@@ -70,7 +70,9 @@ The precise file-by-file packet is listed in [docs/output-inventory.md](docs/out
 
 ## Why This Is Different
 
-Most AI site builds optimize for something that looks finished. This kit optimizes for something a Drupal developer can inspect.
+Most AI site builds optimize for something that looks finished. This kit optimizes for the path to a stable, trusted, production-ready Drupal site that can be launched and used.
+
+That is where Drupal matters: reusable structured content instead of one-off pages, editor workflows instead of hand-edited layouts, media management, roles and permissions, SEO, accessibility, integrations, and the governance evidence needed to know what is ready and what still needs a human decision.
 
 Every run asks:
 
