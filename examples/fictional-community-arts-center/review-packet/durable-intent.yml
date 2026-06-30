@@ -15,10 +15,10 @@ intent_records:
     stale_behavior: "treat_as_no_intent"
   - id: "intent-donation-provider-blocked"
     target_config: "integration.donation_provider"
-    purpose: "Prevent invented donation handling and preserve the need for owner/provider approval."
+    purpose: "Prevent invented donation handling and preserve the need for provider credentials, privacy review, and target proof."
     source_evidence:
       - "Fictional /donate route depends on an external donation provider."
-    rationale: "The target can model the call to action and external link field, but provider credentials, privacy review, and payment/donation handling require owner evidence."
+    rationale: "The target can model the call to action and external link field, but provider credentials, privacy review, and payment/donation handling require human and provider evidence."
     asserted_by: "example"
     last_reviewed: "2026-06-30"
     config_hash: "UNKNOWN"

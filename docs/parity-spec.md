@@ -7,12 +7,12 @@ Parity is easy to overstate. This spec keeps parity tied to evidence.
 Define the addressable surface before scoring parity:
 
 - public routes in scope;
-- routes intentionally excluded by owner or maintainer decision;
-- routes blocked by missing permission, private access, provider ownership, or unresolved redirects;
+- routes intentionally excluded by human or maintainer decision;
+- routes blocked by private access, provider ownership, or unresolved redirects;
 - functional behaviors in scope for the target;
 - functional behaviors explicitly out of scope.
 
-Score parity only over the approved addressable surface. Do not hide excluded or blocked routes; list them separately.
+Score parity only over the accepted addressable surface. Do not hide excluded or blocked routes; list them separately.
 
 ## Route Parity
 
@@ -29,7 +29,7 @@ Do not count 3xx, 401, 403, 404, 5xx, login pages, or unpublished draft 404s as 
 
 ## Functional Parity
 
-Functional parity is scored against the approved behavior list, not against vague visual similarity.
+Functional parity is scored against the accepted behavior list, not against vague visual similarity.
 
 For each behavior, record:
 
@@ -50,11 +50,13 @@ Examples:
 - account or private-content boundaries;
 - redirects and canonical URLs.
 
-## Visual and Content Parity
+## Visual And Content Parity
 
-Visual and content parity require owner-approved content and production-equivalent browser evidence.
+Visual and content parity are part of the default build goal.
 
-Content parity requires owner-approved source material and target Drupal evidence. Public samples may support review drafts, but they are not approved Drupal content.
+Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs a blocker note.
+
+Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
 
 ## Minimum Parity Report Shape
 
@@ -69,10 +71,12 @@ Content parity requires owner-approved source material and target Drupal evidenc
   },
   "routeChecks": [],
   "functionalChecks": [],
+  "visualChecks": [],
+  "contentChecks": [],
   "browserEvidence": [],
   "blockedEvidence": [],
   "verdict": "blocked | partial | pass",
-  "evidenceScope": "Parity applies to the approved addressable surface and evidence layers listed in this report."
+  "evidenceScope": "Parity applies to the accepted addressable surface and evidence layers listed in this report."
 }
 ```
 
@@ -82,6 +86,9 @@ A parity pass requires:
 
 - strict route checks;
 - browser-rendered evidence;
+- content completeness evidence;
+- visual/design evidence;
+- functional behavior evidence;
 - no unresolved hard blockers in scope;
 - reviewer acceptance;
 - launch-gate consistency.

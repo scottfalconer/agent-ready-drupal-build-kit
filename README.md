@@ -2,9 +2,9 @@
 
 **Build a real Drupal CMS site with your AI coding agent.**
 
-Give your agent a source URL. This kit gives the agent the Drupal-specific instructions it needs to create a local Drupal CMS build, model the site with Drupal-native content structures, and produce a review packet that explains what it built, what it assumed, and what still needs a human call.
+Give your agent a source URL. This kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS rebuild: real public content, source-shaped content structures, source-like visual design, public routes and functionality, editorial workflows, and a review packet that explains the work.
 
-This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, with evidence another developer can inspect.
+This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
 
 Send your local AI coding agent this from the parent folder where you want the Drupal project created:
 
@@ -12,6 +12,8 @@ Send your local AI coding agent this from the parent folder where you want the D
 Use the Agent-Ready Drupal Build Kit to rebuild the source site as a local Drupal CMS project.
 
 Source site: [SOURCE_URL]
+
+Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
 
 Clone or update the kit, then enter it:
 
@@ -62,15 +64,17 @@ Need the full strict prompt? See [USAGE.md](USAGE.md). Want the guided version? 
 ## What The Agent Produces
 
 - A local Drupal CMS site you can open in your browser.
+- Real public content and media needed for the rebuild, modeled as Drupal content and Media entities.
+- Source-like visual design: palette, typography, spacing, layout, components, and responsive behavior.
+- Source-like public functionality: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where reachable.
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
-- A `review-packet/` explaining decisions, assumptions, gaps, and verification evidence.
-- A clear list of what still requires human approval before production use.
+- A `review-packet/` explaining decisions, remaining gaps, and verification evidence.
 
 The precise file-by-file packet is listed in [docs/output-inventory.md](docs/output-inventory.md).
 
 ## Why This Is Different
 
-Most AI site builds optimize for something that looks finished. This kit optimizes for the path to a stable, trusted, production-ready Drupal site that can be launched and used.
+Most AI site builds optimize for something that looks finished. This kit optimizes for a stable, trusted, production-ready Drupal site that looks complete, functions completely, and can be maintained in Drupal.
 
 That is where Drupal matters: reusable structured content instead of one-off pages, editor workflows instead of hand-edited layouts, media management, roles and permissions, SEO, accessibility, integrations, and the governance evidence needed to know what is ready and what still needs a human decision.
 
@@ -78,6 +82,8 @@ Every run asks:
 
 - Did the agent build with Drupal CMS instead of a static lookalike?
 - Did it use Drupal-native content structures?
+- Does it contain the public content and media needed for review?
+- Does it match the source site's visual language and public behavior?
 - Did it explain the important decisions?
 - Did it name the gaps instead of hiding them?
 - Did it leave evidence another developer can review?
@@ -101,9 +107,9 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 
 Local builds run on DDEV and `drupal/cms` by default. Static HTML, screenshots, local file previews, and non-Drupal frontends do not count as Drupal CMS builds.
 
-## Source Use
+## Rights
 
-Use this kit only with sites you are allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless you have the right to use them.
+Use this kit only with sites you are allowed to inspect and rebuild. The agent assumes the source URL you provide is authorized for a public-facing local rebuild; it does not adjudicate rights for you.
 
 ## License
 

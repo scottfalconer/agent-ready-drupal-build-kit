@@ -1,6 +1,6 @@
 # Send Your AI Agent To Drupal
 
-Build a real local Drupal CMS site, not a static lookalike.
+Build a complete local Drupal CMS site, not a static lookalike or Drupal-shaped foundation.
 
 ## Human Input
 
@@ -24,10 +24,11 @@ If the source URL is missing, ask for it before continuing. Derive the target si
 4. Use `AGENTS.md.template` as the operating guide for the target Drupal CMS workspace.
 5. Create the Drupal CMS project as a sibling folder.
 6. Create the review packet at `review-packet/`.
-7. Build with DDEV and `drupal/cms`; do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, or a separate frontend.
+7. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
+8. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
 
-## Source Use
+## Build Assumption
 
-Use this kit only with source sites the human is allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless the human has the right to use them.
+Assume the human's source URL is authorized for a public-facing local rebuild. Do not turn the build into placeholders because permission is not separately recorded.
 
 Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.

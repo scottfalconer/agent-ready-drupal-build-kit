@@ -15,6 +15,8 @@
 - Taxonomy:
 - Media:
 - Media rendering and image styles:
+- Content completeness:
+- Visual/design parity:
 - Menus and routing:
 - Menu/block ownership:
 - Views and listings:
@@ -26,6 +28,7 @@
 - Pathauto patterns:
 - Source-intent aliases and redirects:
 - Forms and integrations:
+- Functional parity:
 - Editorial workflow:
 - Moderation/workflow states and roles:
 - Editor add/edit experience:
@@ -48,24 +51,27 @@
 
 ## Stake-My-Name Verdict
 
-Answer these five questions exactly. This is the canonical signoff bar used by `README.md`, `START.md`, the worked example, and this template.
+Answer these questions exactly. This is the canonical signoff bar used by `README.md`, `START.md`, the worked example, and this template.
 
 - [ ] Is the build on Drupal CMS best practices using Drupal-native primitives?
 - [ ] Is the architecture sound for the source site's real shape?
+- [ ] Does it contain the public content and media needed to review the site as a rebuild?
+- [ ] Does it match the source site's visual language and public behavior?
+- [ ] Can editors maintain the site through Drupal forms, menus, media, Views, and workflow?
 - [ ] Are the load-bearing decisions captured and usable by later agents?
-- [ ] Are the remaining business, content, legal, integration, and launch gaps named?
-- [ ] Would a Drupal maintainer put their name on this as a starting position?
+- [ ] Are the remaining business, legal, integration, production, and launch gaps named?
+- [ ] Would a Drupal maintainer put their name on this as a complete local starting point?
 
 ## Binary Verdict
 
 Choose exactly one:
 
-- [ ] I would stake my name on this as a governed starting position.
-- [ ] I would not stake my name on this as a governed starting position.
+- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.
+- [ ] I would not stake my name on this as a complete local Drupal CMS rebuild.
 
 ## Architecture Review Checklist
 
-Use this checklist to support the five-question verdict. It is not a second rubric.
+Use this checklist to support the verdict. It is not a second rubric.
 
 - [ ] The architecture is understandable from the packet.
 - [ ] Drupal CMS install, setup, and site-building mechanics followed the encoded baseline in `AGENTS.md.template`, or every verified divergence from current Drupal CMS mechanics is documented as a maintainer-visible kit/upstream issue.
@@ -80,10 +86,10 @@ Use this checklist to support the five-question verdict. It is not a second rubr
 - [ ] Open Graph/social metadata, schema.org-supporting fields, taxonomy landing pages, and internal related-content links are modeled or explicitly out of scope.
 - [ ] Editor add/edit forms expose the load-bearing fields with clean human-readable labels.
 - [ ] Field widgets and formatters match the field types; taxonomy/media references are not plain text fallbacks unless documented.
-- [ ] Regulated or claim-sensitive content has approval/source status, required disclosure/label text, warning/restriction fields, audience/suitability fields, and blocked-evidence notes where relevant.
+- [ ] Regulated or claim-sensitive content has source/review status, required disclosure/label text, warning/restriction fields, audience/suitability fields, and blocked-evidence notes where relevant.
 - [ ] FAQ, advice/article, retailer/location, legal/footer, professional/audience-specific, and contact workflows are modeled explicitly where the source requires them.
-- [ ] Media strategy is explicit: Drupal media references, approved assets, placeholders, or external references are not conflated.
-- [ ] Approved assets use managed Media and image styles, or the packet documents why raw URI fields, CDN hotlinks, or placeholders remain.
+- [ ] Media strategy is explicit: Drupal media references, source assets, unavailable assets, placeholders, or external references are not conflated.
+- [ ] Public source assets use managed Media and image styles, or the packet documents why raw URI fields, CDN hotlinks, or placeholders remain.
 - [ ] Alt text, responsive image styles, image reuse, and hero/thumbnail/social-image field decisions are explicit.
 - [ ] Primary navigation and footer navigation are owned by Drupal menus/blocks or have a documented exception.
 - [ ] Custom content types have Pathauto patterns or an explicit alias-management decision.
@@ -91,7 +97,7 @@ Use this checklist to support the five-question verdict. It is not a second rubr
 - [ ] Custom modules have purposeful bounded behavior; empty marker modules are not used to imply architecture.
 - [ ] Custom controllers, if present, are thin, access-controlled, cacheable, and driven by editable Drupal content/config.
 - [ ] Public rendering avoids unsafe raw body/source output and undocumented forced `max-age=0`.
-- [ ] Moderation states, role permissions, draft/review/published/unpublished behavior, and claim-sensitive approval flows are documented where relevant.
+- [ ] Moderation states, role permissions, draft/review/published/unpublished behavior, and claim-sensitive review flows are documented where relevant.
 - [ ] Accessibility tooling, content accessibility report status, alt text, heading structure, contrast, embed descriptions, and manual accessibility gaps are documented.
 - [ ] Site name/email, caching/aggregation, backup strategy, update readiness, security update posture, Composer-managed files, and update workflow are documented or intentionally blocked.
 - [ ] Representative top-level, listing, detail, search, where-to-buy/contact/legal routes have anonymous route evidence and alias/canonicalization notes.
@@ -113,4 +119,4 @@ Use this checklist to support the five-question verdict. It is not a second rubr
 
 ## Boundary
 
-Maintainer review is required before launch review. A positive stake-my-name verdict accepts the architecture as a starting position.
+Maintainer review is required before launch review. A positive stake-my-name verdict accepts the local Drupal CMS rebuild as reviewable.

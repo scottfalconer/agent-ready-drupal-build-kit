@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "sourceSite": "Fictional Community Arts Center",
   "target": "Drupal CMS",
-  "sourceUseBoundary": "fictional-example",
+  "sourceUseAssumption": "fictional-user-authorized-public-rebuild",
   "contentTypes": [
     "event",
     "class",
@@ -28,9 +28,9 @@
   "integrations": [
     {
       "sourcePattern": "donation provider",
-      "targetDecision": "blocked until owner approval, provider credentials, privacy review, and target proof exist"
+      "targetDecision": "blocked until provider credentials, privacy review, and target proof exist"
     }
   ],
-  "approvalStatus": "draft",
+  "reviewStatus": "draft",
   "evidenceScope": "Fictional example only. Use launch evidence records for launch decisions."
 }

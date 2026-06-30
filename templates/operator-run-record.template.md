@@ -30,4 +30,4 @@
 
 ## How This Record Is Used
 
-Use this record as operator evidence in the review packet alongside the architecture, source-use, target, QA, and maintainer records.
+Use this record as operator evidence in the review packet alongside the architecture, content/design/function parity, target, QA, and maintainer records.

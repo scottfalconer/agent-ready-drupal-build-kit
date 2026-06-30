@@ -2,7 +2,7 @@
 
 This kit is for developers and teams who want to try Drupal CMS with an AI coding agent, without already knowing how to build Drupal well.
 
-It is especially for Drupal-curious developers, designers, agencies, and site builders who know an existing site could use a stronger CMS foundation but do not want a blank Drupal install, a pile of unfamiliar terms, or an AI-generated static mimic.
+It is especially for Drupal-curious developers, designers, agencies, and site builders who know an existing site could use a stronger CMS but do not want a blank Drupal install, a pile of unfamiliar terms, or an AI-generated static mimic.
 
 The promise is simple: bring a source site and a local coding agent. The kit tells the agent how to build a real Drupal CMS site, show its work, and leave evidence a Drupal expert can inspect.
 
@@ -16,7 +16,7 @@ A useful Drupal CMS rebuild needs to answer harder questions:
 
 - What are the real content patterns?
 - Which parts should be content types, fields, taxonomy, media, menus, Views, workflows, or integrations?
-- Which source claims, assets, forms, legal pages, redirects, and third-party services need owner approval?
+- Which source claims, forms, legal pages, redirects, and third-party services need human review, provider access, or integration decisions?
 - Can an editor maintain the result?
 - Can a Drupal maintainer review the architecture and say it is a credible starting point?
 
@@ -58,7 +58,7 @@ Without the kit, an agent may:
 - produce static HTML that looks plausible but has no Drupal editing experience;
 - create controller-rendered pages instead of Drupal-owned content, Views, menus, and aliases;
 - bury filterable or governed information in body text;
-- hotlink images or invent content without permission;
+- hotlink assets, hard-code the final site, or invent missing content;
 - skip SEO, accessibility, privacy, redirect, workflow, and integration gaps;
 - leave no durable record of why decisions were made.
 
@@ -86,7 +86,7 @@ A good run gives you:
 - durable intent so later agents and maintainers can see why the model exists;
 - a scoped gap list that names the work humans still own;
 - a complete review packet, including blocked gate records instead of missing evidence;
-- a clear answer to whether the result is a credible starting point.
+- a clear answer to whether the result is a complete local rebuild another developer can stand behind.
 
 The most valuable output is often not the local site by itself. It is the combination of local site plus evidence that lets a senior team decide what to trust, what to revise, and what to do next.
 
@@ -104,11 +104,10 @@ Use this kit when:
 
 Do not use this kit when:
 
-- you need a same-day production launch without owner approval or maintainer review;
+- you need a same-day production launch without maintainer review;
 - the target should not be Drupal CMS;
 - the site is intentionally static and has no meaningful editorial workflow;
-- you are not allowed to inspect the source site;
-- you need to copy content or assets but do not have owner permission;
+- you are not allowed to inspect or rebuild the source site;
 - no one will review the Drupal architecture before using it.
 
 ## The Human Value
@@ -118,7 +117,7 @@ This kit moves the human from manual Drupal assembly to judgment:
 - Is this the right content model?
 - Which gaps matter commercially or legally?
 - Which integrations are real blockers?
-- What does the owner need to approve?
+- What needs human approval, provider access, or business review?
 - Would a Drupal maintainer put their name on the result?
 
 That is the point: not replacing expertise, but making the agent produce work that expertise can evaluate.

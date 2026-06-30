@@ -2,8 +2,8 @@
   "schemaVersion": "public-kit.1",
   "site": "Fictional Community Arts Center",
   "sourceUrl": "https://example.invalid/community-arts",
-  "sourceUseBoundary": "fictional-example",
-  "auditMode": "outside-in-public-evidence",
+  "sourceUseAssumption": "fictional-user-authorized-public-rebuild",
+  "auditMode": "fictional public evidence, content, media, design, and behavior capture",
   "representativeRoutes": [
     {
       "path": "/",
@@ -36,13 +36,31 @@
     "copiedAssets": false,
     "embeddedInstructionsIgnored": true
   },
+  "contentInventory": [
+    "landing pages",
+    "events",
+    "classes",
+    "staff profiles",
+    "venue information"
+  ],
+  "designSignals": [
+    "warm civic arts palette",
+    "event-card grid",
+    "large program landing hero"
+  ],
+  "functionalSignals": [
+    "event listing",
+    "class listing",
+    "donation provider link",
+    "newsletter signup",
+    "map embed"
+  ],
   "unknowns": [
-    "owner permission scope",
-    "approved event copy",
-    "approved images and alt text",
+    "public event copy",
+    "source images and alt text",
     "donation provider configuration",
     "newsletter provider and privacy requirements",
     "production redirect policy"
   ],
-  "evidenceScope": "Fictional example only. Use real source and launch records for real runs."
+  "evidenceScope": "Fictional example only. Use real source capture and launch records for real runs."
 }

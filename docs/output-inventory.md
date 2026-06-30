@@ -17,7 +17,6 @@ These files must exist for every run:
 
 These files must also exist. Early runs should create blocked stubs when accepted evidence does not exist yet:
 
-- `owner-permission.md`
 - `operator-run.md`
 - `production-target.md`
 - `parity-report.json`
@@ -27,12 +26,13 @@ These files must also exist. Early runs should create blocked stubs when accepte
 
 Launch readiness requires accepted evidence for every hard gate:
 
-- Owner permission.
 - Independent operator run.
 - Production-equivalent Drupal target.
 - Full route inventory or accepted route boundary.
 - Content parity.
 - Media parity.
+- Visual/design parity.
+- Functional parity.
 - Navigation parity.
 - Views and page parity.
 - Forms and integrations.

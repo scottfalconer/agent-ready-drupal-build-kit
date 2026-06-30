@@ -1,13 +1,14 @@
 # Launch Checklist
 
-Do not mark launch ready until every item has accepted evidence.
+Launch readiness requires accepted evidence for every item.
 
-- [ ] Owner permission accepted.
 - [ ] Independent operator run accepted.
 - [ ] Production-equivalent Drupal target verified.
 - [ ] Full route inventory or accepted route boundary recorded.
 - [ ] Content parity accepted.
 - [ ] Media parity accepted.
+- [ ] Visual/design parity accepted.
+- [ ] Functional parity accepted.
 - [ ] Navigation parity accepted.
 - [ ] Views and page parity accepted.
 - [ ] Forms and integrations accepted.

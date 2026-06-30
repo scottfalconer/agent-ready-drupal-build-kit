@@ -95,4 +95,4 @@ UNKNOWN
 
 ## Evidence Scope
 
-This decision chooses a build start point. Pair it with source-use, import approval, target parity, and launch-gate records when those decisions are needed.
+This decision chooses a build start point. Pair it with source capture, content import, target parity, and launch-gate records when those decisions are needed.

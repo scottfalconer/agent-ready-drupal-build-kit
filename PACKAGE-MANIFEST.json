@@ -13,7 +13,6 @@
     "LICENSE.md",
     "CONTRIBUTING.md",
     "AGENTS.md.template",
-    "bootstrap.sh",
     "docs/",
     "skill.md",
     "templates/",
@@ -21,7 +20,6 @@
   ],
   "keyAdditions": [
     "Product-style README front door with lightweight prompt and links to the strict USAGE.md run instructions",
-    "Bootstrap script that checks Docker, installs DDEV with the official installer when possible, clones or updates the kit, and prints the agent prompt",
     "Moltbook-style skill.md handoff for sending an AI agent directly to the kit",
     "Newcomer-facing README and START.md that position the kit for Drupal-curious developers, designers, agencies, and site builders",
     "Positioning page reframed around trying Drupal CMS with an AI coding agent and keeping the result reviewable",
@@ -35,17 +33,17 @@
     "templates/maintainer-review-packet.md",
     "templates/recipe-start-point.template.md",
     "templates/scoped-gap-list.template.md",
-    "examples/fictional-community-arts-center/review-packet/ complete 11-file fictional packet with blocked gate stubs",
-    "Canonical five-question stake-my-name verdict, with long architecture checklist demoted to supporting evidence",
+    "examples/fictional-community-arts-center/review-packet/ complete 10-file fictional packet with blocked gate stubs",
+    "Canonical stake-my-name verdict, with long architecture checklist demoted to supporting evidence",
     "Recipe discovery commands for Composer package evidence, installed recipe paths, recipe info, and recipe application",
     "Self-contained copyable agent instructions in AGENTS.md.template",
     "Embedded Drupal CMS baseline for install, DDEV setup, Drupal CMS setup assistant or equivalent install path, content modeling, editor workflow, media, SEO, updates, and divergence tracking",
     "Embedded Drupal CMS best-practice defaults for goals-first content modeling, typed fields, taxonomy, Views planning, Media Library, SEO/social metadata, moderation, accessibility tooling, privacy/legal, email, backup/update workflow, and site settings",
     "Drupal-native architecture guardrails for DDEV, managed media, Views, menus, aliases, editor displays, recipe start-point decisions, scoped gaps, and controller exceptions",
     "Pattern-map architecture guards for managed media, menu ownership, collection Views, custom controllers, marker modules, and raw rendering",
-    "Regulated-content governance guardrails for approval/source status, disclosures, product/detail route QA, source-intent aliases, search, and SEO metadata",
+    "Regulated-content governance guardrails for source/review status, disclosures, product/detail route QA, source-intent aliases, search, and SEO metadata",
     "LICENSE.md",
     "CONTRIBUTING.md"
   ],
-  "evidenceScope": "This public package contains instructions, templates, and a fictional example. Real runs produce their own source-use, target, QA, and review evidence."
+  "evidenceScope": "This public package contains instructions, templates, and a fictional example. Real runs produce their own source capture, target, QA, parity, and review evidence."
 }

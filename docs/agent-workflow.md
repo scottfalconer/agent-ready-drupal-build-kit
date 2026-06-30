@@ -3,8 +3,8 @@
 ## Phase 1: Observe
 
 - Start from public URLs supplied by the owner or reviewer.
-- Record source-use boundaries and unknowns.
-- Capture source facts: titles, routes, content patterns, navigation, media signals, forms, integrations, redirects, and visible technology signals.
+- Record source capture assumptions and unknowns.
+- Capture source facts: titles, routes, content patterns, navigation, media signals, design signals, forms, integrations, redirects, and visible technology signals.
 - Record limitations and unfetched candidate routes.
 
 ## Phase 2: Decide
@@ -18,9 +18,9 @@
 
 - Use DDEV as the default local Drupal CMS runtime when building a reviewable target.
 - Create durable intent sidecar records for load-bearing decisions.
-- Create source-use/owner-permission and operator-run packets.
+- Create operator-run packets.
 - Create production target and maintainer review packets.
-- Create parity, accessibility, performance, security, privacy, and final QA plans.
+- Create content, visual, functional, accessibility, performance, security, privacy, and final QA plans.
 
 ## Phase 4: Verify
 
@@ -28,7 +28,7 @@
 - Verify generated recipe material only as recipe material.
 - Verify lab application only as lab proof.
 - Verify production target evidence only from production-equivalent targets.
-- Verify local Drupal CMS builds with DDEV/Drush status, exported config, public anonymous routes, and browser-rendered evidence.
+- Verify local Drupal CMS builds with DDEV/Drush status, exported config, public anonymous routes, content inventory, visual/design checks, functional checks, and browser-rendered evidence.
 - Reject static previews and non-Drupal prototypes as Drupal CMS build evidence.
 
 ## Phase 5: Hand Off

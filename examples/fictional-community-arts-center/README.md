@@ -1,6 +1,6 @@
 # Fictional Example: Community Arts Center
 
-This example is fictional. It exists to show how a public kit packet should be shaped without copying source-site content.
+This example is fictional. It exists to show how a public kit packet should be shaped without using a real source site.
 
 ## Source Observations
 
@@ -17,7 +17,7 @@ This example is fictional. It exists to show how a public kit packet should be s
 - `venue_page`
 - `landing_page`
 - vocabularies for audience, program area, and season
-- media image support with owner-approved files and alt text
+- media image support with source-like files and alt text
 - Views for events and classes
 - menus for main navigation and footer
 - forms and integrations blocked until provider evidence exists
@@ -31,7 +31,6 @@ See `review-packet/` for a filled fictional example:
 - `recipe-start-point.md`
 - `durable-intent.yml`
 - `scoped-gap-list.md`
-- `owner-permission.md`
 - `operator-run.md`
 - `production-target.md`
 - `parity-report.json`
@@ -40,4 +39,4 @@ See `review-packet/` for a filled fictional example:
 
 ## Launch Status
 
-Blocked. Owner permission, production target, browser QA, accessibility, performance, security, editorial handoff, maintainer signoff, and final QA are missing.
+Blocked. Production target, browser QA, accessibility, performance, security, editorial handoff, maintainer signoff, and final QA are missing.

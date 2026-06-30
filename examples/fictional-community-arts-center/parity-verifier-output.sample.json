@@ -8,7 +8,7 @@
     "exclusions": [
       {
         "route": "/donate",
-        "reason": "external provider flow blocked pending owner and provider evidence"
+        "reason": "external provider flow blocked pending provider credentials, privacy review, and target proof"
       },
       {
         "route": "/members",
@@ -35,7 +35,7 @@
   "functionalChecks": [
     {
       "behavior": "event listing sorted by date",
-      "sourceEvidence": "approved pattern map",
+      "sourceEvidence": "reviewed pattern map",
       "targetEvidence": "browser rendered listing",
       "result": "pass"
     },
@@ -47,11 +47,29 @@
       "blocker": "provider and privacy evidence missing"
     }
   ],
+  "visualChecks": [
+    {
+      "id": "visual-home-event-grid",
+      "sourcePattern": "large program hero plus event-card grid",
+      "targetEvidence": null,
+      "result": "blocked",
+      "blocker": "rendered theme evidence missing"
+    }
+  ],
+  "contentChecks": [
+    {
+      "id": "content-events",
+      "sourcePattern": "event title, date, venue, audience, registration link",
+      "targetEvidence": null,
+      "result": "blocked",
+      "blocker": "fictional example has no real source content"
+    }
+  ],
   "blockedEvidence": [
     "launch_readiness",
     "full_content_parity",
     "forms_integrations_parity"
   ],
   "verdict": "partial",
-  "evidenceScope": "Fictional sample output only. Parity applies to the approved addressable surface and evidence layers listed here."
+  "evidenceScope": "Fictional sample output only. Parity applies to the accepted addressable surface and evidence layers listed here."
 }

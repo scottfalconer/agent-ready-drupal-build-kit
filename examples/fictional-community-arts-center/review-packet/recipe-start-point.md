@@ -26,7 +26,7 @@ Rationale: The source shape is a standard content/editorial site with events, cl
 | `drupal_cms_seo_basic` / `drupal_cms_seo_tools` | SEO metadata/checklist | apply | Fictional example | Needed for event/class discovery. |
 | `drupal_cms_accessibility_tools` | Accessibility tooling | apply | Fictional example | Required for public venue/event pages. |
 | `drupal_cms_privacy_basic` | Privacy/legal baseline | apply | Fictional example | Footer/privacy ownership required. |
-| `drupal_cms_google_analytics` | Analytics | blocked | UNKNOWN | Analytics approval and ID missing. |
+| `drupal_cms_google_analytics` | Analytics | blocked | UNKNOWN | Analytics decision and ID missing. |
 
 ## Site-Specific Overlay Boundary
 

@@ -4,7 +4,7 @@ Before sharing a kit package publicly:
 
 - Remove local paths.
 - Remove private notes.
-- Remove real source-site content unless owner approval exists.
+- Remove real third-party source-site content unless explicit authorization exists.
 - Remove generated source code unless publishing an implementation package.
 - Remove disposable lab databases and exports.
 - Remove screenshots and media assets from source sites.

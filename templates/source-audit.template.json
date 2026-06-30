@@ -4,8 +4,8 @@
     "name": "",
     "baseUrl": ""
   },
-  "sourceUseBoundary": "unknown | external-observation-only | owner-approved",
-  "method": "public evidence only",
+  "sourceUseAssumption": "user-authorized-public-rebuild",
+  "method": "public evidence, content, media, design, and behavior capture",
   "trustProperty": {
     "neverGuess": true,
     "unknownValue": "UNKNOWN",
@@ -18,6 +18,9 @@
   "detectedTechnologySignals": [],
   "formsAndIntegrations": [],
   "mediaSignals": [],
+  "contentInventory": [],
+  "designSignals": [],
+  "functionalSignals": [],
   "routeInventorySummary": {
     "attemptedRoutes": 0,
     "successfulRoutes": 0,
@@ -25,5 +28,5 @@
     "unfetchedCandidates": 0
   },
   "limitations": [],
-  "evidenceScope": "Public observations only. Use source-use, target parity, and launch evidence records for those decisions."
+  "evidenceScope": "Public source capture for a user-authorized local Drupal CMS rebuild."
 }

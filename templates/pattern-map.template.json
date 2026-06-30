@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "sourceSite": "",
   "target": "Drupal CMS",
-  "sourceUseBoundary": "unknown",
+  "sourceUseAssumption": "user-authorized-public-rebuild",
   "contentTypes": [],
   "fields": [],
   "vocabularies": [],
@@ -21,7 +21,7 @@
     "applies": false,
     "regulatedCategories": [],
     "requiredDisclosureFields": [],
-    "approvalStatusFields": [],
+    "reviewStatusFields": [],
     "sourceStatusFields": [],
     "blockedEvidenceTypes": []
   },
@@ -32,7 +32,7 @@
     "imageStyles": []
   },
   "architectureGuards": {
-    "managedMediaRequiredForApprovedAssets": true,
+    "managedMediaRequiredForPublicAssets": true,
     "navigationOwnedByMenusOrDocumentedException": true,
     "collectionRoutesDefaultToViews": true,
     "detailRoutesRequireRenderedFieldEvidence": true,
@@ -47,6 +47,6 @@
   "redirectsAndSeo": [],
   "editorialWorkflow": [],
   "durableIntentCandidates": [],
-  "approvalStatus": "draft | approved | rejected",
-  "evidenceScope": "This pattern map is a review contract. Approve it before structured import."
+  "reviewStatus": "draft | reviewed | needs-revision",
+  "evidenceScope": "This pattern map is a review contract. Review it before structured import."
 }

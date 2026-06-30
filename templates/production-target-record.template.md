@@ -14,7 +14,7 @@
 - Recipe or configuration application transcript:
 - Target config export:
 - Target config drift report:
-- Placeholder or approved content import record:
+- Content/media import or recreation record:
 - Rendered smoke record:
 - Browser QA report:
 - Accessibility evidence:

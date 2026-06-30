@@ -8,11 +8,11 @@
   },
   "contentParity": {
     "status": "blocked",
-    "reason": "Owner-approved content bundle is missing."
+    "reason": "Fictional example does not include real source content."
   },
   "mediaParity": {
     "status": "blocked",
-    "reason": "Owner-approved assets and alt text are missing."
+    "reason": "Source assets and alt text are missing from this fictional example."
   },
   "navigationParity": {
     "status": "blocked",
@@ -21,6 +21,14 @@
   "viewsPageParity": {
     "status": "blocked",
     "reason": "Events/classes Views are modeled but not verified through rendered target pages."
+  },
+  "visualDesignParity": {
+    "status": "blocked",
+    "reason": "Fictional design notes are not verified in a rendered Drupal theme."
+  },
+  "functionalParity": {
+    "status": "blocked",
+    "reason": "Donation, newsletter, map, search, and listing behaviors are not verified in a target."
   },
   "evidenceScope": "Fictional blocked parity stub only. Use launch evidence records for launch decisions."
 }

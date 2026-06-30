@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "site": "Fictional Community Arts Center",
   "target": "Drupal CMS",
-  "sourceUseBoundary": "fictional-example",
+  "sourceUseAssumption": "fictional-user-authorized-public-rebuild",
   "contentTypes": [
     {
       "id": "event",
@@ -77,12 +77,12 @@
     "main",
     "footer"
   ],
-  "mediaStrategy": "Use Drupal Media Library for owner-approved images and documents. Use explicit placeholders until approval.",
+  "mediaStrategy": "Use Drupal Media Library for source-like images and documents. Use explicit placeholders only for unavailable or provider-owned assets.",
   "blockedIntegrations": [
     "donation provider",
     "newsletter signup",
     "map embed"
   ],
-  "approvalStatus": "draft",
+  "reviewStatus": "draft",
   "evidenceScope": "Fictional example only. Use launch evidence records for launch decisions."
 }

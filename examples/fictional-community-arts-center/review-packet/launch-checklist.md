@@ -6,12 +6,13 @@
 
 ## Hard Gates
 
-- [ ] Owner permission.
 - [ ] Independent operator run.
 - [ ] Production-equivalent Drupal target.
 - [ ] Full route inventory or accepted route boundary.
 - [ ] Content parity.
 - [ ] Media parity.
+- [ ] Visual/design parity.
+- [ ] Functional parity.
 - [ ] Navigation parity.
 - [ ] Views and page parity.
 - [ ] Forms and integrations.

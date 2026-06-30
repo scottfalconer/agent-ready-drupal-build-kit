@@ -4,7 +4,7 @@
 
 This page walks you through it step by step. You bring a site you want to rebuild and a coding agent. The kit brings the Drupal expertise, so you do not have to learn it first.
 
-By the end of a run you will have a working Drupal site on your machine, a written record of every decision the agent made, a short list of the calls that still need a human, and evidence a senior Drupal developer could put their name on. You do not even need to know the difference between "Drupal" and "Drupal CMS"; the kit handles that.
+By the end of a run you will have a working Drupal site on your machine that looks, functions, and edits like the source site's public experience, plus a written record of every decision the agent made, a short list of the calls that still need a human, and evidence a senior Drupal developer could put their name on. You do not even need to know the difference between "Drupal" and "Drupal CMS"; the kit handles that.
 
 Want the fast path? The lightweight README prompt gets the agent started. Want the strict copy-paste run instructions? Use [USAGE.md](USAGE.md). Want to understand what the agent is actually doing? Read the four moves and the review bar further down. For the full case - who it is for, why Drupal CMS, and when not to use it - see [docs/positioning.md](docs/positioning.md).
 
@@ -60,27 +60,28 @@ The kit folder is not the Drupal site. The sibling `site-slug-drupal/` folder is
 
 Under the hood, the agent works in four moves. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
-1. **Introspect:** read the source site: representative routes, the patterns it is made of, source-use boundaries, and unresolved facts it must not invent.
-2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, and theme/config work.
+1. **Introspect:** read the source site: routes, content inventory, media, design system, public behaviors, and unresolved facts it must not invent.
+2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, theme/config work, and source-like public behavior.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
-4. **Name gaps:** list what still needs a human: owner approval, content, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
+4. **Name gaps:** list what still needs a human: private access, provider credentials, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
 
 ## The Review Bar
 
-This is what separates a foundation from a lookalike. The build is measured against the five questions a senior Drupal developer would ask before signing off:
+This is what separates a complete Drupal rebuild from a foundation or lookalike. The build is measured against the questions a senior Drupal developer would ask before signing off:
 
 - Is the build on Drupal CMS best practices using Drupal-native primitives?
 - Is the architecture sound for the source site's real shape?
+- Does it include the public content and media needed to review the site as a rebuild?
+- Does it match the source site's visual language and public behavior?
+- Can editors maintain the site through Drupal forms, menus, media, Views, and workflow?
 - Are the load-bearing decisions captured and usable by later agents?
-- Are the remaining business, content, legal, integration, and launch gaps named?
-- Would a Drupal maintainer put their name on this as a starting position?
+- Are the remaining business, legal, integration, production, and launch gaps named?
+- Would a Drupal maintainer put their name on this as a complete local starting point?
 
-If any answer is "no," the result can still be useful. It just is not yet a trusted starting point.
+If any answer is "no," the result can still be useful. It just is not yet something to stand behind.
 
 ## Required Packet
 
 The canonical output list is in [docs/output-inventory.md](docs/output-inventory.md).
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.
-
-Use this kit only with sites you are allowed to inspect and rebuild. Do not copy source content or assets unless you have the right to use them.

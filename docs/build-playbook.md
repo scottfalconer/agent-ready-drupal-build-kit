@@ -41,7 +41,7 @@ Name the expected primitives in the build brief and align them to the encoded Dr
 
 - content types and fields for recurring content patterns;
 - taxonomies for categories, topics, audiences, conditions, locations, or other controlled lists;
-- media entities, media reference fields, image styles, and file handling for owner-approved assets;
+- media entities, media reference fields, image styles, and file handling for source assets;
 - menus, menu blocks, path aliases, redirects, and Pathauto patterns for navigation and route parity;
 - Views or Drupal routes for listings, search-like pages, and landing pages;
 - theme templates/CSS or Drupal theme settings for presentation;
@@ -60,24 +60,24 @@ For target architecture:
 - Store filterable or sortable values as typed fields, taxonomy terms, dates, numbers, addresses, geofields, or entity references. Avoid burying product attributes, prices, dates, regions, categories, approvals, or relationships in formatted body text.
 - Plan Views during content modeling. Identify teaser fields, exposed filters, contextual filters, sort criteria, related-content blocks, directories, homepage blocks, and search-like routes before importing content.
 - Use taxonomy for categories, regions, topics, audiences, product families, conditions, or other controlled language that supports filtering, URL structure, SEO, and landing pages.
-- Use Media Library for approved images and files. Record alt text, reuse requirements, responsive image styles, image compression/performance needs, and whether hero, thumbnail, and Open Graph images are shared or separate fields.
+- Use Media Library for source images and files needed for parity. Record alt text, reuse requirements, responsive image styles, image compression/performance needs, and whether hero, thumbnail, and Open Graph images are shared or separate fields.
 - Include SEO and social metadata where the source depends on discovery: URL aliases, meta title, meta description, SEO image, Open Graph title/description/image, heading-level strategy, schema.org-supporting fields, taxonomy landing pages, and related-content/internal-linking Views.
 - Use Drupal CMS moderation/workflow for team-edited, regulated, or claim-sensitive content. Record states such as draft, needs review, published, and unpublished, plus role permissions for create, review, publish, unpublish, and update actions.
 - Apply Drupal CMS Accessibility Tools/Editoria11y when accessibility review is in scope. Record content accessibility report status, alt text, heading structure, contrast, embed descriptions, and unresolved manual checks.
-- Record site settings and operations that affect handoff: site name, site email, caching/aggregation, backup strategy, update readiness, security updates, Composer-managed files, and whether updates are handled through Drupal CMS UI, Composer, hosting tools, or another approved path.
+- Record site settings and operations that affect handoff: site name, site email, caching/aggregation, backup strategy, update readiness, security updates, Composer-managed files, and whether updates are handled through Drupal CMS UI, Composer, hosting tools, or another chosen path.
 
 ## Regulated Product And Compliance Content
 
 For regulated, healthcare, financial, legal, safety-sensitive, or otherwise claim-sensitive sites, make governance part of the content model:
 
 - use distinct product/content categories when the source distinguishes medicine, non-medicine, regulated service, advisory content, legal content, or professional content;
-- add fields for source/approval status, claim status, review status, required disclosure/label text, intended use, intended audience or suitability, warnings or restrictions, and blocked evidence notes;
-- keep external retailer/provider links separate from internal links and mark their approval/source status;
+- add fields for source status, claim status, review status, required disclosure/label text, intended use, intended audience or suitability, warnings or restrictions, and blocked evidence notes;
+- keep external retailer/provider links separate from internal links and mark their source or review status;
 - model professional or practitioner sections separately from consumer journeys when the brief requires separation;
 - model FAQ, advice/blog, retailer/location, legal/footer, and contact workflows explicitly when the source has those recurring patterns;
 - do not invent dosage, safety statements, legal advice, medical claims, comparisons, guarantees, clinical data, professional materials, endorsements, or production contact handling.
 
-Safe placeholders are allowed only when they say what evidence is missing and who must approve it. Placeholder content is not launch content.
+Safe placeholders are allowed only when they say what input is missing and who owns the next action. Placeholder content is not launch content.
 
 ## Drupal-Native Pages Before Controller Mimicry
 
@@ -124,34 +124,34 @@ The build is not reviewable until an editor can use it. Before handoff:
 - confirm form displays are not limited to title/meta controls when the source pattern requires structured fields.
 - confirm widgets match field types, such as entity reference autocomplete for taxonomy/media references and media library controls for image/media fields.
 - confirm view displays render the public fields with appropriate formatters, not machine labels or empty placeholders.
-- for regulated or claim-sensitive content, confirm editors can see and update approval status, source status, required disclosure/label text, warnings/restrictions, professional/consumer audience separation, and blocked-evidence notes.
+- for regulated or claim-sensitive content, confirm editors can see and update source status, review status, required disclosure/label text, warnings/restrictions, professional/consumer audience separation, and blocked-evidence notes.
 
 Record unresolved editor-experience gaps in the handoff instead of hiding them behind public-page screenshots.
 
 ## Media Strategy
 
-Prefer Drupal Media entities and media reference fields for approved images, files, and video records. When source media is not approved:
+Prefer Drupal Media entities and media reference fields for source images, files, and video records. When source media is private, unavailable, or technically blocked:
 
 - use local placeholders or explicit external-reference fields;
-- record owner approval status;
+- record the missing input or blocker;
 - preserve alt-text requirements;
 - explain whether placeholders, URL fields, or media references are the primary rendering path;
 - avoid broken external URLs or root-relative URI values that Drupal field formatters cannot render.
 
-When media is approved, import or stage it into Drupal-managed file storage, reference it through Media entities, preserve alt-text requirements, and render it through Drupal field formatters and image styles. Avoid raw `<img src>` output, CDN hotlinking, and URI/image-url fields as the primary public rendering path unless the owner explicitly chooses an external-asset strategy.
+When media is usable, import or stage it into Drupal-managed file storage, reference it through Media entities, preserve alt-text requirements, and render it through Drupal field formatters and image styles. Avoid raw `<img src>` output, CDN hotlinking, and URI/image-url fields as the primary public rendering path unless the project explicitly chooses an external-asset strategy.
 
 URL/image fields can be useful evidence carriers, but they should not silently replace a real Drupal media strategy.
 
 ## Content Field Formats
 
-Text fields often need both value and format. Do not import formatted text without an explicit text format decision and owner approval.
+Text fields often need both value and format. Do not import formatted text without an explicit text format decision.
 
 Record:
 
 - target field;
 - allowed text format;
 - sanitizer or transform;
-- owner approval requirement.
+- decision owner and rationale.
 
 ## Content Moderation and Visibility
 
@@ -176,7 +176,7 @@ Custom content types should have Pathauto patterns or an explicit documented rea
 
 Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/nytol-range`, either preserve, redirect, or explicitly retire the source-style route.
 
-Detail-route checks must prove rendered content, not only HTTP status. For product/article/legal routes, record title or H1, canonical/alias behavior, and the presence of load-bearing fields such as product type, approval status, safety/disclosure copy, retailer/provider links, and media/placeholders where relevant.
+Detail-route checks must prove rendered content, not only HTTP status. For product/article/legal routes, record title or H1, canonical/alias behavior, and the presence of load-bearing fields such as product type, review status, safety/disclosure copy, retailer/provider links, and media/placeholders where relevant.
 
 ## Databases and Files
 
@@ -225,7 +225,7 @@ Do not treat readable aliases alone as SEO parity.
 
 ## Third-Party Services
 
-Analytics, maps, video embeds, donations, ticketing, email marketing, search, consent, and payment systems need owner approval, provider decisions, privacy review, performance review, credentials, and target proof.
+Analytics, maps, video embeds, donations, ticketing, email marketing, search, consent, and payment systems need an explicit human decision, provider details, privacy review, performance review, credentials where applicable, and target proof.
 
 Detection alone is not implementation evidence.
 
