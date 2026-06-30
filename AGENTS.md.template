@@ -4,7 +4,7 @@ Copy this file into the root of a target Drupal CMS rebuild workspace as `AGENTS
 
 ## Build Context
 
-The agent fills these values from the canonical prompt in `USAGE.md` and any values derived during setup. The human should not need to hand-edit this file. If the human did not provide a preferred target site name, derive one from the source site title or domain.
+The agent fills these values from the canonical prompt in `USAGE.md` and derived setup values. The human should not need to hand-edit this file.
 
 - Source site: `[SOURCE_URL]`
 - Target site name: `[TARGET_SITE_NAME]`

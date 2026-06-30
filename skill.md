@@ -8,7 +8,7 @@ Ask the human for only one required value:
 
 - Source site URL
 
-If the source URL is missing, ask for it before continuing. If the human supplied a preferred target site name, use it; otherwise derive a human-readable target site name from the source site title or domain.
+If the source URL is missing, ask for it before continuing. Derive the target site name and slug from the source site or supplied target name.
 
 ## Agent Instructions
 

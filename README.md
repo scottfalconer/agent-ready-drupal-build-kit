@@ -24,8 +24,7 @@ cd agent-ready-drupal-build-kit
 
 Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
 Read USAGE.md for the canonical run instructions.
-If I provided a preferred target site name, use it. Otherwise derive a human-readable target site name from the source site title or domain.
-Derive SITE_SLUG from that target site name.
+Derive TARGET_SITE_NAME and SITE_SLUG from the source site or supplied target name.
 Create the Drupal CMS project as a clean sibling folder named ${SITE_SLUG}-drupal.
 Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and your derived values.

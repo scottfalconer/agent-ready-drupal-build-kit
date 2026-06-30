@@ -4,7 +4,7 @@ Use one prompt. Let the agent do the setup work.
 
 ## Canonical Prompt
 
-Give your agent a source URL. If you want a particular target site name, say so in the prompt; otherwise the agent should derive one from the source site title or domain. Replace the bracketed value and give this to your coding agent from the kit folder:
+Give your agent a source URL. Add a target site name only if you care about it. Replace the bracketed value and give this to your coding agent from the kit folder:
 
 ```text
 Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
@@ -18,8 +18,7 @@ ddev version
 
 If Docker or DDEV is unavailable, stop and report the blocker.
 
-If the human supplied a preferred target site name, use it. Otherwise derive a human-readable target site name from the source site title or domain.
-Derive SITE_SLUG from that target site name by lowercasing it, replacing non-alphanumeric runs with hyphens, and trimming leading/trailing hyphens.
+Derive TARGET_SITE_NAME and SITE_SLUG from the source site or supplied target name.
 Create a clean sibling workspace named ${SITE_SLUG}-drupal.
 Copy AGENTS.md.template from this kit into that workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and your derived values.

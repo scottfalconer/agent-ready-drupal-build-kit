@@ -17,7 +17,7 @@ You will need a few things on your machine first:
 - a local coding agent with filesystem and shell access, such as Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
 - a public source URL.
 
-If you care about the exact target site name, include it in the prompt. Otherwise the agent should derive it from the source site title or domain.
+Optional: include a target site name. Otherwise the agent derives it.
 
 A normal web chat alone is not enough, because the agent must create files and run local commands.
 
