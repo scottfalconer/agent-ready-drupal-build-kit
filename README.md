@@ -6,11 +6,31 @@ Give your agent a source URL and a target site name. This kit gives the agent th
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, with evidence another developer can inspect.
 
-Start by pulling the kit onto your machine:
+Send your local AI coding agent this from the parent folder where you want the Drupal project created:
 
-```bash
-git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
+```text
+Use the Agent-Ready Drupal Build Kit to rebuild the source site as a local Drupal CMS project.
+
+Source site: [SOURCE_URL]
+Target site name: [TARGET_SITE_NAME]
+
+Clone or update the kit, then enter it:
+
+if [ ! -d agent-ready-drupal-build-kit/.git ]; then
+  git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
+else
+  git -C agent-ready-drupal-build-kit pull --ff-only
+fi
 cd agent-ready-drupal-build-kit
+
+Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
+Read USAGE.md for the canonical run instructions.
+Derive SITE_SLUG from the target site name.
+Create the Drupal CMS project as a clean sibling folder named ${SITE_SLUG}-drupal.
+Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
+Fill the AGENTS.md placeholders from this prompt.
+Create the review packet at review-packet/.
+Write UNKNOWN instead of guessing.
 ```
 
 ## Who This Is For
@@ -38,22 +58,6 @@ You need:
 - a target site name.
 
 A normal web chat is not enough, because the agent needs to create files and run local commands.
-
-From this kit folder, send your agent this:
-
-```text
-Use this Agent-Ready Build Kit to rebuild the source site as a local Drupal CMS project.
-
-Source site: [SOURCE_URL]
-Target site name: [TARGET_SITE_NAME]
-
-Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
-Read USAGE.md for the canonical run instructions.
-Use AGENTS.md.template as the operating guide for the target workspace.
-Create the Drupal CMS project as a sibling folder.
-Create the review packet at review-packet/.
-Write UNKNOWN instead of guessing.
-```
 
 Need the full strict prompt? See [USAGE.md](USAGE.md). Want the guided version? Start with [START.md](START.md).
 
