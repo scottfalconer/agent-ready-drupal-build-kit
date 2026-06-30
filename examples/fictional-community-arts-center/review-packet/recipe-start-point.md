@@ -37,6 +37,6 @@ Rationale: The source shape is a standard content/editorial site with events, cl
 | `person` content type | Staff/artist profile pattern is site-specific | Pattern map | Low. |
 | `audience`, `program_area`, `season` vocabularies | Public filters use controlled terms | Pattern map | Low. |
 
-## Claim Boundary
+## Evidence Scope
 
-This is a fictional decision example. It does not prove recipe availability in a real target and does not clear launch gates.
+This is a fictional decision example. Verify recipe availability and launch gates in a real target.

@@ -33,7 +33,7 @@ The kit is strongest when it is used as a governed head start. The value is not 
 - Private data, credentials, payment flows, users, and roles require explicit approval.
 - Launch evidence must come from a production-equivalent Drupal target.
 - Drupal CMS install, setup, and site-building mechanics should follow the encoded baseline in `AGENTS.md.template`; verified divergences from current Drupal CMS mechanics are kit/upstream update candidates, not silent substitutions.
-- A local build claim requires Drupal-served evidence: DDEV URL, Drush status, config export, anonymous route status, and browser-rendered proof.
+- A local build record requires Drupal-served evidence: DDEV URL, Drush status, config export, anonymous route status, and browser-rendered proof.
 - Static previews, screenshot-only mockups, and non-Drupal prototypes are not Drupal CMS builds.
 - Build briefs should name the required Drupal stack: DDEV, `drupal/cms`, the Drupal CMS installer/setup assistant or documented non-interactive equivalent, Drush, Drupal content/config entities, menus, aliases, media, Views, theme/module/config work, and browser checks against the Drupal-served URL.
 - Content model decisions should start from goals, audiences, organizational requirements, and editor workflow, then use typed fields, taxonomy, media, entity references, Views, SEO/social metadata, moderation, and accessibility tooling where the source pattern requires them.

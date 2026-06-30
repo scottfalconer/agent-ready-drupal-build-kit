@@ -22,5 +22,5 @@
     "status": "blocked",
     "reason": "Events/classes Views are modeled but not verified through rendered target pages."
   },
-  "claimBoundary": "Fictional blocked parity stub only. Not launch evidence."
+  "evidenceScope": "Fictional blocked parity stub only. Use launch evidence records for launch decisions."
 }

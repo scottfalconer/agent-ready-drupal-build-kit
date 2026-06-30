@@ -23,7 +23,7 @@
     "requiredDisclosureFields": [],
     "approvalStatusFields": [],
     "sourceStatusFields": [],
-    "blockedClaimTypes": []
+    "blockedEvidenceTypes": []
   },
   "displayConfig": {
     "formDisplays": [],
@@ -48,5 +48,5 @@
   "editorialWorkflow": [],
   "durableIntentCandidates": [],
   "approvalStatus": "draft | approved | rejected",
-  "claimBoundary": "This pattern map is a review contract. It must be approved before structured import."
+  "evidenceScope": "This pattern map is a review contract. Approve it before structured import."
 }

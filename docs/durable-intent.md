@@ -21,7 +21,7 @@ Do not write unsupported intent metadata into Drupal config unless the target pr
 
 ## Stale Intent Rule
 
-If durable intent is missing, stale, mismatched, or unreviewed, treat it as no intent. Do not let stale intent guide an import, launch decision, or maintainer claim.
+If durable intent is missing, stale, mismatched, or unreviewed, treat it as no intent. Do not let stale intent guide an import, launch decision, or maintainer review.
 
 ## How Intent Is Used
 

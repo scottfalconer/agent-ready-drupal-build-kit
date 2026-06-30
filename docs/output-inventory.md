@@ -25,7 +25,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 
 ## Hard Launch Gates
 
-Do not claim launch readiness unless every hard gate has accepted evidence:
+Launch readiness requires accepted evidence for every hard gate:
 
 - Owner permission.
 - Independent operator run.

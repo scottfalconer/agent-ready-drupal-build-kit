@@ -30,4 +30,4 @@ If the source URL is missing, ask for it before continuing. If the human supplie
 
 Use this kit only with source sites the human is allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless the human has the right to use them.
 
-Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details. Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.
+Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.

@@ -102,7 +102,7 @@ Use this checklist to support the five-question verdict. It is not a second rubr
 - [ ] Recipe and configuration choices are reviewable.
 - [ ] Durable intent is current or treated as absent.
 - [ ] Route, content, media, integration, accessibility, performance, security, and editorial risks are explicit.
-- [ ] Launch claims are blocked unless accepted evidence exists.
+- [ ] Launch readiness is tied to accepted evidence.
 
 ## Required Rationale
 
@@ -113,4 +113,4 @@ Use this checklist to support the five-question verdict. It is not a second rubr
 
 ## Boundary
 
-Maintainer review is required before launch claims. A positive stake-my-name verdict accepts the architecture as a starting position only; it is not owner permission, stakeholder launch approval, or production readiness.
+Maintainer review is required before launch review. A positive stake-my-name verdict accepts the architecture as a starting position.

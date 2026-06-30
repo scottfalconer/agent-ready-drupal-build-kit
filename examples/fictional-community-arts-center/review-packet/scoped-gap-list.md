@@ -17,6 +17,6 @@ Overall status: `blocked`
 | GAP-007 | Production target | Operator | Local plan only | No production-equivalent target evidence | Submit production target record | blocked |
 | GAP-008 | Maintainer review | Drupal maintainer | Fictional review packet | Real maintainer verdict missing | Review architecture and evidence | blocked |
 
-## Claim Boundary
+## Evidence Scope
 
-This gap list is a fictional blocker map. It is not launch evidence.
+This gap list is a fictional blocker map.

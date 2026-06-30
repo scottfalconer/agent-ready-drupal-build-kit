@@ -26,4 +26,4 @@
 
 ## Current Result
 
-No launch gate is clear. This fictional packet shows the shape of a governed blocker list, not launch readiness.
+Launch gates are blocked. This fictional packet shows the shape of a governed blocker list.

@@ -335,15 +335,6 @@ Stop and report blockers when:
 - managed media, Views, menu, alias, SEO, search, accessibility, performance, security, privacy, legal, email, update, or editorial gates remain unresolved;
 - maintainer review is missing.
 
-## Claim Boundaries
-
-- Do not claim speed advantage.
-- Do not claim the rebuild is better than the original.
-- Do not claim launch readiness without owner approval, production-equivalent target evidence, target browser QA, accepted launch evidence, and maintainer signoff.
-- Do not treat a local DDEV build as production target evidence.
-- Do not treat config export as rendered parity.
-- Do not treat packets, screenshots, or source baselines as launch evidence.
-
 ## Required Outputs
 
 Create or update a review packet with:

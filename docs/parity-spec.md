@@ -1,6 +1,6 @@
 # Parity Spec
 
-Parity claims are easy to overstate. This spec keeps parity tied to evidence.
+Parity is easy to overstate. This spec keeps parity tied to evidence.
 
 ## Addressable Surface
 
@@ -54,7 +54,7 @@ Examples:
 
 Visual and content parity require owner-approved content and production-equivalent browser evidence.
 
-Do not claim content parity from public text samples. Public samples may support review drafts, but they are not approved Drupal content.
+Content parity requires owner-approved source material and target Drupal evidence. Public samples may support review drafts, but they are not approved Drupal content.
 
 ## Minimum Parity Report Shape
 
@@ -70,9 +70,9 @@ Do not claim content parity from public text samples. Public samples may support
   "routeChecks": [],
   "functionalChecks": [],
   "browserEvidence": [],
-  "blockedClaims": [],
+  "blockedEvidence": [],
   "verdict": "blocked | partial | pass",
-  "claimBoundary": "Parity applies only to the approved addressable surface and evidence layers listed in this report."
+  "evidenceScope": "Parity applies to the approved addressable surface and evidence layers listed in this report."
 }
 ```
 
@@ -87,4 +87,3 @@ A parity pass requires:
 - launch-gate consistency.
 
 Anything else is partial or blocked.
-

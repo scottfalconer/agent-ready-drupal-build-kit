@@ -27,8 +27,8 @@
 - Verify the packet is internally consistent.
 - Verify generated recipe material only as recipe material.
 - Verify lab application only as lab proof.
-- Verify production target claims only from production-equivalent target evidence.
-- Verify local Drupal CMS build claims with DDEV/Drush status, exported config, public anonymous routes, and browser-rendered evidence.
+- Verify production target evidence only from production-equivalent targets.
+- Verify local Drupal CMS builds with DDEV/Drush status, exported config, public anonymous routes, and browser-rendered evidence.
 - Reject static previews and non-Drupal prototypes as Drupal CMS build evidence.
 
 ## Phase 5: Hand Off

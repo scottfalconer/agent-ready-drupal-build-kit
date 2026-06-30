@@ -1,6 +1,6 @@
 # Drupal CMS Build Playbook
 
-This playbook records common build issues that can cause agents to overclaim or produce brittle Drupal targets.
+This playbook records common build issues that can cause agents to misread evidence or produce brittle Drupal targets.
 
 ## Official Drupal CMS Baseline
 
@@ -194,7 +194,7 @@ A target build must record:
 
 Recipe apply is not enough. Export target config and, when possible, import it into a clean target to prove portability.
 
-Use config evidence to support configuration claims only. It does not prove rendered parity or launch readiness.
+Use config evidence for configuration review. Rendered parity and launch readiness require browser and launch-gate evidence.
 
 ## Cache and Field Discovery
 
@@ -231,7 +231,7 @@ Detection alone is not implementation evidence.
 
 ## Security Defaults
 
-Before launch claims, verify:
+Before launch review, verify:
 
 - security update status;
 - trusted host and environment configuration;

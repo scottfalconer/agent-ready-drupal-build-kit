@@ -1,6 +1,6 @@
 # Four-Layer Truth Model
 
-This model prevents agents from turning one kind of success into a stronger claim.
+This model tells agents which evidence layer they have and which layer comes next.
 
 ## Layer 1: API or Command Success
 
@@ -13,7 +13,7 @@ Examples:
 - `ddev drush status` reports a successful Drupal bootstrap;
 - entity write returned an ID.
 
-This does not prove the CMS stores the right thing or that visitors can see it.
+Next evidence layer: CMS readback.
 
 ## Layer 2: CMS Readback
 
@@ -25,7 +25,7 @@ Examples:
 - entity query returns expected node;
 - field values read back correctly.
 
-This does not prove public route behavior.
+Next evidence layer: public route status.
 
 ## Layer 3: Public Route Status
 
@@ -37,7 +37,7 @@ Examples:
 - expected 301 for approved redirects;
 - expected 403 for private routes.
 
-This does not prove browser-rendered functional parity.
+Next evidence layer: browser-rendered truth.
 
 ## Layer 4: Browser-Rendered Truth
 
@@ -49,6 +49,6 @@ Examples:
 - navigation and interactions work;
 - console, accessibility, performance, and security evidence are attached.
 
-This still does not approve launch unless all launch gates are accepted.
+Launch decisions use the gate records in `docs/output-inventory.md`.
 
-For local builds, DDEV is the default environment for collecting these layers. Static previews and non-Drupal servers sit outside the model and cannot prove Drupal CMS behavior.
+For local builds, DDEV is the default environment for collecting these layers. Static previews and non-Drupal servers sit outside the Drupal CMS evidence model.

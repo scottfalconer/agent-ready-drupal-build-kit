@@ -24,4 +24,4 @@ intent_records:
     config_hash: "UNKNOWN"
     status: "blocked"
     stale_behavior: "treat_as_no_intent"
-claim_boundary: "Durable intent guides review only when current, hash-validated, and accepted."
+evidence_scope: "Durable intent guides review when current, hash-validated, and accepted."

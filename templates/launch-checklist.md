@@ -21,5 +21,4 @@ Do not mark launch ready until every item has accepted evidence.
 - [ ] Final QA accepted.
 - [ ] Rollback plan accepted.
 
-Boundary: A launch checklist is a gate tracker. It is not launch evidence by itself.
-
+Use this checklist as the launch gate tracker. Link accepted evidence beside each cleared item.

@@ -6,6 +6,5 @@
   "passed": false,
   "blockedGates": [],
   "acceptedEvidence": [],
-  "claimBoundary": "Verification proves only the named checks that actually ran."
+  "evidenceScope": "Verification covers the named checks that actually ran."
 }
-

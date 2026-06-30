@@ -43,7 +43,7 @@ You bring:
 - a local AI coding agent;
 - Docker and DDEV.
 
-The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to avoid unsafe claims, and how to leave behind a reviewable handoff packet.
+The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
 
 Already fluent in Drupal? Use this as a repeatable agent workflow and review harness.
 
@@ -83,7 +83,7 @@ Every run asks:
 - Did it name the gaps instead of hiding them?
 - Did it leave evidence another developer can review?
 
-The kit produces a governed head start, not a launch decision. Do not claim launch readiness, production target parity, owner approval, maintainer signoff, speed advantage, or that the rebuild is better than the original unless the required evidence exists.
+The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
 For the full case, see [docs/positioning.md](docs/positioning.md): who this is for, why Drupal CMS, why the kit, and when not to use it.
 

@@ -93,6 +93,6 @@ Recipe discovery / apply evidence:
 UNKNOWN
 ```
 
-## Claim Boundary
+## Evidence Scope
 
-This decision chooses a build start point. It does not grant owner permission, approve imports, prove target parity, or clear launch gates.
+This decision chooses a build start point. Pair it with source-use, import approval, target parity, and launch-gate records when those decisions are needed.

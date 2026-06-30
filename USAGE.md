@@ -31,7 +31,6 @@ Follow the copied AGENTS.md as the operating guide. Start with public source aud
 Create the review packet inside the target workspace at review-packet/.
 
 Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
-Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.
 Only use source sites you are allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless you have the right to use them.
 ```
 

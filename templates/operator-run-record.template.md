@@ -28,6 +28,6 @@
 - [ ] Repeatability blocked
 - [ ] Repeatability accepted with restrictions
 
-## Boundary
+## How This Record Is Used
 
-This record does not prove speed, quality, launch readiness, owner approval, or maintainer signoff by itself.
+Use this record as operator evidence in the review packet alongside the architecture, source-use, target, QA, and maintainer records.

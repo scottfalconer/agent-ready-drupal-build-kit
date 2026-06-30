@@ -47,12 +47,11 @@
       "blocker": "provider and privacy evidence missing"
     }
   ],
-  "blockedClaims": [
+  "blockedEvidence": [
     "launch_readiness",
     "full_content_parity",
     "forms_integrations_parity"
   ],
   "verdict": "partial",
-  "claimBoundary": "Fictional sample output only. Parity applies only to the approved addressable surface and evidence layers listed here."
+  "evidenceScope": "Fictional sample output only. Parity applies to the approved addressable surface and evidence layers listed here."
 }
-

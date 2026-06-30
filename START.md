@@ -83,17 +83,4 @@ The canonical output list is in [docs/output-inventory.md](docs/output-inventory
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.
 
-## What Not To Claim
-
-Do not claim:
-
-- launch readiness;
-- production target parity;
-- owner approval;
-- maintainer signoff;
-- speed advantage;
-- that the rebuild is better than the original.
-
-The kit produces a governed head start, not a launch decision.
-
 Use this kit only with sites you are allowed to inspect and rebuild. Do not copy source content or assets unless you have the right to use them.

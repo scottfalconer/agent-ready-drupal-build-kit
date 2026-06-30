@@ -25,5 +25,5 @@
     "unfetchedCandidates": 0
   },
   "limitations": [],
-  "claimBoundary": "This audit records public observations only. It does not grant permission, prove target parity, or approve launch."
+  "evidenceScope": "Public observations only. Use source-use, target parity, and launch evidence records for those decisions."
 }
