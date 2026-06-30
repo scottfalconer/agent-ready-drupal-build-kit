@@ -16,13 +16,9 @@ Source site: [SOURCE_URL]
 Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
 Do not hand back a partial or representative build as the result. A partial or incomplete site is a failed run unless a real blocker outside the local agent's control is recorded.
 
-Clone or update the kit as reference material beside the Drupal project:
+Make the kit available locally as reference material beside the Drupal project:
 
-if [ ! -d agent-ready-drupal-build-kit/.git ]; then
-  git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
-else
-  git -C agent-ready-drupal-build-kit pull --ff-only
-fi
+git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
 
 Run the preflight checks in agent-ready-drupal-build-kit/USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
 Read agent-ready-drupal-build-kit/USAGE.md for the canonical run instructions.
