@@ -130,6 +130,22 @@ Run the build as a state machine. Do not skip phases.
 - Answer the canonical signoff verdict.
 - If any answer is no, say the result is useful but not something to stand behind yet.
 
+## Required Review Loop
+
+Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
+
+If the agent runtime has a goal, plan, review, reflection, or task-loop feature, use it. If it does not, emulate the loop with a visible checklist in the conversation or working notes.
+
+Each loop must:
+
+1. Build or revise one coherent slice of the Drupal site.
+2. Verify the slice with the strongest available evidence: command success, Drupal readback, anonymous public route checks, browser-rendered public checks, and authenticated editor form checks where relevant.
+3. Self-review against the review bar: Drupal CMS primitives, content/media completeness, visual design, public behavior, editor experience, durable intent, and scoped gaps.
+4. Fix the highest-impact gaps before moving to lower-value polish.
+5. Update `review-packet/` with new evidence, decisions, and blockers.
+
+Stop only when the local Drupal CMS site has reviewable content, media, visual design, public functionality, editor forms, and packet evidence, or when a blocker outside the local agent's control is recorded with the missing input and next action.
+
 ## Build Order
 
 1. Audit representative public source URLs.

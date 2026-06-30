@@ -29,6 +29,7 @@ Read USAGE.md for the canonical run instructions.
 Create a clean Drupal CMS project workspace outside the kit folder.
 Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
+Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 Create the review packet at review-packet/.
 Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 ```

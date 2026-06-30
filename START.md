@@ -32,13 +32,14 @@ If either command fails, fix the local environment before asking for a build.
 
 Copy the lightweight prompt from [README.md](README.md), or the full strict prompt from [USAGE.md](USAGE.md). Replace the bracketed source URL and send it to the agent.
 
-You will not hand-edit anything yourself. The agent does the setup for you:
+You will not hand-edit anything yourself. The agent does the setup and review loop for you:
 
 1. it creates a clean Drupal CMS project workspace outside the kit folder;
 2. it copies `AGENTS.md.template` into that workspace as `AGENTS.md`, which is what carries Drupal's best practices into the build;
 3. it fills in the placeholders from your prompt;
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
-5. it creates `review-packet/` with the evidence.
+5. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
+6. it creates `review-packet/` with the evidence.
 
 ## Workspace Topology
 
@@ -56,7 +57,7 @@ The kit folder is not the Drupal site. The Drupal project folder is the active s
 
 ## The Four Moves
 
-Under the hood, the agent works in four moves. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
+Under the hood, the agent works in four moves and repeats them as a review loop. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
 1. **Introspect:** read the source site: routes, content inventory, media, design system, public behaviors, and unresolved facts it must not invent.
 2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, theme/config work, and source-like public behavior.

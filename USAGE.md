@@ -26,6 +26,8 @@ Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 
 Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
 
+Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+
 Follow the copied AGENTS.md as the operating guide. Start with public source audit, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify public routes, visual/function parity, and editor forms, and produce every file named in docs/output-inventory.md.
 
 Create the review packet inside the target workspace at review-packet/.

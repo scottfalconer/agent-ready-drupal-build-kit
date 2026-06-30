@@ -25,7 +25,8 @@ If the source URL is missing, ask for it before continuing.
 5. Create a clean Drupal CMS project workspace outside the kit folder.
 6. Create the review packet at `review-packet/`.
 7. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
-8. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
+8. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+9. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
 
 ## Build Assumption
 
