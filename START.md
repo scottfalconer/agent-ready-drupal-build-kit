@@ -15,8 +15,9 @@ You will need a few things on your machine first:
 - Docker running;
 - DDEV installed;
 - a local coding agent with filesystem and shell access, such as Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
-- a public source URL;
-- a target site name.
+- a public source URL.
+
+If you care about the exact target site name, include it in the prompt. Otherwise the agent should derive it from the source site title or domain.
 
 A normal web chat alone is not enough, because the agent must create files and run local commands.
 
@@ -31,7 +32,7 @@ If either command fails, fix the local environment before asking for a build.
 
 ## One Prompt
 
-Copy the lightweight prompt from [README.md](README.md), or the full strict prompt from [USAGE.md](USAGE.md). Replace the bracketed values and send it to the agent.
+Copy the lightweight prompt from [README.md](README.md), or the full strict prompt from [USAGE.md](USAGE.md). Replace the bracketed source URL and send it to the agent.
 
 You will not hand-edit anything yourself. The agent does the setup for you:
 
@@ -47,7 +48,7 @@ Here is the shape you will end up with:
 
 ```text
 parent-folder/
-  agent-ready-build-kit-2026-06-29/   # this kit, reference only
+  agent-ready-drupal-build-kit/        # this kit, reference only
   site-slug-drupal/                   # DDEV Drupal CMS project, your new site
     AGENTS.md                         # copied from AGENTS.md.template
     review-packet/                    # evidence and handoff packet
@@ -59,7 +60,7 @@ The kit folder is not the Drupal site. The sibling `site-slug-drupal/` folder is
 
 Under the hood, the agent works in four moves. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
-1. **Introspect:** read the source site: representative routes, the patterns it is made of, source-use boundaries, and anything it cannot be sure about (`UNKNOWN`).
+1. **Introspect:** read the source site: representative routes, the patterns it is made of, source-use boundaries, and unresolved facts it must not invent.
 2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, and theme/config work.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps:** list what still needs a human: owner approval, content, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.

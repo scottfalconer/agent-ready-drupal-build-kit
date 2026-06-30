@@ -4,12 +4,11 @@ Build a real local Drupal CMS site, not a static lookalike.
 
 ## Human Input
 
-Ask the human for only two values:
+Ask the human for only one required value:
 
 - Source site URL
-- Target site name
 
-If either value is missing, ask for it before continuing.
+If the source URL is missing, ask for it before continuing. If the human supplied a preferred target site name, use it; otherwise derive a human-readable target site name from the source site title or domain.
 
 ## Agent Instructions
 
@@ -31,4 +30,4 @@ If either value is missing, ask for it before continuing.
 
 Use this kit only with source sites the human is allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless the human has the right to use them.
 
-Write `UNKNOWN` instead of guessing. Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.
+Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details. Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.

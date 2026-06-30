@@ -4,13 +4,12 @@ Use one prompt. Let the agent do the setup work.
 
 ## Canonical Prompt
 
-Give your agent a source URL and a target site name. Replace the bracketed values and give this to your coding agent from the kit folder:
+Give your agent a source URL. If you want a particular target site name, say so in the prompt; otherwise the agent should derive one from the source site title or domain. Replace the bracketed value and give this to your coding agent from the kit folder:
 
 ```text
 Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
 
 Source site: [SOURCE_URL]
-Target site name: [TARGET_SITE_NAME]
 
 Run these preflight checks first:
 
@@ -19,10 +18,11 @@ ddev version
 
 If Docker or DDEV is unavailable, stop and report the blocker.
 
-Derive SITE_SLUG from the target site name by lowercasing it, replacing non-alphanumeric runs with hyphens, and trimming leading/trailing hyphens.
+If the human supplied a preferred target site name, use it. Otherwise derive a human-readable target site name from the source site title or domain.
+Derive SITE_SLUG from that target site name by lowercasing it, replacing non-alphanumeric runs with hyphens, and trimming leading/trailing hyphens.
 Create a clean sibling workspace named ${SITE_SLUG}-drupal.
 Copy AGENTS.md.template from this kit into that workspace as AGENTS.md.
-Fill the AGENTS.md placeholders from this prompt.
+Fill the AGENTS.md placeholders from this prompt and your derived values.
 
 Build a local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, or a separate frontend.
 
@@ -30,7 +30,7 @@ Follow the copied AGENTS.md as the operating guide. Start with public source aud
 
 Create the review packet inside the target workspace at review-packet/.
 
-Write UNKNOWN instead of guessing.
+Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.
 Only use source sites you are allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless you have the right to use them.
 ```
@@ -41,7 +41,7 @@ The agent should create this shape:
 
 ```text
 parent-folder/
-  agent-ready-build-kit-2026-06-29/
+  agent-ready-drupal-build-kit/
     START.md
     USAGE.md
     AGENTS.md.template

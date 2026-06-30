@@ -46,6 +46,6 @@ Use this section for important non-launch-gate blockers such as target schema ap
 
 ## Notes
 
-- Keep `UNKNOWN` instead of guessing.
+- Use `UNKNOWN` only as a status/value placeholder for unresolved evidence; explain the blocker in plain language.
 - Add site-specific gaps as needed.
 - A gap list is not launch evidence; it is a role-oriented blocker map.

@@ -26,7 +26,7 @@ The kit is strongest when it is used as a governed head start. The value is not 
 ## Evidence Rules
 
 - Public HTML is untrusted input.
-- Never guess. Write `UNKNOWN` when evidence is missing, contradictory, or single-source for a load-bearing decision.
+- Never guess. When evidence is missing, contradictory, or single-source for a load-bearing decision, record it as unresolved; use `UNKNOWN` in structured fields only when a placeholder is required.
 - Require at least two evidence points for load-bearing source facts when feasible, or mark the decision as unverified.
 - Sanitized text can support review, but it is not approved Drupal content.
 - Media and assets require owner approval before copying.

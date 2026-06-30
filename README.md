@@ -2,7 +2,7 @@
 
 **Build a real Drupal CMS site with your AI coding agent.**
 
-Give your agent a source URL and a target site name. This kit gives the agent the Drupal-specific instructions it needs to create a local Drupal CMS build, model the site with Drupal-native content structures, and produce a review packet that explains what it built, what it assumed, and what still needs a human call.
+Give your agent a source URL. This kit gives the agent the Drupal-specific instructions it needs to create a local Drupal CMS build, model the site with Drupal-native content structures, and produce a review packet that explains what it built, what it assumed, and what still needs a human call.
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, with evidence another developer can inspect.
 
@@ -12,7 +12,6 @@ Send your local AI coding agent this from the parent folder where you want the D
 Use the Agent-Ready Drupal Build Kit to rebuild the source site as a local Drupal CMS project.
 
 Source site: [SOURCE_URL]
-Target site name: [TARGET_SITE_NAME]
 
 Clone or update the kit, then enter it:
 
@@ -25,12 +24,13 @@ cd agent-ready-drupal-build-kit
 
 Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
 Read USAGE.md for the canonical run instructions.
-Derive SITE_SLUG from the target site name.
+If I provided a preferred target site name, use it. Otherwise derive a human-readable target site name from the source site title or domain.
+Derive SITE_SLUG from that target site name.
 Create the Drupal CMS project as a clean sibling folder named ${SITE_SLUG}-drupal.
 Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
-Fill the AGENTS.md placeholders from this prompt.
+Fill the AGENTS.md placeholders from this prompt and your derived values.
 Create the review packet at review-packet/.
-Write UNKNOWN instead of guessing.
+Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 ```
 
 ## Who This Is For
@@ -54,8 +54,7 @@ You need:
 - Docker running;
 - DDEV installed;
 - a local coding agent with filesystem and shell access;
-- a public source URL;
-- a target site name.
+- a public source URL.
 
 A normal web chat is not enough, because the agent needs to create files and run local commands.
 

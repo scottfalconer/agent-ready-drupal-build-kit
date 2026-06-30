@@ -67,7 +67,8 @@ cat <<'PROMPT'
 Read skill.md and follow the instructions to build a real local Drupal CMS site.
 
 Source site: [SOURCE_URL]
-Target site name: [TARGET_SITE_NAME]
+
+If I provided a preferred target site name, use it. Otherwise derive a human-readable target site name from the source site title or domain.
 PROMPT
 
 say
