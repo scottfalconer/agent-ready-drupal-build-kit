@@ -36,7 +36,7 @@ Copy the lightweight prompt from [README.md](README.md), or the full strict prom
 
 You will not hand-edit anything yourself. The agent does the setup and review loop for you:
 
-1. it creates a clean Drupal CMS project workspace outside the kit folder;
+1. it keeps the kit as reference material and creates a clean Drupal CMS project workspace beside it;
 2. it copies `AGENTS.md.template` into that workspace as `AGENTS.md`, which is what carries Drupal's best practices into the build;
 3. it fills in the placeholders from your prompt;
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
@@ -55,7 +55,7 @@ parent-folder/
     review-packet/                    # evidence and handoff packet
 ```
 
-The kit folder is not the Drupal site. The Drupal project folder is the active site workspace.
+The kit folder is not the Drupal site. It sits beside the Drupal project as reference material.
 
 ## The Four Moves
 

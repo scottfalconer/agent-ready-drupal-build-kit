@@ -13,16 +13,15 @@ If the source URL is missing, ask for it before continuing.
 ## Agent Instructions
 
 1. Make sure you are working in a local coding environment with filesystem and shell access.
-2. If this repository is not already available locally, clone it:
+2. If this repository is not already available locally, clone it beside the target Drupal workspace:
 
    ```bash
    git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
-   cd agent-ready-drupal-build-kit
    ```
 
-3. Read `USAGE.md` for the canonical run instructions.
-4. Use `AGENTS.md.template` as the operating guide for the target Drupal CMS workspace.
-5. Create a clean Drupal CMS project workspace outside the kit folder.
+3. Read `agent-ready-drupal-build-kit/USAGE.md` for the canonical run instructions.
+4. Use `agent-ready-drupal-build-kit/AGENTS.md.template` as the operating guide for the target Drupal CMS workspace.
+5. Create a clean Drupal CMS project workspace alongside the kit folder.
 6. Create the review packet at `review-packet/`.
 7. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
 8. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.

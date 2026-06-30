@@ -4,7 +4,7 @@ Use one prompt. Let the agent do the setup work.
 
 ## Canonical Prompt
 
-Give your agent a source URL. Replace the bracketed value and give this to your coding agent from the kit folder:
+Give your agent a source URL. Replace the bracketed value and give this to your coding agent from the parent workspace where the kit and Drupal project should sit:
 
 ```text
 Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
@@ -21,8 +21,8 @@ ddev version
 
 If Docker or DDEV is unavailable, stop and report the blocker.
 
-Create a clean Drupal CMS project workspace outside the kit folder.
-Copy AGENTS.md.template from this kit into that workspace as AGENTS.md.
+Create a clean Drupal CMS project workspace alongside the kit folder.
+Copy AGENTS.md.template from the kit folder into that workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 
 Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.

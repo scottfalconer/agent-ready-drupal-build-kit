@@ -16,19 +16,18 @@ Source site: [SOURCE_URL]
 Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
 Do not hand back a partial or representative build as the result. A partial or incomplete site is a failed run unless a real blocker outside the local agent's control is recorded.
 
-Clone or update the kit, then enter it:
+Clone or update the kit as reference material beside the Drupal project:
 
 if [ ! -d agent-ready-drupal-build-kit/.git ]; then
   git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
 else
   git -C agent-ready-drupal-build-kit pull --ff-only
 fi
-cd agent-ready-drupal-build-kit
 
-Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
-Read USAGE.md for the canonical run instructions.
-Create a clean Drupal CMS project workspace outside the kit folder.
-Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
+Run the preflight checks in agent-ready-drupal-build-kit/USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
+Read agent-ready-drupal-build-kit/USAGE.md for the canonical run instructions.
+Create a clean Drupal CMS project workspace alongside agent-ready-drupal-build-kit.
+Copy agent-ready-drupal-build-kit/AGENTS.md.template into that target workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 Create the review packet at review-packet/.
