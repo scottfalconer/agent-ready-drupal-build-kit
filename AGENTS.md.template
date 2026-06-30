@@ -7,7 +7,6 @@ Copy this file into the root of a target Drupal CMS rebuild workspace as `AGENTS
 The agent fills these values from the canonical prompt in `USAGE.md` and derived setup values. The human should not need to hand-edit this file.
 
 - Source site: `[SOURCE_URL]`
-- Target site name: `[TARGET_SITE_NAME]`
 - Kit location or reference: `[KIT_PATH_OR_PUBLIC_REPO_URL]`
 - Build workspace: `[TARGET_WORKSPACE]`
 
@@ -61,7 +60,7 @@ ddev status
 
 The setup assistant opens in the browser after `ddev launch`. During setup:
 
-- Set the site name to the target site name.
+- Set the site name to a human-readable name for the rebuilt site.
 - Choose the Starter template unless there is a documented reason to use another Drupal CMS template.
 - Create the administrator account.
 - After setup, land on the Dashboard and use the admin toolbar for Pages, CMS content, Media, Structure, Appearance, Extend, Configuration, People, and Reports.

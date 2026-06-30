@@ -26,10 +26,9 @@ cd agent-ready-drupal-build-kit
 
 Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
 Read USAGE.md for the canonical run instructions.
-Derive TARGET_SITE_NAME and SITE_SLUG from the source site or supplied target name.
-Create the Drupal CMS project as a clean sibling folder named ${SITE_SLUG}-drupal.
+Create a clean Drupal CMS project workspace outside the kit folder.
 Copy AGENTS.md.template from this kit into that target workspace as AGENTS.md.
-Fill the AGENTS.md placeholders from this prompt and your derived values.
+Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 Create the review packet at review-packet/.
 Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 ```

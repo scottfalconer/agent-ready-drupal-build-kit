@@ -4,7 +4,7 @@ Use one prompt. Let the agent do the setup work.
 
 ## Canonical Prompt
 
-Give your agent a source URL. Add a target site name only if you care about it. Replace the bracketed value and give this to your coding agent from the kit folder:
+Give your agent a source URL. Replace the bracketed value and give this to your coding agent from the kit folder:
 
 ```text
 Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
@@ -20,10 +20,9 @@ ddev version
 
 If Docker or DDEV is unavailable, stop and report the blocker.
 
-Derive TARGET_SITE_NAME and SITE_SLUG from the source site or supplied target name.
-Create a clean sibling workspace named ${SITE_SLUG}-drupal.
+Create a clean Drupal CMS project workspace outside the kit folder.
 Copy AGENTS.md.template from this kit into that workspace as AGENTS.md.
-Fill the AGENTS.md placeholders from this prompt and your derived values.
+Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 
 Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
 
@@ -46,7 +45,7 @@ parent-folder/
     AGENTS.md.template
     templates/
     docs/
-  site-slug-drupal/
+  drupal-project/
     AGENTS.md
     web/
     vendor/
@@ -64,7 +63,7 @@ parent-folder/
       maintainer-review.md
 ```
 
-The kit folder is reference material. The `site-slug-drupal/` folder is the DDEV Drupal CMS project and active build workspace.
+The kit folder is reference material. The Drupal project folder is the DDEV Drupal CMS project and active build workspace.
 
 ## What The Agent Must Prove
 

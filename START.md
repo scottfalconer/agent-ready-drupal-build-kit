@@ -17,8 +17,6 @@ You will need a few things on your machine first:
 - a local coding agent with filesystem and shell access, such as Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
 - a public source URL.
 
-Optional: include a target site name. Otherwise the agent derives it.
-
 A normal web chat alone is not enough, because the agent must create files and run local commands.
 
 Run this preflight first, or ask the agent to run it:
@@ -36,7 +34,7 @@ Copy the lightweight prompt from [README.md](README.md), or the full strict prom
 
 You will not hand-edit anything yourself. The agent does the setup for you:
 
-1. it creates a clean sibling workspace for the new site;
+1. it creates a clean Drupal CMS project workspace outside the kit folder;
 2. it copies `AGENTS.md.template` into that workspace as `AGENTS.md`, which is what carries Drupal's best practices into the build;
 3. it fills in the placeholders from your prompt;
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
@@ -49,12 +47,12 @@ Here is the shape you will end up with:
 ```text
 parent-folder/
   agent-ready-drupal-build-kit/        # this kit, reference only
-  site-slug-drupal/                   # DDEV Drupal CMS project, your new site
+  drupal-project/                     # DDEV Drupal CMS project, your new site
     AGENTS.md                         # copied from AGENTS.md.template
     review-packet/                    # evidence and handoff packet
 ```
 
-The kit folder is not the Drupal site. The sibling `site-slug-drupal/` folder is the Drupal site.
+The kit folder is not the Drupal site. The Drupal project folder is the active site workspace.
 
 ## The Four Moves
 
