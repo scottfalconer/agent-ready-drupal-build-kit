@@ -12,6 +12,7 @@ Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
 Source site: [SOURCE_URL]
 
 Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
+Do not hand back a partial or representative build as the result. A partial or incomplete site is a failed run unless a real blocker outside the local agent's control is recorded.
 
 Run these preflight checks first:
 
@@ -24,7 +25,7 @@ Create a clean Drupal CMS project workspace outside the kit folder.
 Copy AGENTS.md.template from this kit into that workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 
-Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, or a separate frontend.
+Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
 
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 

@@ -16,6 +16,8 @@ Build a complete public-facing Drupal CMS rebuild, not a static mimic, screensho
 
 The expected end state is a local Drupal CMS site that a Drupal developer could stand behind: it contains the reachable public content and media needed for review, matches the source site's visual language, preserves the important public routes and behaviors, and gives editors a credible Drupal editing path.
 
+Partial or representative sites are failed runs, not deliverables. Do not hand back a site as "rebuilt", "done", "ready", "complete", or "final" while reachable public content, media, routes, source-like design, public behavior, editor forms, or packet evidence are still missing.
+
 Use Drupal CMS mechanics directly in the build. The Drupal CMS baseline encoded here is drawn from the Drupal CMS User Guide as of 2026-06-30. If you later verify that current Drupal CMS docs differ from this file, follow current Drupal CMS mechanics and record the mismatch as a kit or upstream update candidate. Do not stop and tell the user to read external docs before building.
 
 ## Required Local Stack
@@ -145,6 +147,37 @@ Each loop must:
 5. Update `review-packet/` with new evidence, decisions, and blockers.
 
 Stop only when the local Drupal CMS site has reviewable content, media, visual design, public functionality, editor forms, and packet evidence, or when a blocker outside the local agent's control is recorded with the missing input and next action.
+
+## No Partial Deliveries
+
+The final handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required.
+
+The following are not acceptable final states:
+
+- a sample catalog when the public source exposes a fuller catalog;
+- partially imported reachable public content, shows, products, articles, events, episodes, locations, or legal/footer pages;
+- partially imported reachable public media, posters, documents, videos, thumbnails, logos, or alt text without item-level blockers;
+- placeholder copy/media where source material was reachable;
+- a stock theme, generic theme, or base-theme look that does not match the source's public visual language;
+- homepage-only visual parity with weak listing, detail, taxonomy/category, search, form, legal/footer, or navigation routes;
+- public pages that render but do not expose Drupal-owned content, fields, Media, Views, menus, aliases, and blocks behind them;
+- editor add/edit forms that omit load-bearing fields or expose raw machine names, missing labels, or broken widgets;
+- stale review-packet files that still describe placeholders, old route checks, old screenshots, or earlier architecture decisions.
+
+These are work items, not blockers: large catalogs, many media files, CSS/theme bugs, cache issues, route alias bugs, field/display mistakes, failed imports that can be retried, and time spent reconciling counts.
+
+Valid blockers are external or environmental: source routes are unreachable, content is private or authenticated, provider credentials are missing, assets remain technically inaccessible after retries, DDEV/Drupal cannot run locally, or the human changes scope. Each blocker must name the affected item, attempted evidence, missing input, and next action.
+
+Before final handoff, answer this completion gate:
+
+- Public content inventory reconciled: every reachable source item is imported/recreated or item-blocked.
+- Public media inventory reconciled: every reachable asset is managed in Drupal Media or item-blocked.
+- Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
+- Source-like public behavior is implemented or blocked for search, filters, pagination, forms, embeds, provider links, redirects, and canonical routes.
+- Drupal editor experience is verified for every custom content type and load-bearing workflow.
+- Review packet evidence is current and matches the live Drupal site.
+
+If any answer is no, continue the review loop. Do not present the site as finished.
 
 ## Build Order
 

@@ -14,6 +14,7 @@ Use the Agent-Ready Drupal Build Kit to rebuild the source site as a local Drupa
 Source site: [SOURCE_URL]
 
 Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
+Do not hand back a partial or representative build as the result. A partial or incomplete site is a failed run unless a real blocker outside the local agent's control is recorded.
 
 Clone or update the kit, then enter it:
 
@@ -69,6 +70,8 @@ Need the full strict prompt? See [USAGE.md](USAGE.md). Want the guided version? 
 - Source-like public functionality: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where reachable.
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
 - A `review-packet/` explaining decisions, remaining gaps, and verification evidence.
+
+Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
 The precise file-by-file packet is listed in [docs/output-inventory.md](docs/output-inventory.md).
 

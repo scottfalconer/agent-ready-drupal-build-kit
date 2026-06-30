@@ -6,6 +6,8 @@ This page walks you through it step by step. You bring a site you want to rebuil
 
 By the end of a run you will have a working Drupal site on your machine that looks, functions, and edits like the source site's public experience, plus a written record of every decision the agent made, a short list of the calls that still need a human, and evidence a senior Drupal developer could put their name on. You do not even need to know the difference between "Drupal" and "Drupal CMS"; the kit handles that.
 
+A partial or representative site is not a successful run. If the site is missing reachable public content, media, source-like design, public behavior, or editor forms, the agent keeps working or records the real blocker.
+
 Want the fast path? The lightweight README prompt gets the agent started. Want the strict copy-paste run instructions? Use [USAGE.md](USAGE.md). Want to understand what the agent is actually doing? Read the four moves and the review bar further down. For the full case - who it is for, why Drupal CMS, and when not to use it - see [docs/positioning.md](docs/positioning.md).
 
 ## Prerequisites

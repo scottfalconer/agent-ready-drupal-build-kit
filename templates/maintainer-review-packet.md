@@ -69,6 +69,8 @@ Choose exactly one:
 - [ ] I would stake my name on this as a complete local Drupal CMS rebuild.
 - [ ] I would not stake my name on this as a complete local Drupal CMS rebuild.
 
+A partial or incomplete site is an automatic "would not stake my name" verdict. Missing reachable public content, media, source-like design, public behavior, editor forms, or current packet evidence cannot be treated as polish.
+
 ## Architecture Review Checklist
 
 Use this checklist to support the verdict. It is not a second rubric.
@@ -109,6 +111,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Durable intent is current or treated as absent.
 - [ ] Route, content, media, integration, accessibility, performance, security, and editorial risks are explicit.
 - [ ] Launch readiness is tied to accepted evidence.
+- [ ] The packet does not present a sample, representative, placeholder-heavy, stale, or partial build as complete.
 
 ## Required Rationale
 
