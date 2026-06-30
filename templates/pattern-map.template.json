@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "public-kit.1",
+  "sourceSite": "",
+  "target": "Drupal CMS",
+  "permissionStatus": "unknown",
+  "contentTypes": [],
+  "fields": [],
+  "vocabularies": [],
+  "media": [],
+  "menus": [],
+  "views": [],
+  "sourceIntentRoutes": [],
+  "seoMetadata": {
+    "strategy": "",
+    "metatagConfig": [],
+    "editorFields": [],
+    "canonicalDecisions": [],
+    "blockedEvidence": []
+  },
+  "regulatedContentGovernance": {
+    "applies": false,
+    "regulatedCategories": [],
+    "requiredDisclosureFields": [],
+    "approvalStatusFields": [],
+    "sourceStatusFields": [],
+    "blockedClaimTypes": []
+  },
+  "displayConfig": {
+    "formDisplays": [],
+    "viewDisplays": [],
+    "pathautoPatterns": [],
+    "imageStyles": []
+  },
+  "architectureGuards": {
+    "managedMediaRequiredForApprovedAssets": true,
+    "navigationOwnedByMenusOrDocumentedException": true,
+    "collectionRoutesDefaultToViews": true,
+    "detailRoutesRequireRenderedFieldEvidence": true,
+    "sourceIntentAliasesRequireDisposition": true,
+    "searchRouteRequiresPublicDecision": true,
+    "customControllersRequireJustification": true,
+    "noEmptyMarkerModules": true,
+    "noUnsafeRawSourceRendering": true
+  },
+  "forms": [],
+  "integrations": [],
+  "redirectsAndSeo": [],
+  "editorialWorkflow": [],
+  "durableIntentCandidates": [],
+  "approvalStatus": "draft | approved | rejected",
+  "claimBoundary": "This pattern map is a review contract. It must be approved before structured import."
+}

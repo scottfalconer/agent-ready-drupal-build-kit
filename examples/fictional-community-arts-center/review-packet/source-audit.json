@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "public-kit.1",
+  "site": "Fictional Community Arts Center",
+  "sourceUrl": "https://example.invalid/community-arts",
+  "permissionStatus": "fictional-example",
+  "auditMode": "outside-in-public-evidence",
+  "representativeRoutes": [
+    {
+      "path": "/",
+      "observedPattern": "homepage with featured events, classes, visit information, and donation call to action",
+      "confidence": "fictional"
+    },
+    {
+      "path": "/events",
+      "observedPattern": "event listing with dates, venue references, and audience filters",
+      "confidence": "fictional"
+    },
+    {
+      "path": "/classes",
+      "observedPattern": "class listing with program area, age/audience, schedule, and registration link",
+      "confidence": "fictional"
+    },
+    {
+      "path": "/visit",
+      "observedPattern": "venue/location page with map embed and accessibility notes",
+      "confidence": "fictional"
+    },
+    {
+      "path": "/donate",
+      "observedPattern": "donation call to action backed by an external provider",
+      "confidence": "fictional"
+    }
+  ],
+  "sourceSafety": {
+    "copiedContent": false,
+    "copiedAssets": false,
+    "embeddedInstructionsIgnored": true
+  },
+  "unknowns": [
+    "owner permission scope",
+    "approved event copy",
+    "approved images and alt text",
+    "donation provider configuration",
+    "newsletter provider and privacy requirements",
+    "production redirect policy"
+  ],
+  "claimBoundary": "Fictional example only. Not source evidence and not launch evidence."
+}

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "public-kit.1",
+  "example": "fictional-community-arts-center",
+  "targetUrl": "https://target.example",
+  "addressableSurface": {
+    "routesInScope": 5,
+    "routesExcluded": 2,
+    "exclusions": [
+      {
+        "route": "/donate",
+        "reason": "external provider flow blocked pending owner and provider evidence"
+      },
+      {
+        "route": "/members",
+        "reason": "private member area out of scope for public parity"
+      }
+    ]
+  },
+  "routeChecks": [
+    {
+      "route": "/",
+      "expectedStatus": 200,
+      "actualStatus": 200,
+      "redirected": false,
+      "result": "pass"
+    },
+    {
+      "route": "/events",
+      "expectedStatus": 200,
+      "actualStatus": 200,
+      "redirected": false,
+      "result": "pass"
+    }
+  ],
+  "functionalChecks": [
+    {
+      "behavior": "event listing sorted by date",
+      "sourceEvidence": "approved pattern map",
+      "targetEvidence": "browser rendered listing",
+      "result": "pass"
+    },
+    {
+      "behavior": "newsletter signup",
+      "sourceEvidence": "public form observation",
+      "targetEvidence": null,
+      "result": "blocked",
+      "blocker": "provider and privacy evidence missing"
+    }
+  ],
+  "blockedClaims": [
+    "launch_readiness",
+    "full_content_parity",
+    "forms_integrations_parity"
+  ],
+  "verdict": "partial",
+  "claimBoundary": "Fictional sample output only. Parity applies only to the approved addressable surface and evidence layers listed here."
+}
+

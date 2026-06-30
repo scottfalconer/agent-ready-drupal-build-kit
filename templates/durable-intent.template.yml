@@ -1,0 +1,15 @@
+schema_version: public-kit.1
+site: ""
+intent_records:
+  - id: ""
+    target_config: ""
+    purpose: ""
+    source_evidence: []
+    rationale: ""
+    asserted_by: ""
+    last_reviewed: ""
+    config_hash: ""
+    status: "draft"
+    stale_behavior: "treat_as_no_intent"
+claim_boundary: "Durable intent guides review only when current, hash-validated, and accepted."
+

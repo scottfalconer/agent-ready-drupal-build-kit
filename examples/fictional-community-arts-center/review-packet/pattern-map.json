@@ -1,0 +1,88 @@
+{
+  "schemaVersion": "public-kit.1",
+  "site": "Fictional Community Arts Center",
+  "target": "Drupal CMS",
+  "permissionStatus": "fictional-example",
+  "contentTypes": [
+    {
+      "id": "event",
+      "label": "Event",
+      "fields": [
+        "title",
+        "body",
+        "field_event_date",
+        "field_venue",
+        "field_audience",
+        "field_program_area",
+        "field_registration_link",
+        "field_featured_media"
+      ],
+      "editorialNeed": "Editors can create calendar entries with date, venue, audience, registration, image, and publication status."
+    },
+    {
+      "id": "class",
+      "label": "Class",
+      "fields": [
+        "title",
+        "body",
+        "field_schedule",
+        "field_age_range",
+        "field_program_area",
+        "field_registration_link",
+        "field_featured_media"
+      ],
+      "editorialNeed": "Editors can maintain class catalog entries and listing filters."
+    },
+    {
+      "id": "person",
+      "label": "Person",
+      "fields": [
+        "title",
+        "body",
+        "field_role",
+        "field_portrait",
+        "field_program_area"
+      ],
+      "editorialNeed": "Editors can maintain staff and teaching artist profiles."
+    },
+    {
+      "id": "landing_page",
+      "label": "Landing page",
+      "fields": [
+        "title",
+        "body",
+        "field_page_role",
+        "field_featured_media",
+        "field_related_links"
+      ],
+      "editorialNeed": "Editors can own homepage, visit, donate, and program landing content."
+    }
+  ],
+  "vocabularies": [
+    "audience",
+    "program_area",
+    "season"
+  ],
+  "views": [
+    {
+      "id": "events_listing",
+      "purpose": "Public event listing with date sort and audience/program filters."
+    },
+    {
+      "id": "classes_listing",
+      "purpose": "Public class listing with program and age/audience filters."
+    }
+  ],
+  "menus": [
+    "main",
+    "footer"
+  ],
+  "mediaStrategy": "Use Drupal Media Library for owner-approved images and documents. Use explicit placeholders until approval.",
+  "blockedIntegrations": [
+    "donation provider",
+    "newsletter signup",
+    "map embed"
+  ],
+  "approvalStatus": "draft",
+  "claimBoundary": "Fictional example only. Not launch evidence."
+}

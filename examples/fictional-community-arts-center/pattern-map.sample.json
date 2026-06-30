@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "public-kit.1",
+  "sourceSite": "Fictional Community Arts Center",
+  "target": "Drupal CMS",
+  "permissionStatus": "fictional-example",
+  "contentTypes": [
+    "event",
+    "class",
+    "person",
+    "venue_page",
+    "landing_page"
+  ],
+  "vocabularies": [
+    "audience",
+    "program_area",
+    "season"
+  ],
+  "views": [
+    "events_listing",
+    "classes_listing"
+  ],
+  "forms": [
+    {
+      "sourcePattern": "newsletter signup",
+      "targetDecision": "blocked until provider and privacy evidence are accepted"
+    }
+  ],
+  "integrations": [
+    {
+      "sourcePattern": "donation provider",
+      "targetDecision": "blocked until owner approval, provider credentials, privacy review, and target proof exist"
+    }
+  ],
+  "approvalStatus": "draft",
+  "claimBoundary": "Fictional example only. Not launch evidence."
+}
+

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "public-kit.1",
+  "site": "Fictional Community Arts Center",
+  "status": "blocked",
+  "routeParity": {
+    "status": "blocked",
+    "reason": "No production-equivalent Drupal target or browser QA evidence exists."
+  },
+  "contentParity": {
+    "status": "blocked",
+    "reason": "Owner-approved content bundle is missing."
+  },
+  "mediaParity": {
+    "status": "blocked",
+    "reason": "Owner-approved assets and alt text are missing."
+  },
+  "navigationParity": {
+    "status": "blocked",
+    "reason": "Menus and source-intent aliases are proposed but not verified on a target."
+  },
+  "viewsPageParity": {
+    "status": "blocked",
+    "reason": "Events/classes Views are modeled but not verified through rendered target pages."
+  },
+  "claimBoundary": "Fictional blocked parity stub only. Not launch evidence."
+}

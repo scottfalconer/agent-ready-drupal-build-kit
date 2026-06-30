@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "public-kit.1",
+  "site": "",
+  "verifiedAt": "",
+  "commands": [],
+  "passed": false,
+  "blockedGates": [],
+  "acceptedEvidence": [],
+  "claimBoundary": "Verification proves only the named checks that actually ran."
+}
+
