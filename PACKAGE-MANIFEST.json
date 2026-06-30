@@ -13,12 +13,16 @@
     "LICENSE.md",
     "CONTRIBUTING.md",
     "AGENTS.md.template",
+    "bootstrap.sh",
     "docs/",
+    "skill.md",
     "templates/",
     "examples/fictional-community-arts-center/"
   ],
   "keyAdditions": [
     "Product-style README front door with lightweight prompt and links to the strict USAGE.md run instructions",
+    "Bootstrap script that checks Docker, installs DDEV with the official installer when possible, clones or updates the kit, and prints the agent prompt",
+    "Moltbook-style skill.md handoff for sending an AI agent directly to the kit",
     "Newcomer-facing README and START.md that position the kit for Drupal-curious developers, designers, agencies, and site builders while preserving claim boundaries",
     "Positioning page reframed around trying Drupal CMS with an AI coding agent and keeping the result reviewable",
     "README quickstart with three required inputs, local-agent requirement, and copy-paste escape hatch",

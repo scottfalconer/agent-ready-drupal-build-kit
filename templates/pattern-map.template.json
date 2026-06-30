@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "sourceSite": "",
   "target": "Drupal CMS",
-  "permissionStatus": "unknown",
+  "sourceUseBoundary": "unknown",
   "contentTypes": [],
   "fields": [],
   "vocabularies": [],

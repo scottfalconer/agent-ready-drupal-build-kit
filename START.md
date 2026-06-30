@@ -16,7 +16,7 @@ You will need a few things on your machine first:
 - DDEV installed;
 - a local coding agent with filesystem and shell access, such as Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
 - a public source URL;
-- owner permission status, even if the status is `UNKNOWN`.
+- a target site name.
 
 A normal web chat alone is not enough, because the agent must create files and run local commands.
 
@@ -59,7 +59,7 @@ The kit folder is not the Drupal site. The sibling `site-slug-drupal/` folder is
 
 Under the hood, the agent works in four moves. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
-1. **Introspect:** read the source site: representative routes, the patterns it is made of, owner permission status, and anything it cannot be sure about (`UNKNOWN`).
+1. **Introspect:** read the source site: representative routes, the patterns it is made of, source-use boundaries, and anything it cannot be sure about (`UNKNOWN`).
 2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, and theme/config work.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps:** list what still needs a human: owner approval, content, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
@@ -94,3 +94,5 @@ Do not claim:
 - that the rebuild is better than the original.
 
 The kit produces a governed head start, not a launch decision.
+
+Use this kit only with sites you are allowed to inspect and rebuild. Do not copy source content or assets unless you have the right to use them.

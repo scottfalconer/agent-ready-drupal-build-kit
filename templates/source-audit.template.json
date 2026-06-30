@@ -4,7 +4,7 @@
     "name": "",
     "baseUrl": ""
   },
-  "permissionStatus": "unknown | external-observation-only | owner-approved",
+  "sourceUseBoundary": "unknown | external-observation-only | owner-approved",
   "method": "public evidence only",
   "trustProperty": {
     "neverGuess": true,

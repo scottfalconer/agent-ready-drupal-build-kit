@@ -9,7 +9,7 @@ The kit is strongest when it is used as a governed head start. The value is not 
 ## Workflow
 
 1. Select representative public URLs.
-2. Record permission status.
+2. Record source-use boundaries and unknowns.
 3. Audit the source site from public evidence only.
 4. Copy `AGENTS.md.template` into the target workspace as `AGENTS.md` and use its encoded Drupal CMS baseline for install, setup, and site-building mechanics.
 5. Build a pattern map that separates source observations from target Drupal decisions.
@@ -18,7 +18,7 @@ The kit is strongest when it is used as a governed head start. The value is not 
 8. For local build work, start from DDEV unless the owner explicitly requires another approved Drupal runtime.
 9. Prefer Drupal-native content, taxonomy, media, menus, aliases, Views, blocks, and form displays before custom route controllers.
 10. Keep structured imports behind the approved target schema.
-11. Generate owner permission, operator run, production target, parity, and maintainer review packets.
+11. Generate source-use/owner-permission, operator run, production target, parity, and maintainer review packets.
 12. Apply recipes only in a clearly labeled disposable lab or production-equivalent target.
 13. Collect target config, rendered page, browser QA, accessibility, performance, security, and editorial evidence.
 14. Promote to launch-candidate only when every hard gate is clearable from accepted evidence.

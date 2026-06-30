@@ -4,14 +4,13 @@ Use one prompt. Let the agent do the setup work.
 
 ## Canonical Prompt
 
-Replace the bracketed values and give this to your coding agent from the kit folder:
+Give your agent a source URL and a target site name. Replace the bracketed values and give this to your coding agent from the kit folder:
 
 ```text
 Use this Agent-Ready Build Kit for a Drupal CMS rebuild.
 
 Source site: [SOURCE_URL]
 Target site name: [TARGET_SITE_NAME]
-Owner permission status: [APPROVED | PENDING | DENIED | UNKNOWN]
 
 Run these preflight checks first:
 
@@ -31,9 +30,9 @@ Follow the copied AGENTS.md as the operating guide. Start with public source aud
 
 Create the review packet inside the target workspace at review-packet/.
 
-Do not copy source content or assets without owner approval.
 Write UNKNOWN instead of guessing.
 Do not claim launch readiness, target parity, owner approval, or maintainer signoff unless the required evidence exists.
+Only use source sites you are allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless you have the right to use them.
 ```
 
 ## Expected Workspace

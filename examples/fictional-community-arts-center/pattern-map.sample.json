@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "sourceSite": "Fictional Community Arts Center",
   "target": "Drupal CMS",
-  "permissionStatus": "fictional-example",
+  "sourceUseBoundary": "fictional-example",
   "contentTypes": [
     "event",
     "class",
@@ -34,4 +34,3 @@
   "approvalStatus": "draft",
   "claimBoundary": "Fictional example only. Not launch evidence."
 }
-

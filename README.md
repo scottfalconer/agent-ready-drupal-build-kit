@@ -6,6 +6,16 @@ Give your agent a source URL and a target site name. This kit gives the agent th
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, with evidence another developer can inspect.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/scottfalconer/agent-ready-drupal-build-kit/main/bootstrap.sh | bash
+```
+
+Or send your AI agent straight to the skill:
+
+```text
+Read https://raw.githubusercontent.com/scottfalconer/agent-ready-drupal-build-kit/main/skill.md and follow the instructions to build a real local Drupal CMS site.
+```
+
 ## Who This Is For
 
 This kit is for developers, designers, agencies, and site builders who want to try Drupal CMS without becoming Drupal-fluent first.
@@ -14,8 +24,7 @@ You bring:
 
 - a site to study;
 - a local AI coding agent;
-- Docker and DDEV;
-- a permission status for the source site.
+- Docker and DDEV, or the bootstrap script above to check them.
 
 The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to avoid unsafe claims, and how to leave behind a reviewable handoff packet.
 
@@ -29,7 +38,7 @@ You need:
 - DDEV installed;
 - a local coding agent with filesystem and shell access;
 - a public source URL;
-- owner permission status: `APPROVED`, `PENDING`, `DENIED`, or `UNKNOWN`.
+- a target site name.
 
 A normal web chat is not enough, because the agent needs to create files and run local commands.
 
@@ -40,13 +49,11 @@ Use this Agent-Ready Build Kit to rebuild the source site as a local Drupal CMS 
 
 Source site: [SOURCE_URL]
 Target site name: [TARGET_SITE_NAME]
-Owner permission status: [APPROVED | PENDING | DENIED | UNKNOWN]
 
 Read USAGE.md for the canonical run instructions.
 Use AGENTS.md.template as the operating guide for the target workspace.
 Create the Drupal CMS project as a sibling folder.
 Create the review packet at review-packet/.
-Do not copy source content or assets unless owner permission is APPROVED.
 Write UNKNOWN instead of guessing.
 ```
 
@@ -91,6 +98,10 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 ## Requirements
 
 Local builds run on DDEV and `drupal/cms` by default. Static HTML, screenshots, local file previews, and non-Drupal frontends do not count as Drupal CMS builds.
+
+## Source Use
+
+Use this kit only with sites you are allowed to inspect and rebuild. Do not copy source content, images, files, videos, private data, credentials, tracking IDs, or third-party integrations unless you have the right to use them.
 
 ## License
 

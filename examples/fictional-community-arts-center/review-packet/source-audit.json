@@ -2,7 +2,7 @@
   "schemaVersion": "public-kit.1",
   "site": "Fictional Community Arts Center",
   "sourceUrl": "https://example.invalid/community-arts",
-  "permissionStatus": "fictional-example",
+  "sourceUseBoundary": "fictional-example",
   "auditMode": "outside-in-public-evidence",
   "representativeRoutes": [
     {

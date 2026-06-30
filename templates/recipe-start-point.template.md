@@ -5,7 +5,7 @@
 - Source URL:
 - Target site name:
 - Target workspace:
-- Owner permission status:
+- Source-use boundary:
 - Decision date:
 - Decision owner:
 

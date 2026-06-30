@@ -3,7 +3,7 @@
 ## Phase 1: Observe
 
 - Start from public URLs supplied by the owner or reviewer.
-- Record permission status.
+- Record source-use boundaries and unknowns.
 - Capture source facts: titles, routes, content patterns, navigation, media signals, forms, integrations, redirects, and visible technology signals.
 - Record limitations and unfetched candidate routes.
 
@@ -18,7 +18,7 @@
 
 - Use DDEV as the default local Drupal CMS runtime when building a reviewable target.
 - Create durable intent sidecar records for load-bearing decisions.
-- Create owner permission and operator-run packets.
+- Create source-use/owner-permission and operator-run packets.
 - Create production target and maintainer review packets.
 - Create parity, accessibility, performance, security, privacy, and final QA plans.
 

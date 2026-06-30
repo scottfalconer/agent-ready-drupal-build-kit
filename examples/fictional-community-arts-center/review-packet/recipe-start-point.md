@@ -5,7 +5,7 @@
 - Source URL: `https://example.invalid/community-arts`
 - Target site name: Fictional Community Arts Center
 - Target workspace: `fictional-community-arts-drupal`
-- Owner permission status: `fictional-example`
+- Source-use boundary: `fictional-example`
 - Decision date: 2026-06-30
 
 ## Recommended Start Point
