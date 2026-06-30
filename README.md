@@ -6,14 +6,11 @@ Give your agent a source URL and a target site name. This kit gives the agent th
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, with evidence another developer can inspect.
 
+Start by pulling the kit onto your machine:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scottfalconer/agent-ready-drupal-build-kit/main/bootstrap.sh | bash
-```
-
-Or send your AI agent straight to the skill:
-
-```text
-Read https://raw.githubusercontent.com/scottfalconer/agent-ready-drupal-build-kit/main/skill.md and follow the instructions to build a real local Drupal CMS site.
+git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
+cd agent-ready-drupal-build-kit
 ```
 
 ## Who This Is For
@@ -24,7 +21,7 @@ You bring:
 
 - a site to study;
 - a local AI coding agent;
-- Docker and DDEV, or the bootstrap script above to check them.
+- Docker and DDEV.
 
 The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to avoid unsafe claims, and how to leave behind a reviewable handoff packet.
 
@@ -50,6 +47,7 @@ Use this Agent-Ready Build Kit to rebuild the source site as a local Drupal CMS 
 Source site: [SOURCE_URL]
 Target site name: [TARGET_SITE_NAME]
 
+Run the preflight checks in USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
 Read USAGE.md for the canonical run instructions.
 Use AGENTS.md.template as the operating guide for the target workspace.
 Create the Drupal CMS project as a sibling folder.
