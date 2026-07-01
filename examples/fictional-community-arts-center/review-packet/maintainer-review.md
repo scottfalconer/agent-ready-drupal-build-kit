@@ -11,6 +11,7 @@ Fictional Community Arts Center example packet.
 - Recipe start-point decision: `recipe-start-point.md`
 - Durable intent: `durable-intent.yml`
 - Scoped gap list: `scoped-gap-list.md`
+- Independent verification: `independent-verification.json` blocked stub; no live Drupal target exists for this fictional packet.
 
 ## Stake-My-Name Verdict
 
@@ -38,6 +39,7 @@ Fictional Community Arts Center example packet.
 - [ ] A real maintainer has reviewed a real local build.
 - [ ] A production-equivalent target exists.
 - [ ] Content, media, visual, and functional parity are verified in a real local build.
+- [ ] Independent verification has tried to falsify completion claims against a live Drupal target.
 
 ## Verdict
 

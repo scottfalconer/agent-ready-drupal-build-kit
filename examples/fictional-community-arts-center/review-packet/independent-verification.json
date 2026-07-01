@@ -1,0 +1,119 @@
+{
+  "schemaVersion": "public-kit.independent-verification.1",
+  "site": "Fictional Community Arts Center",
+  "checkedAt": "2026-06-29T00:00:00Z",
+  "verifier": {
+    "nameOrRole": "example blocked stub",
+    "runtimeOrTool": "not run",
+    "freshContextUsed": false,
+    "builderSummaryExcluded": false,
+    "liveSiteInspected": false,
+    "packetInspected": true,
+    "notes": "This fictional packet has no live Drupal target. A real run must use a fresh verifier context against the live site."
+  },
+  "target": {
+    "baseUrl": "",
+    "ddevProject": "",
+    "adminUrl": "",
+    "editorUser": "",
+    "editorRole": ""
+  },
+  "artifactsReviewed": [
+    "review-packet/source-audit.json",
+    "review-packet/pattern-map.json",
+    "review-packet/maintainer-review.md"
+  ],
+  "completionClaims": [
+    {
+      "claimId": "example-live-target-verification",
+      "claim": "A live Drupal target exists and can be independently verified.",
+      "gate": "packet",
+      "builderEvidence": [],
+      "falsificationChecks": [
+        "Open target homepage in browser",
+        "Check route and content counts",
+        "Run non-admin editor task"
+      ],
+      "status": "blocked",
+      "failureEvidence": [
+        "No live Drupal target exists for this fictional example packet."
+      ],
+      "nextFix": "Run the kit against a real local Drupal CMS target and complete independent verification."
+    }
+  ],
+  "perRouteItemCounts": [],
+  "collectionOwnershipChecks": [],
+  "renderedEmbedChecks": [],
+  "rawEmbedAndMarkupScan": {
+    "fieldsScanned": [],
+    "patternsChecked": [
+      "<iframe",
+      "<script",
+      "onload=",
+      "onclick=",
+      "javascript:",
+      "style=",
+      "raw source HTML"
+    ],
+    "findings": [],
+    "offRoadInventoryUpdated": false,
+    "status": "blocked"
+  },
+  "footerAndMenuLinkChecks": [],
+  "targetRequiredRouteChecks": [],
+  "routeDriftDispositionChecks": [],
+  "placeholderTextScan": {
+    "scannedRoutes": [],
+    "scannedAdminSurfaces": [],
+    "termsChecked": [
+      "lorem ipsum",
+      "placeholder",
+      "sample",
+      "starter",
+      "TODO",
+      "test page"
+    ],
+    "findings": [],
+    "status": "blocked"
+  },
+  "starterRouteAndLeakChecks": {
+    "pathsChecked": [],
+    "rawNodeRoutesChecked": [],
+    "unexpectedPublic200s": [],
+    "duplicateAliases": [],
+    "disconnectedCanvasStarterPages": [],
+    "status": "blocked"
+  },
+  "canvasPlaceholderChecks": {
+    "canvasEnabled": false,
+    "starterCanvasPagesChecked": [],
+    "publicCanvasPlaceholderFindings": [],
+    "disconnectedCanvasEditorRoutes": [],
+    "canvasIntentionallyUnusedAndDocumented": false,
+    "status": "blocked"
+  },
+  "firstFoldBrandAssetChecks": [],
+  "editorAddRowChecks": [],
+  "fieldOutputFalsification": [],
+  "coldReaderLabelChecks": [],
+  "directDatabaseCleanupChecks": [],
+  "packetFreshnessChecks": [
+    {
+      "artifact": "review-packet/maintainer-review.md",
+      "claim": "This packet is an example shape, not a verified live rebuild.",
+      "liveSiteEvidence": "No live site exists.",
+      "staleOrMissingEvidence": false,
+      "status": "blocked"
+    }
+  ],
+  "summary": {
+    "failedClaimCount": 0,
+    "blockedClaimCount": 1,
+    "highestRiskFailures": [
+      "No live Drupal target exists for independent verification."
+    ],
+    "verdict": "blocked",
+    "completeLocalRebuildClaimAllowed": false,
+    "notes": "Blocked stubs are preferable to missing gate records because they keep the evidence gap visible."
+  }
+}

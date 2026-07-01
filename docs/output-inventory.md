@@ -23,6 +23,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `parity-report.json`
 - `route-matrix.json`
 - `browser-evidence.json`
+- `independent-verification.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
 - `launch-checklist.md`
@@ -36,6 +37,14 @@ Launch readiness requires accepted evidence for every hard gate:
 - Full route inventory or accepted route boundary.
 - Browser-first source route expansion.
 - Public browser-rendered evidence.
+- Independent verifier pass that tries to falsify completion claims against the live site.
+- Per-route item reconciliation for repeated source items.
+- Collection ownership ledger and editor add-a-row evidence.
+- Target-required route checks for privacy/legal/footer, sitemap/robots when enabled, login/admin expectations, front page behavior, and locally introduced menu/footer links.
+- Source route drift classification and disposition.
+- Raw embed and source-markup scan with off-road inventory entries.
+- Canvas placeholder detection and build type declaration.
+- First-fold and brand-asset parity for primary routes.
 - Source/target visual comparison evidence.
 - Canvas authoring ownership evidence for composed pages.
 - Authenticated non-admin editor browser task evidence.
@@ -61,6 +70,7 @@ Launch readiness requires accepted evidence for every hard gate:
 - Utility Page exception evidence.
 - Config sync directory evidence.
 - Off-road inventory evidence.
+- Direct database cleanup recorded as local-only off-road evidence with a production-safe alternative.
 - Durable intent validation.
 - Maintainer signoff.
 - Final QA.

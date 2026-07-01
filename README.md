@@ -26,6 +26,7 @@ Create a clean Drupal CMS project workspace alongside agent-ready-drupal-build-k
 Copy agent-ready-drupal-build-kit/AGENTS.md.template into that target workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+Before final handoff, run a fresh independent verification pass whose job is to falsify completion claims against the live Drupal site. Produce review-packet/independent-verification.json, fix failed claims, and rerun it before calling the site complete.
 Create the review packet at review-packet/.
 Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 ```
@@ -68,6 +69,7 @@ If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
 - Browser-first route discovery, Starter route cleanup, front-page/alias decisions, and Drupal readback that another developer can inspect.
 - Version-controlled config as the source of truth, rendered SEO/social evidence, non-admin editor-role verification, and an off-road inventory for any custom code or hardcoded behavior.
+- Independent verification from a fresh verifier context that tries to break completion claims against the live site before handoff: route item counts, collection ownership, embeds, target-owned links, route drift, Canvas placeholders, brand assets, editor add-a-row tasks, labels, field output, and off-road cleanup.
 - A `review-packet/` explaining decisions, remaining gaps, and verification evidence.
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
@@ -99,7 +101,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `START.md`: expanded quickstart and operator flow for humans who want more detail.
 - `USAGE.md`: the full canonical agent prompt.
 - `AGENTS.md.template`: the self-contained file an agent copies into the target Drupal CMS workspace as `AGENTS.md`. This is what carries Drupal's best practices into the build.
-- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, Drupal readback, field-output matrix, scoped gaps, launch gates, and maintainer review.
+- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, independent verification, Drupal readback, field-output matrix, scoped gaps, launch gates, and maintainer review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.
 - `docs/output-inventory.md`: the canonical packet and gate vocabulary.

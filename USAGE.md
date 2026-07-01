@@ -31,6 +31,8 @@ Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitu
 
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 
+Before final handoff, run a fresh independent verification pass. Use a separate subagent, new context, review-only task, or clearly separated skeptic checklist. Its job is to falsify the completion claims against the live Drupal site, not to summarize the builder's work. It must produce review-packet/independent-verification.json and check per-route item counts, collection ownership, rendered embeds/media, raw embed/markup scans, footer/menu/legal/target-required routes, source route drift dispositions, placeholder or starter content, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness. Fix or item-block every failed claim before calling the site complete.
+
 Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-first source route expansion, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, export structure to the tracked config sync directory, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, browser-evidence.json, Canvas authoring ownership for composed pages, Drupal readback, field-to-output behavior, starter route cleanup, rendered SEO output, visual/function parity, non-admin editor forms, off-road-inventory.md, and produce every file named in docs/output-inventory.md.
 
 Create the review packet inside the target workspace at review-packet/.
@@ -67,6 +69,7 @@ parent-folder/
       parity-report.json
       route-matrix.json
       browser-evidence.json
+      independent-verification.json
       drupal-readback.json
       field-output-matrix.json
       launch-checklist.md
@@ -90,6 +93,7 @@ Before calling the local build successful, the agent must record:
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
 - route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
 - browser-evidence.json with source/target browser-rendered screenshots or equivalent evidence for visitor-facing routes, visual/functional comparison, Canvas authoring ownership for composed pages, and authenticated non-admin editor tasks;
+- independent-verification.json from a fresh verifier context that tries to falsify completion claims against the live site, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness;
 - unfiltered Drupal readback for front page, config sync directory, all nodes including unpublished/default content, all aliases including duplicates, menus/menu links, Canvas pages when available, media counts, themes, and config status;
 - field-to-output matrix showing which editor fields affect anonymous public output and which are editor-only metadata;
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;

@@ -45,6 +45,43 @@
     "accepted": false,
     "rationale": ""
   },
+  "sourceRouteDriftClassification": [
+    {
+      "sourcePath": "",
+      "sourceStatus": null,
+      "classification": "canonical | duplicate_alias | legacy | test_staging | private_boundary | unknown",
+      "targetDisposition": "keep | redirect | unpublished_import | intentionally_drop | owner_decision_required | blocked",
+      "targetPath": "",
+      "ownerDecisionEvidence": "",
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "targetRequiredRoutes": [
+    {
+      "targetPath": "",
+      "reasonRequired": "privacy_legal_footer | sitemap | robots | login_admin | front_page | locally_introduced_menu_link | locally_introduced_footer_link | other",
+      "targetStatus": null,
+      "targetFinalPath": "",
+      "drupalOwner": "menu | route | node | canvas_page | view | block | config | file | documented_exception",
+      "shouldBePublic": false,
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "perRouteItemReconciliation": [
+    {
+      "sourcePath": "",
+      "targetPath": "",
+      "itemType": "video | card | event | gallery_image | sponsor | post | article | download | document | form_field | product | person | location | other",
+      "sourceCount": null,
+      "targetRenderedCount": null,
+      "targetDrupalEntityCount": null,
+      "mismatchDisposition": "none | item_blocked | owner_approved_exclusion | private_unreachable | implementation_gap | unknown",
+      "accepted": false,
+      "notes": ""
+    }
+  ],
   "canvasRouteOwnership": {
     "canvasOrExperienceBuilderAvailable": false,
     "publicRoutesExpectedToUseCanvas": [],
@@ -54,6 +91,22 @@
     "accepted": false,
     "notes": ""
   },
+  "firstFoldBrandAssetParity": [
+    {
+      "sourcePath": "",
+      "targetPath": "",
+      "viewport": "desktop | mobile | tablet | custom",
+      "heroArtworkMatchesOrDispositioned": false,
+      "logoOrLockupMatchesOrDispositioned": false,
+      "signatureGraphicsMatchOrDispositioned": false,
+      "primaryCtaTreatmentMatchesOrDispositioned": false,
+      "sourceAssetsReachable": [],
+      "targetAssetsUsed": [],
+      "exceptions": [],
+      "accepted": false,
+      "notes": ""
+    }
+  ],
   "primaryRoutes": [
     {
       "sourcePath": "/",
@@ -97,6 +150,17 @@
     "staleMenuOrFooterLinks": [],
     "duplicateAliases": [],
     "unexpectedStarterPublic200s": [],
+    "accepted": false,
+    "notes": ""
+  },
+  "canvasPlaceholderDetection": {
+    "canvasEnabled": false,
+    "starterCanvasRoutesChecked": [],
+    "placeholderTextFindings": [],
+    "disconnectedCanvasEditorRoutes": [],
+    "canvasIntentionallyUnused": false,
+    "documentedReasonIfUnused": "",
+    "hardFailIfPublicPlaceholderExists": true,
     "accepted": false,
     "notes": ""
   },

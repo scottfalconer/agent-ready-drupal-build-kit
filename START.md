@@ -41,7 +41,8 @@ You will not hand-edit anything yourself. The agent does the setup and review lo
 3. it fills in the placeholders from your prompt;
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
 5. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
-6. it creates `review-packet/` with the evidence.
+6. it runs an independent verifier pass that tries to falsify the completion claims against the live site;
+7. it creates `review-packet/` with the evidence.
 
 ## Workspace Topology
 
@@ -66,6 +67,8 @@ Under the hood, the agent works in four moves and repeats them as a review loop.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps:** list what still needs a human: private access, provider credentials, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
 
+Before handoff, the agent also needs a fresh verifier pass. The verifier acts as a skeptic: it checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, editor add-a-row failures, and stale evidence.
+
 ## The Review Bar
 
 This is what separates a complete Drupal rebuild from a foundation or lookalike. The build is measured against the questions a senior Drupal developer would ask before signing off:
@@ -77,6 +80,7 @@ This is what separates a complete Drupal rebuild from a foundation or lookalike.
 - Can editors maintain the site through Drupal forms, menus, media, Views, and workflow?
 - Are the load-bearing decisions captured and usable by later agents?
 - Are the remaining business, legal, integration, production, and launch gaps named?
+- Did an independent verifier try to falsify the completion claims against the live site?
 - Would a Drupal maintainer put their name on this as a complete local starting point?
 
 If any answer is "no," the result can still be useful. It just is not yet something to stand behind.

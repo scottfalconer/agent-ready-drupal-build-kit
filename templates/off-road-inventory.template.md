@@ -23,6 +23,8 @@ Use this packet to list every place the build leaves Drupal's normal paved path.
 | OR-008 | Aliases | Pathauto pattern that does not cover custom bundles | Bundle-specific Pathauto pattern or explicit alias rule | UNKNOWN | UNKNOWN | blocked |
 | OR-009 | Config portability | Hardcoded entity ID in config | UUID/config dependency/content reference/default content strategy | UNKNOWN | UNKNOWN | blocked |
 | OR-010 | Editorial access | Custom content type with no non-admin editor role access | Role/permission/workflow configuration | UNKNOWN | UNKNOWN | blocked |
+| OR-011 | Embeds/markup | Raw iframe, script, inline event handler, style attribute, or source HTML in editorial fields | Media/oEmbed, typed provider field, configured block, Webform/integration plugin, filtered text format | UNKNOWN | UNKNOWN | blocked |
+| OR-012 | Local rebuild cleanup | Direct SQL, table purge, alias reset, or destructive import cleanup | Drupal APIs, entity deletes, migrations rollback, config import, clean rebuild scripts | UNKNOWN | UNKNOWN | blocked |
 
 ## Required Notes
 
@@ -32,4 +34,6 @@ Use this packet to list every place the build leaves Drupal's normal paved path.
 - Editor/permission risks:
 - SEO/token/default risks:
 - Accessibility/cache/access risks:
+- Raw embed or source-markup findings and safer Drupal-native owner:
+- Direct database cleanup performed, local-only safety boundary, and production-safe alternative:
 - Maintainer decision needed:

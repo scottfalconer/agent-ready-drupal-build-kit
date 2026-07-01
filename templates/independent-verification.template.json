@@ -1,0 +1,238 @@
+{
+  "schemaVersion": "public-kit.independent-verification.1",
+  "site": "",
+  "checkedAt": "",
+  "verifier": {
+    "nameOrRole": "independent verifier | skeptic subagent | fresh context | manual reviewer",
+    "runtimeOrTool": "",
+    "freshContextUsed": false,
+    "builderSummaryExcluded": false,
+    "liveSiteInspected": false,
+    "packetInspected": false,
+    "notes": ""
+  },
+  "target": {
+    "baseUrl": "",
+    "ddevProject": "",
+    "adminUrl": "",
+    "editorUser": "",
+    "editorRole": ""
+  },
+  "artifactsReviewed": [
+    "AGENTS.md",
+    "review-packet/source-audit.json",
+    "review-packet/pattern-map.json",
+    "review-packet/route-matrix.json",
+    "review-packet/browser-evidence.json",
+    "review-packet/drupal-readback.json",
+    "review-packet/field-output-matrix.json",
+    "review-packet/off-road-inventory.md",
+    "review-packet/maintainer-review.md"
+  ],
+  "completionClaims": [
+    {
+      "claimId": "",
+      "claim": "",
+      "gate": "content | media | visual | behavior | editor | route | seo | accessibility | security_privacy | architecture | packet",
+      "builderEvidence": [],
+      "falsificationChecks": [],
+      "status": "pass | fail | blocked",
+      "failureEvidence": [],
+      "nextFix": ""
+    }
+  ],
+  "perRouteItemCounts": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "routeRole": "homepage | listing | detail | taxonomy | search | legal | media | form | other",
+      "expectedSourceItemCount": null,
+      "targetRenderedItemCount": null,
+      "targetDrupalEntityCount": null,
+      "missingItems": [],
+      "extraItems": [],
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "collectionOwnershipChecks": [
+    {
+      "sourceRoute": "",
+      "collectionPattern": "list | grid | schedule | directory | archive | catalog | feed | search | gallery | other",
+      "drupalOwner": "content_type_plus_view | media_plus_view | taxonomy_view | search_api_view | canvas_bound_to_view | documented_exception | body_markup_or_blob",
+      "viewOrCollectionConfig": "",
+      "editorAddRowEvidence": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "renderedEmbedChecks": [
+    {
+      "route": "",
+      "embedType": "iframe | video | audio | map | social | document | image | other",
+      "expectedSourceSignal": "",
+      "targetRenderedSignal": "",
+      "providerLinkOrFallbackPresent": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "rawEmbedAndMarkupScan": {
+    "fieldsScanned": [],
+    "patternsChecked": [
+      "<iframe",
+      "<script",
+      "onload=",
+      "onclick=",
+      "javascript:",
+      "style=",
+      "raw source HTML"
+    ],
+    "findings": [],
+    "offRoadInventoryUpdated": false,
+    "status": "pass | fail | blocked"
+  },
+  "footerAndMenuLinkChecks": [
+    {
+      "sourceLabel": "",
+      "sourceHref": "",
+      "targetHref": "",
+      "targetStatus": null,
+      "targetFinalUrl": "",
+      "ownedByDrupalMenuOrBlock": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "targetRequiredRouteChecks": [
+    {
+      "targetPath": "",
+      "reasonRequired": "privacy_legal_footer | sitemap | robots | login_admin | front_page | locally_introduced_menu_link | locally_introduced_footer_link | other",
+      "targetStatus": null,
+      "targetFinalUrl": "",
+      "expectedPublicBehavior": "public_200 | redirect | private_403 | noindex | blocked",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "routeDriftDispositionChecks": [
+    {
+      "sourcePath": "",
+      "classification": "canonical | duplicate_alias | legacy | test_staging | private_boundary | unknown",
+      "targetDisposition": "keep | redirect | unpublished_import | intentionally_drop | owner_decision_required | blocked",
+      "dispositionEvidence": "",
+      "status": "pass | fail | blocked"
+    }
+  ],
+  "placeholderTextScan": {
+    "scannedRoutes": [],
+    "scannedAdminSurfaces": [],
+    "termsChecked": [
+      "lorem ipsum",
+      "placeholder",
+      "sample",
+      "starter",
+      "TODO",
+      "test page"
+    ],
+    "findings": [],
+    "status": "pass | fail | blocked"
+  },
+  "starterRouteAndLeakChecks": {
+    "pathsChecked": [
+      "/",
+      "/home",
+      "/page/1",
+      "/privacy-policy"
+    ],
+    "rawNodeRoutesChecked": [],
+    "unexpectedPublic200s": [],
+    "duplicateAliases": [],
+    "disconnectedCanvasStarterPages": [],
+    "status": "pass | fail | blocked"
+  },
+  "canvasPlaceholderChecks": {
+    "canvasEnabled": false,
+    "starterCanvasPagesChecked": [],
+    "publicCanvasPlaceholderFindings": [],
+    "disconnectedCanvasEditorRoutes": [],
+    "canvasIntentionallyUnusedAndDocumented": false,
+    "status": "pass | fail | blocked"
+  },
+  "firstFoldBrandAssetChecks": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "viewport": "desktop | mobile | tablet | custom",
+      "heroArtworkStatus": "pass | fail | blocked | not_applicable",
+      "logoOrLockupStatus": "pass | fail | blocked | not_applicable",
+      "signatureGraphicStatus": "pass | fail | blocked | not_applicable",
+      "primaryCtaTreatmentStatus": "pass | fail | blocked | not_applicable",
+      "reachableSourceAssetsMissingOrApproximated": [],
+      "evidence": ""
+    }
+  ],
+  "editorAddRowChecks": [
+    {
+      "objectType": "",
+      "drupalOwner": "node | taxonomy | media | menu | view | canvas_page | block | other",
+      "editorUser": "",
+      "addOrEditRoute": "",
+      "task": "create representative item | edit representative item | add menu link | add media | update Canvas section | other",
+      "publicRouteExpectedToChange": "",
+      "publicOutputChanged": false,
+      "listingOrDetailUpdatedWithoutCode": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "fieldOutputFalsification": [
+    {
+      "entityType": "",
+      "bundle": "",
+      "field": "",
+      "claim": "",
+      "actualEditorSurface": "",
+      "actualPublicOutput": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "coldReaderLabelChecks": [
+    {
+      "bundle": "",
+      "editorFacingLabel": "",
+      "wouldMakeSenseIfBrandChanged": false,
+      "siteBrandingExposedToEditor": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "directDatabaseCleanupChecks": [
+    {
+      "operation": "direct_sql | table_purge | alias_reset | destructive_import_cleanup | other",
+      "localCleanRebuildOnly": false,
+      "recordedInOffRoadInventory": false,
+      "productionSafeAlternative": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "packetFreshnessChecks": [
+    {
+      "artifact": "",
+      "claim": "",
+      "liveSiteEvidence": "",
+      "staleOrMissingEvidence": false,
+      "status": "pass | fail | blocked"
+    }
+  ],
+  "summary": {
+    "failedClaimCount": 0,
+    "blockedClaimCount": 0,
+    "highestRiskFailures": [],
+    "verdict": "pass | fail | blocked",
+    "completeLocalRebuildClaimAllowed": false,
+    "notes": ""
+  }
+}

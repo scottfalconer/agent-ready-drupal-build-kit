@@ -58,6 +58,7 @@
 - Production target:
 - Browser QA:
 - Browser evidence (`browser-evidence.json`):
+- Independent verification (`independent-verification.json`):
 - Route matrix:
 - Drupal readback:
 - Field-output matrix:
@@ -95,6 +96,8 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Structured content first: recurring source objects are identified before import, theming, or Canvas composition.
 - [ ] Generic Page or Utility Page bundles are not used for recurring content objects such as articles, releases, tracks, artists, sessions, events, venues, speakers, products, services, locations, episodes, FAQs, resources, legal notices, retailers, sponsors, taxonomy terms, or media assets.
 - [ ] Lists, grids, schedules, directories, archives, catalogs, feeds, and search results are backed by structured content plus Views or another documented Drupal-native collection owner.
+- [ ] Every collection route has a collection ownership ledger entry with source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence.
+- [ ] Per-route item reconciliation compares source and target counts for repeated items such as videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, and locations.
 - [ ] The target model fits the load-bearing source patterns.
 - [ ] Filterable, sortable, relational, governed, and reusable values are typed fields, taxonomy terms, or entity references rather than hidden in body text.
 - [ ] Dates, venues, categories, people, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationships are modeled as Drupal fields/references where those values affect visitors, editors, filters, search, SEO, integrations, or future agents.
@@ -108,8 +111,11 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Views own collection/listing/search routes and entity displays own repeatable detail pages; Canvas composition does not replace those Drupal primitives.
 - [ ] Canvas authoring ownership: The public homepage or landing-page composition is editable in Canvas when Canvas is the selected owner.
 - [ ] No starter Canvas placeholder is counted as evidence for the rebuilt public route; starter Canvas pages are replaced, routed correctly, unpublished, or explicitly excluded.
+- [ ] The run declares its build type: structured Drupal-native with Canvas intentionally unused, hybrid structured content plus Canvas composition, Canvas-heavy with structured data embedded, or constrained fallback because Canvas was unavailable or blocked.
+- [ ] Major composed routes have section ownership records for hero copy, hero image, gallery, sponsor strip, CTA, media embeds, related items, footer CTA, and layout/order.
 - [ ] Utility Page exception records exist for every public source route owned by Utility Page, including why Canvas/Experience Builder and structured content were not better owners.
 - [ ] Editor-facing bundle labels are generic, portable nouns; source-site, client, brand, event, or campaign names are not exposed in content type labels unless they are part of the real content noun.
+- [ ] Editor-facing bundle labels pass the cold-reader label test: they still make sense if the brand/site name changes but the content pattern stays the same.
 - [ ] Automation, derived values, rollups, and light workflow use ECA or another maintained Drupal automation path before custom hook code.
 - [ ] Data relationships use the Entity and Field APIs, entity references, taxonomy, computed fields, and access-checked queries instead of custom tables or raw SQL for normal content modeling.
 - [ ] Views were planned from the content model, including teaser fields, exposed/contextual filters, sorting, related-content blocks, and directory/search-like behavior where needed.
@@ -126,6 +132,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] hardcoded public strings in Twig, templates, preprocess code, Views text areas, and import scripts are inventoried; source-owned public copy has a Drupal owner or a documented exception.
 - [ ] Public navigation, footer links, CTA labels, and legal/privacy links are owned by Drupal menus, blocks, Canvas components, fields, or config unless the packet documents why template ownership is acceptable.
 - [ ] Raw field-value rendering that bypasses Drupal text formatters, rendered labels inside HTML attributes, invalid alt text, and visible links hidden from assistive technology are absent or explicitly blocked.
+- [ ] Raw iframe/script/widget markup, inline event handlers, style attributes, `javascript:` URLs, and raw source HTML in editorial fields were mechanically scanned and every remaining finding appears in `off-road-inventory.md`.
 - [ ] Regulated or claim-sensitive content has source/review status, required disclosure/label text, warning/restriction fields, audience/suitability fields, and blocked-evidence notes where relevant.
 - [ ] FAQ, advice/article, retailer/location, legal/footer, professional/audience-specific, and contact workflows are modeled explicitly where the source requires them.
 - [ ] Media strategy is explicit: Drupal media references, source assets, unavailable assets, placeholders, or external references are not conflated.
@@ -143,6 +150,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Empty marker modules are not used to imply architecture.
 - [ ] Custom controllers, if present, are thin, access-controlled, cacheable, and driven by editable Drupal content/config.
 - [ ] Off-road moves are inventoried and justified in `off-road-inventory.md`: custom modules/controllers/endpoints, preprocess/entity-query rendering, hardcoded copy or computed values, raw CSS/presentation fields, unfiltered formats, `accessCheck(FALSE)`, `_access: TRUE`, forced `max-age=0`, raw markup, raw SQL, one-shot derived fields, stale contrib defaults, missing Pathauto patterns, hardcoded entity IDs in config, or config that is not import-reproducible.
+- [ ] Direct SQL cleanup, table purges, alias resets, or destructive import cleanup are recorded as local-only off-road moves with what changed, why Drupal APIs/config were insufficient, why it is safe in the clean workspace, and the production-safe alternative.
 - [ ] Public rendering avoids unsafe raw body/source output and undocumented forced `max-age=0`.
 - [ ] Moderation states, role permissions, draft/review/published/unpublished behavior, and claim-sensitive review flows are documented where relevant.
 - [ ] Accessibility tooling, content accessibility report status, alt text, heading structure, contrast, embed descriptions, and manual accessibility gaps are documented.
@@ -150,15 +158,21 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Representative top-level, listing, detail, search, where-to-buy/contact/legal routes have anonymous route evidence and alias/canonicalization notes.
 - [ ] Browser-first source route expansion checked likely public slugs from rendered links, source bundle route data, metadata, click targets, asset names, sitemap/robots hints, and naming patterns; curl-only evidence did not close route inventory.
 - [ ] Source and target screenshots exist for the homepage, primary routes, and representative page patterns at desktop and mobile widths, with accepted exceptions or blockers named.
+- [ ] Primary routes include first-fold and brand-asset parity evidence for reachable hero artwork, logo/lockup, campaign graphics, signature imagery, and primary CTA treatment.
 - [ ] Visitor-facing visual parity, functional parity, homepage parity, and source-like behavior are supported by browser-rendered source/target evidence, not inferred from curl, route status, Drush, config export, Drupal readback, target-only screenshots, or prose review.
 - [ ] Authenticated non-admin editor browser task evidence exists for every custom content type and load-bearing workflow, including create/edit task, fields/widgets verified, screenshots or captured evidence, result, and public output affected.
+- [ ] Independent verification was performed by a fresh verifier context, subagent, review-only task, or clearly separated skeptic checklist; the same builder self-review is not counted as independent evidence.
+- [ ] The independent verifier tried to falsify completion claims against the live site for per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder or starter content, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
+- [ ] Every failed independent-verification claim is fixed, item-blocked with external evidence, or explicitly listed as a reason to reject the handoff.
 - [ ] The homepage/front page matches the browser-rendered source intent, or any redirect/canonical difference is explicitly accepted with source evidence.
 - [ ] Target `/` itself was checked against browser-rendered source `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership; a correct page at another alias does not satisfy this check by itself.
 - [ ] The front-page alias decision is explicit: canonical redirect, distinct Drupal display route, View/route composition, or duplication with synchronization warning.
 - [ ] Every browser-rendered source route is preserved, redirected, or explicitly item-blocked; missing source routes are not hidden by a passing smoke check.
+- [ ] Every browser-rendered source 200 route is classified as canonical, duplicate/alias, legacy, test/staging, private boundary, or unknown and has a target disposition.
 - [ ] Starter route cleanup is complete for `/home`, `/page/1`, `/privacy-policy`, raw `/node/*`, starter Canvas pages, stale menu/footer links, duplicate aliases, and unexpected public 200 routes.
 - [ ] Unexpected public 200 routes from duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts are removed or explicitly accepted.
 - [ ] Legal, privacy, footer, and menu links resolve anonymously or are explicitly blocked with next actions.
+- [ ] Target-required routes introduced by the Drupal build, including privacy/legal/footer links, sitemap/robots behavior when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links, resolve as intended or are blocked.
 - [ ] Product, article, and legal detail routes render the expected H1/title and load-bearing fields, not only HTTP 200.
 - [ ] Important source-intent routes are preserved, redirected, or explicitly retired.
 - [ ] Drupal readback is unfiltered and includes front-page setting, all nodes including unpublished/default content, aliases including duplicates, menus and menu links, Canvas pages when available, media counts, themes, config sync directory, config status, and unexpected public routes.

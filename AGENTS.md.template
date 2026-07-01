@@ -107,8 +107,10 @@ Run the build as a state machine. Do not skip phases.
 - Build a content inventory for public pages, listings, details, media, taxonomies/categories, forms, embeds, and navigation.
 - Build a browser-rendered route manifest for the source. Include the homepage, rendered links, menu/footer/legal links, canonical aliases, redirects, status codes, titles/H1s, and key body evidence. JavaScript bundle data is useful evidence, but browser-rendered source truth wins when bundle data and rendered output disagree.
 - Browser-first route expansion is mandatory for JavaScript, static-bundle, smart-link, SPA, or app-like sources. Probe likely public slugs found in rendered links, source bundle route data, metadata, sitemap/robots hints, click targets, asset names, canonical tags, social metadata, and observed naming patterns. A curl response alone cannot close the route inventory when browser evidence, bundles, or assets imply more public routes.
+- Classify every browser-rendered source 200 route before import as canonical, duplicate/alias, legacy, test/staging, private boundary, or unknown. Give each route a target disposition: keep, redirect, unpublished import, intentionally drop, owner decision required, or blocked. Test/staging routes must not silently ship as normal published content or silently disappear.
 - Mark primary routes separately from representative routes. The source homepage `/` is always a primary route unless the browser-rendered source immediately redirects elsewhere. Capture it after JavaScript/rendering, not only from a curl HTML shell or app bundle.
 - Capture the source design system: palette, typography, spacing, layout, components, responsive behavior, and high-value interaction patterns.
+- Capture first-fold and brand-defining assets for primary routes: hero artwork, logo/lockup, campaign graphics, venue/map imagery, primary CTA treatment, sponsor/video imagery, and other signature graphics. Reachable brand-defining assets must be used, replaced with an explicit rationale, or item-blocked.
 - Capture source functionality: search, listings, filters, pagination, forms, video/media behavior, account/private boundaries, redirects, canonical URLs, and provider integrations.
 - Separate observed facts from target Drupal decisions.
 - Mark missing or uncertain facts as unresolved; use `UNKNOWN` only where a structured field needs a placeholder value.
@@ -121,21 +123,26 @@ Complete this gate before theme polish, Canvas composition, or bulk import. A Dr
 - Identify recurring source objects before building pages: articles, releases, tracks, artists, sessions, events, venues, speakers, products, services, locations, episodes, FAQs, resources, legal notices, retailers, sponsors, taxonomy terms, and media assets.
 - Do not model repeatable source objects as generic Page or Utility Page nodes, body markup, JSON blobs, Canvas-only copies, Twig arrays, or import-script data. Generic pages are acceptable only for genuinely simple standalone informational pages, and the packet must name that exception.
 - A list, grid, schedule, directory, archive, catalog, feed, or search result implies a structured content type plus a View unless the packet records a stronger Drupal-native owner such as an existing entity display or Search API-backed view.
+- For every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, produce a collection ownership ledger entry: source route, collection pattern, source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and non-admin editor add-a-row evidence. Body markup, a one-off blob field, or static cards are failed collection owners unless the packet records a genuine one-off exception.
+- For every route with repeated load-bearing items, reconcile source versus target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar items. A matching route status and H1 do not prove route completeness.
 - For each recurring object, define typed fields, taxonomy vocabularies, entity references, media references, dates, links, booleans, numeric values, text fields, view modes, form displays, and editor workflow before importing content.
 - Store facts as fields. Dates, venues, categories, speakers, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationship data do not belong only in the body field.
 - Canvas composes experiences; it does not replace the canonical data model for repeatable content. Use Canvas for the homepage, campaign, about, splash, or marketing composition, and bind or place Drupal-owned structured content inside it where the page needs reusable data.
 - Views own public collections and editor-maintained listings. A hand-coded card grid, controller array, or Canvas page that must be manually updated for each new item is a modeling failure unless the source pattern is truly one-off.
 - Source audit fields belong in the review packet, import manifest, migration map, or admin-only audit surface. Do not add `Source URL`, `Source route status`, crawl notes, source HTML, source CSS, or route evidence to normal editorial content types by default.
 - The content model is not done until a non-admin editor can add a new representative item and it appears in the relevant public listing or detail route without code changes.
+- The editor add/edit gate is per collection, not only per bundle. A non-admin editor must create or update a representative row/item and prove it appears in the expected public View, listing, detail route, menu, or Canvas composition without code changes.
 - Record this gate in `review-packet/pattern-map.json`, `review-packet/field-output-matrix.json`, Drupal readback, and maintainer review. If this gate fails, return to the review loop before declaring visual or editor parity.
 
 ### Canvas Authoring Ownership Gate
 
 Complete this gate for homepage, landing, campaign, splash, marketing, presentation-heavy about, and other composed pages before final theme polish. Canvas/Experience Builder is an authoring owner, not a decorative checkbox.
 
+- Declare the build type in the pattern map: structured Drupal-native rebuild with Canvas intentionally unused; hybrid structured content plus Canvas composition; Canvas-heavy rebuild with Drupal-owned structured data embedded; or constrained fallback because Canvas was unavailable or blocked. The build type must match the source shape and the editor ownership evidence.
 - If Canvas/Experience Builder is available and a homepage, landing page, campaign page, splash page, or presentation-heavy about page is source-like composition, the rebuilt public route must be owned by Canvas/Experience Builder or the packet must record why another Drupal-native owner is better.
 - A Canvas-ready page is not proven by the existence of a Canvas page. The public route, menu link, route matrix, and editor task must point to the same rebuilt composition.
-- Do not leave a starter Canvas page disconnected from the rebuilt public route. Replace it, route it correctly, unpublish it, or record why it is intentionally kept out of the public experience.
+- Do not leave a starter Canvas page disconnected from the rebuilt public route. Replace it, route it correctly, unpublish it, or record why it is intentionally kept out of the public experience. Starter Canvas content or placeholder copy such as "Your hero content goes here" on a public route is a hard failure unless Canvas is intentionally unused and documented.
+- For each major composed route, record section-level ownership: hero copy, hero image, gallery, sponsor strip, CTA, media embed, related items, footer CTA, and layout/order. Each section must be owned by a field, media field, View, Canvas component, block, menu/config, or a documented theme exception.
 - Utility Page is a fallback for simple low-design informational pages. Do not use it for the homepage, rich marketing pages, campaign pages, or composed source experiences unless the packet records why Canvas/Experience Builder is unavailable or a worse fit.
 - Each Utility Page exception record must name the source route, why the page is not reusable structured content, why Canvas/Experience Builder was not used, which Drupal primitive owns the route, how a non-admin editor edits it, and what browser evidence proves the public output changes.
 - Theme templates may provide chrome, regions, component styling, and entity display presentation; they must not become the hidden owner of source-specific page composition. Route-specific Twig/preprocess arrays that carry page sections, galleries, CTA copy, or body composition are a failed authoring boundary unless recorded as a temporary blocker.
@@ -178,6 +185,30 @@ Complete this gate for homepage, landing, campaign, splash, marketing, presentat
 - Answer the canonical signoff verdict.
 - If any answer is no, say the result is useful but not something to stand behind yet.
 
+### Phase 6: Independent Verification
+
+Before final handoff, run a fresh independent verification pass whose job is to falsify the completion claims against the live Drupal site.
+
+Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence.
+
+The verifier must try to break each claimed gate, not confirm it politely. It should inspect the live Drupal site and packet for:
+
+- per-route item counts and collection completeness, especially listings, grids, search/discovery pages, detail pages, media pages, and legal/footer pages;
+- collection ownership ledger entries, View/collection ownership, and editor add-a-row evidence;
+- rendered media and embed presence, including iframes, videos, posters, thumbnails, documents, alt text, fallback states, and provider links;
+- raw embed/source-markup findings in editorial fields and whether `off-road-inventory.md` records them;
+- footer, menu, legal, privacy, search, contact, target-required route, and source-intent link resolution;
+- placeholder, lorem ipsum, starter content, default Drupal CMS content, disconnected Canvas starter pages, Canvas placeholder copy, stale route evidence, and live test pages;
+- wrong front page, wrong route owner, route drift disposition gaps, duplicate aliases, raw `/node/*` leaks, unexpected public 200 routes, and missing redirects;
+- first-fold and brand-defining asset parity for primary routes;
+- non-admin editor add-a-row/add-a-node tasks that prove new content can enter the expected View, listing, detail route, menu, or Canvas composition without code changes;
+- cold-reader label checks for editor-facing content type labels;
+- source-owned public strings, content, or navigation that exist only in Twig, import scripts, or static markup;
+- field-output gaps where required or load-bearing fields do not affect anonymous output or exist only as implementation metadata.
+- direct database cleanup, table purges, alias resets, or destructive import cleanup recorded as local-only off-road work.
+
+Produce `review-packet/independent-verification.json`. Every failure or blocked check must name the completion claim it falsifies, the live evidence, the expected evidence, and the next fix. The builder must fix failing claims and rerun verification before calling the site complete.
+
 ## Required Review Loop
 
 Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
@@ -191,6 +222,7 @@ Each loop must:
 3. Self-review against the review bar: Drupal CMS primitives, content/media completeness, visual design, public behavior, editor experience, durable intent, and scoped gaps.
 4. Fix the highest-impact gaps before moving to lower-value polish.
 5. Update `review-packet/` with new evidence, decisions, and blockers.
+6. Before final handoff, run the independent verification pass and treat its failures as work items unless they are real external blockers.
 
 Stop only when the local Drupal CMS site has reviewable content, media, visual design, public functionality, editor forms, and packet evidence, or when a blocker outside the local agent's control is recorded with the missing input and next action.
 
@@ -235,7 +267,10 @@ The following are not acceptable final states:
 - a stock theme, generic theme, or base-theme look that does not match the source's public visual language;
 - a front page that renders the wrong source pattern, wrong canonical content, or an unrelated default page;
 - a browser-rendered source route, likely public slug, or source-bundle route hint that is not preserved, redirected, or item-blocked;
+- per-route item-count mismatches that are not item-blocked or owner-dispositioned;
+- collection routes without a Drupal owner plus View/collection config and editor add-a-row evidence;
 - homepage-only visual parity with weak listing, detail, taxonomy/category, search, form, legal/footer, or navigation routes;
+- first-fold homepage or primary-route output missing reachable brand-defining hero artwork, logo/lockup, campaign graphics, signature imagery, or primary CTA treatment without an explicit exception;
 - public pages that render but do not expose Drupal-owned content, fields, Media, Views, menus, aliases, and blocks behind them;
 - editor add/edit forms that omit load-bearing fields or expose raw machine names, missing labels, or broken widgets;
 - stale review-packet files that still describe placeholders, old route checks, old screenshots, or earlier architecture decisions.
@@ -247,11 +282,17 @@ Valid blockers are external or environmental: source routes are unreachable, con
 Before final handoff, answer this completion gate:
 
 - Public content inventory reconciled: every reachable source item is imported/recreated or item-blocked.
+- Per-route item reconciliation complete: repeated items on each load-bearing route match source counts or have item-level dispositions.
+- Collection ownership ledger complete: each collection route maps to a Drupal content/entity owner plus View/collection owner or an accepted exception.
 - Public media inventory reconciled: every reachable asset is managed in Drupal Media or item-blocked.
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
+- First-fold and brand-defining assets are present or explicitly dispositioned for primary routes.
 - Source-like public behavior is implemented or blocked for search, filters, pagination, forms, embeds, provider links, redirects, and canonical routes.
 - Drupal editor experience is verified for every custom content type and load-bearing workflow.
+- Non-admin editor add-a-row tasks prove new representative collection items appear publicly without code changes.
+- Target-required routes such as privacy/legal/footer links, sitemap/robots when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links resolve as intended.
 - Review packet evidence is current and matches the live Drupal site.
+- Independent verification has tried to falsify the completion claims and every failure is fixed or item-blocked.
 
 If any answer is no, continue the review loop. Do not present the site as finished.
 
@@ -271,7 +312,8 @@ If any answer is no, continue the review loop. Do not present the site as finish
 12. Verify visual, content, and functional parity in a browser.
 13. Verify editor add/edit forms while logged in.
 14. Produce the scoped gap list.
-15. Package maintainer review evidence.
+15. Run independent verification against the live site and packet; fix or block every falsified claim.
+16. Package maintainer review evidence.
 
 ## Drupal CMS Baseline To Encode In The Build
 
@@ -314,11 +356,13 @@ Use custom code only when none of these tools can reasonably express the need. I
 
 - Model recurring source patterns as content types with human-readable field labels and useful editorial form displays.
 - Editor-facing content type labels are portable nouns: `Sponsor`, `Speaker`, `Product`, `Article`, `Episode`, not `Example Sponsor` or `Brand Product`. Do not label bundles with the source site, client, brand, event, or campaign name unless the name is part of the real content type. Machine names may use a project prefix when needed to avoid collisions or follow an existing convention.
+- Apply the cold-reader label test: if the brand/site name changed but the content pattern stayed the same, the editor-facing bundle label should still make sense. If not, rename the label or record why the brand is part of the actual domain concept.
 - Use site-specific machine-name prefixes for custom bundles, fields, views, and vocabularies when the project does not already provide a naming convention, but keep those prefixes out of editor-facing labels.
 - Use taxonomy for controlled category, topic, audience, condition, product, or location lists.
 - Use managed Media entities and image styles for public source assets; use explicit placeholders or external-reference fields only when assets are private, unavailable, technically blocked, or intentionally excluded. Do not silently rely on raw URI fields, CDN hotlinks, or root-relative source image paths.
 - Use Drupal menus, menu blocks, path aliases, redirects, and Pathauto patterns for navigation and route preservation.
 - Keep presentation implementation out of content fields. Do not create editor fields for raw CSS declarations, gradients, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. If per-content visual variation is real editor-owned data, model it as a constrained semantic choice such as a theme variant, palette term, boolean, enum, or validated color token, and let the theme/config translate that token into CSS.
+- Scan editorial fields and rendered field output for raw `<iframe>`, `<script>`, inline event handlers, `javascript:` URLs, style attributes, and raw source HTML. YouTube/Vimeo-style video should usually be Media/oEmbed. Maps, widgets, or provider-specific embeds may use typed provider fields, configured blocks, Webform/integration plugins, or documented integration stubs. Any raw embed or source markup that remains must appear in `off-road-inventory.md` with rationale, text-format/sanitization details, editor implications, and the preferred Drupal-native replacement.
 - Keep source-audit and crawl-provenance data out of normal editorial forms unless the project deliberately needs an admin-only governance surface. Evidence fields that editors cannot meaningfully maintain make the content model worse.
 - Export `entity_form_display` and `entity_view_display` config for every custom content type.
 - Keep custom modules purposeful, reusable, bounded, and idempotent. Do not create empty marker modules or miscellaneous source-site buckets.
@@ -459,6 +503,8 @@ Before calling the local build successful, record:
 - content type label evidence showing editor-facing bundle labels are generic, portable nouns and site-specific names are limited to machine names where needed;
 - field-to-output evidence: every load-bearing or required editorial field must identify its editor label, widget, formatter/public rendering location, and whether changing it affects anonymous output. If a field is editor-only metadata, record the rationale.
 - presentation-boundary evidence: no editor field stores raw CSS, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. Any editor-owned visual variation is constrained to semantic tokens or validated color/palette choices. Also record hardcoded public strings in Twig/templates, raw field-value rendering that bypasses Drupal formatters, invalid alt/ARIA attributes, and any public navigation, footer links, CTA labels, or source-owned public copy that only exists in theme code.
+- raw embed and source-markup scan evidence: editorial field scans for raw iframe/script/inline-handler/style/source HTML findings, with every remaining raw embed listed in `off-road-inventory.md`.
+- independent verification evidence: a fresh verifier context attempted to falsify completion claims against the live site, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - rendered SEO evidence for public content types, including non-empty meta description and image/social metadata where applicable;
@@ -518,9 +564,13 @@ The homepage is a primary route, not a representative sample. Target `/` must ma
 
 If the source or target has both `/` and another route for the same public concept, record the front-page alias decision: canonical redirect, distinct Drupal display route, View/route composition, or duplication with synchronization warning. Check no-follow redirects so route-normalizer behavior is visible instead of hidden by `curl -L` or browser navigation.
 
+Also check target-required routes introduced by the rebuild even when they were not explicit source routes: privacy/legal/footer links, sitemap and robots behavior when enabled, login/admin expectations, canonical front page behavior, and any locally introduced menu or footer links. A broken target-owned footer link fails the route gate.
+
 Starter and route drift cleanup is part of route parity. Check `/home`, `/page/1`, `/privacy-policy`, raw `/node/*`, starter Canvas pages, stale menu/footer links, duplicate aliases, and unexpected public 200 routes before handoff.
 
 The route matrix must reconcile source-rendered routes against target routes. It must fail the review loop when a source route is missing, a target route renders the wrong H1/body pattern, homepage/front-page behavior is wrong, a legal/footer route is broken, or an unexpected public 200 exists because of duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts. Expected redirects are acceptable only when recorded with source evidence and rationale.
+
+Direct SQL cleanup, table purges, alias resets, and destructive import cleanup are off-road operations. They may be acceptable only in a clean local rebuild when recorded as local-only in `off-road-inventory.md` with what changed, why Drupal APIs/config were insufficient, why the operation is safe in this workspace, and what a production-safe alternative would be.
 
 ## Stop Conditions
 
@@ -556,6 +606,7 @@ Gate records, either accepted evidence or blocked stubs:
 - parity report;
 - route matrix;
 - browser evidence;
+- independent verification;
 - Drupal readback;
 - field-output matrix;
 - launch checklist.

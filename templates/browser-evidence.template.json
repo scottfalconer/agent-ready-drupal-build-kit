@@ -38,6 +38,25 @@
         "mediaPlacementMatches": false,
         "sourceLikeBehaviorMatches": false
       },
+      "firstFoldBrandAssetSignals": {
+        "sourceHeroArtwork": "",
+        "targetHeroArtwork": "",
+        "sourceLogoOrLockup": "",
+        "targetLogoOrLockup": "",
+        "sourceSignatureGraphics": [],
+        "targetSignatureGraphics": [],
+        "primaryCtaTreatmentMatches": false,
+        "brandDefiningAssetsMissingOrApproximated": []
+      },
+      "renderedItemCounts": [
+        {
+          "itemType": "video | card | event | gallery_image | sponsor | post | article | download | document | form_field | product | person | location | other",
+          "sourceCount": null,
+          "targetCount": null,
+          "accepted": false,
+          "notes": ""
+        }
+      ],
       "notes": "",
       "accepted": false,
       "blockers": []
