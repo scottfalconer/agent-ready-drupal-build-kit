@@ -31,7 +31,7 @@ Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitu
 
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 
-Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, Drupal readback, field-to-output behavior, visual/function parity, and editor forms, and produce every file named in docs/output-inventory.md.
+Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-first source route expansion, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, export structure to the tracked config sync directory, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, Drupal readback, field-to-output behavior, starter route cleanup, rendered SEO output, visual/function parity, non-admin editor forms, off-road-inventory.md, and produce every file named in docs/output-inventory.md.
 
 Create the review packet inside the target workspace at review-packet/.
 
@@ -61,6 +61,7 @@ parent-folder/
       recipe-start-point.md
       durable-intent.yml
       scoped-gap-list.md
+      off-road-inventory.md
       operator-run.md
       production-target.md
       parity-report.json
@@ -80,19 +81,21 @@ Before calling the local build successful, the agent must record:
 - DDEV project URL;
 - `ddev drush status`;
 - enabled modules/profile;
-- exported config;
+- exported config, active config sync directory, tracked config directory, and clean config-import reproduction evidence;
 - recipe start-point decision and any applied recipes;
 - optional Agent Skills used, including repo, selected skill, version or commit SHA, and any conflict with `AGENTS.md`;
 - content inventory and import evidence;
 - design-system capture and target theme evidence;
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
 - route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
-- unfiltered Drupal readback for front page, all nodes including unpublished/default content, all aliases including duplicates, menus, media counts, themes, and config status;
+- unfiltered Drupal readback for front page, config sync directory, all nodes including unpublished/default content, all aliases including duplicates, menus/menu links, Canvas pages when available, media counts, themes, and config status;
 - field-to-output matrix showing which editor fields affect anonymous public output and which are editor-only metadata;
+- off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
+- rendered SEO evidence for public content types, including non-empty meta description and image/social metadata where applicable;
 - anonymous public route checks;
 - functional checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
-- authenticated editor add/edit form checks with clean labels and visible load-bearing fields;
+- authenticated non-admin editor add/edit form checks with clean labels, visible load-bearing fields, and create/edit permission proof;
 - a scoped gap list for operator, maintainer, content/business review, legal/privacy, integration, accessibility, performance, security, SEO, and launch evidence.
 
 ## Fallback

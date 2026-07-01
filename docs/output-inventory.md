@@ -11,6 +11,7 @@ These files must exist for every run:
 - `recipe-start-point.md`
 - `durable-intent.yml`
 - `scoped-gap-list.md`
+- `off-road-inventory.md`
 - `maintainer-review.md`
 
 ## Gate Records
@@ -32,8 +33,12 @@ Launch readiness requires accepted evidence for every hard gate:
 - Independent operator run.
 - Production-equivalent Drupal target.
 - Full route inventory or accepted route boundary.
+- Browser-first source route expansion.
 - Homepage/front-page and canonical route parity.
+- Front-page alias decision.
 - Unexpected public-route cleanup.
+- Starter route cleanup.
+- Structured content ownership evidence.
 - Content parity.
 - Media parity.
 - Visual/design parity.
@@ -47,6 +52,9 @@ Launch readiness requires accepted evidence for every hard gate:
 - Security and privacy.
 - Editorial handoff.
 - Field-to-public-output evidence.
+- Presentation ownership evidence.
+- Config sync directory evidence.
+- Off-road inventory evidence.
 - Durable intent validation.
 - Maintainer signoff.
 - Final QA.

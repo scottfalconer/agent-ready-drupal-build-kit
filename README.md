@@ -66,6 +66,8 @@ If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs
 - Source-like visual design: palette, typography, spacing, layout, components, and responsive behavior.
 - Source-like public functionality: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where reachable.
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
+- Browser-first route discovery, Starter route cleanup, front-page/alias decisions, and Drupal readback that another developer can inspect.
+- Version-controlled config as the source of truth, rendered SEO/social evidence, non-admin editor-role verification, and an off-road inventory for any custom code or hardcoded behavior.
 - A `review-packet/` explaining decisions, remaining gaps, and verification evidence.
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.

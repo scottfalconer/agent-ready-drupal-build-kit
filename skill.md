@@ -26,8 +26,9 @@ If the source URL is missing, ask for it before continuing.
 7. Create the review packet at `review-packet/`.
 8. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
 9. Use nodes/content types for reusable information and Canvas pages / Experience Builder for one-off composed experiences; record the reason for each major ownership decision.
-10. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
-11. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
+10. Run browser-first route expansion, Starter route cleanup, front-page/alias decision checks, tracked config export/import checks, rendered SEO checks, Drupal readback, field-output checks, off-road inventory, and non-admin editor-form checks before handoff.
+11. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+12. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
 
 Partial or incomplete sites are failed runs, not deliverables. Keep working unless a blocker is outside the local agent's control and is recorded with the missing input and next action.
 

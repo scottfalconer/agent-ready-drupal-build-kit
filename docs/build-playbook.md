@@ -41,6 +41,79 @@ Treat the homepage as a primary route, not just one route in a smoke list. Captu
 
 A target fails the local rebuild bar when `/` renders a different source pattern, wrong canonical content, unrelated default node, or duplicate content shortcut, even if the correct page exists at another alias such as `/artist` or `/home`. Only accept a redirect when the source homepage also redirects or the route matrix records an explicit, reviewed canonicalization decision.
 
+## Browser-First Route Discovery
+
+Route discovery starts in the browser, not in curl. Curl is useful for headers and status codes, but a curl response alone cannot close the route inventory for JavaScript, static-bundle, smart-link, SPA, or app-like sources.
+
+Use browser-rendered pages as the source truth, then expand with evidence from:
+
+- rendered navigation, footer, legal links, canonical links, Open Graph/social metadata, and click targets;
+- source bundle route data, client-side router manifests, sitemap/robots hints, and embedded JSON;
+- asset names, artwork filenames, media manifests, API payloads, and source naming patterns that imply likely public slugs;
+- no-follow redirect checks, not only final pages after `curl -L`.
+
+Every likely public slug gets one disposition in the route matrix: preserved, redirected, intentionally retired, private/unreachable, or item-blocked with the evidence and next action. A seed prompt that names three pages does not excuse missing other browser-discovered public routes.
+
+## Starter Content And Route Drift Cleanup
+
+Drupal CMS Starter content is useful scaffolding, not acceptable leftover public content. Before handoff, run anonymous checks for `/home`, `/page/1`, `/privacy-policy`, raw `/node/*` routes, starter Canvas pages, default menu/footer links, duplicate aliases, and unexpected public 200 routes.
+
+For each leftover route, either:
+
+- remove or unpublish it;
+- convert it into source-owned Drupal content;
+- redirect it deliberately;
+- record it as a blocked legal/privacy/footer decision.
+
+The packet should prove cleanup, because stale starter routes can make a Drupal build look more complete than it is.
+
+## Front Page And Alias Ownership
+
+Drupal's route-normalizer can redirect aliases for the configured front page. That is normal Drupal behavior, but it must be a decision, not a surprise.
+
+When `/` and another source route represent the same or related public concept, choose and record one approach:
+
+- canonical redirect;
+- distinct Drupal display route;
+- View/route composition;
+- duplication with synchronization warning.
+
+The cleaner Drupal answer is usually one content owner plus a deliberate display/canonicalization decision. Duplicating content to satisfy two URLs is allowed only when the packet names the synchronization risk.
+
+## Standard Drupal Readback
+
+Every run should emit comparable Drupal readback. At minimum include:
+
+- `ddev drush status`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
+- the active config sync directory and whether it is the tracked/reviewed directory;
+- content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
+- nodes including unpublished/default/demo content, aliases including duplicates, redirects, menus/menu links, blocks, Views, Canvas pages when available, and unexpected public routes;
+- media counts/items, source asset locations, alt text, responsive image styles, and whether imports rely on cached local evidence or live remote downloads.
+
+If root `config/sync` is empty but Drupal's active sync directory is `web/sites/default/files/sync` or another path, say that plainly. A reviewer should not have to guess where the real config export lives.
+
+## Reproducible Config As Source Of Truth
+
+Drupal configuration is the reviewable source of truth for site structure. Content types, fields, form displays, view displays, Views, menus, roles, workflows, image styles, Pathauto patterns, and theme settings should live in exported config or a recipe, not only in a build script.
+
+For DDEV Drupal CMS projects with a `web` docroot, set the active config sync directory to a version-controlled project path such as `../config/sync` and export there. Do not leave `web/sites/default/files/sync` as the only source of config evidence; it is normally runtime file storage and easy to miss or ignore.
+
+The clean-import proof is the real test. A clean install plus `drush config:import` should reproduce the custom structure. At minimum, assert that `system.theme:default` is the intended public theme, custom content types and fields exist, Views and menus import, and Starter defaults do not come back as the only public site.
+
+Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
+
+## SEO Is Rendered Output, Not Enabled Modules
+
+For public-facing rebuilds, SEO and social metadata are part of public behavior. Prefer the maintained Drupal CMS SEO recipe or configured contrib path when available, then map tokens and defaults to fields the target model actually has.
+
+Do not treat "Metatag is enabled" or "SEO recipe applied" as evidence. Fetch anonymous published pages and verify rendered output: a non-empty meta description per public content type, canonical URL behavior, and `og:image` where the source or content model has meaningful imagery. Empty tags caused by tokens pointing at missing fields are failed evidence, not harmless defaults.
+
+## Non-Admin Editor Verification
+
+Drupal access and workflow are part of the build, not admin polish. A content type is not editorially complete until a non-admin editor role can create and edit it when that workflow is required.
+
+Seed at least one editor user for local verification. Run add/edit form checks as that user, not uid=1. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
+
 ## Drupal Build Primitives
 
 Name the expected primitives in the build brief and align them to the encoded Drupal CMS baseline. A Drupal CMS rebuild should use Drupal to hold the site architecture:
@@ -56,6 +129,28 @@ Name the expected primitives in the build brief and align them to the encoded Dr
 - Drush and config export for repeatable verification.
 
 If the output does not contain Drupal entities/config/code that a maintainer can inspect, it is not a Drupal-side build. A visually close static site is a design artifact, not successful execution of this kit.
+
+## Structured Content First
+
+A Drupal content model starts with the source site's nouns, not its screenshots or page count. Before import or theming, identify the repeatable objects visitors and editors actually work with: articles, releases, tracks, artists, sessions, events, venues, speakers, products, services, locations, episodes, FAQs, resources, legal notices, retailers, sponsors, taxonomy terms, and media assets.
+
+Generic Page or Utility Page bundles are not acceptable owners for recurring source objects. A generic page can own a simple one-off informational page; it should not own every speaker profile, schedule item, catalog entry, release, product, or article because that hides the schema in body fields and makes future listings, filters, search, APIs, permissions, workflow, and editor training brittle.
+
+Use this decision test:
+
+- repeatable thing with stable attributes -> content type with typed fields;
+- controlled category or classification -> taxonomy vocabulary;
+- reusable file/image/video/document -> Media entity;
+- collection, grid, directory, schedule, archive, catalog, feed, or search result -> View over structured content;
+- one-off composed marketing or storytelling page -> Canvas page / Experience Builder, usually placing structured content rather than replacing it.
+
+Store facts as Drupal facts. Dates, venues, categories, people, prices, statuses, audiences, CTAs, external IDs, provider URLs, descriptions, images, alt text, legal labels, and relationships should be fields, taxonomy terms, entity references, media references, links, dates, booleans, or numbers where those values matter to visitors, editors, filters, search, SEO, integrations, or future agents. Do not bury them only in formatted body text, raw HTML, JSON blobs, Canvas-only copies, or theme arrays.
+
+Canvas is a composition layer, not a loophole around content modeling. Use Canvas for page-level narrative and arrangement. Keep products, events, people, resources, articles, releases, and other reusable data as canonical Drupal content, then render or bind that content into Canvas where the experience needs it.
+
+Source audit and migration evidence are not normal editorial fields. `Source URL`, source route status, crawl notes, source HTML, source CSS, and route evidence belong in the review packet, import manifest, migration map, logs, or an admin-only audit surface when there is a real governance reason. They should not clutter the authoring form for ordinary editors.
+
+The gate is practical: a non-admin editor must be able to add a new representative item, fill meaningful fields, save it, and see it appear in the expected public View, listing, detail route, search result, menu placement, or Canvas composition without code changes. If that cannot happen, the build has not proved Drupal ownership of the content.
 
 ## Drupal CMS Guide Best Practices
 
@@ -88,7 +183,7 @@ Safe placeholders are allowed only when they say what input is missing and who o
 
 ## Native Tools Before Custom Code
 
-`AGENTS.md.template` names the Drupal tool for each need: Views, Canvas/Experience Builder or Blocks/Layout Builder, ECA, the Entity and Field APIs, Configuration Management, roles and permissions, and configured contrib or Drupal CMS recipes. These tools keep the build inside Drupal's enforced access, validation, cacheability, sanitization, routing, and editorial workflow. Custom code is the exception because it can opt out of that enforcement.
+Drupal is the gate: build through its APIs and systems so Drupal enforces access, validation, cacheability, sanitization, routing, and editorial workflow. `AGENTS.md.template` names the Drupal tool for each need: Views, Canvas/Experience Builder or Blocks/Layout Builder, ECA, the Entity and Field APIs, Configuration Management, roles and permissions, and configured contrib or Drupal CMS recipes. Custom code is the exception because it can opt out of that enforcement.
 
 When custom code is genuinely required, record why no Drupal-native tool could express the need, which editable content or config drives it, which platform guarantees it must now handle directly, and what evidence proves it preserves access, cacheability, sanitization, validation, and editor workflow.
 
@@ -96,7 +191,7 @@ Review attention should concentrate where a framework gate was switched off. Inv
 
 - a custom module, route controller, or endpoint;
 - an entity query/load plus render inside theme preprocess, a template, or a controller where a View or entity display should own it;
-- human copy or dynamic values such as a year, count, status, or rollup hardcoded in a template, Views text area, or import script;
+- human copy or dynamic values such as a year, count, status, CTA label, footer link, navigation label, or rollup hardcoded in a template, Views text area, or import script;
 - a bespoke or unfiltered text format used for site content;
 - `accessCheck(FALSE)`, forced `max-age=0`, `_access: TRUE`, raw render arrays, unsafe source markup, or raw SQL;
 - a field value computed once at import from other entities with no live derivation, View, computed field, ECA rule, or recompute path;
@@ -106,11 +201,17 @@ Review attention should concentrate where a framework gate was switched off. Inv
 
 None of these is automatically wrong, but each must earn its exception in the review packet.
 
+## Off-Road Inventory
+
+Create `review-packet/off-road-inventory.md` for every run. This is not an automatic fail list; it is the maintainer's map of where Drupal's normal guarantees were bypassed and what evidence makes that acceptable.
+
+Inventory custom modules/controllers/endpoints, entity queries plus rendering outside Views/entity displays, hardcoded public copy or dynamic values, bespoke text formats, `accessCheck(FALSE)`, forced `max-age=0`, raw markup, raw SQL, one-shot computed field values, contrib tokens/default metadata pointing at missing fields, Pathauto patterns that miss custom bundles, hardcoded entity IDs in config, and custom content types without non-admin editor-role access.
+
 ## Custom Modules As Last Resort
 
 The preferred local rebuild has no custom module. Drupal config, recipes, maintained contrib, Views, Canvas/Experience Builder, blocks, Layout Builder, ECA, Webform, menus, aliases, theme code, and import scripts should cover most rebuild work.
 
-Do not create a catch-all source-site module such as `refwd_site`, `dangertv_site`, `site_custom`, or `migration_helpers` to collect unrelated routes, templates, CSS, one-off imports, click handlers, or miscellaneous glue. That shape is hard to hand off because it hides which parts are Drupal architecture and which parts are one-off agent decisions.
+Do not create catch-all modules named after the source site, client, brand, or project to collect unrelated routes, templates, CSS, one-off imports, click handlers, endpoints, or miscellaneous glue. That shape is hard to hand off because it hides which parts are Drupal architecture and which parts are one-off agent decisions.
 
 If custom behavior is genuinely required, make the module Drupal-shaped:
 
@@ -172,7 +273,7 @@ Config that imports but leaves editor forms unusable is not acceptable architect
 
 The build is not reviewable until an editor can use it. Before handoff:
 
-- log in as an editor or administrator;
+- log in as the seeded non-admin editor user for primary editor checks; administrator checks can supplement but do not replace this;
 - open add/edit forms for every custom content type;
 - confirm human-readable labels and help text for load-bearing fields;
 - confirm raw machine names, translation keys, or broken labels are not exposed;
@@ -188,6 +289,8 @@ Record unresolved editor-experience gaps in the handoff instead of hiding them b
 
 Content fields are not a place to store CSS or theme implementation. Do not expose editor fields such as `Background gradient CSS`, raw class names, style attributes, HTML snippets, JavaScript, iframe markup, or arbitrary theme strings.
 
+Theme templates are also not a hidden CMS. Do not put public navigation, footer links, CTA labels, or source-owned public copy only in Twig when editors should maintain it through Drupal menus, fields, blocks, Canvas components, or config. Template microcopy can be acceptable for generic UI chrome, but source-specific public content needs a Drupal owner or a documented exception.
+
 If visual variation is part of the source pattern and editors should control it, model it as constrained data:
 
 - a theme or layout variant with allowed values;
@@ -198,6 +301,8 @@ If visual variation is part of the source pattern and editors should control it,
 The theme, Canvas/Experience Builder, Blocks/Layout Builder, or Drupal config should translate those choices into CSS. Full CSS declarations, gradients, media queries, classes, and implementation selectors belong in theme code/config or source evidence, not node fields.
 
 Flag any raw presentation field in the maintainer review. It is usually a sign the build escaped Drupal's editor model and handed implementation details to content editors.
+
+Also flag raw field-value rendering that bypasses Drupal text formatters, rendered labels used inside attributes, invalid alt text, visible links hidden from assistive technology, and hardcoded public strings in Twig that should have been fields, menu links, blocks, or Canvas component props.
 
 ## Media Strategy
 

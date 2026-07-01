@@ -10,6 +10,32 @@
   "menus": [],
   "views": [],
   "sourceIntentRoutes": [],
+  "structuredContentModel": {
+    "recurringSourceObjects": [
+      {
+        "sourceObject": "",
+        "examples": [],
+        "drupalOwner": "content_type | taxonomy | media | view | canvas_page | block | menu | config | documented_exception",
+        "bundleOrConfigName": "",
+        "requiredFields": [],
+        "relationships": [],
+        "collectionOwner": "",
+        "detailRouteOwner": "",
+        "editorVerification": {
+          "nonAdminEditorCanCreate": false,
+          "appearsInPublicListingOrDetailWithoutCodeChange": false,
+          "evidence": ""
+        },
+        "accepted": false,
+        "notes": ""
+      }
+    ],
+    "genericPageOrUtilityPageExceptions": [],
+    "canvasCompositionUsesStructuredData": [],
+    "viewsBackedCollections": [],
+    "sourceAuditDataStorage": "review_packet | import_manifest | migration_map | admin_only_audit_surface | other",
+    "blockers": []
+  },
   "seoMetadata": {
     "strategy": "",
     "metatagConfig": [],

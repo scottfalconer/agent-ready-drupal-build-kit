@@ -4,6 +4,18 @@
   "checkedAt": "",
   "sourceBaseUrl": "",
   "targetBaseUrl": "",
+  "browserFirstRouteExpansion": {
+    "browserRenderedSeedRoutes": [],
+    "candidateRoutesFromRenderedLinks": [],
+    "candidateRoutesFromBundles": [],
+    "candidateRoutesFromMetadata": [],
+    "candidateRoutesFromAssets": [],
+    "candidateRoutesFromSitemapsOrRobots": [],
+    "candidateRoutesFromNamingPatterns": [],
+    "curlOnlyRoutesRejected": [],
+    "expansionComplete": false,
+    "notes": ""
+  },
   "homepageParity": {
     "sourcePath": "/",
     "sourceStatus": null,
@@ -22,6 +34,14 @@
     "targetCanonical": "",
     "targetScreenshot": "",
     "targetDrupalRouteOwner": "",
+    "accepted": false,
+    "rationale": ""
+  },
+  "frontPageAliasDecision": {
+    "sourceHasSeparateHomeAndAlias": false,
+    "targetDecision": "canonical_redirect | distinct_drupal_display_route | view_route_composition | duplicated_content_with_synchronization_warning | not_applicable",
+    "finalUrlChecks": [],
+    "noFollowRedirectChecks": [],
     "accepted": false,
     "rationale": ""
   },
@@ -56,6 +76,20 @@
   "renderedLinksChecked": [],
   "menuAndFooterLinksChecked": [],
   "legalAndPrivacyRoutesChecked": [],
+  "starterRouteCleanup": {
+    "checkedPaths": [
+      "/home",
+      "/page/1",
+      "/privacy-policy"
+    ],
+    "rawNodeRoutesChecked": [],
+    "starterCanvasPages": [],
+    "staleMenuOrFooterLinks": [],
+    "duplicateAliases": [],
+    "unexpectedStarterPublic200s": [],
+    "accepted": false,
+    "notes": ""
+  },
   "unexpectedPublic200s": [],
   "missingSourceRoutes": [],
   "wrongPatternRoutes": [],

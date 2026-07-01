@@ -26,7 +26,12 @@
     }
   ],
   "fieldsWithNoPublicEffect": [],
+  "hardcodedPublicStrings": [],
+  "rawFieldValueRendering": [],
+  "accessibilityAttributeIssues": [],
   "rawPresentationImplementationFields": [],
+  "repeatableSourceObjectsStoredAsBodyMarkup": [],
+  "sourceAuditFieldsOnEditorialBundles": [],
   "missingEditorLabels": [],
   "rawMachineNameLabels": [],
   "blockedFields": []

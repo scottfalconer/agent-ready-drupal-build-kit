@@ -9,6 +9,10 @@
     "defaultTheme": "",
     "adminTheme": "",
     "frontPage": "",
+    "frontPageAliasNormalization": [],
+    "configSyncDirectory": "",
+    "trackedConfigDirectory": "",
+    "configSyncDirectoryMatchesTrackedDirectory": false,
     "configStatus": ""
   },
   "content": {
@@ -18,14 +22,16 @@
     "contentTypes": [],
     "fieldStorage": [],
     "formDisplays": [],
-    "viewDisplays": []
+    "viewDisplays": [],
+    "canvasPages": []
   },
   "routing": {
     "aliases": [],
     "duplicateAliases": [],
     "redirects": [],
     "unexpectedPublicRoutes": [],
-    "menus": []
+    "menus": [],
+    "menuLinks": []
   },
   "media": {
     "countsByType": {},
