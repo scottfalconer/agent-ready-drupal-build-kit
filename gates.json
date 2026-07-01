@@ -1,0 +1,231 @@
+{
+  "schemaVersion": "public-kit.gates.1",
+  "reviewPacketFiles": [
+    "source-audit.json",
+    "pattern-map.json",
+    "recipe-start-point.md",
+    "durable-intent.yml",
+    "scoped-gap-list.md",
+    "off-road-inventory.md",
+    "maintainer-review.md",
+    "operator-run.md",
+    "production-target.md",
+    "parity-report.json",
+    "route-matrix.json",
+    "browser-evidence.json",
+    "independent-verification.json",
+    "drupal-readback.json",
+    "field-output-matrix.json",
+    "launch-checklist.md"
+  ],
+  "gates": [
+    {
+      "id": "G-OPERATOR-01",
+      "title": "Independent operator run recorded",
+      "phase": 6,
+      "evidenceFile": "operator-run.md",
+      "checkedBy": "human",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-TARGET-01",
+      "title": "Production-equivalent Drupal target recorded",
+      "phase": 6,
+      "evidenceFile": "production-target.md",
+      "checkedBy": "human",
+      "blocking": "launch"
+    },
+    {
+      "id": "G-ROUTE-01",
+      "title": "Full source route inventory or accepted route boundary",
+      "phase": 1,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ROUTE-02",
+      "title": "Browser-first source route expansion",
+      "phase": 1,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ROUTE-03",
+      "title": "Per-route item counts reconciled",
+      "phase": 6,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ROUTE-04",
+      "title": "Source route drift classified and dispositioned",
+      "phase": 6,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ROUTE-05",
+      "title": "Target-required routes resolve as intended",
+      "phase": 6,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ROUTE-06",
+      "title": "Homepage/front-page and alias behavior verified",
+      "phase": 6,
+      "evidenceFile": "route-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-BROWSER-01",
+      "title": "Public browser-rendered source/target evidence captured",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-BROWSER-02",
+      "title": "First-fold and brand-defining assets verified",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-CONTENT-01",
+      "title": "Structured content ownership evidence recorded",
+      "phase": 2,
+      "evidenceFile": "pattern-map.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-CONTENT-02",
+      "title": "Collection ownership ledger and editor add-a-row evidence recorded",
+      "phase": 2,
+      "evidenceFile": "pattern-map.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-COMPOSITION-01",
+      "title": "Flexible page composition model declared",
+      "phase": 2,
+      "evidenceFile": "pattern-map.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-COMPOSITION-02",
+      "title": "Composition owner fidelity checked",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-CANVAS-01",
+      "title": "Canvas component model fidelity checked when Canvas is used",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-RECIPE-01",
+      "title": "Recipe discovery and default-owner decisions recorded",
+      "phase": 2,
+      "evidenceFile": "recipe-start-point.md",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-CONFIG-01",
+      "title": "Tracked config sync and config-import reproduction evidence recorded",
+      "phase": 2,
+      "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-INTENT-01",
+      "title": "Durable intent is current or treated as advisory",
+      "phase": 3,
+      "evidenceFile": "durable-intent.yml",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-FIELD-01",
+      "title": "Field-to-public-output behavior verified",
+      "phase": 6,
+      "evidenceFile": "field-output-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-OFFROAD-01",
+      "title": "Raw embed/source markup and off-road moves inventoried",
+      "phase": 6,
+      "evidenceFile": "off-road-inventory.md",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-VERIFY-01",
+      "title": "Independent verifier attempted to falsify completion claims",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-VERIFY-02",
+      "title": "Packet verifier executed and raw report captured",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-EDITOR-01",
+      "title": "Authenticated non-admin editor browser tasks verified",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-SEO-01",
+      "title": "Rendered SEO/social metadata verified or blocked",
+      "phase": 6,
+      "evidenceFile": "field-output-matrix.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-LAUNCH-01",
+      "title": "Launch checklist records accepted evidence or blocked stubs",
+      "phase": 6,
+      "evidenceFile": "launch-checklist.md",
+      "checkedBy": "human",
+      "blocking": "launch"
+    },
+    {
+      "id": "G-MAINTAINER-01",
+      "title": "Maintainer review verdict recorded",
+      "phase": 5,
+      "evidenceFile": "maintainer-review.md",
+      "checkedBy": "human",
+      "blocking": "launch"
+    }
+  ]
+}

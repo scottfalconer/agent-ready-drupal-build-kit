@@ -71,9 +71,9 @@ Use authenticated browser evidence for non-admin editor tasks. A form URL return
 
 ## Independent Verification Pass
 
-The builder's self-review is useful, but it is not enough to close the rebuild. A separate verifier should try to falsify every completion claim against the live Drupal site and the current packet.
+The builder's self-review is useful, but it is not enough to close the rebuild. A separate verifier that did not build the site should try to falsify every completion claim against the live Drupal site and the current packet.
 
-Use the strongest separation the runtime supports: a subagent, a new agent context, a review-only task, or a clearly separated skeptic checklist that reads only the operating guide, live target URLs, credentials needed for editor checks, and the packet. The verifier should not rely on the builder's prose summary as evidence.
+Use the strongest separation the runtime supports: a subagent, a new agent context, a review-only task, or a clearly separated skeptic checklist that reads only the operating guide, live target URLs, credentials needed for editor checks, and the packet. The verifier should not rely on the builder's prose summary as evidence. If the runtime cannot create a separate context, record that as degraded independence rather than treating it as the same confidence level.
 
 The verifier must emit `review-packet/independent-verification.json`. At minimum it should check:
 
@@ -204,7 +204,7 @@ Canvas is a composition layer, not a loophole around content modeling. Use Canva
 
 Source audit and migration evidence are not normal editorial fields. `Source URL`, source route status, crawl notes, source HTML, source CSS, and route evidence belong in the review packet, import manifest, migration map, logs, or an admin-only audit surface when there is a real governance reason. They should not clutter the authoring form for ordinary editors.
 
-The collection ownership gate is concrete. Every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route needs a ledger entry showing the source route, collection pattern, source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. A route-level 200/H1 check is not collection parity. Reconcile source and target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar repeated items.
+The collection ownership gate is concrete. Every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route needs a ledger entry showing the source route, collection pattern, source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. Detail pages, individual node routes, and sample items do not satisfy a collection route. A route-level 200/H1 check is not collection parity. Reconcile source and target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar repeated items.
 
 The editor gate is practical: a non-admin editor must be able to add a new representative item, fill meaningful fields, save it, and see it appear in the expected public View, listing, detail route, search result, menu placement, or Canvas composition without code changes. If that cannot happen, the build has not proved Drupal ownership of the content.
 
@@ -240,6 +240,8 @@ Safe placeholders are allowed only when they say what input is missing and who o
 ## Native Tools Before Custom Code
 
 Drupal is the gate: build through its APIs and systems so Drupal enforces access, validation, cacheability, sanitization, routing, and editorial workflow. `AGENTS.md.template` names the Drupal tool for each need: Views, Canvas/Experience Builder or Blocks/Layout Builder, ECA, the Entity and Field APIs, Configuration Management, roles and permissions, and configured contrib or Drupal CMS recipes. Custom code is the exception because it can opt out of that enforcement.
+
+Recipe-backed assembly follows the same rule. Before creating a custom content type, View, workflow, or cross-cutting feature, discover available Drupal CMS recipes in the target. When a maintained recipe matches the source pattern, treat it as the default owner and record whether it was applied, rejected, blocked, or not applicable in `recipe-start-point.md`. Custom overlays should be bounded additions on top of the selected recipe or explicit fallback when recipe discovery proves no fit.
 
 When custom code is genuinely required, record why no Drupal-native tool could express the need, which editable content or config drives it, which platform guarantees it must now handle directly, and what evidence proves it preserves access, cacheability, sanitization, validation, and editor workflow.
 
@@ -319,16 +321,46 @@ Bad Canvas use: building repeatable structured content as hand-assembled pages. 
 
 Declare the build type so reviewers know what to expect: structured Drupal-native rebuild with Canvas intentionally unused; hybrid structured content plus Canvas composition; Canvas-heavy rebuild with Drupal-owned structured data embedded; or constrained fallback because Canvas was unavailable or blocked. This is not a marketing label. It must match the source shape, Canvas availability, and editor ownership evidence.
 
+## Composition Modeling Before Build
+
+Flexible landing-like pages need explicit authoring ownership before implementation. The rule is not that public `/` must be Canvas. The rule is that every homepage, landing page, campaign page, splash page, section landing page, one-off marketing page, presentation-heavy about page, product launch page, donor appeal, event splash, or partner page must declare what owns the composition and why.
+
+Valid owners include Canvas/Experience Builder, a structured Landing Page content type with typed fields and media references, Layout Builder or block layout, a View page, an entity display, Utility Page for simple low-design informational routes, or a documented exception. The packet should record the editor mental model: arrange sections, fill structured fields, manage a list, update a menu/block, or maintain a simple page.
+
+Use this decision procedure:
+
+- composition itself is the editorial surface -> Canvas/Experience Builder;
+- stable reusable/queryable structure -> content type, fields, media/entity references, and Views;
+- dynamic collection/search/listing -> View or Search API-backed View;
+- repeatable detail page -> entity display and view modes;
+- simple standalone informational page -> Utility Page or plain node with evidence;
+- unavailable or blocked owner -> deviation record and reviewer-visible fallback.
+
+The hybrid rule is strict: Canvas can arrange a page, but repeatable collections stay Drupal-owned. Sponsors, videos, cards, events, galleries, people, products, locations, articles, and resources should not be serialized into Canvas text props or Twig arrays. Use entities, media, entity references, Views, slots, or child components backed by Drupal data.
+
+For each flexible route, `pattern-map.json` should name the owner, rationale, sections, editor-facing section names, singleton/repeatable classification, data source, expected editor action, and acceptance proof. If the build later changes owner or component model, add a deviation record instead of silently downgrading to theme-only composition or a blob component.
+
 ## Canvas Authoring Ownership
 
 A Canvas-ready page is not proven by the existence of a Canvas page. It is proven when the rebuilt public route is the page a non-admin editor can open and maintain in Canvas/Experience Builder.
 
 The rebuilt public route must open in the Canvas editor when Canvas is the selected owner. The homepage, campaign landing pages, splash pages, presentation-heavy about pages, and other composed marketing experiences should not be route-specific Twig or preprocess arrays wrapped in a theme if Canvas/Experience Builder is available and fits the source pattern.
 
+Canvas usability is a component-model gate, not a page-existence gate. A flexible public Canvas page with one monolithic component is a failed Canvas model unless the packet records a blocked fallback. A usable Canvas model has components, slots, and typed props aligned to editor mental models: hero, intro, CTA, sponsor strip, media band, gallery, related content, card grid, footer CTA, and similar sections.
+
+Mechanical anti-patterns should fail independent verification:
+
+- one Canvas component owns an entire flexible page;
+- a string prop contains JSON, multiple URLs, or newline-delimited lists;
+- repeatable sections use serialized text instead of entities, media, Views, slots, or child components backed by Drupal data;
+- source-owned CTA copy, links, sponsor names, media URLs, or route-specific strings are hardcoded in component Twig when the composition model declared them editor-owned;
+- the implemented component inventory, slots, props, or data references do not match the declared model and no deviation record exists.
+
 Use this gate:
 
 - identify every page where the presentation is the content;
 - decide whether Canvas/Experience Builder, Blocks/Layout Builder, a View, an entity display, or a simple Utility Page owns the route;
+- declare the Canvas component model before building when Canvas is the owner;
 - verify that the public menu/link/alias resolves to the selected owner, not to a disconnected starter Canvas page;
 - scan for starter Canvas pages and placeholder copy such as "Your hero content goes here"; a public Canvas placeholder is a hard fail unless Canvas is intentionally unused and documented;
 - log in as a non-admin editor and open the selected owner;

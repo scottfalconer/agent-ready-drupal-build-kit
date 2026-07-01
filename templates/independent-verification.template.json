@@ -6,7 +6,9 @@
     "nameOrRole": "independent verifier | skeptic subagent | fresh context | manual reviewer",
     "runtimeOrTool": "",
     "freshContextUsed": false,
+    "sameContextAsBuilder": false,
     "builderSummaryExcluded": false,
+    "independenceDegradedReason": "",
     "liveSiteInspected": false,
     "packetInspected": false,
     "notes": ""
@@ -169,6 +171,46 @@
       "signatureGraphicStatus": "pass | fail | blocked | not_applicable",
       "primaryCtaTreatmentStatus": "pass | fail | blocked | not_applicable",
       "reachableSourceAssetsMissingOrApproximated": [],
+      "evidence": ""
+    }
+  ],
+  "compositionModelFidelityChecks": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "declaredCompositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | documented_exception",
+      "actualCompositionOwner": "",
+      "routeRationalePresent": false,
+      "sectionOwnershipDeclared": false,
+      "sectionsChecked": [],
+      "expectedEditorActionsVerified": false,
+      "nonAdminEditorPublicOutputProof": "",
+      "deviationRecordRequired": false,
+      "deviationRecordPresent": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "canvasComponentModelChecks": [
+    {
+      "sourceRoute": "",
+      "publicRoute": "",
+      "canvasPagePublicOrPartOfRebuild": false,
+      "declaredComponentCount": null,
+      "actualComponentCount": null,
+      "componentInventoryMatchesDeclaration": false,
+      "singleMonolithComponentDetected": false,
+      "declaredSlotsActuallySlots": false,
+      "entityReferencePropsActuallyReferences": false,
+      "declaredRepeatableSectionsBackedByDrupalData": false,
+      "sectionOrderEditableWhenCanvasOwnsComposition": false,
+      "stringBlobProps": [],
+      "jsonPropsDetected": [],
+      "newlineUrlListPropsDetected": [],
+      "multiUrlStringPropsDetected": [],
+      "hardcodedTwigLiteralFindings": [],
+      "deviationRecordsReviewed": [],
+      "status": "pass | fail | blocked",
       "evidence": ""
     }
   ],

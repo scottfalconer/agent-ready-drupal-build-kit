@@ -62,11 +62,77 @@
     "accepted": false,
     "notes": ""
   },
+  "compositionModel": {
+    "completedBeforeImplementation": false,
+    "flexibleLandingRoutes": [
+      {
+        "sourceRoute": "",
+        "targetRoute": "",
+        "pageType": "homepage | landing | campaign | splash | section_landing | about | marketing | product_launch | donor_appeal | event_splash | partner_page | utility | other",
+        "compositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | documented_exception",
+        "ownerRationale": "",
+        "editorMentalModel": "arrange_sections | fill_structured_fields | manage_list | update_menu_or_block | maintain_simple_page | other",
+        "canvasIsNotMandatoryRouteRule": true,
+        "sections": [
+          {
+            "section": "hero | intro | cta | sponsor_strip | media_band | gallery | related_content | card_grid | footer_cta | layout_order | other",
+            "editorFacingName": "",
+            "owner": "canvas_component | canvas_slot | field | media_reference | entity_reference | view | block | menu | config | entity_display | theme_exception | documented_exception",
+            "repeatability": "singleton | repeatable | collection | generated | other",
+            "dataSource": "",
+            "expectedEditorAction": "",
+            "acceptanceProof": ""
+          }
+        ],
+        "accepted": false,
+        "notes": ""
+      }
+    ],
+    "canvasComponentModel": [
+      {
+        "sourceRoute": "",
+        "publicRoute": "",
+        "canvasOwnerDeclared": false,
+        "componentList": [],
+        "slotList": [],
+        "props": [
+          {
+            "component": "",
+            "prop": "",
+            "type": "plain_text | rich_text | link | boolean | number | media_reference | entity_reference | view_reference | config_reference | other",
+            "repeatedItemHandling": "not_repeatable | slot | child_component | entity_reference | media_reference | view | documented_exception",
+            "editorFacing": false,
+            "notes": ""
+          }
+        ],
+        "repeatableSectionsUseDrupalOwnedData": false,
+        "oneMonolithicComponentRejected": false,
+        "jsonOrNewlineBlobPropsRejected": false,
+        "hardcodedPublicCopyRejected": false,
+        "componentInventoryMatchesDeclaration": false,
+        "accepted": false,
+        "notes": ""
+      }
+    ],
+    "deviationRecords": [
+      {
+        "sourceRoute": "",
+        "declaredOwner": "",
+        "implementedOwner": "",
+        "blockedReason": "",
+        "fallbackRationale": "",
+        "reviewRequired": true,
+        "accepted": false,
+        "notes": ""
+      }
+    ]
+  },
   "pageCompositionOwnership": [
     {
       "sourceRoute": "",
       "routeRole": "homepage | landing | campaign | splash | about | marketing | legal | other",
       "selectedOwner": "canvas_page | experience_builder_page | utility_page | node | view | block_layout | entity_display | documented_exception",
+      "ownerRationale": "",
       "canvasOrExperienceBuilderAvailable": false,
       "canvasOwnsPublicRoute": false,
       "editorCanOpenSelectedOwner": false,
@@ -81,7 +147,12 @@
     {
       "sourceRoute": "",
       "section": "hero | hero_image | gallery | sponsor_strip | cta | layout_order | media_embed | related_items | footer_cta | other",
+      "editorFacingName": "",
       "editorOwnedBy": "field | media_field | view | canvas_component | block | menu | config | theme_exception | documented_exception",
+      "repeatability": "singleton | repeatable | collection | generated | other",
+      "dataSource": "",
+      "expectedEditorAction": "",
+      "acceptanceProof": "",
       "drupalOwner": "",
       "publicOutputLocation": "",
       "nonAdminEditorCanChange": false,

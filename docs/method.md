@@ -21,7 +21,8 @@ The kit is strongest when it produces a real Drupal site that looks, functions, 
 11. Generate operator run, production target, parity, and maintainer review packets.
 12. Apply recipes only in a clearly labeled disposable lab or production-equivalent target.
 13. Collect target config, rendered page, browser QA, accessibility, performance, security, and editorial evidence.
-14. Promote to launch-candidate only when every hard gate is clearable from accepted evidence.
+14. Run independent verification and `node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet`.
+15. Promote to launch-candidate only when every hard gate in `gates.json` is clearable from accepted evidence.
 
 ## Evidence Rules
 

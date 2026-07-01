@@ -66,7 +66,7 @@
 
 ## Stake-My-Name Verdict
 
-Answer these questions exactly. This is the canonical signoff bar used by `README.md`, `START.md`, the worked example, and this template.
+Answer these questions exactly. `gates.json` is the machine-readable gate vocabulary; this verdict is the human maintainer view over those gates.
 
 - [ ] Is the build on Drupal CMS best practices using Drupal-native primitives?
 - [ ] Is the architecture sound for the source site's real shape?
@@ -109,7 +109,16 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] One-off composed experiences use Canvas pages / Experience Builder when available rather than tortured content types with single-use layout fields.
 - [ ] Hybrid pages keep nodes as canonical data and use Canvas as composed presentation where that fits the source pattern.
 - [ ] Views own collection/listing/search routes and entity displays own repeatable detail pages; Canvas composition does not replace those Drupal primitives.
+- [ ] Composition modeling happened before implementation for every flexible landing-like route, and `pattern-map.json` records the selected owner, route rationale, sections, data sources, expected editor actions, and acceptance proof.
+- [ ] Canvas is not treated as a route mandate for `/`; every homepage, landing, campaign, splash, section landing, and presentation-heavy page has an explicit Drupal authoring owner that fits the editor mental model.
+- [ ] Repeatable collections inside composed pages remain Drupal-owned through entities, media, entity references, Views, slots, or child components backed by Drupal data.
+- [ ] Any deviation from the declared composition owner or component model has a deviation record; silent fallback to theme-only composition or a blob component is not accepted.
 - [ ] Canvas authoring ownership: The public homepage or landing-page composition is editable in Canvas when Canvas is the selected owner.
+- [ ] Public or rebuild-owned Canvas pages have a usable rational component model, not one monolithic component wrapping the whole flexible page.
+- [ ] Canvas props use typed values for singleton data and references/Views/slots/child components for repeatable data; JSON strings, newline URL lists, multi-URL string props, and body/source HTML blobs are rejected.
+- [ ] Canvas component Twig does not hardcode source-owned CTA text, links, media URLs, sponsor names, section copy, or route-specific public strings that the composition model declared editor-owned.
+- [ ] Canvas component inventory, slots, typed props, entity/media/View references, and repeatable-section data sources match the declared `compositionModel.canvasComponentModel`.
+- [ ] Non-admin editor proof shows a meaningful declared section/component can be changed through the selected owner and the anonymous public route changes without code.
 - [ ] No starter Canvas placeholder is counted as evidence for the rebuilt public route; starter Canvas pages are replaced, routed correctly, unpublished, or explicitly excluded.
 - [ ] The run declares its build type: structured Drupal-native with Canvas intentionally unused, hybrid structured content plus Canvas composition, Canvas-heavy with structured data embedded, or constrained fallback because Canvas was unavailable or blocked.
 - [ ] Major composed routes have section ownership records for hero copy, hero image, gallery, sponsor strip, CTA, media embeds, related items, footer CTA, and layout/order.

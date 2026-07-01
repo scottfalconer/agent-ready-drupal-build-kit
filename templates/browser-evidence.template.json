@@ -89,8 +89,24 @@
       "editorUser": "",
       "editorRole": "",
       "canvasOwnsPublicRoute": false,
+      "declaredComponentModel": "",
+      "componentInventoryMatchesDeclaration": false,
+      "singleMonolithComponentDetected": false,
+      "stringBlobPropsDetected": [],
       "starterCanvasPlaceholderPresent": false,
       "representativeEditPerformed": "",
+      "declaredSectionEditChecks": [
+        {
+          "section": "",
+          "editorFacingName": "",
+          "declaredOwner": "canvas_component | canvas_slot | field | media_reference | entity_reference | view | block | menu | config | entity_display | documented_exception",
+          "expectedEditorAction": "",
+          "actualEditorAction": "",
+          "publicOutputChanged": false,
+          "evidence": "",
+          "status": "pass | needs-review | fail | blocked"
+        }
+      ],
       "editorScreenshot": "",
       "publicRouteBeforeEditScreenshot": "",
       "publicRouteAfterEditScreenshot": "",

@@ -24,7 +24,10 @@
 
 ## Phase 4: Verify
 
+- Run the packet verifier: `node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet`.
+- Use `gates.json` as the stable gate vocabulary.
 - Verify the packet is internally consistent.
+- Run independent verification against the live Drupal site and packet before handoff.
 - Verify generated recipe material only as recipe material.
 - Verify lab application only as lab proof.
 - Verify production target evidence only from production-equivalent targets.

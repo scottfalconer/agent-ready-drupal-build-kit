@@ -42,7 +42,7 @@ You will not hand-edit anything yourself. The agent does the setup and review lo
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
 5. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
 6. it runs an independent verifier pass that tries to falsify the completion claims against the live site;
-7. it creates `review-packet/` with the evidence.
+7. it copies the needed packet templates from `templates/`, creates `review-packet/` with the evidence, and runs `bin/verify-packet.mjs` before handoff.
 
 ## Workspace Topology
 
@@ -63,11 +63,11 @@ The kit folder is not the Drupal site. It sits beside the Drupal project as refe
 Under the hood, the agent works in four moves and repeats them as a review loop. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
 1. **Introspect:** read the source site: routes, content inventory, media, design system, public behaviors, and unresolved facts it must not invent.
-2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, theme/config work, and source-like public behavior.
+2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, declare the composition owner for flexible pages, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, Canvas/Experience Builder or another declared owner where appropriate, theme/config work, and source-like public behavior.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps:** list what still needs a human: private access, provider credentials, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
 
-Before handoff, the agent also needs a fresh verifier pass. The verifier acts as a skeptic: it checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, editor add-a-row failures, and stale evidence.
+Before handoff, the agent also needs a fresh verifier pass. The verifier acts as a skeptic: it checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence.
 
 ## The Review Bar
 
@@ -78,6 +78,7 @@ This is what separates a complete Drupal rebuild from a foundation or lookalike.
 - Does it include the public content and media needed to review the site as a rebuild?
 - Does it match the source site's visual language and public behavior?
 - Can editors maintain the site through Drupal forms, menus, media, Views, and workflow?
+- Do flexible pages have a real authoring owner, and do Canvas pages have usable section-level component models when Canvas is used?
 - Are the load-bearing decisions captured and usable by later agents?
 - Are the remaining business, legal, integration, production, and launch gaps named?
 - Did an independent verifier try to falsify the completion claims against the live site?
@@ -87,6 +88,6 @@ If any answer is "no," the result can still be useful. It just is not yet someth
 
 ## Required Packet
 
-The canonical output list is in [docs/output-inventory.md](docs/output-inventory.md).
+The canonical output list is in [gates.json](gates.json) and [docs/output-inventory.md](docs/output-inventory.md). The agent should run `node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet` before handoff.
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.

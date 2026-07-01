@@ -115,6 +115,7 @@ Run the build as a state machine. Do not skip phases.
 - Separate observed facts from target Drupal decisions.
 - Mark missing or uncertain facts as unresolved; use `UNKNOWN` only where a structured field needs a placeholder value.
 - Produce `review-packet/source-audit.json` and `review-packet/pattern-map.json`.
+- Use the kit templates as the packet shapes. Copy matching files from `[KIT_PATH_OR_PUBLIC_REPO_URL]/templates/` into `review-packet/` as needed, remove the `.template` suffix in the target filename, and fill each file with run-specific evidence or a blocked stub.
 
 ### Structured Content First Gate
 
@@ -123,24 +124,45 @@ Complete this gate before theme polish, Canvas composition, or bulk import. A Dr
 - Identify recurring source objects before building pages: articles, releases, tracks, artists, sessions, events, venues, speakers, products, services, locations, episodes, FAQs, resources, legal notices, retailers, sponsors, taxonomy terms, and media assets.
 - Do not model repeatable source objects as generic Page or Utility Page nodes, body markup, JSON blobs, Canvas-only copies, Twig arrays, or import-script data. Generic pages are acceptable only for genuinely simple standalone informational pages, and the packet must name that exception.
 - A list, grid, schedule, directory, archive, catalog, feed, or search result implies a structured content type plus a View unless the packet records a stronger Drupal-native owner such as an existing entity display or Search API-backed view.
-- For every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, produce a collection ownership ledger entry: source route, collection pattern, source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and non-admin editor add-a-row evidence. Body markup, a one-off blob field, or static cards are failed collection owners unless the packet records a genuine one-off exception.
+- For every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, produce a collection ownership ledger entry: source route, collection pattern, source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and non-admin editor add-a-row evidence. Body markup, a one-off blob field, or static cards are failed collection owners unless the packet records a genuine one-off exception. Detail pages, individual node routes, or sample items do not satisfy the collection-route gate; a source listing/archive route needs its own View, redirect, intentional-drop disposition, or documented owner decision.
 - For every route with repeated load-bearing items, reconcile source versus target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar items. A matching route status and H1 do not prove route completeness.
 - For each recurring object, define typed fields, taxonomy vocabularies, entity references, media references, dates, links, booleans, numeric values, text fields, view modes, form displays, and editor workflow before importing content.
 - Store facts as fields. Dates, venues, categories, speakers, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationship data do not belong only in the body field.
-- Canvas composes experiences; it does not replace the canonical data model for repeatable content. Use Canvas for the homepage, campaign, about, splash, or marketing composition, and bind or place Drupal-owned structured content inside it where the page needs reusable data.
+- Canvas composes experiences; it does not replace the canonical data model for repeatable content. Use Canvas when composition itself is the editor-owned surface, and bind or place Drupal-owned structured content inside it where the page needs reusable data.
 - Views own public collections and editor-maintained listings. A hand-coded card grid, controller array, or Canvas page that must be manually updated for each new item is a modeling failure unless the source pattern is truly one-off.
 - Source audit fields belong in the review packet, import manifest, migration map, or admin-only audit surface. Do not add `Source URL`, `Source route status`, crawl notes, source HTML, source CSS, or route evidence to normal editorial content types by default.
 - The content model is not done until a non-admin editor can add a new representative item and it appears in the relevant public listing or detail route without code changes.
 - The editor add/edit gate is per collection, not only per bundle. A non-admin editor must create or update a representative row/item and prove it appears in the expected public View, listing, detail route, menu, or Canvas composition without code changes.
 - Record this gate in `review-packet/pattern-map.json`, `review-packet/field-output-matrix.json`, Drupal readback, and maintainer review. If this gate fails, return to the review loop before declaring visual or editor parity.
 
+### Composition Modeling Gate
+
+Complete this gate before creating Canvas pages, Layout Builder layouts, route-specific templates, landing-page fields, import scripts, or theme polish for flexible pages. The question is not "is `/` backed by Canvas?" The question is "what owns each visible section, and can an editor change it without code?"
+
+- Identify every flexible landing-like route: homepage, landing page, campaign page, splash page, section landing page, one-off marketing page, presentation-heavy about page, donor appeal, event splash, product launch page, partner page, or other route where the page composition is part of the content.
+- Declare the composition owner for each route before implementation: Canvas/Experience Builder, structured Landing Page content type with typed fields/media references/embedded Views, Layout Builder or block layout, View page, entity display, simple Utility Page, or documented exception. Canvas is not mandatory for every homepage or `/`; explicit editor ownership is mandatory.
+- Record a route-level rationale: why this owner fits the editor's mental model. If the editor arranges sections, media, CTAs, and narrative flow, lean Canvas/Experience Builder. If the editor fills stable fields or manages a repeatable/queryable list, lean structured content types plus Views. If the route is simple and low-design, Utility Page or a plain node can be valid with evidence.
+- Use the hybrid rule: even on Canvas-owned pages, repeatable collections stay Drupal-owned. Sponsors, videos, cards, events, articles, people, products, locations, resources, galleries, and similar repeated items should come from entities, media references, entity references, Views, slots, or child components backed by Drupal data, not serialized text.
+- For each declared flexible route, write `compositionModel` evidence in `review-packet/pattern-map.json`: route, page type, selected owner, rationale, sections, editor-facing section name, section owner, singleton/repeatable classification, data source, expected editor action, and acceptance proof.
+- For Canvas-owned routes, declare the component model before building: component list, slots, props, prop types, which props are plain text, which props are media/entity/View references, how repeatable items are handled, and anti-patterns rejected.
+- If implementation cannot match the declared model, do not silently degrade to a fake pass. Add a deviation record naming the blocked owner/model, the reason, the fallback owner, and the reviewer-visible consequence before proceeding.
+- A flexible page passes only when a non-admin editor can change a meaningful representative section through the declared owner and the anonymous public route changes without code.
+
+Record this gate in `review-packet/pattern-map.json`, `review-packet/browser-evidence.json`, `review-packet/independent-verification.json`, and maintainer review. If this gate fails, return to the review loop before declaring visual or editor parity.
+
 ### Canvas Authoring Ownership Gate
 
-Complete this gate for homepage, landing, campaign, splash, marketing, presentation-heavy about, and other composed pages before final theme polish. Canvas/Experience Builder is an authoring owner, not a decorative checkbox.
+Complete this gate whenever Canvas/Experience Builder is selected as a route owner, a public Canvas page exists, or a Canvas page is part of the rebuild. Canvas/Experience Builder is an authoring owner, not a decorative checkbox.
 
 - Declare the build type in the pattern map: structured Drupal-native rebuild with Canvas intentionally unused; hybrid structured content plus Canvas composition; Canvas-heavy rebuild with Drupal-owned structured data embedded; or constrained fallback because Canvas was unavailable or blocked. The build type must match the source shape and the editor ownership evidence.
-- If Canvas/Experience Builder is available and a homepage, landing page, campaign page, splash page, or presentation-heavy about page is source-like composition, the rebuilt public route must be owned by Canvas/Experience Builder or the packet must record why another Drupal-native owner is better.
+- If Canvas/Experience Builder is available and a homepage, landing page, campaign page, splash page, or presentation-heavy about page is source-like composition, the rebuilt public route should be owned by Canvas/Experience Builder unless the composition model records why another Drupal-native owner is better.
 - A Canvas-ready page is not proven by the existence of a Canvas page. The public route, menu link, route matrix, and editor task must point to the same rebuilt composition.
+- A Canvas page that exists on a public route or is part of the rebuild must have a usable rational component model. A flexible page wrapped in one monolithic component is a failed Canvas model unless the packet records a temporary blocked fallback and reviewer consequence.
+- Canvas components should match editor mental models: hero, intro, CTA, sponsor strip, media band, gallery, related content, card grid, footer CTA, and similar meaningful sections. Use multiple components, slots, or child components where the editor needs to add, remove, reorder, or maintain sections.
+- Use typed props for simple singleton values. Use media references, entity references, View-backed components, slots, child components, or other Drupal-owned data for repeatable sections. Do not use JSON strings, newline-delimited URL lists, multi-URL string props, body blobs, or source HTML blobs to carry sponsors, videos, galleries, cards, or other repeated items.
+- Do not hardcode source-owned CTA text, links, media URLs, sponsor names, section copy, or route-specific public strings in Canvas component Twig when the composition model declared them editor-owned props, references, fields, blocks, menus, or Views.
+- The implemented Canvas component inventory must match `compositionModel.canvasComponentModel` or have a deviation record. Declared entity-reference props must be real references, declared slots must be real slots, and declared repeatable sections must resolve to Drupal-owned data.
+- When Canvas owns composition, section order and page composition must be editable in Canvas unless the packet records a limitation and fallback. A non-admin editor capstone check must change a declared section/component and verify the anonymous public route changes.
 - Do not leave a starter Canvas page disconnected from the rebuilt public route. Replace it, route it correctly, unpublish it, or record why it is intentionally kept out of the public experience. Starter Canvas content or placeholder copy such as "Your hero content goes here" on a public route is a hard failure unless Canvas is intentionally unused and documented.
 - For each major composed route, record section-level ownership: hero copy, hero image, gallery, sponsor strip, CTA, media embed, related items, footer CTA, and layout/order. Each section must be owned by a field, media field, View, Canvas component, block, menu/config, or a documented theme exception.
 - Utility Page is a fallback for simple low-design informational pages. Do not use it for the homepage, rich marketing pages, campaign pages, or composed source experiences unless the packet records why Canvas/Experience Builder is unavailable or a worse fit.
@@ -170,7 +192,8 @@ Complete this gate for homepage, landing, campaign, splash, marketing, presentat
 ### Phase 3: Durable Intent
 
 - For every major architectural decision, content type, View, workflow, integration boundary, custom controller, or recipe/overlay decision, append a durable intent record.
-- Include purpose, source evidence, rationale, asserted by, last reviewed date, config hash when available, status, and stale behavior.
+- Include purpose, source evidence, rationale, asserted by, last reviewed date, config hash, status, and stale behavior. For config objects, compute `config_hash` as `sha256:<64 lowercase hex chars>` from the exported config YAML after deleting `uuid:` and `_core:` lines and trimming trailing whitespace. Use `config_hash: "not-applicable"` only for behavior or external decisions with no Drupal config object.
+- A solo-agent run may set durable intent status to `hash-valid` when the hash matches exported config. Only human maintainer review should set status to `accepted`. Blank or `UNKNOWN` hashes are advisory only and fail the packet verifier when paired with `hash-valid` or `accepted`.
 - Produce `review-packet/durable-intent.yml`.
 
 ### Phase 4: Gap List
@@ -189,7 +212,7 @@ Complete this gate for homepage, landing, campaign, splash, marketing, presentat
 
 Before final handoff, run a fresh independent verification pass whose job is to falsify the completion claims against the live Drupal site.
 
-Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence.
+Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. The verifier should be a context that did not build the site. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence. Record any same-context fallback as degraded independence in `review-packet/independent-verification.json`.
 
 The verifier must try to break each claimed gate, not confirm it politely. It should inspect the live Drupal site and packet for:
 
@@ -201,6 +224,8 @@ The verifier must try to break each claimed gate, not confirm it politely. It sh
 - placeholder, lorem ipsum, starter content, default Drupal CMS content, disconnected Canvas starter pages, Canvas placeholder copy, stale route evidence, and live test pages;
 - wrong front page, wrong route owner, route drift disposition gaps, duplicate aliases, raw `/node/*` leaks, unexpected public 200 routes, and missing redirects;
 - first-fold and brand-defining asset parity for primary routes;
+- composition model fidelity for flexible landing-like routes, including declared owner, section ownership, expected editor actions, deviation records, and public-output proof;
+- Canvas component model fidelity when Canvas is used, including component inventory, slots, typed props, entity/media/View references, monolithic component detection, string-blob prop detection, hardcoded Twig literals, and repeatable-section ownership;
 - non-admin editor add-a-row/add-a-node tasks that prove new content can enter the expected View, listing, detail route, menu, or Canvas composition without code changes;
 - cold-reader label checks for editor-facing content type labels;
 - source-owned public strings, content, or navigation that exist only in Twig, import scripts, or static markup;
@@ -208,6 +233,14 @@ The verifier must try to break each claimed gate, not confirm it politely. It sh
 - direct database cleanup, table purges, alias resets, or destructive import cleanup recorded as local-only off-road work.
 
 Produce `review-packet/independent-verification.json`. Every failure or blocked check must name the completion claim it falsifies, the live evidence, the expected evidence, and the next fix. The builder must fix failing claims and rerun verification before calling the site complete.
+
+After independent verification, run the packet verifier from the target workspace:
+
+```bash
+node [KIT_PATH_OR_PUBLIC_REPO_URL]/bin/verify-packet.mjs --packet review-packet
+```
+
+This command must exit zero before any complete local rebuild claim. It writes `review-packet/evidence/packet-verification.json`. If verifier independence is degraded, the packet verifier requires `independent-verification.json` to cap `summary.completeLocalRebuildClaimAllowed` at `false`.
 
 ## Required Review Loop
 
@@ -223,6 +256,7 @@ Each loop must:
 4. Fix the highest-impact gaps before moving to lower-value polish.
 5. Update `review-packet/` with new evidence, decisions, and blockers.
 6. Before final handoff, run the independent verification pass and treat its failures as work items unless they are real external blockers.
+7. Run `bin/verify-packet.mjs` from the kit and treat failures as work items unless they are real external blockers.
 
 Stop only when the local Drupal CMS site has reviewable content, media, visual design, public functionality, editor forms, and packet evidence, or when a blocker outside the local agent's control is recorded with the missing input and next action.
 
@@ -392,7 +426,9 @@ Before creating site-specific config, decide whether the target starts from:
 - maintained Drupal CMS recipes plus bounded site-specific recipes/config;
 - a custom Drupal CMS build only when recipes/templates do not fit.
 
-Prefer recipe-by-construction where maintained Drupal CMS recipes fit the source pattern. Do not install every recipe by default. For each candidate, record whether it is applied, rejected, or blocked and why.
+Prefer recipe-by-construction where maintained Drupal CMS recipes fit the source pattern. Before creating a custom content type, View, workflow, or cross-cutting feature, run recipe discovery and check whether a maintained Drupal CMS recipe already owns that pattern. A matching maintained recipe is the default owner; building custom config where a matching recipe exists requires a rationale in `review-packet/recipe-start-point.md` that names the recipe, availability evidence, why it was rejected or blocked, and what bounded overlay remains.
+
+Do not install every recipe by default. For each candidate, record whether it is applied, rejected, blocked, or not applicable and why.
 
 Known candidate recipe families to check in the target project include:
 
@@ -408,6 +444,7 @@ Known candidate recipe families to check in the target project include:
 - `drupal_cms_google_analytics` only when analytics are explicitly in scope and IDs exist.
 - `drupal_cms_ai` only when AI features are explicitly in scope.
 - `drupal_cms_content_type_base` and `drupal_cms_site_template_base` when composing Drupal CMS content/template foundations.
+- content-type recipe candidates such as `drupal_cms_events`, `drupal_cms_person`, `drupal_cms_news`, `drupal_cms_blog`, `drupal_cms_page`, `drupal_cms_project`, and `drupal_cms_case_study` when the source has matching recurring objects. Verify exact recipe names in the target before relying on them.
 
 Verify recipe availability in the actual target with Composer/recipe discovery before relying on a recipe name. Record missing recipes as blocked or not applicable. Site-specific overlays should be small, reviewable, and tied to the pattern map.
 
@@ -505,6 +542,9 @@ Before calling the local build successful, record:
 - presentation-boundary evidence: no editor field stores raw CSS, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. Any editor-owned visual variation is constrained to semantic tokens or validated color/palette choices. Also record hardcoded public strings in Twig/templates, raw field-value rendering that bypasses Drupal formatters, invalid alt/ARIA attributes, and any public navigation, footer links, CTA labels, or source-owned public copy that only exists in theme code.
 - raw embed and source-markup scan evidence: editorial field scans for raw iframe/script/inline-handler/style/source HTML findings, with every remaining raw embed listed in `off-road-inventory.md`.
 - independent verification evidence: a fresh verifier context attempted to falsify completion claims against the live site, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
+- packet verifier evidence: `review-packet/evidence/packet-verification.json` from `node [KIT_PATH_OR_PUBLIC_REPO_URL]/bin/verify-packet.mjs --packet review-packet`, with a zero exit code before any complete local rebuild claim.
+- composition model evidence: every flexible landing-like route has a declared authoring owner, section ownership model, editor mental-model rationale, expected editor actions, acceptance proof, and deviation records when the implementation differs.
+- Canvas component fidelity evidence: every public or rebuild-owned Canvas page has a rational component model that rejects one giant components, JSON/newline URL/string blobs for repeatable content, hardcoded source-owned Twig literals, and repeatable sections not backed by Drupal-owned data.
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - rendered SEO evidence for public content types, including non-empty meta description and image/social metadata where applicable;
@@ -589,6 +629,10 @@ Stop and report blockers when:
 
 Create or update a review packet with:
 
+Gate vocabulary:
+
+- `[KIT_PATH_OR_PUBLIC_REPO_URL]/gates.json`;
+
 Core architecture packet:
 
 - source audit;
@@ -607,6 +651,7 @@ Gate records, either accepted evidence or blocked stubs:
 - route matrix;
 - browser evidence;
 - independent verification;
+- packet verifier report under `evidence/packet-verification.json`;
 - Drupal readback;
 - field-output matrix;
 - launch checklist.

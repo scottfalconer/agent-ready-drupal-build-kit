@@ -34,6 +34,8 @@ List the source patterns that affect the start point.
 
 Do not install every recipe by default. Verify availability in the target project before relying on a recipe name.
 
+Before creating a custom content type, View, workflow, or cross-cutting feature, check whether a maintained Drupal CMS recipe already owns that pattern. A matching maintained recipe is the default owner. If you reject or block it, record the evidence and rationale here before building a custom overlay.
+
 From the DDEV Drupal project root, collect recipe evidence with:
 
 ```bash
@@ -65,6 +67,13 @@ If `dr list recipe` does not show recipe commands, record recipe application as 
 | `drupal_cms_google_analytics` | Analytics | UNKNOWN |  |  |
 | `drupal_cms_ai` | AI features | UNKNOWN |  |  |
 | `drupal_cms_content_type_base` / `drupal_cms_site_template_base` | Content/template foundation | UNKNOWN |  |  |
+| `drupal_cms_events` | Event content type/listing candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_person` | Person/staff/speaker/artist profile candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_news` | News/article content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_blog` | Blog/post content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_page` | Basic/landing page content candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_project` | Project/work/case item candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| `drupal_cms_case_study` | Case study content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
 
 Decision values: `apply`, `reject`, `blocked`, `not_applicable`, `UNKNOWN`.
 
@@ -75,6 +84,8 @@ List custom config/code that remains after using Drupal CMS core primitives and 
 | Overlay | Why recipe/core does not cover it | Evidence | Maintainer risk |
 | --- | --- | --- | --- |
 |  |  |  | UNKNOWN |
+
+For every custom content type, View, workflow, or feature in this table, include the recipe default-owner decision: matching recipe checked, exact recipe evidence, decision (`apply`, `reject`, `blocked`, `not_applicable`, `UNKNOWN`), and why a custom overlay remains.
 
 ## Commands And Evidence
 

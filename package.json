@@ -1,0 +1,16 @@
+{
+  "name": "agent-ready-drupal-build-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent instructions and packet verification for local Drupal CMS rebuilds.",
+  "scripts": {
+    "verify-packet": "node bin/verify-packet.mjs"
+  },
+  "bin": {
+    "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

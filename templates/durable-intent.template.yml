@@ -8,7 +8,7 @@ intent_records:
     rationale: ""
     asserted_by: ""
     last_reviewed: ""
-    config_hash: ""
-    status: "draft"
+    config_hash: "" # sha256:<64 lowercase hex chars> or not-applicable
+    status: "draft" # draft | hash-valid | accepted | superseded
     stale_behavior: "treat_as_no_intent"
-evidence_scope: "Durable intent guides review when current, hash-validated, and accepted."
+evidence_scope: "Durable intent guides review when current and hash-validated. Only human maintainer review should mark intent accepted."

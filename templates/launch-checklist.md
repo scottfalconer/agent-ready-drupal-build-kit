@@ -1,6 +1,6 @@
 # Launch Checklist
 
-Launch readiness requires accepted evidence for every item.
+Launch readiness requires accepted evidence for every launch-blocking gate in `gates.json`. Use this checklist as a human tracker, not as a second source of truth.
 
 - [ ] Independent operator run accepted.
 - [ ] Production-equivalent Drupal target verified.
@@ -22,4 +22,4 @@ Launch readiness requires accepted evidence for every item.
 - [ ] Final QA accepted.
 - [ ] Rollback plan accepted.
 
-Use this checklist as the launch gate tracker. Link accepted evidence beside each cleared item.
+Link accepted evidence beside each cleared item. If this checklist conflicts with `gates.json`, update the checklist from `gates.json` before making a launch claim.

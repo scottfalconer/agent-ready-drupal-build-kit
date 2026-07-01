@@ -1,6 +1,6 @@
 # Packet Outputs And Gates
 
-This is the canonical output and gate vocabulary for the kit.
+The machine-readable source of truth is [../gates.json](../gates.json). This page explains the same output and gate vocabulary for humans; if it conflicts with `gates.json`, fix both before shipping the kit.
 
 ## Core Architecture Packet
 
@@ -30,7 +30,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 
 ## Hard Launch Gates
 
-Launch readiness requires accepted evidence for every hard gate:
+Launch readiness requires accepted evidence for every hard gate in `gates.json`. The summary below is explanatory, not a second source of truth:
 
 - Independent operator run.
 - Production-equivalent Drupal target.
@@ -53,6 +53,9 @@ Launch readiness requires accepted evidence for every hard gate:
 - Unexpected public-route cleanup.
 - Starter route cleanup.
 - Structured content ownership evidence.
+- Composition model declaration for every flexible landing-like route.
+- Composition-owner fidelity checks for selected owners, route rationales, sections, data sources, expected editor actions, acceptance proof, and deviation records.
+- Canvas component model fidelity when Canvas is public or part of the rebuild: component inventory, slots, typed props, entity/media/View references, monolithic component detection, string-blob prop detection, and repeatable-section Drupal ownership.
 - Content parity.
 - Media parity.
 - Visual/design parity.
