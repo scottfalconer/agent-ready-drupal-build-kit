@@ -20,6 +20,9 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `operator-run.md`
 - `production-target.md`
 - `parity-report.json`
+- `route-matrix.json`
+- `drupal-readback.json`
+- `field-output-matrix.json`
 - `launch-checklist.md`
 
 ## Hard Launch Gates
@@ -29,6 +32,8 @@ Launch readiness requires accepted evidence for every hard gate:
 - Independent operator run.
 - Production-equivalent Drupal target.
 - Full route inventory or accepted route boundary.
+- Homepage/front-page and canonical route parity.
+- Unexpected public-route cleanup.
 - Content parity.
 - Media parity.
 - Visual/design parity.
@@ -41,6 +46,7 @@ Launch readiness requires accepted evidence for every hard gate:
 - Performance.
 - Security and privacy.
 - Editorial handoff.
+- Field-to-public-output evidence.
 - Durable intent validation.
 - Maintainer signoff.
 - Final QA.

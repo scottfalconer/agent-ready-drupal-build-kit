@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "public-kit.field-output-matrix.1",
+  "site": "",
+  "checkedAt": "",
+  "bundles": [
+    {
+      "entityType": "node",
+      "bundle": "",
+      "fields": [
+        {
+          "machineName": "",
+          "editorLabel": "",
+          "required": false,
+          "fieldType": "",
+          "widget": "",
+          "formatter": "",
+          "publicRenderLocations": [],
+          "affectsAnonymousOutput": false,
+          "containsRawPresentationImplementation": false,
+          "presentationBoundary": "content_fact | semantic_visual_token | editor_metadata | invalid_raw_css_or_markup",
+          "editorOnlyRationale": "",
+          "accepted": false,
+          "notes": ""
+        }
+      ]
+    }
+  ],
+  "fieldsWithNoPublicEffect": [],
+  "rawPresentationImplementationFields": [],
+  "missingEditorLabels": [],
+  "rawMachineNameLabels": [],
+  "blockedFields": []
+}

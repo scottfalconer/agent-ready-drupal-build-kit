@@ -35,6 +35,12 @@ Before accepting a local build, record:
 
 Do not accept static HTML, local file previews, screenshots, or a non-Drupal server as a Drupal CMS build.
 
+## Primary Route Gate
+
+Treat the homepage as a primary route, not just one route in a smoke list. Capture the browser-rendered source `/` after JavaScript, including final URL, status, title, H1, key body intent, canonical link, and screenshot. Then compare target `/` against that same evidence.
+
+A target fails the local rebuild bar when `/` renders a different source pattern, wrong canonical content, unrelated default node, or duplicate content shortcut, even if the correct page exists at another alias such as `/artist` or `/home`. Only accept a redirect when the source homepage also redirects or the route matrix records an explicit, reviewed canonicalization decision.
+
 ## Drupal Build Primitives
 
 Name the expected primitives in the build brief and align them to the encoded Drupal CMS baseline. A Drupal CMS rebuild should use Drupal to hold the site architecture:
@@ -43,9 +49,10 @@ Name the expected primitives in the build brief and align them to the encoded Dr
 - taxonomies for categories, topics, audiences, conditions, locations, or other controlled lists;
 - media entities, media reference fields, image styles, and file handling for source assets;
 - menus, menu blocks, path aliases, redirects, and Pathauto patterns for navigation and route parity;
-- Views or Drupal routes for listings, search-like pages, and landing pages;
+- Canvas pages / Experience Builder for one-off composed experiences when available;
+- Views or Drupal routes for listings, search-like pages, taxonomy/category pages, and collection behavior;
 - theme templates/CSS or Drupal theme settings for presentation;
-- custom modules, recipes, or config overlays for site-specific behavior;
+- recipes, maintained contrib, config overlays, ECA, Webform, and theme code before custom modules for site-specific behavior;
 - Drush and config export for repeatable verification.
 
 If the output does not contain Drupal entities/config/code that a maintainer can inspect, it is not a Drupal-side build. A visually close static site is a design artifact, not successful execution of this kit.
@@ -79,26 +86,73 @@ For regulated, healthcare, financial, legal, safety-sensitive, or otherwise clai
 
 Safe placeholders are allowed only when they say what input is missing and who owns the next action. Placeholder content is not launch content.
 
-## Drupal-Native Pages Before Controller Mimicry
+## Native Tools Before Custom Code
 
-Use Drupal primitives before custom route controllers:
+`AGENTS.md.template` names the Drupal tool for each need: Views, Canvas/Experience Builder or Blocks/Layout Builder, ECA, the Entity and Field APIs, Configuration Management, roles and permissions, and configured contrib or Drupal CMS recipes. These tools keep the build inside Drupal's enforced access, validation, cacheability, sanitization, routing, and editorial workflow. Custom code is the exception because it can opt out of that enforcement.
 
-- Use nodes or other content entities for editable landing, product, article, campaign, retailer, location, and utility pages.
-- Use Views for listings, search-like routes, filtered collections, related-content blocks, retailer/location directories, and product/advice indexes.
-- Use menus, menu blocks, aliases, redirects, and Pathauto patterns for navigation and route ownership.
-- Keep theme templates focused on presentation of Drupal-owned data.
+When custom code is genuinely required, record why no Drupal-native tool could express the need, which editable content or config drives it, which platform guarantees it must now handle directly, and what evidence proves it preserves access, cacheability, sanitization, validation, and editor workflow.
 
-Custom controllers are allowed only when content entities, Views, blocks, menus, recipes, or config are not a reasonable fit. If a controller is used, record:
+Review attention should concentrate where a framework gate was switched off. Inventory these off-road moves and justify each one:
 
-- why Drupal config primitives were insufficient;
-- access requirements beyond `_access: TRUE`;
-- cacheability metadata;
-- which editable content or config drives the output;
-- what route/alias tests prove the route is public and not a hard-coded mimic.
+- a custom module, route controller, or endpoint;
+- an entity query/load plus render inside theme preprocess, a template, or a controller where a View or entity display should own it;
+- human copy or dynamic values such as a year, count, status, or rollup hardcoded in a template, Views text area, or import script;
+- a bespoke or unfiltered text format used for site content;
+- `accessCheck(FALSE)`, forced `max-age=0`, `_access: TRUE`, raw render arrays, unsafe source markup, or raw SQL;
+- a field value computed once at import from other entities with no live derivation, View, computed field, ECA rule, or recompute path;
+- contrib or recipe defaults, tokens, metadata, consent, moderation, email, search, sitemap, alias, or SEO config pointing at fields or behaviors the target model does not actually have;
+- a content type with no non-admin role able to create or edit it when the editorial workflow requires that;
+- exported config that is not what a clean install plus config import would load.
 
-Controller-rendered pages that replace editable Drupal content, Views listings, menus, or search should be flagged for maintainer review.
+None of these is automatically wrong, but each must earn its exception in the review packet.
 
-Do not use forced `max-age=0`, `_access: TRUE`, or unsafe raw body/source rendering as a shortcut. If a controller needs unusual access, cache, or markup handling, record the reason and put it in the maintainer review packet.
+## Custom Modules As Last Resort
+
+The preferred local rebuild has no custom module. Drupal config, recipes, maintained contrib, Views, Canvas/Experience Builder, blocks, Layout Builder, ECA, Webform, menus, aliases, theme code, and import scripts should cover most rebuild work.
+
+Do not create a catch-all source-site module such as `refwd_site`, `dangertv_site`, `site_custom`, or `migration_helpers` to collect unrelated routes, templates, CSS, one-off imports, click handlers, or miscellaneous glue. That shape is hard to hand off because it hides which parts are Drupal architecture and which parts are one-off agent decisions.
+
+If custom behavior is genuinely required, make the module Drupal-shaped:
+
+- name it for the reusable capability, not the source site;
+- keep source-specific routes, labels, tokens, selectors, and provider values in config or content;
+- expose config entities, plugins, services, events, or hooks when future variation is likely;
+- preserve access checks, CSRF expectations, cache metadata, output sanitization, validation, and privacy-safe logging;
+- include install/update paths or config schema only for behavior that cannot live in exported config;
+- record maintained-contrib and recipe alternatives checked before writing the module.
+
+For example, local click collection should first be a no-op/provider-aware stub or contrib-backed analytics decision. If a local endpoint is unavoidable, build an extensible event-tracking capability with config and validation rather than a bespoke source-site controller.
+
+## Node And Canvas Ownership
+
+Use nodes when the primary asset is reusable information. Use Canvas pages / Experience Builder when the primary asset is a one-off composed experience.
+
+Nodes model content. Canvas composes experiences. Use a node when the content should survive its current presentation. Use a Canvas page when the presentation is the content.
+
+Lean toward nodes/content types when:
+
+- there will be many similar items;
+- the thing has fields other systems should understand;
+- it will be listed, filtered, searched, related, syndicated, translated field-by-field, indexed, exposed through JSON:API, or used by an agent/integration;
+- it needs multiple displays such as teaser, card, full page, RSS, email, API, app view, or related-content widget;
+- twenty similar Canvas pages would repeat the same component pattern manually.
+
+Lean toward Canvas pages / Experience Builder when:
+
+- the main editorial work is arranging sections, components, media, calls to action, and narrative flow;
+- the page is a unique marketing, campaign, launch, donor appeal, temporary microsite, conference splash, partner, homepage, or presentation-heavy about experience;
+- a content type would create many one-off layout fields no other page will reuse.
+
+The best architecture is often hybrid: node = canonical data, Canvas = composed presentation. A product, event, article, case study, person, location, or resource should usually stay a node while Canvas arranges components, node teasers, field-bound components, calls to action, and media around it.
+
+Use another Drupal-native owner when it fits the route:
+
+- Views owns collection, search, directory, taxonomy/category, and listing pages.
+- Entity view displays and templates own repeatable detail pages.
+- Blocks or Layout Builder can own page regions when Canvas is unavailable or the page pattern is simpler and the packet records the reason.
+- Theme templates own presentation of Drupal data, not editor-owned page composition.
+
+Bad Canvas use: building repeatable structured content as hand-assembled pages. Bad node use: building a one-off landing page as a tortured content type with fields for every section, button color, logo row, promo card, and layout variant. A build that does either, or hand-codes homepage or landing-page content in Twig, a Views text area, a custom controller, or generic custom markup without this ownership decision, should return to the review loop.
 
 ## Config and Module Source of Truth
 
@@ -106,8 +160,10 @@ The target must be reproducible from reviewable Drupal artifacts:
 
 - use exported config for custom bundles, fields, form displays, view displays, Views, menus, vocabularies, image styles, roles, workflows, and Pathauto patterns;
 - use one clear source of truth for the content model, not duplicate definitions split across config and install hooks;
+- confirm the tracked config directory is the active sync directory, and that a clean install plus `config:import` would reproduce the site structure;
 - use documented default-content/import records for sample content, aliases, and menu links that are not config;
 - avoid empty custom modules that only mark ownership;
+- avoid source-site catch-all modules; custom modules should be reusable capabilities with explicit extension points and review evidence;
 - keep module install/update hooks idempotent and limited to behavior or data that cannot be represented cleanly in config.
 
 Config that imports but leaves editor forms unusable is not acceptable architecture.
@@ -127,6 +183,21 @@ The build is not reviewable until an editor can use it. Before handoff:
 - for regulated or claim-sensitive content, confirm editors can see and update source status, review status, required disclosure/label text, warnings/restrictions, professional/consumer audience separation, and blocked-evidence notes.
 
 Record unresolved editor-experience gaps in the handoff instead of hiding them behind public-page screenshots.
+
+## Presentation Boundary
+
+Content fields are not a place to store CSS or theme implementation. Do not expose editor fields such as `Background gradient CSS`, raw class names, style attributes, HTML snippets, JavaScript, iframe markup, or arbitrary theme strings.
+
+If visual variation is part of the source pattern and editors should control it, model it as constrained data:
+
+- a theme or layout variant with allowed values;
+- a taxonomy or config entity representing a palette;
+- a validated color token when color itself is editor-owned;
+- a boolean or enum for source-observed display states.
+
+The theme, Canvas/Experience Builder, Blocks/Layout Builder, or Drupal config should translate those choices into CSS. Full CSS declarations, gradients, media queries, classes, and implementation selectors belong in theme code/config or source evidence, not node fields.
+
+Flag any raw presentation field in the maintainer review. It is usually a sign the build escaped Drupal's editor model and handed implementation details to content editors.
 
 ## Media Strategy
 

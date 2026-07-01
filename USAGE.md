@@ -21,6 +21,8 @@ ddev version
 
 If Docker or DDEV is unavailable, stop and report the blocker.
 
+If this agent runtime supports Agent Skills, read docs/recommended-agent-skills.md. Install only skills that fit this run. AGENTS.md remains the operating contract. Record installed skill repos, selected skills, and versions or commit SHAs in review-packet/operator-run.md.
+
 Create a clean Drupal CMS project workspace alongside the kit folder.
 Copy AGENTS.md.template from the kit folder into that workspace as AGENTS.md.
 Fill the AGENTS.md placeholders from this prompt and the local workspace path.
@@ -29,7 +31,7 @@ Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitu
 
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 
-Follow the copied AGENTS.md as the operating guide. Start with public source audit, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify public routes, visual/function parity, and editor forms, and produce every file named in docs/output-inventory.md.
+Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, Drupal readback, field-to-output behavior, visual/function parity, and editor forms, and produce every file named in docs/output-inventory.md.
 
 Create the review packet inside the target workspace at review-packet/.
 
@@ -62,6 +64,9 @@ parent-folder/
       operator-run.md
       production-target.md
       parity-report.json
+      route-matrix.json
+      drupal-readback.json
+      field-output-matrix.json
       launch-checklist.md
       maintainer-review.md
 ```
@@ -77,9 +82,13 @@ Before calling the local build successful, the agent must record:
 - enabled modules/profile;
 - exported config;
 - recipe start-point decision and any applied recipes;
+- optional Agent Skills used, including repo, selected skill, version or commit SHA, and any conflict with `AGENTS.md`;
 - content inventory and import evidence;
 - design-system capture and target theme evidence;
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
+- route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
+- unfiltered Drupal readback for front page, all nodes including unpublished/default content, all aliases including duplicates, menus, media counts, themes, and config status;
+- field-to-output matrix showing which editor fields affect anonymous public output and which are editor-only metadata;
 - anonymous public route checks;
 - functional checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;

@@ -97,6 +97,8 @@ Run the build as a state machine. Do not skip phases.
 
 - Audit representative public source URLs and expand route coverage enough to understand the public site.
 - Build a content inventory for public pages, listings, details, media, taxonomies/categories, forms, embeds, and navigation.
+- Build a browser-rendered route manifest for the source. Include the homepage, rendered links, menu/footer/legal links, canonical aliases, redirects, status codes, titles/H1s, and key body evidence. JavaScript bundle data is useful evidence, but browser-rendered source truth wins when bundle data and rendered output disagree.
+- Mark primary routes separately from representative routes. The source homepage `/` is always a primary route unless the browser-rendered source immediately redirects elsewhere. Capture it after JavaScript/rendering, not only from a curl HTML shell or app bundle.
 - Capture the source design system: palette, typography, spacing, layout, components, responsive behavior, and high-value interaction patterns.
 - Capture source functionality: search, listings, filters, pagination, forms, video/media behavior, account/private boundaries, redirects, canonical URLs, and provider integrations.
 - Separate observed facts from target Drupal decisions.
@@ -107,12 +109,16 @@ Run the build as a state machine. Do not skip phases.
 
 - Decide the start point before building site-specific config.
 - Prefer Drupal CMS core config and maintained recipes when they fit.
-- Do not write custom code, custom controllers, or manual config when a maintained Drupal CMS recipe or Drupal-native primitive covers the need.
+- Do not write custom code, custom controllers, site-specific catch-all modules, or manual config when a maintained Drupal CMS recipe, contributed module, or Drupal-native primitive covers the need.
 - Produce `review-packet/recipe-start-point.md`.
 - Build the Drupal CMS site with DDEV, `drupal/cms`, content types, fields, taxonomy, media, Views, menus, aliases, workflows, theme work, and bounded overlays.
 - Import or recreate the reachable public content and media needed for review. Use placeholders only for private, credentialed, unavailable, or technically blocked material, and label each placeholder with the exact blocker.
+- Decide node vs Canvas ownership before building page structure. Use nodes/content types when the primary asset is reusable information with schema, fields, workflow, search, listings, APIs, or multiple displays. Use Canvas pages / Experience Builder when the primary asset is a one-off composed experience whose value is the arrangement of sections, components, media, calls to action, and narrative flow. Moving faster or hardcoding markup is not a reason to choose the wrong owner.
 - Match the source site's visual language with a custom theme/subtheme, Drupal blocks, regions, templates, image styles, and CSS. Do not fall back to Olivero or another stock theme as the final public experience unless the source itself is generic enough to justify that choice.
 - Rebuild public functionality with Drupal-native primitives where possible: Views for listings/search-like pages, menus and aliases for navigation, blocks for reusable page regions, media handling for videos/images, and Webform or provider-aware integration stubs for forms.
+- Preserve homepage and canonical route behavior deliberately. If source `/` is a 200, do not replace it with an unrelated default content page. If source `/`, `/artist`, `/you`, or similar smart-link aliases represent distinct public intents, model those intents without duplicate content nodes or alias drift.
+- Verify target `/` before polishing lower-priority routes. If target `/` renders the wrong source pattern, wrong H1, wrong body intent, wrong canonical page, or an unrelated default node, the build is incomplete even when the correct content exists at another alias.
+- For analytics, click tracking, collection, or provider callbacks, prefer documented no-op/local-only stubs. Do not log raw payloads by default. If a custom endpoint is unavoidable, validate the event shape, avoid secret/private data, mark it local-only unless production requirements are known, and record the production integration as a scoped gap.
 
 ### Phase 3: Durable Intent
 
@@ -159,6 +165,7 @@ The following are not acceptable final states:
 - partially imported reachable public media, posters, documents, videos, thumbnails, logos, or alt text without item-level blockers;
 - placeholder copy/media where source material was reachable;
 - a stock theme, generic theme, or base-theme look that does not match the source's public visual language;
+- a front page that renders the wrong source pattern, wrong canonical content, or an unrelated default page;
 - homepage-only visual parity with weak listing, detail, taxonomy/category, search, form, legal/footer, or navigation routes;
 - public pages that render but do not expose Drupal-owned content, fields, Media, Views, menus, aliases, and blocks behind them;
 - editor add/edit forms that omit load-bearing fields or expose raw machine names, missing labels, or broken widgets;
@@ -219,16 +226,31 @@ Use these Drupal CMS primitives deliberately:
 
 ## Drupal Architecture Defaults
 
+Build through Drupal's own APIs and tools. Used as intended, Drupal enforces access, required fields, config schema, output sanitization, cacheability, routing, and editor workflow for you. Custom code, custom markup, and one-off import logic are exceptions because they can opt out of those platform gates; when you leave the paved road, you own the checks Drupal would otherwise provide.
+
+Use the named Drupal tool before inventing one:
+
+- Listings, related content, search, featured/latest, directories, homepage collections, and taxonomy collections -> Views.
+- Reusable information such as articles, case studies, events, people, locations, products, services, reports, FAQs, jobs, resources, glossary terms, and press releases -> nodes/content types with fields, view modes, workflow, search/indexing, and API-ready structure.
+- One-off composed experiences such as homepages, campaign landing pages, conference splash pages, product launch pages, donor appeals, temporary microsites, custom partner pages, and presentation-heavy about pages -> Canvas pages / Experience Builder when available in the target. Use Blocks or Layout Builder only when Canvas is unavailable or the page pattern has a documented reason. Do not bake editor-owned regions into theme templates, Views text areas, or generic custom markup.
+- Automation, derived or rollup values, on-save side effects, and light workflow -> ECA or another maintained Drupal automation tool before a custom hook module.
+- Data model and relationships -> the Entity and Field APIs: content types, fields, entity references, taxonomy, computed fields, and access-checked entity queries. Do not use custom tables or raw SQL for normal content modeling.
+- Structure and reproducibility -> Configuration Management: config is the source of truth, the tracked config directory is the active sync directory, and a clean install plus config import should reproduce the site structure.
+- Access -> roles and permissions. A content type is not done until a non-admin role can create and edit it when the editorial workflow requires that.
+- Cross-cutting features -> maintained contrib or Drupal CMS recipe modules such as Media, Metatag, Pathauto, Search API, Sitemap, Content Moderation, SEO, Accessibility, Privacy, and Forms, configured against the fields the model actually has.
+
+Default to no custom modules. Do not create catch-all site modules such as `refwd_site`, `dangertv_site`, `site_custom`, or `migration_helpers` to hold ordinary pages, routes, templates, CSS, imports, click handlers, or miscellaneous glue. First exhaust Drupal config, recipes, maintained contrib, Views, Canvas/Experience Builder, blocks, Layout Builder, ECA, Webform, menus, aliases, theme code, and Drush/import scripts.
+
+Use custom code only when none of these tools can reasonably express the need. If a custom module is unavoidable, make it Drupal-shaped and reusable: name it after the capability rather than the source site, expose configuration or plugins where the behavior varies, keep source-specific values in config/content, and preserve access, cacheability, sanitization, validation, logging privacy, and editor workflow. An extensible local event or click tracker with config is a better shape than a bespoke `refwd_site` endpoint hardcoded for one rebuild. Record why the native or contrib path did not fit and what evidence proves the module is maintainable.
+
 - Model recurring source patterns as content types with human-readable field labels and useful editorial form displays.
 - Use site-specific machine-name prefixes for custom bundles, fields, views, and vocabularies when the project does not already provide a naming convention.
 - Use taxonomy for controlled category, topic, audience, condition, product, or location lists.
 - Use managed Media entities and image styles for public source assets; use explicit placeholders or external-reference fields only when assets are private, unavailable, technically blocked, or intentionally excluded. Do not silently rely on raw URI fields, CDN hotlinks, or root-relative source image paths.
 - Use Drupal menus, menu blocks, path aliases, redirects, and Pathauto patterns for navigation and route preservation.
-- Use Views for product, article, retailer/location, search, filter, related-content, and listing pages unless a controller is clearly justified.
-- Use custom controllers only when content, Views, blocks, menus, recipes, or config cannot reasonably model the behavior. Controllers must be thin, cacheable, access-controlled, and driven by editable Drupal content or config.
+- Keep presentation implementation out of content fields. Do not create editor fields for raw CSS declarations, gradients, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. If per-content visual variation is real editor-owned data, model it as a constrained semantic choice such as a theme variant, palette term, boolean, enum, or validated color token, and let the theme/config translate that token into CSS.
 - Export `entity_form_display` and `entity_view_display` config for every custom content type.
-- Keep custom modules purposeful and idempotent. Do not create empty marker modules.
-- Do not make install hooks the only source of truth for the content model.
+- Keep custom modules purposeful, reusable, bounded, and idempotent. Do not create empty marker modules or miscellaneous source-site buckets.
 - Do not render source-derived body markup with unsafe raw output.
 
 ## Content, Visual, And Functional Parity Requirements
@@ -240,6 +262,8 @@ The default build goal is complete public-facing parity, not a foundation.
 - Build a Drupal-owned content model behind that content. Do not hard-code the final site as theme-only markup.
 - Capture the source design language: background colors, accent colors, typography scale, card/list patterns, spacing, header/nav/footer, hero sections, media/poster grids, detail-page layout, buttons, forms, responsive breakpoints, and empty/loading/error states.
 - Implement the visual design in Drupal theme/templates/CSS/blocks/regions. A stock theme is acceptable only as a starting scaffold, not as the final public experience.
+- Use a node when the content should survive its current presentation. Use a Canvas page when the presentation is the content. The common high-quality pattern is node = canonical data and Canvas = composed presentation: products, events, articles, case studies, and similar structured things stay nodes, while Canvas can arrange those nodes, components, CTAs, and media into rich page experiences.
+- Do not build repeatable structured content as hand-assembled Canvas pages. Do not build one-off campaign composition as a tortured content type full of single-use layout fields. Views still own dynamic collections, filters, and search-like pages. Entity view displays still own repeatable detail pages. Theme templates own presentation of Drupal data, not editor-owned page composition.
 - Rebuild source-like public behavior: route structure, menus, listings, filters, pagination, search, forms, embeds, video/media behavior, provider links, redirects, and canonical metadata where present.
 - Verify the result in a browser. A route that returns 200 but does not look or behave like the source pattern is not complete.
 - Record any unreachable, private, credentialed, or provider-owned behavior as a scoped gap with the exact missing input.
@@ -294,6 +318,7 @@ Replace `recipes/drupal_cms_media` with the verified recipe path. If the command
 - For each recurring pattern, decide whether it is a content type, taxonomy vocabulary, media type, menu, block, View, form, or theme concern.
 - For each content type, define required fields, optional fields, cardinality, field type, widget, formatter, editor help text, validation expectations, and publication workflow.
 - Include separate display needs in the model. A hero image, listing thumbnail, inline image, and social-share image may be one shared media field or separate fields, but the decision must be explicit.
+- Separate content fields from presentation tokens. Editors should see meaningful choices such as `Release theme`, `Hero style`, or `Accent palette`, not raw implementation fields such as `Background gradient CSS`. Store raw CSS only in theme code/config or source evidence, not in node fields.
 - Plan Views at the same time as the content model. Record fields for teasers, exposed filters, contextual filters, sort criteria, related-content blocks, directories, search-like pages, and editorial/admin listings.
 - Use numeric/date/link/reference field types when visitors or editors need sorting, filtering, ranges, relationships, or governed reuse.
 - Use taxonomy terms instead of free-text categories when categories power filters, landing pages, permissions, SEO, or governance.
@@ -343,9 +368,15 @@ Before calling the local build successful, record:
 - `ddev drush status`;
 - enabled modules/profile;
 - exported config;
+- optional Agent Skills used, including repo, selected skill, version or commit SHA, and any conflict with this `AGENTS.md`;
+- unfiltered Drupal readback, including front-page setting, all nodes including unpublished/default/demo content, all aliases including duplicates, menu links, media counts, themes, config status, and unexpected public routes;
 - content inventory, media inventory, and import/recreation counts;
 - design-system capture and target theme evidence;
+- node-vs-Canvas ownership evidence: for each homepage, landing, campaign, marketing, reusable information item, listing, and editor-arranged page, record whether the canonical owner is a node/content type, Canvas page / Experience Builder page, View, entity display, block/Layout Builder region, or another Drupal-native primitive, plus the reason and editor-maintenance evidence.
 - content type, field, form display, view display, View, menu, alias, media, taxonomy, workflow, and role/permission evidence;
+- field-to-output evidence: every load-bearing or required editorial field must identify its editor label, widget, formatter/public rendering location, and whether changing it affects anonymous output. If a field is editor-only metadata, record the rationale.
+- presentation-boundary evidence: no editor field stores raw CSS, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. Any editor-owned visual variation is constrained to semantic tokens or validated color/palette choices.
+- primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - anonymous public route checks;
 - visual parity checks for homepage, listing, detail, navigation, footer, and major responsive states;
@@ -398,6 +429,10 @@ Run route and alias checks for the representative top-level, listing, search, an
 
 Detail pages must render expected title/H1 and load-bearing fields, not only HTTP 200. A route that works only through a controller template but has no editable Drupal content/config ownership is an architecture risk.
 
+The homepage is a primary route, not a representative sample. Target `/` must match the browser-rendered source homepage intent unless the source itself redirects. Do not satisfy homepage parity by placing the correct page at `/artist`, `/home`, `/landing`, or another alias while `/` renders different content.
+
+The route matrix must reconcile source-rendered routes against target routes. It must fail the review loop when a source route is missing, a target route renders the wrong H1/body pattern, homepage/front-page behavior is wrong, a legal/footer route is broken, or an unexpected public 200 exists because of duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts. Expected redirects are acceptable only when recorded with source evidence and rationale.
+
 ## Stop Conditions
 
 Stop and report blockers when:
@@ -429,4 +464,7 @@ Gate records, either accepted evidence or blocked stubs:
 - operator run record;
 - production target record or blocked production-target note;
 - parity report;
+- route matrix;
+- Drupal readback;
+- field-output matrix;
 - launch checklist.

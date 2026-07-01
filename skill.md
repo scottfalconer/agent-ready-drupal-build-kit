@@ -21,11 +21,13 @@ If the source URL is missing, ask for it before continuing.
 
 3. Read `agent-ready-drupal-build-kit/USAGE.md` for the canonical run instructions.
 4. Use `agent-ready-drupal-build-kit/AGENTS.md.template` as the operating guide for the target Drupal CMS workspace.
-5. Create a clean Drupal CMS project workspace alongside the kit folder.
-6. Create the review packet at `review-packet/`.
-7. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
-8. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
-9. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
+5. If Agent Skills are supported, read `agent-ready-drupal-build-kit/docs/recommended-agent-skills.md`; install only skills that fit the run and record them in `review-packet/operator-run.md`.
+6. Create a clean Drupal CMS project workspace alongside the kit folder.
+7. Create the review packet at `review-packet/`.
+8. Build with DDEV and `drupal/cms`; include public content, media, visual design, routes, functionality, and editor experience.
+9. Use nodes/content types for reusable information and Canvas pages / Experience Builder for one-off composed experiences; record the reason for each major ownership decision.
+10. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+11. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
 
 Partial or incomplete sites are failed runs, not deliverables. Keep working unless a blocker is outside the local agent's control and is recorded with the missing input and next action.
 

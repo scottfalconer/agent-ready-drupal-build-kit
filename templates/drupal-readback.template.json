@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "public-kit.drupal-readback.1",
+  "site": "",
+  "checkedAt": "",
+  "commands": [],
+  "drupal": {
+    "status": {},
+    "enabledModules": [],
+    "defaultTheme": "",
+    "adminTheme": "",
+    "frontPage": "",
+    "configStatus": ""
+  },
+  "content": {
+    "nodes": [],
+    "unpublishedNodes": [],
+    "defaultOrDemoContent": [],
+    "contentTypes": [],
+    "fieldStorage": [],
+    "formDisplays": [],
+    "viewDisplays": []
+  },
+  "routing": {
+    "aliases": [],
+    "duplicateAliases": [],
+    "redirects": [],
+    "unexpectedPublicRoutes": [],
+    "menus": []
+  },
+  "media": {
+    "countsByType": {},
+    "items": []
+  },
+  "views": [],
+  "workflows": [],
+  "rolesAndPermissionsNotes": [],
+  "readbackComplete": false,
+  "blockers": []
+}

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "public-kit.route-matrix.1",
+  "site": "",
+  "checkedAt": "",
+  "sourceBaseUrl": "",
+  "targetBaseUrl": "",
+  "homepageParity": {
+    "sourcePath": "/",
+    "sourceStatus": null,
+    "sourceFinalPath": "",
+    "sourceH1": "",
+    "sourceTitle": "",
+    "sourceKeyBodyIntent": "",
+    "sourceCanonical": "",
+    "sourceScreenshot": "",
+    "targetPath": "/",
+    "targetStatus": null,
+    "targetFinalPath": "",
+    "targetH1": "",
+    "targetTitle": "",
+    "targetKeyBodyIntent": "",
+    "targetCanonical": "",
+    "targetScreenshot": "",
+    "targetDrupalRouteOwner": "",
+    "accepted": false,
+    "rationale": ""
+  },
+  "primaryRoutes": [
+    {
+      "sourcePath": "/",
+      "targetPath": "/",
+      "sourceIntent": "",
+      "targetIntent": "",
+      "matchesBrowserRenderedSource": false,
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "routes": [
+    {
+      "sourcePath": "",
+      "sourceStatus": null,
+      "sourceFinalPath": "",
+      "sourceTitle": "",
+      "sourceH1": "",
+      "targetPath": "",
+      "targetStatus": null,
+      "targetFinalPath": "",
+      "targetTitle": "",
+      "targetH1": "",
+      "expectedRedirect": false,
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "renderedLinksChecked": [],
+  "menuAndFooterLinksChecked": [],
+  "legalAndPrivacyRoutesChecked": [],
+  "unexpectedPublic200s": [],
+  "missingSourceRoutes": [],
+  "wrongPatternRoutes": [],
+  "blockedRoutes": []
+}
