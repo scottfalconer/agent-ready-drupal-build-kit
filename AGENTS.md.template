@@ -18,7 +18,7 @@ The expected end state is a local Drupal CMS site that a Drupal developer could 
 
 Partial or representative sites are failed runs, not deliverables. Do not hand back a site as "rebuilt", "done", "ready", "complete", or "final" while reachable public content, media, routes, source-like design, public behavior, editor forms, or packet evidence are still missing.
 
-Use Drupal CMS mechanics directly in the build. The Drupal CMS baseline encoded here is drawn from the Drupal CMS User Guide as of 2026-06-30. If you later verify that current Drupal CMS docs differ from this file, follow current Drupal CMS mechanics and record the mismatch as a kit or upstream update candidate. Do not stop and tell the user to read external docs before building.
+Use Drupal CMS mechanics directly in the build. The Drupal CMS baseline encoded here is drawn from the Drupal CMS User Guide as of 2026-06-30 and Drupal core 11.4.0 behavior verified on 2026-07-01. Fresh `drupal/cms` installs currently resolve to Drupal core 11.4.x, including the core `dr` CLI. If you later verify that current Drupal CMS docs differ from this file, follow current Drupal CMS mechanics and record the mismatch as a kit or upstream update candidate. Do not stop and tell the user to read external docs before building.
 
 ## Required Local Stack
 
@@ -40,7 +40,8 @@ A valid local rebuild uses:
 - DDEV for local web, PHP, database, and routing.
 - `drupal/cms` as the Composer project.
 - The Drupal CMS setup assistant or a documented non-interactive equivalent.
-- Drush for status, install/readback, cache rebuild, entity inspection, and config export.
+- Drupal core `dr` CLI for core-native status and cache rebuild evidence. Use it for recipe discovery and application only after the actual target exposes recipe commands.
+- Drush for mature readback, entity inspection, extension lists, config export/status, and scripting evidence.
 - Drupal content/config entities, fields, taxonomy, media, menus, aliases, redirects, Views, form displays, view displays, workflows, themes, modules, and config overlays.
 - Anonymous browser checks against the Drupal-served DDEV URL.
 
@@ -72,6 +73,10 @@ The setup assistant opens in the browser after `ddev launch`. During setup:
 After installation, gather evidence:
 
 ```bash
+ddev exec dr --version
+ddev exec dr status
+ddev exec dr cache:rebuild
+ddev exec dr list recipe
 ddev drush status
 ddev drush pm:list --status=enabled
 ddev drush config:export -y
@@ -123,6 +128,19 @@ Complete this gate before theme polish, Canvas composition, or bulk import. A Dr
 - Source audit fields belong in the review packet, import manifest, migration map, or admin-only audit surface. Do not add `Source URL`, `Source route status`, crawl notes, source HTML, source CSS, or route evidence to normal editorial content types by default.
 - The content model is not done until a non-admin editor can add a new representative item and it appears in the relevant public listing or detail route without code changes.
 - Record this gate in `review-packet/pattern-map.json`, `review-packet/field-output-matrix.json`, Drupal readback, and maintainer review. If this gate fails, return to the review loop before declaring visual or editor parity.
+
+### Canvas Authoring Ownership Gate
+
+Complete this gate for homepage, landing, campaign, splash, marketing, presentation-heavy about, and other composed pages before final theme polish. Canvas/Experience Builder is an authoring owner, not a decorative checkbox.
+
+- If Canvas/Experience Builder is available and a homepage, landing page, campaign page, splash page, or presentation-heavy about page is source-like composition, the rebuilt public route must be owned by Canvas/Experience Builder or the packet must record why another Drupal-native owner is better.
+- A Canvas-ready page is not proven by the existence of a Canvas page. The public route, menu link, route matrix, and editor task must point to the same rebuilt composition.
+- Do not leave a starter Canvas page disconnected from the rebuilt public route. Replace it, route it correctly, unpublish it, or record why it is intentionally kept out of the public experience.
+- Utility Page is a fallback for simple low-design informational pages. Do not use it for the homepage, rich marketing pages, campaign pages, or composed source experiences unless the packet records why Canvas/Experience Builder is unavailable or a worse fit.
+- Each Utility Page exception record must name the source route, why the page is not reusable structured content, why Canvas/Experience Builder was not used, which Drupal primitive owns the route, how a non-admin editor edits it, and what browser evidence proves the public output changes.
+- Theme templates may provide chrome, regions, component styling, and entity display presentation; they must not become the hidden owner of source-specific page composition. Route-specific Twig/preprocess arrays that carry page sections, galleries, CTA copy, or body composition are a failed authoring boundary unless recorded as a temporary blocker.
+- The gate passes only when a non-admin editor can open the selected owner for the public route, edit a representative section/component/field, save, and see the Drupal-served public route change without code.
+- Record this in `review-packet/pattern-map.json`, `review-packet/route-matrix.json`, `review-packet/browser-evidence.json`, Drupal readback, and maintainer review. If the source route is visually patched in theme code but not editable through its selected Drupal owner, return to the review loop.
 
 ### Phase 2: Recipe-Backed Assembly
 
@@ -295,7 +313,8 @@ Default to no custom modules. Do not create catch-all modules named after the so
 Use custom code only when none of these tools can reasonably express the need. If a custom module is unavoidable, make it Drupal-shaped and reusable: name it after the capability rather than the source site, expose configuration or plugins where the behavior varies, keep source-specific values in config/content, and preserve access, cacheability, sanitization, validation, logging privacy, and editor workflow. An extensible local event or click tracker with config is a better shape than a bespoke source-site endpoint hardcoded for one rebuild. Record why the native or contrib path did not fit and what evidence proves the module is maintainable.
 
 - Model recurring source patterns as content types with human-readable field labels and useful editorial form displays.
-- Use site-specific machine-name prefixes for custom bundles, fields, views, and vocabularies when the project does not already provide a naming convention.
+- Editor-facing content type labels are portable nouns: `Sponsor`, `Speaker`, `Product`, `Article`, `Episode`, not `Example Sponsor` or `Brand Product`. Do not label bundles with the source site, client, brand, event, or campaign name unless the name is part of the real content type. Machine names may use a project prefix when needed to avoid collisions or follow an existing convention.
+- Use site-specific machine-name prefixes for custom bundles, fields, views, and vocabularies when the project does not already provide a naming convention, but keep those prefixes out of editor-facing labels.
 - Use taxonomy for controlled category, topic, audience, condition, product, or location lists.
 - Use managed Media entities and image styles for public source assets; use explicit placeholders or external-reference fields only when assets are private, unavailable, technically blocked, or intentionally excluded. Do not silently rely on raw URI fields, CDN hotlinks, or root-relative source image paths.
 - Use Drupal menus, menu blocks, path aliases, redirects, and Pathauto patterns for navigation and route preservation.
@@ -353,16 +372,17 @@ From the DDEV Drupal project root, collect recipe evidence with commands like:
 ```bash
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
-ddev exec php web/core/scripts/drupal recipe:info recipes/drupal_cms_media
+ddev exec dr list recipe
+ddev exec dr recipe:info ../recipes/drupal_cms_media
 ```
 
-Apply recipes only after recording why they fit the pattern map. The core recipe command shape is:
+Apply recipes only after recording why they fit the pattern map. The core `dr` recipe command shape is:
 
 ```bash
-ddev exec php web/core/scripts/drupal recipe recipes/drupal_cms_media
+ddev exec dr recipe:apply ../recipes/drupal_cms_media
 ```
 
-Replace `recipes/drupal_cms_media` with the verified recipe path. If the command is unavailable or the recipe path is missing, record the candidate as blocked or not applicable instead of assuming it exists.
+Only use `dr recipe:info` or `dr recipe:apply` after `dr list` shows those commands in the actual target. Replace `../recipes/drupal_cms_media` with the verified recipe path. The `dr` command bootstraps from the Drupal webroot, so project-root recipe paths usually need `../recipes/...`. If the command is unavailable, recipe commands are missing, or the recipe path is missing, record the candidate as blocked or not applicable instead of assuming it exists.
 
 ## Content Modeling Requirements
 
@@ -399,6 +419,7 @@ Before handoff:
 - load-bearing fields are visible to editors with clean human labels;
 - widgets match the field types and likely editor workflow;
 - raw machine names, missing labels, and translation keys are not exposed as labels;
+- source-site, client, brand, event, or campaign prefixes are not exposed in normal content type labels unless they are the actual reusable content noun;
 - required fields, help text, allowed values, taxonomy references, media widgets, link fields, moderation controls, URL alias controls, and SEO fields are understandable;
 - editors can create or update homepage, landing, product/detail, article/advice, FAQ, retailer/location, contact, legal/footer, and navigation content when those patterns exist;
 - dashboard or admin listing affordances exist for editors to find and maintain content.
@@ -432,7 +453,10 @@ Before calling the local build successful, record:
 - design-system capture and target theme evidence;
 - browser evidence for visitor-facing visual/functional claims and authenticated non-admin editor tasks;
 - node-vs-Canvas ownership evidence: for each homepage, landing, campaign, marketing, reusable information item, listing, and editor-arranged page, record whether the canonical owner is a node/content type, Canvas page / Experience Builder page, View, entity display, block/Layout Builder region, or another Drupal-native primitive, plus the reason and editor-maintenance evidence.
+- Canvas authoring ownership evidence: when Canvas/Experience Builder is the selected owner, the rebuilt public route must open in the Canvas editor for a non-admin editor, not a disconnected starter placeholder, and a representative edit must affect the anonymous public route.
+- Utility Page exception evidence: every Utility Page used for a public source route must record why Canvas/Experience Builder or a structured content type was not the better owner.
 - content type, field, form display, view display, View, menu, alias, media, taxonomy, workflow, and role/permission evidence;
+- content type label evidence showing editor-facing bundle labels are generic, portable nouns and site-specific names are limited to machine names where needed;
 - field-to-output evidence: every load-bearing or required editorial field must identify its editor label, widget, formatter/public rendering location, and whether changing it affects anonymous output. If a field is editor-only metadata, record the rationale.
 - presentation-boundary evidence: no editor field stores raw CSS, style attributes, class names, HTML snippets, JavaScript, or theme implementation strings. Any editor-owned visual variation is constrained to semantic tokens or validated color/palette choices. Also record hardcoded public strings in Twig/templates, raw field-value rendering that bypasses Drupal formatters, invalid alt/ARIA attributes, and any public navigation, footer links, CTA labels, or source-owned public copy that only exists in theme code.
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.

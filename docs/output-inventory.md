@@ -37,6 +37,7 @@ Launch readiness requires accepted evidence for every hard gate:
 - Browser-first source route expansion.
 - Public browser-rendered evidence.
 - Source/target visual comparison evidence.
+- Canvas authoring ownership evidence for composed pages.
 - Authenticated non-admin editor browser task evidence.
 - Homepage/front-page and canonical route parity.
 - Front-page alias decision.
@@ -57,6 +58,7 @@ Launch readiness requires accepted evidence for every hard gate:
 - Editorial handoff.
 - Field-to-public-output evidence.
 - Presentation ownership evidence.
+- Utility Page exception evidence.
 - Config sync directory evidence.
 - Off-road inventory evidence.
 - Durable intent validation.

@@ -11,6 +11,9 @@
 
 - DDEV project URL:
 - `ddev describe`:
+- `ddev exec dr --version`:
+- `ddev exec dr status`:
+- `ddev exec dr list recipe`:
 - `ddev drush status`:
 - Config export location:
 - Anonymous route checks:

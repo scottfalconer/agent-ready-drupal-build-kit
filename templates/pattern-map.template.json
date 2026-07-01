@@ -36,6 +36,41 @@
     "sourceAuditDataStorage": "review_packet | import_manifest | migration_map | admin_only_audit_surface | other",
     "blockers": []
   },
+  "pageCompositionOwnership": [
+    {
+      "sourceRoute": "",
+      "routeRole": "homepage | landing | campaign | splash | about | marketing | legal | other",
+      "selectedOwner": "canvas_page | experience_builder_page | utility_page | node | view | block_layout | entity_display | documented_exception",
+      "canvasOrExperienceBuilderAvailable": false,
+      "canvasOwnsPublicRoute": false,
+      "editorCanOpenSelectedOwner": false,
+      "themeOwnsOnlyPresentation": false,
+      "starterCanvasPlaceholderDisconnected": false,
+      "editorVerificationEvidence": "",
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "utilityPageExceptions": [
+    {
+      "sourceRoute": "",
+      "routeRole": "",
+      "reasonUtilityPageFits": "",
+      "whyNotStructuredContent": "",
+      "whyCanvasOrExperienceBuilderNotUsed": "",
+      "editorMaintenancePath": "",
+      "browserEvidence": "",
+      "accepted": false,
+      "notes": ""
+    }
+  ],
+  "contentTypeLabelPolicy": {
+    "editorFacingLabelsUsePortableNouns": false,
+    "siteBrandedEditorLabels": [],
+    "machineNamePrefixPolicy": "",
+    "accepted": false,
+    "notes": ""
+  },
   "seoMetadata": {
     "strategy": "",
     "metatagConfig": [],

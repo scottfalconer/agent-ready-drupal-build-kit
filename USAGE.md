@@ -31,7 +31,7 @@ Build a complete local Drupal CMS site with DDEV and drupal/cms. Do not substitu
 
 Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
 
-Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-first source route expansion, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, export structure to the tracked config sync directory, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, browser-evidence.json, Drupal readback, field-to-output behavior, starter route cleanup, rendered SEO output, visual/function parity, non-admin editor forms, off-road-inventory.md, and produce every file named in docs/output-inventory.md.
+Follow the copied AGENTS.md as the operating guide. Start with public source audit, browser-first source route expansion, browser-rendered route manifest, content inventory, design capture, functionality capture, and pattern map, then make the recipe start-point decision, build with Drupal-native primitives, export structure to the tracked config sync directory, import reachable public content and media, match the source design language, record durable intent for load-bearing decisions, name scoped gaps, verify route matrix parity, browser-evidence.json, Canvas authoring ownership for composed pages, Drupal readback, field-to-output behavior, starter route cleanup, rendered SEO output, visual/function parity, non-admin editor forms, off-road-inventory.md, and produce every file named in docs/output-inventory.md.
 
 Create the review packet inside the target workspace at review-packet/.
 
@@ -89,7 +89,7 @@ Before calling the local build successful, the agent must record:
 - design-system capture and target theme evidence;
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
 - route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
-- browser-evidence.json with source/target browser-rendered screenshots or equivalent evidence for visitor-facing routes, visual/functional comparison, and authenticated non-admin editor tasks;
+- browser-evidence.json with source/target browser-rendered screenshots or equivalent evidence for visitor-facing routes, visual/functional comparison, Canvas authoring ownership for composed pages, and authenticated non-admin editor tasks;
 - unfiltered Drupal readback for front page, config sync directory, all nodes including unpublished/default content, all aliases including duplicates, menus/menu links, Canvas pages when available, media counts, themes, and config status;
 - field-to-output matrix showing which editor fields affect anonymous public output and which are editor-only metadata;
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;

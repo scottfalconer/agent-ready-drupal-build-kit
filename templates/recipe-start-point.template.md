@@ -39,16 +39,17 @@ From the DDEV Drupal project root, collect recipe evidence with:
 ```bash
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
-ddev exec php web/core/scripts/drupal recipe:info recipes/drupal_cms_media
+ddev exec dr list recipe
+ddev exec dr recipe:info ../recipes/drupal_cms_media
 ```
 
 Apply a recipe only after recording why it fits the pattern map:
 
 ```bash
-ddev exec php web/core/scripts/drupal recipe recipes/drupal_cms_media
+ddev exec dr recipe:apply ../recipes/drupal_cms_media
 ```
 
-Replace `recipes/drupal_cms_media` with the verified recipe path.
+If `dr list recipe` does not show recipe commands, record recipe application as blocked or use the current documented Drupal core recipe path only after verifying it in the target. Replace `../recipes/drupal_cms_media` with the verified recipe path. The `dr` command resolves paths from the Drupal webroot after bootstrap, so project-root recipes usually need `../recipes/...`.
 
 | Candidate recipe | Fit | Decision | Evidence | Notes |
 | --- | --- | --- | --- | --- |
@@ -85,6 +86,7 @@ ddev drush pm:list --status=enabled
 ddev drush config:export -y
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
+ddev exec dr list recipe
 ```
 
 Recipe discovery / apply evidence:

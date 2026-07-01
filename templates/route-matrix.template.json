@@ -45,6 +45,15 @@
     "accepted": false,
     "rationale": ""
   },
+  "canvasRouteOwnership": {
+    "canvasOrExperienceBuilderAvailable": false,
+    "publicRoutesExpectedToUseCanvas": [],
+    "routesBackedByCanvas": [],
+    "routesBackedByThemeOrUtilityPageInstead": [],
+    "nonAdminEditorChecks": [],
+    "accepted": false,
+    "notes": ""
+  },
   "primaryRoutes": [
     {
       "sourcePath": "/",
@@ -84,6 +93,7 @@
     ],
     "rawNodeRoutesChecked": [],
     "starterCanvasPages": [],
+    "starterCanvasPlaceholderChecks": [],
     "staleMenuOrFooterLinks": [],
     "duplicateAliases": [],
     "unexpectedStarterPublic200s": [],

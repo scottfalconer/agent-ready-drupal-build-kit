@@ -21,6 +21,7 @@
 - Content completeness:
 - Visual/design parity:
 - Browser evidence:
+- Canvas authoring ownership:
 - Menus and routing:
 - Menu/block ownership:
 - Views and listings:
@@ -36,6 +37,8 @@
 - Editorial workflow:
 - Moderation/workflow states and roles:
 - Editor add/edit experience:
+- Utility Page exceptions:
+- Bundle label policy:
 - Accessibility tooling and content report:
 - Site settings, caching, backup, and update workflow:
 - Regulated/claim-sensitive content governance:
@@ -103,6 +106,10 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] One-off composed experiences use Canvas pages / Experience Builder when available rather than tortured content types with single-use layout fields.
 - [ ] Hybrid pages keep nodes as canonical data and use Canvas as composed presentation where that fits the source pattern.
 - [ ] Views own collection/listing/search routes and entity displays own repeatable detail pages; Canvas composition does not replace those Drupal primitives.
+- [ ] Canvas authoring ownership: The public homepage or landing-page composition is editable in Canvas when Canvas is the selected owner.
+- [ ] No starter Canvas placeholder is counted as evidence for the rebuilt public route; starter Canvas pages are replaced, routed correctly, unpublished, or explicitly excluded.
+- [ ] Utility Page exception records exist for every public source route owned by Utility Page, including why Canvas/Experience Builder and structured content were not better owners.
+- [ ] Editor-facing bundle labels are generic, portable nouns; source-site, client, brand, event, or campaign names are not exposed in content type labels unless they are part of the real content noun.
 - [ ] Automation, derived values, rollups, and light workflow use ECA or another maintained Drupal automation path before custom hook code.
 - [ ] Data relationships use the Entity and Field APIs, entity references, taxonomy, computed fields, and access-checked queries instead of custom tables or raw SQL for normal content modeling.
 - [ ] Views were planned from the content model, including teaser fields, exposed/contextual filters, sorting, related-content blocks, and directory/search-like behavior where needed.

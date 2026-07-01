@@ -61,6 +61,27 @@
       "blockers": []
     }
   ],
+  "canvasAuthoringChecks": [
+    {
+      "publicRoute": "",
+      "routeRole": "homepage | landing | campaign | splash | about | marketing | other",
+      "selectedOwner": "canvas_page | experience_builder_page | block_layout | view | utility_page | node | documented_exception",
+      "canvasEditorUrl": "",
+      "editorUser": "",
+      "editorRole": "",
+      "canvasOwnsPublicRoute": false,
+      "starterCanvasPlaceholderPresent": false,
+      "representativeEditPerformed": "",
+      "editorScreenshot": "",
+      "publicRouteBeforeEditScreenshot": "",
+      "publicRouteAfterEditScreenshot": "",
+      "publicOutputAffected": "",
+      "status": "pass | needs-review | fail | blocked",
+      "acceptedExceptions": [],
+      "accepted": false,
+      "blockers": []
+    }
+  ],
   "targetOnlyScreenshots": [],
   "missingBrowserEvidence": [],
   "browserEvidenceComplete": false,

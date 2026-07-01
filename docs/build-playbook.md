@@ -10,6 +10,21 @@ That baseline is drawn from the Drupal CMS User Guide and includes installation,
 
 If a maintainer or agent verifies that current Drupal CMS docs conflict with the encoded baseline, follow current Drupal CMS mechanics, continue only if the build remains reviewable, and record the conflict as a kit or upstream-fix item. Do not block routine use of this kit on a separate reading pass.
 
+## Drupal 11.4 Baseline
+
+As of 2026-07-01, fresh `drupal/cms` installs resolve to Drupal core 11.4.x. Treat that as the normal kit baseline unless Composer evidence in the actual target says otherwise.
+
+Use the Drupal core `dr` CLI for core-native evidence: `ddev exec dr --version`, `ddev exec dr status`, and `ddev exec dr cache:rebuild`. First verify command availability with `ddev exec dr list recipe`; do not rely on recipe application commands until the target exposes them. When available, use `ddev exec dr recipe:info ...` and `ddev exec dr recipe:apply ...` for recipe evidence. Keep Drush in the workflow for extension lists, detailed status/readback, config export/status, and `php:script`.
+
+The 11.4 baseline also changes what the kit can lean on:
+
+- recipe-first assembly is more practical because recipe install/application is faster, but do not turn that into a speed claim;
+- dependency updates can move faster because `core-recommended` no longer pins every minor dependency, but each update still needs target QA;
+- Brotli-compressed aggregated assets are available when PHP `ext-brotli` exists, but performance evidence must come from the rendered target;
+- Argon2id password hashing is a hardening option when the target environment and maintainer approve it;
+- display-management and Canvas-related readback should be verified on the real authoring owner, not inferred from enabled modules;
+- CKEditor FullScreen can improve long-form editor ergonomics, but text formats and editor forms still need non-admin verification.
+
 ## Local Runtime
 
 Use DDEV as the default local runtime for Drupal CMS rebuilds. Start from a clean project unless the task explicitly says to continue an existing target:
@@ -22,11 +37,12 @@ ddev launch
 ddev status
 ```
 
-For automated builds, use a documented equivalent Drupal CMS install/setup path. After installation, gather Drush and config evidence with commands such as `ddev drush status` and `ddev drush config:export -y`.
+For automated builds, use a documented equivalent Drupal CMS install/setup path. After installation, gather core `dr`, Drush, and config evidence with commands such as `ddev exec dr status`, `ddev drush status`, and `ddev drush config:export -y`.
 
 Before accepting a local build, record:
 
 - `ddev describe`;
+- `ddev exec dr --version`, `ddev exec dr status`, `ddev exec dr cache:rebuild`, and `ddev exec dr list recipe`;
 - `ddev drush status`;
 - enabled modules/profile;
 - exported config;
@@ -95,6 +111,7 @@ The cleaner Drupal answer is usually one content owner plus a deliberate display
 Every run should emit comparable Drupal readback. At minimum include:
 
 - `ddev drush status`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
+- `ddev exec dr status` and `ddev exec dr --version` so the packet records the core CLI and Drupal core baseline;
 - the active config sync directory and whether it is the tracked/reviewed directory;
 - content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
 - nodes including unpublished/default/demo content, aliases including duplicates, redirects, menus/menu links, blocks, Views, Canvas pages when available, and unexpected public routes;
@@ -264,6 +281,44 @@ Use another Drupal-native owner when it fits the route:
 - Theme templates own presentation of Drupal data, not editor-owned page composition.
 
 Bad Canvas use: building repeatable structured content as hand-assembled pages. Bad node use: building a one-off landing page as a tortured content type with fields for every section, button color, logo row, promo card, and layout variant. A build that does either, or hand-codes homepage or landing-page content in Twig, a Views text area, a custom controller, or generic custom markup without this ownership decision, should return to the review loop.
+
+## Canvas Authoring Ownership
+
+A Canvas-ready page is not proven by the existence of a Canvas page. It is proven when the rebuilt public route is the page a non-admin editor can open and maintain in Canvas/Experience Builder.
+
+The rebuilt public route must open in the Canvas editor when Canvas is the selected owner. The homepage, campaign landing pages, splash pages, presentation-heavy about pages, and other composed marketing experiences should not be route-specific Twig or preprocess arrays wrapped in a theme if Canvas/Experience Builder is available and fits the source pattern.
+
+Use this gate:
+
+- identify every page where the presentation is the content;
+- decide whether Canvas/Experience Builder, Blocks/Layout Builder, a View, an entity display, or a simple Utility Page owns the route;
+- verify that the public menu/link/alias resolves to the selected owner, not to a disconnected starter Canvas page;
+- log in as a non-admin editor and open the selected owner;
+- make a representative component, section, media, or CTA edit;
+- verify the anonymous public route changes without code.
+
+Theme code still matters, but it has a narrower job: chrome, regions, typography, component styling, entity display presentation, responsive behavior, and generic UI. Theme templates should not become a hidden CMS for source-specific page sections, galleries, CTA copy, or route-specific body composition.
+
+## Utility Page Decision
+
+Utility Page is a fallback for simple low-design informational pages. It can be the right owner for a basic policy page, simple notice page, or plain text informational route.
+
+Do not use Utility Page for homepages, rich landing pages, campaign pages, splash pages, presentation-heavy about pages, or recurring content objects when Canvas/Experience Builder or structured content would give editors a better Drupal owner.
+
+Every Utility Page exception should record:
+
+- source route and route role;
+- why the route is not recurring structured content;
+- why Canvas/Experience Builder was unavailable, unnecessary, or a worse fit;
+- which fields, blocks, menus, or config own the page;
+- how a non-admin editor edits it;
+- browser evidence proving an editor change affects anonymous output.
+
+## Site-Branded Bundle Labels
+
+Editor-facing bundle labels should be generic, portable nouns. Use `Sponsor`, `Speaker`, `Performer`, `Product`, `Article`, or `Episode`, not source-site, client, brand, event, or campaign-prefixed labels.
+
+Site-specific machine-name prefixes can still be useful for collision avoidance or project conventions. Keep that implementation detail out of labels editors see. A label such as `Brand Sponsor` usually means the model is carrying project provenance into the editorial experience instead of naming the reusable content object.
 
 ## Config and Module Source of Truth
 
