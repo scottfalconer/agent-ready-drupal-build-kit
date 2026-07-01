@@ -20,6 +20,7 @@
 - Media rendering and image styles:
 - Content completeness:
 - Visual/design parity:
+- Browser evidence:
 - Menus and routing:
 - Menu/block ownership:
 - Views and listings:
@@ -53,6 +54,7 @@
 - Off-road inventory (`off-road-inventory.md`):
 - Production target:
 - Browser QA:
+- Browser evidence (`browser-evidence.json`):
 - Route matrix:
 - Drupal readback:
 - Field-output matrix:
@@ -140,6 +142,9 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Site name/email, caching/aggregation, backup strategy, update readiness, security update posture, Composer-managed files, and update workflow are documented or intentionally blocked.
 - [ ] Representative top-level, listing, detail, search, where-to-buy/contact/legal routes have anonymous route evidence and alias/canonicalization notes.
 - [ ] Browser-first source route expansion checked likely public slugs from rendered links, source bundle route data, metadata, click targets, asset names, sitemap/robots hints, and naming patterns; curl-only evidence did not close route inventory.
+- [ ] Source and target screenshots exist for the homepage, primary routes, and representative page patterns at desktop and mobile widths, with accepted exceptions or blockers named.
+- [ ] Visitor-facing visual parity, functional parity, homepage parity, and source-like behavior are supported by browser-rendered source/target evidence, not inferred from curl, route status, Drush, config export, Drupal readback, target-only screenshots, or prose review.
+- [ ] Authenticated non-admin editor browser task evidence exists for every custom content type and load-bearing workflow, including create/edit task, fields/widgets verified, screenshots or captured evidence, result, and public output affected.
 - [ ] The homepage/front page matches the browser-rendered source intent, or any redirect/canonical difference is explicitly accepted with source evidence.
 - [ ] Target `/` itself was checked against browser-rendered source `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership; a correct page at another alias does not satisfy this check by itself.
 - [ ] The front-page alias decision is explicit: canonical redirect, distinct Drupal display route, View/route composition, or duplication with synchronization warning.

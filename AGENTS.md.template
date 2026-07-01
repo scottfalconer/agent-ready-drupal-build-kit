@@ -176,6 +176,34 @@ Each loop must:
 
 Stop only when the local Drupal CMS site has reviewable content, media, visual design, public functionality, editor forms, and packet evidence, or when a blocker outside the local agent's control is recorded with the missing input and next action.
 
+## Browser Evidence Gate
+
+Claims about what a visitor sees or what an editor can do require browser evidence. The tool is not prescribed. The evidence is prescribed.
+
+Use any available real browser method: an automated browser runner, browser DevTools protocol, Selenium-style driver, local browser with screenshots, or another tool that renders CSS, JavaScript, fonts, media, redirects, and authenticated Drupal pages as a user would see them. Do not prescribe one tool. Do record the tool or method used.
+
+Do not claim visual parity, functional parity, homepage parity, source-like behavior, or editor experience from curl, HTTP status, Drush, config export, Drupal readback, DOM snapshots without rendered layout, target-only screenshots, or prose review alone.
+
+Create `review-packet/browser-evidence.json` and store supporting files under:
+
+```text
+review-packet/evidence/browser/
+```
+
+At minimum, browser evidence must cover:
+
+- source and target homepage at desktop and mobile widths;
+- source and target examples for every major public page pattern: landing, listing, detail, taxonomy/category, search/discovery, form/contact, legal/footer, and media/embed routes where present;
+- every primary route identified in `route-matrix.json`;
+- any route whose design, behavior, or source intent differs from the dominant template;
+- non-admin editor create/edit workflows for every custom content type and load-bearing workflow.
+
+For each public route check, record source URL/final URL, target URL/final URL, viewport, source screenshot, target screenshot, optional diff image or diff score when the tool supports it, title, H1, key visible body intent, section order, header/footer treatment, typography and spacing notes, media placement, functional behavior notes, accepted exceptions, and pass/fail status.
+
+For each editor workflow check, record editor user/role, Drupal route, task performed, screenshots or captured evidence for the form and result, fields/widgets verified, public output affected, failures, accepted exceptions, and pass/fail status.
+
+If browser evidence is missing or failing, return to the review loop. A target that is only source-inspired is not visually complete.
+
 ## Completion Contract
 
 The final handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required.
@@ -402,6 +430,7 @@ Before calling the local build successful, record:
 - unfiltered Drupal readback, including front-page setting, config sync directory, all nodes including unpublished/default/demo content, all aliases including duplicates, menu links, media counts, Canvas pages when available, themes, config status, and unexpected public routes;
 - content inventory, media inventory, and import/recreation counts;
 - design-system capture and target theme evidence;
+- browser evidence for visitor-facing visual/functional claims and authenticated non-admin editor tasks;
 - node-vs-Canvas ownership evidence: for each homepage, landing, campaign, marketing, reusable information item, listing, and editor-arranged page, record whether the canonical owner is a node/content type, Canvas page / Experience Builder page, View, entity display, block/Layout Builder region, or another Drupal-native primitive, plus the reason and editor-maintenance evidence.
 - content type, field, form display, view display, View, menu, alias, media, taxonomy, workflow, and role/permission evidence;
 - field-to-output evidence: every load-bearing or required editorial field must identify its editor label, widget, formatter/public rendering location, and whether changing it affects anonymous output. If a field is editor-only metadata, record the rationale.
@@ -502,6 +531,7 @@ Gate records, either accepted evidence or blocked stubs:
 - production target record or blocked production-target note;
 - parity report;
 - route matrix;
+- browser evidence;
 - Drupal readback;
 - field-output matrix;
 - launch checklist.

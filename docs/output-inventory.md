@@ -22,6 +22,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `production-target.md`
 - `parity-report.json`
 - `route-matrix.json`
+- `browser-evidence.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
 - `launch-checklist.md`
@@ -34,6 +35,9 @@ Launch readiness requires accepted evidence for every hard gate:
 - Production-equivalent Drupal target.
 - Full route inventory or accepted route boundary.
 - Browser-first source route expansion.
+- Public browser-rendered evidence.
+- Source/target visual comparison evidence.
+- Authenticated non-admin editor browser task evidence.
 - Homepage/front-page and canonical route parity.
 - Front-page alias decision.
 - Unexpected public-route cleanup.

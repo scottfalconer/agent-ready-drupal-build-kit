@@ -41,6 +41,16 @@ Treat the homepage as a primary route, not just one route in a smoke list. Captu
 
 A target fails the local rebuild bar when `/` renders a different source pattern, wrong canonical content, unrelated default node, or duplicate content shortcut, even if the correct page exists at another alias such as `/artist` or `/home`. Only accept a redirect when the source homepage also redirects or the route matrix records an explicit, reviewed canonicalization decision.
 
+## Browser Evidence Is Not Optional
+
+Browser evidence is a proof substrate for visitor-facing and editor-experience claims. Command success, Drupal readback, route status, screenshots of only the target, and prose review are useful lower layers, but they cannot prove what a visitor sees or what a non-admin editor can do.
+
+Keep this tool-neutral. A run may use an automated browser runner, DevTools protocol, Selenium-style driver, manual local browser screenshots, or another browser-capable method. The kit should require the evidence shape, not a specific tool.
+
+Use browser evidence to compare source and target pages at the route and viewport level. For public visual and functional checks, capture source and target final URLs, viewport, screenshots, visible title/H1/body intent, section order, header/footer treatment, typography/spacing notes, media placement, behavior notes, accepted exceptions, and pass/fail status. A visual diff image or score is useful when the chosen tool supports it, but the gate is the browser-rendered comparison, not the library.
+
+Use authenticated browser evidence for non-admin editor tasks. A form URL returning 200 or a Drush permission check is not enough. The packet should show that the editor can complete the task and that the expected public output changes without code changes.
+
 ## Browser-First Route Discovery
 
 Route discovery starts in the browser, not in curl. Curl is useful for headers and status codes, but a curl response alone cannot close the route inventory for JavaScript, static-bundle, smart-link, SPA, or app-like sources.

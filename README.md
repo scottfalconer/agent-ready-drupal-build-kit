@@ -99,7 +99,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `START.md`: expanded quickstart and operator flow for humans who want more detail.
 - `USAGE.md`: the full canonical agent prompt.
 - `AGENTS.md.template`: the self-contained file an agent copies into the target Drupal CMS workspace as `AGENTS.md`. This is what carries Drupal's best practices into the build.
-- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, Drupal readback, field-output matrix, scoped gaps, launch gates, and maintainer review.
+- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, Drupal readback, field-output matrix, scoped gaps, launch gates, and maintainer review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.
 - `docs/output-inventory.md`: the canonical packet and gate vocabulary.
