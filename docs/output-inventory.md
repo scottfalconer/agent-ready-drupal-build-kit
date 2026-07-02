@@ -24,6 +24,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `route-matrix.json`
 - `browser-evidence.json`
 - `independent-verification.json`
+- `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
 - `launch-checklist.md`
@@ -37,7 +38,8 @@ Launch readiness requires accepted evidence for every hard gate in `gates.json`.
 - Full route inventory or accepted route boundary.
 - Browser-first source route expansion.
 - Public browser-rendered evidence.
-- Independent verifier pass that tries to falsify completion claims against the live site.
+- Independent mechanical verifier pass that tries to falsify packet and live-site completion claims.
+- Blind adversarial product review that compares the original brief/source-of-truth materials to the target, before reading builder rationale or packet claims.
 - Per-route item reconciliation for repeated source items.
 - Collection ownership ledger and editor add-a-row evidence.
 - Target-required route checks for privacy/legal/footer, sitemap/robots when enabled, login/admin expectations, front page behavior, and locally introduced menu/footer links.

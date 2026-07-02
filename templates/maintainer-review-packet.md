@@ -59,6 +59,7 @@
 - Browser QA:
 - Browser evidence (`browser-evidence.json`):
 - Independent verification (`independent-verification.json`):
+- Blind adversarial review (`blind-adversarial-review.json`):
 - Route matrix:
 - Drupal readback:
 - Field-output matrix:
@@ -173,6 +174,14 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Independent verification was performed by a fresh verifier context, subagent, review-only task, or clearly separated skeptic checklist; the same builder self-review is not counted as independent evidence.
 - [ ] The independent verifier tried to falsify completion claims against the live site for per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder or starter content, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
 - [ ] Every failed independent-verification claim is fixed, item-blocked with external evidence, or explicitly listed as a reason to reject the handoff.
+- [ ] Blind adversarial review was performed by a fresh reviewer/context that did not build the target and saw only the original brief, target URL or artifact, explicit source-of-truth materials, and needed editor credentials before public/artifact review.
+- [ ] The blind reviewer did not read implementation files, the review packet, builder notes, config/scripts, prior build conversation, self-authored claims, or the builder's final summary before reviewing the produced target.
+- [ ] `blind-adversarial-review.json` includes desktop and mobile route notes, raw evidence under `review-packet/evidence/blind-adversarial-review/`, and a verdict of `good` or `good_enough` before any complete local rebuild claim.
+- [ ] Blind route coverage includes every primary route from `route-matrix.json` at desktop and mobile widths, or `routeCoverage.omittedPrimaryRoutes` records accepted out-of-scope or external-blocker dispositions.
+- [ ] Every screenshot path named in `routeViewportReviews` resolves to a real packet evidence file.
+- [ ] The blind review checked the actual requested outcome, visual/interaction parity, content hierarchy, media/art fidelity, navigation, links, forms, embeds, editor/admin maintainability, accessibility, SEO, console errors, and obvious usability defects where applicable.
+- [ ] Every blocker, critical, or high blind-review defect is fixed, externally blocked, or explicitly accepted as out of scope; fixed defects name the later `reviewPasses` entry that confirmed the fix.
+- [ ] `acceptable_with_issues`, `not_good_enough`, or `blocked` is a reason to reject completion.
 - [ ] The homepage/front page matches the browser-rendered source intent, or any redirect/canonical difference is explicitly accepted with source evidence.
 - [ ] Target `/` itself was checked against browser-rendered source `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership; a correct page at another alias does not satisfy this check by itself.
 - [ ] The front-page alias decision is explicit: canonical redirect, distinct Drupal display route, View/route composition, or duplication with synchronization warning.

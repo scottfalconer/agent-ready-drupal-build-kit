@@ -17,6 +17,7 @@ Launch readiness requires accepted evidence for every launch-blocking gate in `g
 - [ ] Performance accepted.
 - [ ] Security and privacy accepted.
 - [ ] Editorial handoff accepted.
+- [ ] Blind adversarial review accepted for the brief, target, and source-of-truth materials.
 - [ ] Durable intent validated.
 - [ ] Maintainer signoff accepted.
 - [ ] Final QA accepted.

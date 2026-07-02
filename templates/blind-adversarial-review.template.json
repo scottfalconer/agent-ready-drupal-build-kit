@@ -1,0 +1,127 @@
+{
+  "schemaVersion": "public-kit.blind-adversarial-review.1",
+  "site": "",
+  "checkedAt": "",
+  "evidenceRoot": "review-packet/evidence/blind-adversarial-review/",
+  "reviewer": {
+    "nameOrRole": "blind product reviewer | adversarial reviewer | skeptic subagent | fresh context | manual reviewer",
+    "runtimeOrTool": "",
+    "freshContextUsed": false,
+    "sameContextAsBuilder": false,
+    "didNotBuildTarget": false,
+    "inputsRestrictedToBriefTargetAndSourceTruth": false,
+    "implementationFilesReadBeforePublicReview": false,
+    "reviewPacketReadBeforePublicReview": false,
+    "priorBuildConversationRead": false,
+    "builderSummaryExcluded": false,
+    "notes": ""
+  },
+  "reviewInputs": {
+    "originalBrief": "",
+    "acceptanceCriteria": [],
+    "targetUrlsOrArtifacts": [],
+    "sourceOfTruthMaterials": [
+      {
+        "type": "source_site | screenshot | design_file | content_inventory | brand_guide | written_spec | other",
+        "reference": "",
+        "notes": ""
+      }
+    ],
+    "credentialsUsed": [],
+    "excludedInputs": [
+      "implementation files",
+      "review packet before public/artifact review",
+      "builder notes",
+      "prior build conversation",
+      "self-authored completion claims"
+    ]
+  },
+  "routeCoverage": {
+    "strategy": "all_primary_routes | representative_sample_with_rationale",
+    "primaryRoutesReviewed": [],
+    "omittedPrimaryRoutes": [
+      {
+        "route": "",
+        "disposition": "accepted_out_of_scope | external_blocker",
+        "rationale": "",
+        "acceptedBy": ""
+      }
+    ],
+    "notes": ""
+  },
+  "routeViewportReviews": [
+    {
+      "route": "",
+      "sourceTruthReference": "",
+      "targetUrlOrArtifact": "",
+      "viewport": "desktop | mobile | tablet | custom",
+      "sourceScreenshot": "",
+      "targetScreenshot": "",
+      "routeNotes": "",
+      "checks": {
+        "actualRequestedOutcome": "pass | fail | blocked | not_applicable",
+        "firstFoldVisualParity": "pass | fail | blocked | not_applicable",
+        "navigationBehavior": "pass | fail | blocked | not_applicable",
+        "contentHierarchyCompleteness": "pass | fail | blocked | not_applicable",
+        "mediaArtworkFidelity": "pass | fail | blocked | not_applicable",
+        "interactionParity": "pass | fail | blocked | not_applicable",
+        "editorialQuality": "pass | fail | blocked | not_applicable",
+        "accessibilitySeoConsoleObviousDefects": "pass | fail | blocked | not_applicable"
+      },
+      "verdict": "good | good_enough | acceptable_with_issues | not_good_enough | blocked",
+      "evidence": []
+    }
+  ],
+  "editorExperienceReviews": [
+    {
+      "task": "create content | edit content | update navigation | update media | update Canvas section | add collection item | other",
+      "briefExpectation": "",
+      "targetAdminUrl": "",
+      "editorRole": "",
+      "publicOutputExpectedToChange": "",
+      "publicOutputChanged": false,
+      "notInspectedReason": "",
+      "verdict": "good | good_enough | acceptable_with_issues | not_good_enough | blocked",
+      "evidence": []
+    }
+  ],
+  "productDefects": [
+    {
+      "id": "",
+      "severity": "blocker | critical | high | medium | low",
+      "title": "",
+      "briefExpectation": "",
+      "sourceTruthEvidence": "",
+      "targetFinding": "",
+      "evidence": [],
+      "recommendedFix": "",
+      "status": "open | fixed | accepted_out_of_scope | external_blocker",
+      "resolvedByReviewPassId": "",
+      "acceptedBy": "",
+      "acceptedReason": ""
+    }
+  ],
+  "reviewPasses": [
+    {
+      "id": "",
+      "checkedAt": "",
+      "reviewer": "",
+      "verdict": "good | good_enough | acceptable_with_issues | not_good_enough | blocked",
+      "notes": ""
+    }
+  ],
+  "summary": {
+    "verdict": "good | good_enough | acceptable_with_issues | not_good_enough | blocked",
+    "completionState": "mechanically_verified | parity_reviewed | human_accepted | complete | blocked",
+    "desktopMobileReviewed": false,
+    "routeNotesPresent": false,
+    "rawEvidencePresent": false,
+    "openBlockerIssueCount": 0,
+    "openCriticalIssueCount": 0,
+    "openHighIssueCount": 0,
+    "acceptedOutOfScopeIssueCount": 0,
+    "externalBlockerIssueCount": 0,
+    "completeLocalRebuildClaimAllowed": false,
+    "notes": ""
+  }
+}

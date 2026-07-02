@@ -14,6 +14,7 @@
     "route-matrix.json",
     "browser-evidence.json",
     "independent-verification.json",
+    "blind-adversarial-review.json",
     "drupal-readback.json",
     "field-output-matrix.json",
     "launch-checklist.md"
@@ -193,6 +194,14 @@
       "phase": 6,
       "evidenceFile": "independent-verification.json",
       "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-BLIND-01",
+      "title": "Blind adversarial product review completed against brief and source of truth",
+      "phase": 6,
+      "evidenceFile": "blind-adversarial-review.json",
+      "checkedBy": "blind-verifier",
       "blocking": "handoff"
     },
     {

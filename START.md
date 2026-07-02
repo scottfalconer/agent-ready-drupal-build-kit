@@ -41,8 +41,9 @@ You will not hand-edit anything yourself. The agent does the setup and review lo
 3. it fills in the placeholders from your prompt;
 4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
 5. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
-6. it runs an independent verifier pass that tries to falsify the completion claims against the live site;
-7. it copies the needed packet templates from `templates/`, creates `review-packet/` with the evidence, and runs `bin/verify-packet.mjs` before handoff.
+6. it runs an independent mechanical verifier pass that tries to falsify packet and live-site claims;
+7. it runs a blind adversarial product review against the original brief/source-of-truth and target, without showing the reviewer the builder's rationale first;
+8. it copies the needed packet templates from `templates/`, creates `review-packet/` with the evidence, and runs `bin/verify-packet.mjs` before handoff.
 
 ## Workspace Topology
 
@@ -67,7 +68,7 @@ Under the hood, the agent works in four moves and repeats them as a review loop.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps:** list what still needs a human: private access, provider credentials, legal/privacy, integrations, accessibility, performance, security, SEO, production target, launch, and maintainer review.
 
-Before handoff, the agent also needs a fresh verifier pass. The verifier acts as a skeptic: it checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence.
+Before handoff, the agent also needs two skeptic passes. The mechanical verifier checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence. The blind adversarial reviewer sees only the original brief, the target, and source-of-truth materials before public review, then decides whether the produced site is actually good enough.
 
 ## The Review Bar
 
@@ -81,7 +82,8 @@ This is what separates a complete Drupal rebuild from a foundation or lookalike.
 - Do flexible pages have a real authoring owner, and do Canvas pages have usable section-level component models when Canvas is used?
 - Are the load-bearing decisions captured and usable by later agents?
 - Are the remaining business, legal, integration, production, and launch gaps named?
-- Did an independent verifier try to falsify the completion claims against the live site?
+- Did an independent verifier try to falsify the mechanical completion claims against the live site?
+- Did a blind adversarial reviewer decide the target is good enough against the original brief and source-of-truth materials?
 - Would a Drupal maintainer put their name on this as a complete local starting point?
 
 If any answer is "no," the result can still be useful. It just is not yet something to stand behind.

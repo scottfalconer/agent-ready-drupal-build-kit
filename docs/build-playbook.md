@@ -69,9 +69,9 @@ Use browser evidence to compare source and target pages at the route and viewpor
 
 Use authenticated browser evidence for non-admin editor tasks. A form URL returning 200 or a Drush permission check is not enough. The packet should show that the editor can complete the task and that the expected public output changes without code changes.
 
-## Independent Verification Pass
+## Independent Mechanical Verification Pass
 
-The builder's self-review is useful, but it is not enough to close the rebuild. A separate verifier that did not build the site should try to falsify every completion claim against the live Drupal site and the current packet.
+The builder's self-review is useful, but it is not enough to close the rebuild. A separate verifier that did not build the site should try to falsify every mechanical completion claim against the live Drupal site and the current packet.
 
 Use the strongest separation the runtime supports: a subagent, a new agent context, a review-only task, or a clearly separated skeptic checklist that reads only the operating guide, live target URLs, credentials needed for editor checks, and the packet. The verifier should not rely on the builder's prose summary as evidence. If the runtime cannot create a separate context, record that as degraded independence rather than treating it as the same confidence level.
 
@@ -90,7 +90,30 @@ The verifier must emit `review-packet/independent-verification.json`. At minimum
 - field-output gaps where required or load-bearing fields do not affect anonymous output or only carry implementation metadata;
 - direct database cleanup or destructive import cleanup recorded as local-only off-road work with a production-safe alternative.
 
-Failures from this pass are work items unless the verifier proves a real external blocker. A site cannot be called complete while the independent verifier has open failed claims.
+Failures from this pass are work items unless the verifier proves a real external blocker. This pass can prove the packet is current and internally honest. It does not prove the target is good enough for the user's requested outcome.
+
+## Blind Adversarial Product Review
+
+Mechanical verification and packet checks can pass while the product is still not good enough. A blind adversarial review is the product-quality gate: a fresh reviewer compares the original brief and source-of-truth materials to the produced target without first reading the builder's rationale.
+
+Use the strongest separation the runtime supports. The reviewer should receive only the original brief, acceptance criteria, target URL or artifact, source site/screenshots/design files/content inventory/brand guide/spec named in the brief, and credentials needed for editor checks. Before public or artifact review, the reviewer should not read implementation files, review-packet files, builder notes, config/scripts, prior build conversation, self-authored completion claims, or the builder's final summary.
+
+The reviewer must emit `review-packet/blind-adversarial-review.json` and store raw evidence under `review-packet/evidence/blind-adversarial-review/`. At minimum it should include desktop and mobile route notes and evaluate:
+
+- whether the target satisfies the actual requested outcome;
+- first-fold visual parity, source/design/brief interaction parity, and mobile navigation;
+- route-by-route content hierarchy, completeness, and editorial quality;
+- media and artwork fidelity, not just asset counts;
+- homepage and landing-page composition ownership and editor maintainability;
+- navigation, links, forms, embeds, and source-like workflows;
+- CMS/editor experience when the brief asks for it;
+- accessibility, SEO, console errors, and obvious usability defects.
+
+Use a verdict vocabulary that separates evidence layers: `mechanically_verified`, `parity_reviewed`, `human_accepted`, `complete`, and `blocked`. A packet with passing scripts is mechanically verified. It is not complete until the blind reviewer verdict is `good` or `good_enough`, raw evidence exists, desktop/mobile route notes exist, and any remaining blocker/critical/high findings are fixed or explicitly accepted as out-of-scope or external blockers.
+
+The route coverage floor is the route matrix, not a single homepage row. Complete claims should cover every primary route from `route-matrix.json` at desktop and mobile widths. If a primary route is omitted, the blind review must record the omission with an accepted out-of-scope or external-blocker disposition. The screenshot paths named in each route review should resolve to real packet evidence files. If a defect is marked fixed, the blind review should name the later review pass that confirmed it; otherwise the artifact cannot distinguish rerun review from status laundering.
+
+A site cannot be called complete while the blind adversarial review says `acceptable_with_issues`, `not_good_enough`, or `blocked`.
 
 ## Browser-First Route Discovery
 
