@@ -4,7 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Agent instructions and packet verification for local Drupal CMS rebuilds.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scottfalconer/agent-ready-drupal-build-kit.git"
+  },
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "verify-packet": "node bin/verify-packet.mjs"
   },
   "bin": {

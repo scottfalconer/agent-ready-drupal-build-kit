@@ -1,15 +1,19 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const KIT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const USAGE = 'Usage: node bin/verify-packet.mjs --packet review-packet --out review-packet/evidence/packet-verification.json';
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const BLIND_COMPLETE_VERDICTS = new Set(['good', 'good_enough']);
 const GATE_CHECKED_BY = new Set(['human', 'verify-script', 'verifier', 'blind-verifier']);
 const BLIND_DEFECT_SEVERITIES = new Set(['blocker', 'critical', 'high', 'medium', 'low']);
 const BLIND_DEFECT_STATUSES = new Set(['open', 'fixed', 'accepted_out_of_scope', 'external_blocker']);
+
+class UsageError extends Error {}
 
 function parseArgs(argv) {
   const args = {
@@ -19,14 +23,35 @@ function parseArgs(argv) {
 
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === '--packet') {
-      args.packet = argv[index + 1];
+    if (arg === '--packet' || arg === '--out') {
+      const next = argv[index + 1];
+      if (!next || next.startsWith('--')) {
+        throw new UsageError(`${arg} requires a value.`);
+      }
+      if (arg === '--packet') {
+        args.packet = next;
+      } else {
+        args.out = next;
+      }
       index += 1;
-    } else if (arg === '--out') {
-      args.out = argv[index + 1];
-      index += 1;
+    } else if (arg.startsWith('--packet=')) {
+      const value = arg.slice('--packet='.length);
+      if (!value) {
+        throw new UsageError('--packet requires a value.');
+      }
+      args.packet = value;
+    } else if (arg.startsWith('--out=')) {
+      const value = arg.slice('--out='.length);
+      if (!value) {
+        throw new UsageError('--out requires a value.');
+      }
+      args.out = value;
     } else if (arg === '--help' || arg === '-h') {
       args.help = true;
+    } else if (arg.startsWith('-')) {
+      throw new UsageError(`Unknown option: ${arg}.`);
+    } else {
+      throw new UsageError(`Unexpected positional argument: ${arg}.`);
     }
   }
 
@@ -35,6 +60,18 @@ function parseArgs(argv) {
   }
 
   return args;
+}
+
+function isDirectRun() {
+  if (!process.argv[1]) {
+    return false;
+  }
+
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(SCRIPT_PATH);
+  } catch {
+    return false;
+  }
 }
 
 async function readJson(path, errors) {
@@ -425,6 +462,8 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
+  const completeLocalRebuildClaimAllowed =
+    completionAllowed(independentVerification) && completionAllowed(blindAdversarialReview);
   validateCompletionAgreement(independentVerification, blindAdversarialReview, errors);
   validateIndependentVerification(packetDir, independentVerification, errors);
   await validateBlindAdversarialReview(packetDir, blindAdversarialReview, routeMatrix, errors);
@@ -438,6 +477,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gatesSchemaVersion: gates?.schemaVersion ?? '',
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
+    completeLocalRebuildClaimAllowed,
     valid: errors.length === 0,
     errors,
     warnings
@@ -447,8 +487,12 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    process.stdout.write('Usage: node bin/verify-packet.mjs --packet review-packet --out review-packet/evidence/packet-verification.json\n');
+    process.stdout.write(`${USAGE}\n`);
     return;
+  }
+
+  if (!existsSync(args.packet)) {
+    throw new UsageError(`Packet directory does not exist: ${args.packet}.`);
   }
 
   const report = await validatePacket({ packetDir: args.packet });
@@ -463,12 +507,22 @@ async function main() {
     process.exit(1);
   }
 
-  process.stdout.write(`Packet verification passed. Report: ${args.out}\n`);
+  if (report.completeLocalRebuildClaimAllowed) {
+    process.stdout.write(`Packet verification passed for complete local rebuild claim. Report: ${args.out}\n`);
+  } else {
+    process.stdout.write(
+      `Packet structure valid; no complete local rebuild claim allowed by verifier/blind-review evidence. Report: ${args.out}\n`
+    );
+  }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isDirectRun()) {
   main().catch((error) => {
-    process.stderr.write(`${error.stack || error.message}\n`);
+    if (error instanceof UsageError) {
+      process.stderr.write(`${error.message}\n${USAGE}\n`);
+    } else {
+      process.stderr.write(`${error.stack || error.message}\n`);
+    }
     process.exit(1);
   });
 }

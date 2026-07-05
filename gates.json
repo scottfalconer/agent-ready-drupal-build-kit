@@ -6,6 +6,7 @@
     "recipe-start-point.md",
     "durable-intent.yml",
     "scoped-gap-list.md",
+    "open-decisions.md",
     "off-road-inventory.md",
     "maintainer-review.md",
     "operator-run.md",
@@ -194,6 +195,14 @@
       "phase": 6,
       "evidenceFile": "independent-verification.json",
       "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-HANDOFF-01",
+      "title": "Human-only open decisions are presented in final handoff",
+      "phase": 6,
+      "evidenceFile": "open-decisions.md",
+      "checkedBy": "human",
       "blocking": "handoff"
     },
     {

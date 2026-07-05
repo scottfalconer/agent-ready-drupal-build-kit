@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "public-kit.parity-report.1",
+  "targetUrl": "",
+  "addressableSurface": {
+    "routesInScope": 0,
+    "routesExcluded": 0,
+    "exclusions": []
+  },
+  "routeChecks": [],
+  "functionalChecks": [],
+  "visualChecks": [],
+  "contentChecks": [],
+  "browserEvidence": [],
+  "blockedEvidence": [],
+  "verdict": "blocked | partial | pass",
+  "evidenceScope": "Parity applies to the accepted addressable surface and evidence layers listed in this report."
+}

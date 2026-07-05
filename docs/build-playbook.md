@@ -512,7 +512,7 @@ Run a route/alias smoke check for every representative top-level source route an
 
 Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
 
-Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/nytol-range`, either preserve, redirect, or explicitly retire the source-style route.
+Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/seasonal-range`, either preserve, redirect, or explicitly retire the source-style route.
 
 Detail-route checks must prove rendered content, not only HTTP status. For product/article/legal routes, record title or H1, canonical/alias behavior, and the presence of load-bearing fields such as product type, review status, safety/disclosure copy, retailer/provider links, and media/placeholders where relevant.
 

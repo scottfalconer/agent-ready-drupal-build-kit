@@ -24,7 +24,7 @@
 
 ## Phase 4: Verify
 
-- Run the packet verifier: `node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet`.
+- From the target Drupal project workspace, run the packet verifier: `node ../agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet`.
 - Use `gates.json` as the stable gate vocabulary.
 - Verify the packet is internally consistent.
 - Run independent verification against the live Drupal site and packet before handoff.
