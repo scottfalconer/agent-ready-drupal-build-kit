@@ -62,7 +62,7 @@ Visual parity requires browser evidence for the source-like public experience: p
 
 ```json
 {
-  "schemaVersion": "public-kit.1",
+  "schemaVersion": "public-kit.parity-report.1",
   "targetUrl": "https://target.example",
   "addressableSurface": {
     "routesInScope": 0,

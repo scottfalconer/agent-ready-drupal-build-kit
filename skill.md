@@ -1,3 +1,8 @@
+---
+name: agent-ready-drupal-build-kit
+description: Build a complete local Drupal CMS rebuild with the Agent-Ready Drupal Build Kit and produce a verified review packet.
+---
+
 # Send Your AI Agent To Drupal
 
 Build a complete local Drupal CMS site, not a static lookalike, Drupal-shaped foundation, or partial representative build.
@@ -31,9 +36,10 @@ If the source URL is missing, ask for it before continuing.
 12. Run browser-first route expansion, browser-evidence checks for visitor-facing routes, composition model fidelity, Canvas authoring ownership, Canvas component model fidelity, and non-admin editor tasks, Starter route cleanup, front-page/alias decision checks, tracked config export/import checks, rendered SEO checks, Drupal readback, field-output checks, off-road inventory, and non-admin editor-form checks before handoff.
 13. Run an independent mechanical verifier pass in a separate subagent, fresh context, review-only task, or clearly separated skeptic checklist that did not build the site. Its job is to try to falsify packet and live-site completion claims. Produce `review-packet/independent-verification.json`; fix or item-block failures for per-route item counts, collection ownership, rendered embeds/media, raw embed/markup scans, footer/legal/target-required routes, route drift, Canvas placeholders, composition model fidelity, Canvas component model fidelity, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness. If same-context fallback is unavoidable, record degraded independence.
 14. Run a blind adversarial product review in a fresh agent/context. Give the reviewer only the original brief, target URL or artifact, source-of-truth materials named in the brief, and credentials needed for editor checks. Do not show implementation files, review-packet files, builder notes, config/scripts, prior build conversation, or self-authored claims before public/artifact review. Produce `review-packet/blind-adversarial-review.json` with every primary route from `route-matrix.json` covered at desktop/mobile widths unless an accepted omission is recorded, real screenshot evidence under `review-packet/evidence/blind-adversarial-review/`, and defect review passes; fix or item-block failures until the blind reviewer verdict is `good` or `good_enough`.
-15. Copy needed files from `agent-ready-drupal-build-kit/templates/` into `review-packet/`, fill them with evidence or blocked stubs, then run `node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet` before any complete rebuild claim.
-16. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
-17. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
+15. Produce `review-packet/open-decisions.md` at final handoff with only decisions a human owner, operator, legal/privacy reviewer, maintainer, or launch authority can make. Do not stop early for these decisions, and do not hide agent-fixable implementation work there.
+16. Copy needed files from `../agent-ready-drupal-build-kit/templates/` into `review-packet/`, fill them with evidence or blocked stubs, then run `node ../agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet` from the target Drupal project workspace before any complete rebuild claim.
+17. Work in review loops: build, verify, self-review against `AGENTS.md`, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
+18. Do not substitute static HTML, screenshots, a local file preview, a CMS-shaped packet, a stock-theme placeholder, a partial/sample catalog, or a separate frontend.
 
 Partial or incomplete sites are failed runs, not deliverables. Keep working unless a blocker is outside the local agent's control and is recorded with the missing input and next action.
 

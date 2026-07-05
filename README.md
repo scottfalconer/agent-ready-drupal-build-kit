@@ -6,31 +6,10 @@ Give your agent a source URL. This kit gives the agent the Drupal-specific instr
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
 
-Send your local AI coding agent this from the parent folder where you want the Drupal project created:
+Use one prompt. From the parent folder where the kit and Drupal project should sit, clone this repository if it is not already present, then give your local coding agent the canonical prompt in [USAGE.md](USAGE.md).
 
-```text
-Use the Agent-Ready Drupal Build Kit to rebuild the source site as a local Drupal CMS project.
-
-Source site: [SOURCE_URL]
-
-Build the complete public-facing Drupal CMS rebuild: content, media, visual design, routes, functionality, and editor experience.
-Do not hand back a partial or representative build as the result. A partial or incomplete site is a failed run unless a real blocker outside the local agent's control is recorded.
-
-Make the kit available locally as reference material beside the Drupal project:
-
+```bash
 git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
-
-Run the preflight checks in agent-ready-drupal-build-kit/USAGE.md first. If Docker or DDEV is unavailable, stop and report the blocker.
-Read agent-ready-drupal-build-kit/USAGE.md for the canonical run instructions.
-Create a clean Drupal CMS project workspace alongside agent-ready-drupal-build-kit.
-Copy agent-ready-drupal-build-kit/AGENTS.md.template into that target workspace as AGENTS.md.
-Fill the AGENTS.md placeholders from this prompt and the local workspace path.
-Work in review loops: build, verify, self-review against AGENTS.md, fix the highest-impact gaps, update the review packet, and repeat until the complete local rebuild bar is met or a real blocker is recorded.
-Before building flexible landing-like pages, declare what owns the composition and why. Canvas is one valid owner, not a route mandate; if Canvas is used, prove it has a usable component model and editor-owned repeatable data.
-Before final handoff, run both verification gates: independent mechanical verification against the live Drupal site and packet, then a blind adversarial product review against the original brief/source-of-truth and target. Produce review-packet/independent-verification.json and review-packet/blind-adversarial-review.json, fix failed claims, and rerun the failed gate before calling the site complete.
-Copy the matching files from agent-ready-drupal-build-kit/templates/ into review-packet/ as needed and fill them. Then run node agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet before handoff.
-Create the review packet at review-packet/.
-Mark uncertain facts, missing evidence, and assumptions clearly in the review packet instead of inventing details.
 ```
 
 ## Who This Is For
@@ -41,7 +20,7 @@ You bring:
 
 - a site to study;
 - a local AI coding agent;
-- Docker and DDEV.
+- Docker, DDEV, and Node.js 20 or newer.
 
 The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
 
@@ -53,12 +32,13 @@ You need:
 
 - Docker running;
 - DDEV installed;
+- Node.js 20 or newer for the packet verifier;
 - a local coding agent with filesystem and shell access;
 - a public source URL.
 
 A normal web chat is not enough, because the agent needs to create files and run local commands.
 
-Need the full strict prompt? See [USAGE.md](USAGE.md). Want the guided version? Start with [START.md](START.md).
+Need the copy-paste prompt? See [USAGE.md](USAGE.md). Want the guided version? Start with [START.md](START.md).
 
 If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs/recommended-agent-skills.md). Skills are optional accelerators; this kit remains the operating contract.
 
@@ -75,7 +55,9 @@ If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs
 - Independent mechanical verification from a fresh verifier context that tries to break completion claims against the live site before handoff: route item counts, collection ownership, embeds, target-owned links, route drift, Canvas placeholders, composition model fidelity, Canvas component fidelity, brand assets, editor add-a-row tasks, labels, field output, and off-road cleanup.
 - Blind adversarial product review from a reviewer that did not build the site and sees only the original brief, target, and source-of-truth materials before public review. This catches "the checks pass, but this is not the requested site" failures.
 - A machine-readable `gates.json` vocabulary and `bin/verify-packet.mjs` packet verifier that fail when required packet files are missing, JSON is invalid, verifier independence is degraded without consequences, blind-review completion evidence is missing or not good enough, recipe discovery/default-owner evidence is missing, or accepted durable intent lacks a valid hash.
-- A `review-packet/` explaining decisions, remaining gaps, and verification evidence.
+- A `review-packet/` explaining architecture decisions, remaining gaps, human-only open decisions, and verification evidence.
+
+The verifier's zero exit code means the packet is structurally valid. A complete rebuild claim is allowed only when the generated `packet-verification.json` also records `completeLocalRebuildClaimAllowed: true`.
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
@@ -108,7 +90,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `AGENTS.md.template`: the self-contained file an agent copies into the target Drupal CMS workspace as `AGENTS.md`. This is what carries Drupal's best practices into the build.
 - `gates.json`: the stable machine-readable gate vocabulary.
 - `bin/verify-packet.mjs`: a self-contained packet verifier the agent and reviewer can rerun.
-- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, independent verification, blind adversarial review, Drupal readback, field-output matrix, scoped gaps, launch gates, and maintainer review.
+- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, independent verification, blind adversarial review, Drupal readback, field-output matrix, scoped gaps, open decisions, launch gates, and maintainer review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.
 - `docs/output-inventory.md`: the canonical packet and gate vocabulary.

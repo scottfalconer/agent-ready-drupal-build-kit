@@ -11,6 +11,7 @@ These files must exist for every run:
 - `recipe-start-point.md`
 - `durable-intent.yml`
 - `scoped-gap-list.md`
+- `open-decisions.md`
 - `off-road-inventory.md`
 - `maintainer-review.md`
 
@@ -40,6 +41,7 @@ Launch readiness requires accepted evidence for every hard gate in `gates.json`.
 - Public browser-rendered evidence.
 - Independent mechanical verifier pass that tries to falsify packet and live-site completion claims.
 - Blind adversarial product review that compares the original brief/source-of-truth materials to the target, before reading builder rationale or packet claims.
+- Human-only open decisions presented at final handoff without treating agent-resolvable work as a human decision.
 - Per-route item reconciliation for repeated source items.
 - Collection ownership ledger and editor add-a-row evidence.
 - Target-required route checks for privacy/legal/footer, sitemap/robots when enabled, login/admin expectations, front page behavior, and locally introduced menu/footer links.
@@ -81,3 +83,5 @@ Launch readiness requires accepted evidence for every hard gate in `gates.json`.
 - Final QA.
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
+
+`bin/verify-packet.mjs` exits zero when the packet is structurally valid. A successful structural packet is not the same as an accepted complete rebuild claim. Complete rebuild claims require `review-packet/evidence/packet-verification.json` to record `completeLocalRebuildClaimAllowed: true`, backed by independent verification and blind-review evidence.

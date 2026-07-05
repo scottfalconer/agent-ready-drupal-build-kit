@@ -7,7 +7,7 @@ Copy this file into the root of a target Drupal CMS rebuild workspace as `AGENTS
 The agent fills these values from the canonical prompt in `USAGE.md` and derived setup values. The human should not need to hand-edit this file.
 
 - Source site: `[SOURCE_URL]`
-- Kit location or reference: `[KIT_PATH_OR_PUBLIC_REPO_URL]`
+- Local kit path: `[KIT_LOCAL_PATH]`
 - Build workspace: `[TARGET_WORKSPACE]`
 
 ## Operating Contract
@@ -31,13 +31,15 @@ Run preflight before starting the build:
 ```bash
 docker info >/dev/null
 ddev version
+node --version
 ```
 
-If either command fails, stop and report the blocker.
+If Docker, DDEV, or Node.js 20+ is unavailable, stop and report the blocker.
 
 A valid local rebuild uses:
 
 - DDEV for local web, PHP, database, and routing.
+- Node.js 20 or newer for packet verification.
 - `drupal/cms` as the Composer project.
 - The Drupal CMS setup assistant or a documented non-interactive equivalent.
 - Drupal core `dr` CLI for core-native status and cache rebuild evidence. Use it for recipe discovery and application only after the actual target exposes recipe commands.
@@ -115,7 +117,7 @@ Run the build as a state machine. Do not skip phases.
 - Separate observed facts from target Drupal decisions.
 - Mark missing or uncertain facts as unresolved; use `UNKNOWN` only where a structured field needs a placeholder value.
 - Produce `review-packet/source-audit.json` and `review-packet/pattern-map.json`.
-- Use the kit templates as the packet shapes. Copy matching files from `[KIT_PATH_OR_PUBLIC_REPO_URL]/templates/` into `review-packet/` as needed, remove the `.template` suffix in the target filename, and fill each file with run-specific evidence or a blocked stub.
+- Use the kit templates as the packet shapes. Copy matching files from `[KIT_LOCAL_PATH]/templates/` into `review-packet/` as needed, remove the `.template` suffix in the target filename, and fill each file with run-specific evidence or a blocked stub.
 
 ### Structured Content First Gate
 
@@ -199,7 +201,10 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 ### Phase 4: Gap List
 
 - Produce `review-packet/scoped-gap-list.md`.
+- Produce `review-packet/open-decisions.md`.
 - Name what remains for operator, maintainer, private or inaccessible content, provider credentials, legal/privacy, integration, accessibility, performance, security, SEO, production target, launch, and final QA.
+- Separate human-only decisions from agent-resolvable work. Human-only decisions include owner approval of source/content/legal choices, production target selection, provider credentials, route/content disposition calls, accepted exceptions, maintainer signoff, and launch go/no-go. Missing reachable content, broken routes, visual defects, editor-form gaps, import retries, and incomplete packet evidence are work items; keep building instead of listing them as decisions.
+- Do not stop early because a human-only decision exists. Build as far as the local agent can, item-block only the affected facts, and present the remaining decisions during final handoff.
 - Create blocked stubs for gate records that are not earned yet.
 
 ### Phase 5: Stake-My-Name Self-Eval
@@ -245,6 +250,7 @@ The blind reviewer must receive only:
 - the original user brief and acceptance criteria;
 - the target URL or target artifact;
 - explicit source-of-truth materials named in the brief, such as a source site, screenshots, design files, content inventory, brand guide, or written spec;
+- a restricted primary-route list extracted from `route-matrix.json` that contains route paths and source-truth references only, not builder rationale or packet claims;
 - credentials needed for editor/admin checks when the brief requires CMS/editor experience.
 
 The blind reviewer must not read these before public/artifact review:
@@ -267,19 +273,19 @@ The reviewer's job is to falsify completion against the brief and source-of-trut
 - editor/admin maintainability when the brief requires a CMS/editor experience;
 - accessibility, SEO, console errors, and obvious usability defects.
 
-Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. The review must include desktop and mobile route notes. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. Claim completion only after the blind reviewer says the target is good enough, or after remaining issues are clearly recorded as explicit out-of-scope constraints or external blockers.
+Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. The review must include desktop and mobile route notes. If a fresh blind reviewer/context is unavailable, record degraded independence honestly and leave `completeLocalRebuildClaimAllowed` false. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. Claim completion only after the blind reviewer says the target is good enough, or after remaining issues are clearly recorded as explicit out-of-scope constraints or external blockers.
 
-The blind review claim set comes from the brief and packet, not the builder's preferences. For complete claims, cover every primary route in `review-packet/route-matrix.json` at desktop and mobile widths, or record an explicit `routeCoverage.omittedPrimaryRoutes` entry with an accepted out-of-scope or external-blocker disposition. Each route review screenshot reference must point at a real file under `review-packet/evidence/blind-adversarial-review/` or another packet-local evidence path. Every product defect must have a valid severity and status; missing status is treated as open. A fixed defect must name the `reviewPasses` entry that confirmed the fix, so the artifact distinguishes rerun review from a builder-edited status.
+The blind review claim set comes from the brief, source-truth materials, target, and restricted route list, not the builder's preferences. For complete claims, cover every primary route in that restricted route list at desktop and mobile widths, or record an explicit `routeCoverage.omittedPrimaryRoutes` entry with an accepted out-of-scope or external-blocker disposition. Each route review screenshot reference must point at a real file under `review-packet/evidence/blind-adversarial-review/` or another packet-local evidence path. Every product defect must have a valid severity and status; missing status is treated as open. A fixed defect must name the `reviewPasses` entry that confirmed the fix, so the artifact distinguishes rerun review from a builder-edited status.
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
 After independent verification, run the packet verifier from the target workspace:
 
 ```bash
-node [KIT_PATH_OR_PUBLIC_REPO_URL]/bin/verify-packet.mjs --packet review-packet
+node [KIT_LOCAL_PATH]/bin/verify-packet.mjs --packet review-packet
 ```
 
-This command must exit zero before any complete local rebuild claim. It writes `review-packet/evidence/packet-verification.json`. If verifier independence is degraded, the packet verifier requires `independent-verification.json` to cap `summary.completeLocalRebuildClaimAllowed` at `false`. If the blind reviewer is not fresh, did not stay blind to builder rationale before public review, lacks desktop/mobile route notes, lacks raw evidence, has open blocker/critical/high product defects, or does not reach a `good` or `good_enough` verdict, the packet verifier rejects complete-claim artifacts.
+This command must exit zero before any complete local rebuild claim, and `review-packet/evidence/packet-verification.json` must record `completeLocalRebuildClaimAllowed: true`. A zero exit with `completeLocalRebuildClaimAllowed: false` is only a structurally valid blocked or incomplete packet. If verifier independence is degraded, the packet verifier requires `independent-verification.json` to cap `summary.completeLocalRebuildClaimAllowed` at `false`. If the blind reviewer is not fresh, did not stay blind to builder rationale before public review, lacks desktop/mobile route notes, lacks raw evidence, has open blocker/critical/high product defects, or does not reach a `good` or `good_enough` verdict, the packet verifier rejects complete-claim artifacts.
 
 ## Required Review Loop
 
@@ -367,6 +373,7 @@ Before final handoff, answer this completion gate:
 - Target-required routes such as privacy/legal/footer links, sitemap/robots when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links resolve as intended.
 - Review packet evidence is current and matches the live Drupal site.
 - Independent verification has tried to falsify the completion claims and every failure is fixed or item-blocked.
+- Human-only open decisions are listed in `review-packet/open-decisions.md`, and agent-resolvable work has not been hidden there.
 
 If any answer is no, continue the review loop. Do not present the site as finished.
 
@@ -386,8 +393,9 @@ If any answer is no, continue the review loop. Do not present the site as finish
 12. Verify visual, content, and functional parity in a browser.
 13. Verify editor add/edit forms while logged in.
 14. Produce the scoped gap list.
-15. Run independent verification against the live site and packet; fix or block every falsified claim.
-16. Package maintainer review evidence.
+15. Produce the human-only open decisions handoff.
+16. Run independent verification against the live site and packet; fix or block every falsified claim.
+17. Package maintainer review evidence.
 
 ## Drupal CMS Baseline To Encode In The Build
 
@@ -583,7 +591,8 @@ Before calling the local build successful, record:
 - raw embed and source-markup scan evidence: editorial field scans for raw iframe/script/inline-handler/style/source HTML findings, with every remaining raw embed listed in `off-road-inventory.md`.
 - independent verification evidence: a fresh verifier context attempted to falsify completion claims against the live site, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
 - blind adversarial review evidence: a reviewer that did not build the target compared the original brief and source-of-truth materials to the live target on desktop and mobile, excluded builder rationale before public review, produced `review-packet/blind-adversarial-review.json`, and stored raw evidence under `review-packet/evidence/blind-adversarial-review/`.
-- packet verifier evidence: `review-packet/evidence/packet-verification.json` from `node [KIT_PATH_OR_PUBLIC_REPO_URL]/bin/verify-packet.mjs --packet review-packet`, with a zero exit code before any complete local rebuild claim.
+- open decisions evidence: `review-packet/open-decisions.md` lists only decisions a human owner, operator, legal/privacy reviewer, maintainer, or launch authority must make, with options, current evidence, impact, and affected gate. It must not hide work the agent can still fix.
+- packet verifier evidence: `review-packet/evidence/packet-verification.json` from `node [KIT_LOCAL_PATH]/bin/verify-packet.mjs --packet review-packet`, with a zero exit code and `completeLocalRebuildClaimAllowed: true` before any complete local rebuild claim.
 - composition model evidence: every flexible landing-like route has a declared authoring owner, section ownership model, editor mental-model rationale, expected editor actions, acceptance proof, and deviation records when the implementation differs.
 - Canvas component fidelity evidence: every public or rebuild-owned Canvas page has a rational component model that rejects one giant components, JSON/newline URL/string blobs for repeatable content, hardcoded source-owned Twig literals, and repeatable sections not backed by Drupal-owned data.
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
@@ -617,6 +626,14 @@ At minimum cover:
 - maintainer review blockers and final QA blockers.
 
 Each gap needs responsible role, current evidence, blocked reason, next action, and status.
+
+## Open Decisions
+
+Create `review-packet/open-decisions.md` at final handoff. This is the short list for decisions only a human can make. It should include current evidence, options, recommended default when evidence supports one, impact if deferred, owner role, affected gate, and status.
+
+This is not a permission slip to stop early. Before adding a decision here, ask whether the agent can resolve it with more build work, browser checks, Drupal readback, packet updates, route cleanup, imports, theme work, or editor-form fixes. If yes, fix it or record it as an implementation gap in `scoped-gap-list.md`, not as a human decision.
+
+Valid human-only decisions include production target selection, credentials and provider accounts, legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope blockers.
 
 Use the four-layer truth model:
 
@@ -672,7 +689,7 @@ Create or update a review packet with:
 
 Gate vocabulary:
 
-- `[KIT_PATH_OR_PUBLIC_REPO_URL]/gates.json`;
+- `[KIT_LOCAL_PATH]/gates.json`;
 
 Core architecture packet:
 
