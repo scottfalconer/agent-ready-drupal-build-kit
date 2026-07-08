@@ -30,7 +30,11 @@ ddev version
 node --version
 ```
 
-If Docker, DDEV, or Node.js 20+ is unavailable, fix the local environment before asking for a build.
+If Docker, DDEV, or Node.js 20+ is unavailable, the fastest fix is the Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer), which sets up the full environment in one command:
+
+```bash
+bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
+```
 
 ## Run Shape
 

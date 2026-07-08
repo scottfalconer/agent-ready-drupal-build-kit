@@ -34,7 +34,13 @@ ddev version
 node --version
 ```
 
-If Docker, DDEV, or Node.js 20+ is unavailable, stop and report the blocker.
+If Docker, DDEV, or Node.js 20+ is unavailable, report the blocker and give the human the one-command environment fix, the Drupal One Line Installer:
+
+```bash
+bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
+```
+
+Do not run that installer without the human's explicit consent; it installs system tools and can require elevated access. If the environment was provisioned with it, record that in review-packet/operator-run.md.
 
 A valid local rebuild uses:
 

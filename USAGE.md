@@ -20,7 +20,11 @@ docker info >/dev/null
 ddev version
 node --version
 
-If Docker, DDEV, or Node.js 20+ is unavailable, stop and report the blocker.
+If Docker, DDEV, or Node.js 20+ is unavailable, report the blocker and give the user the one-command environment fix, the Drupal One Line Installer:
+
+bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
+
+Do not run that installer yourself without the user's explicit consent; it installs system tools and can require elevated access. If the environment was provisioned with it, record that in review-packet/operator-run.md.
 
 If this agent runtime supports Agent Skills, read agent-ready-drupal-build-kit/docs/recommended-agent-skills.md. Install only skills that fit this run. AGENTS.md remains the operating contract. Record installed skill repos, selected skills, and versions or commit SHAs in review-packet/operator-run.md.
 
