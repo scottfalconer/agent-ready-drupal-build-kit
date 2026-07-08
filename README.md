@@ -6,41 +6,46 @@ Give your agent a source URL. This kit gives the agent the Drupal-specific instr
 
 This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
 
-Use one prompt. From the parent folder where the kit and Drupal project should sit, clone this repository if it is not already present, then give your local coding agent the canonical prompt in [USAGE.md](USAGE.md).
+## Quick Start
 
-```bash
+You need:
+
+- [Docker](https://www.docker.com/) running;
+- [DDEV](https://ddev.com/) installed;
+- [Node.js](https://nodejs.org/) 20 or newer for the packet verifier;
+- a local coding agent with filesystem and shell access, such as Claude Code, Codex, or Cursor;
+- a public source URL: the site you want rebuilt.
+
+A normal web chat is not enough, because the agent needs to create files and run local commands.
+
+Open your coding agent in the folder where the work should live — an empty folder is fine; the kit and the Drupal project will sit side by side inside it. Replace `[SOURCE_URL]` with the site you want to rebuild, then paste this:
+
+```text
+Use the Agent-Ready Drupal Build Kit to rebuild the source site as a complete local Drupal CMS project.
+
+Source site: [SOURCE_URL]
+
+If the folder agent-ready-drupal-build-kit is not already present here, clone it:
+
 git clone https://github.com/scottfalconer/agent-ready-drupal-build-kit.git
+
+Then read agent-ready-drupal-build-kit/USAGE.md and follow its canonical prompt exactly, using the source site above.
+Do not hand back a partial or representative build as the result.
 ```
+
+The agent does the rest: it clones the kit, checks your tools, builds the site locally with DDEV and `drupal/cms`, and hands back a working site plus a `review-packet/` explaining what it built and why. Expect an iterative build over multiple agent passes, not one quick chat response.
+
+The full canonical prompt lives in [USAGE.md](USAGE.md). Want the guided walkthrough? Start with [START.md](START.md).
+
+If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs/recommended-agent-skills.md). Skills are optional accelerators; this kit remains the operating contract.
 
 ## Who This Is For
 
 This kit is for developers, designers, agencies, and site builders who want to try Drupal CMS without becoming Drupal-fluent first.
 
-You bring:
-
-- a site to study;
-- a local AI coding agent;
-- Docker, DDEV, and Node.js 20 or newer.
-
-The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
+You bring a site to study and the prerequisites above. The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
 
 Already fluent in Drupal? Use this as a repeatable agent workflow and review harness.
-
-## Quick Start
-
-You need:
-
-- Docker running;
-- DDEV installed;
-- Node.js 20 or newer for the packet verifier;
-- a local coding agent with filesystem and shell access;
-- a public source URL.
-
-A normal web chat is not enough, because the agent needs to create files and run local commands.
-
-Need the copy-paste prompt? See [USAGE.md](USAGE.md). Want the guided version? Start with [START.md](START.md).
-
-If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs/recommended-agent-skills.md). Skills are optional accelerators; this kit remains the operating contract.
 
 ## What The Agent Produces
 
@@ -49,19 +54,14 @@ If your agent supports Agent Skills, see [docs/recommended-agent-skills.md](docs
 - Source-like visual design: palette, typography, spacing, layout, components, and responsive behavior.
 - Source-like public functionality: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where reachable.
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
-- Composition ownership for flexible pages: Canvas/Experience Builder, structured landing content, Layout Builder, Views, entity displays, or documented exceptions, with section-level editor proof.
-- Browser-first route discovery, Starter route cleanup, front-page/alias decisions, and Drupal readback that another developer can inspect.
-- Version-controlled config as the source of truth, rendered SEO/social evidence, non-admin editor-role verification, and an off-road inventory for any custom code or hardcoded behavior.
-- Independent mechanical verification from a fresh verifier context that tries to break completion claims against the live site before handoff: route item counts, collection ownership, embeds, target-owned links, route drift, Canvas placeholders, composition model fidelity, Canvas component fidelity, brand assets, editor add-a-row tasks, labels, field output, and off-road cleanup.
-- Blind adversarial product review from a reviewer that did not build the site and sees only the original brief, target, and source-of-truth materials before public review. This catches "the checks pass, but this is not the requested site" failures.
-- A machine-readable `gates.json` vocabulary and `bin/verify-packet.mjs` packet verifier that fail when required packet files are missing, JSON is invalid, verifier independence is degraded without consequences, blind-review completion evidence is missing or not good enough, recipe discovery/default-owner evidence is missing, or accepted durable intent lacks a valid hash.
-- A `review-packet/` explaining architecture decisions, remaining gaps, human-only open decisions, and verification evidence.
-
-The verifier's zero exit code means the packet is structurally valid. A complete rebuild claim is allowed only when the generated `packet-verification.json` also records `completeLocalRebuildClaimAllowed: true`.
+- Pages editors can actually maintain: each flexible page declares which Drupal tool owns its composition (Canvas/Experience Builder, Layout Builder, Views, structured content, or a documented exception), proven with a non-admin editor account.
+- Version-controlled config as the source of truth, plus evidence another developer can inspect: route-by-route comparisons, rendered SEO output, browser evidence, and an inventory of any custom code or hardcoded behavior.
+- Independent verification and a blind adversarial review that try to break the build's completion claims before handoff. This catches "the checks pass, but this is not the requested site" failures.
+- A `review-packet/` explaining architecture decisions, remaining gaps, human-only open decisions, and verification evidence — machine-checked: `bin/verify-packet.mjs` fails the packet when required evidence is missing, and a complete rebuild claim is allowed only when the verifier output records it.
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
-The precise file-by-file packet is listed in [docs/output-inventory.md](docs/output-inventory.md).
+The precise file-by-file packet and gate vocabulary are listed in [docs/output-inventory.md](docs/output-inventory.md).
 
 ## Why This Is Different
 
@@ -90,15 +90,11 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `AGENTS.md.template`: the self-contained file an agent copies into the target Drupal CMS workspace as `AGENTS.md`. This is what carries Drupal's best practices into the build.
 - `gates.json`: the stable machine-readable gate vocabulary.
 - `bin/verify-packet.mjs`: a self-contained packet verifier the agent and reviewer can rerun.
-- `templates/`: packet templates for source audit, pattern map, recipe start point, durable intent, route matrix, browser evidence, independent verification, blind adversarial review, Drupal readback, field-output matrix, scoped gaps, open decisions, launch gates, and maintainer review.
+- `templates/`: packet templates for every required review artifact, from source audit to blind adversarial review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.
 - `docs/output-inventory.md`: the canonical packet and gate vocabulary.
 - `docs/`: reference material and rationale.
-
-## Requirements
-
-Local builds run on DDEV and `drupal/cms` by default. Static HTML, screenshots, local file previews, and non-Drupal frontends do not count as Drupal CMS builds.
 
 ## Rights
 

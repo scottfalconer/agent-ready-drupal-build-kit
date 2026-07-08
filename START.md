@@ -17,7 +17,7 @@ You will need a few things on your machine first:
 - Docker running;
 - DDEV installed;
 - Node.js 20 or newer;
-- a local coding agent with filesystem and shell access, such as Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
+- a local coding agent with filesystem and shell access, such as Claude Code, Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
 - a public source URL.
 
 A normal web chat alone is not enough, because the agent must create files and run local commands.
