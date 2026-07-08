@@ -8,17 +8,15 @@ This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal
 
 ## Quick Start
 
-You need:
+Fastest way in: one command sets up the whole local environment — Docker, DDEV, Drupal CMS, and a coding agent — using the Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer):
 
-- [Docker](https://www.docker.com/) running;
-- [DDEV](https://ddev.com/) installed;
-- [Node.js](https://nodejs.org/) 20 or newer for the packet verifier;
-- a local coding agent with filesystem and shell access, such as Claude Code, Codex, or Cursor;
-- a public source URL: the site you want rebuilt.
+```bash
+bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
+```
 
-A normal web chat is not enough, because the agent needs to create files and run local commands.
+Prefer to bring your own tools? You'll want [Docker](https://www.docker.com/) running, [DDEV](https://ddev.com/), [Node.js](https://nodejs.org/) 20 or newer, and a local coding agent with filesystem and shell access — Claude Code, Codex, Cursor, and others all work. A normal web chat won't do, because the agent needs to create files and run local commands.
 
-Open your coding agent in the folder where the work should live — an empty folder is fine; the kit and the Drupal project will sit side by side inside it. Replace `[SOURCE_URL]` with the site you want to rebuild, then paste this:
+Either way, you bring one thing: a public URL for the site you want rebuilt. Open your coding agent in the folder where the work should live (an empty folder is fine), replace `[SOURCE_URL]` with that URL, and paste this:
 
 ```text
 Use the Agent-Ready Drupal Build Kit to rebuild the source site as a complete local Drupal CMS project.
