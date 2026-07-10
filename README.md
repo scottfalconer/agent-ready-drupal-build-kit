@@ -1,20 +1,43 @@
 # Agent-Ready Build Kit for Drupal CMS
 
-**Build a real Drupal CMS site with your AI coding agent.**
+**Give your coding agent a source URL. Get back a real, editable Drupal CMS site.**
 
-Give your agent a source URL. This kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS rebuild: real public content, source-shaped content structures, source-like visual design, public routes and functionality, editorial workflows, and a review packet that explains the work.
+## Copy This Prompt
 
-This is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
+Open Codex, Claude Code, or OpenCode in an empty folder. Change only the `Source site` line, then paste the whole prompt:
 
-## Quick Start
+```text
+Rebuild the source site below as a complete local Drupal CMS site.
 
-The fastest path uses the official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) to create the one Drupal project you will rebuild. Run it from the folder that should contain your new site:
+Source site: [SOURCE_URL]
+Build kit: https://github.com/scottfalconer/agent-ready-drupal-build-kit
+
+Use the build kit as your instructions and handle all setup yourself. If needed, use its recommended One Line Installer path. Work in exactly one Drupal project, install and initialize the kit there, then continue until the real Drupal site passes the kit's verification.
+
+As soon as the first meaningful source-shaped route works, share its DDEV URL with me, then continue. Do not hand back a partial or representative build as the result.
+```
+
+Prerequisite: macOS or Linux. On macOS, start Docker Desktop or OrbStack. After that, the prompt is the whole human workflow: the agent handles Drupal setup, skill installation, the rebuild, live verification, and the review packet.
+
+Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. The agent should stop only for a genuinely human decision or something it cannot access, such as private source content or external credentials.
+
+The result is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
+
+## What The Agent Does
+
+The kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS rebuild: real public content, source-shaped content structures, source-like visual design, public routes and functionality, editorial workflows, and a review packet that explains the work.
+
+For a new project, the agent uses the official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) to create the one Drupal project it will rebuild. The current installer supports macOS and Linux. It chooses **Drupal CMS** and the current coding agent, then treats the resulting DDEV project as the rebuild target rather than creating another site beside or inside it.
+
+A normal web chat is not enough because the agent needs filesystem, shell, Drupal, and browser access. Expect an iterative build over multiple agent passes, not one quick chat response.
+
+## Manual Setup (Optional)
+
+If you prefer to perform setup yourself, run the One Line Installer from the folder that should contain the new site:
 
 ```bash
 bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
 ```
-
-The current installer supports macOS and Linux.
 
 Choose **Drupal CMS** and your preferred coding agent when prompted. The installer creates the DDEV project, installs Drupal CMS and the selected agent in the container, and leaves your shell in the new project directory. That project is the rebuild target; do not create a second Drupal site beside or inside it.
 
@@ -27,22 +50,7 @@ ddev codex
 
 `ddev codex` is the Codex example. Use `ddev claude` or `ddev opencode` when that is the agent you selected.
 
-Then replace `[SOURCE_URL]` and give the selected agent this prompt:
-
-```text
-Use the installed agent-ready-drupal-build-kit skill to rebuild the source site in this existing Drupal CMS project.
-
-Source site: [SOURCE_URL]
-
-Do not create another Drupal project. Preserve all existing managed sections in AGENTS.md when adding the build-kit contract.
-Initialize the kit in place, follow the skill and its canonical run instructions, verify the real DDEV site, and produce the review packet.
-As soon as the first meaningful source-shaped route is working, share its DDEV URL with me, then continue the full rebuild and verification loop.
-Do not hand back a partial or representative build as the result.
-```
-
-The agent does the rest in the project the installer created and hands back a working site plus a `review-packet/` explaining what it built and why. Expect an iterative build over multiple agent passes, not one quick chat response.
-
-Already have a clean DDEV Drupal CMS project with a supported coding agent? Skip the One Line Installer, install the skill there, and start that agent. A normal web chat is not enough because the agent needs filesystem, shell, Drupal, and browser access.
+Then paste the prompt at the top of this README. The agent does the rest in the project the installer created and hands back a working site plus a `review-packet/` explaining what it built and why.
 
 The same canonical prompt lives in [USAGE.md](USAGE.md). Want the guided walkthrough? Start with [START.md](START.md).
 

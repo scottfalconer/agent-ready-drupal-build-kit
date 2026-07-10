@@ -155,18 +155,21 @@ test('public repository surface includes conventional license, CI, and contribut
   assert.ok(packageJson.keywords.includes('drupal-cms'));
 });
 
-test('README and USAGE expose one concise canonical prompt with real-site progress', () => {
+test('README leads with the same concise bootstrap prompt as USAGE', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
   const usage = readFileSync(join(repoRoot, 'USAGE.md'), 'utf8');
   const start = readFileSync(join(repoRoot, 'START.md'), 'utf8');
-  const readmePrompt = textPromptAfter(readme, 'Then replace `[SOURCE_URL]` and give the selected agent this prompt:');
+  const readmePrompt = textPromptAfter(readme, '## Copy This Prompt');
   const usagePrompt = textPromptAfter(usage, '## Canonical Prompt');
 
   assert.equal(usagePrompt, readmePrompt);
   assert.match(usagePrompt, /Source site: \[SOURCE_URL\]/);
+  assert.match(usagePrompt, /handle all setup yourself/);
+  assert.match(usagePrompt, /Work in exactly one Drupal project/);
   assert.match(usagePrompt, /first meaningful source-shaped route/);
-  assert.match(usagePrompt, /continue the full rebuild and verification loop/);
+  assert.match(usagePrompt, /real Drupal site passes the kit's verification/);
   assert.ok(usagePrompt.split('\n').length <= 12, 'canonical prompt should stay concise');
+  assert.ok(readme.indexOf('```text') < readme.indexOf('bash <('), 'copy-paste prompt should precede manual setup');
   assert.match(start, /on macOS, Docker Desktop or OrbStack installed and running/);
   assert.doesNotMatch(start, /supplies the rest: Docker/);
 });
