@@ -1,8 +1,27 @@
 # Using This Kit With An Agent
 
-If you are reading this file from an installed build-kit skill inside an existing Drupal target, setup is already complete. Skip to **Canonical Prompt**; do not rerun the installer or start another agent.
+## Canonical Prompt
 
-Use the official One Line Installer to create one Drupal CMS project, install this kit into that project, then give the agent one prompt.
+Open Codex, Claude Code, or OpenCode in an empty folder. Replace the bracketed source URL and paste the whole prompt:
+
+```text
+Rebuild the source site below as a complete local Drupal CMS site.
+
+Source site: [SOURCE_URL]
+Build kit: https://github.com/scottfalconer/agent-ready-drupal-build-kit
+
+Use the build kit as your instructions and handle all setup yourself. If needed, use its recommended One Line Installer path. Work in exactly one Drupal project, install and initialize the kit there, then continue until the real Drupal site passes the kit's verification.
+
+As soon as the first meaningful source-shaped route works, share its DDEV URL with me, then continue. Do not hand back a partial or representative build as the result.
+```
+
+You can stop here—the agent handles setup, the rebuild, real-site verification, and the review packet. Everything below is optional reference or manual setup.
+
+Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. If this file is inside an installed build-kit skill, setup is already complete.
+
+## Manual Setup (Optional)
+
+If you prefer to prepare the Drupal target yourself, use the official One Line Installer to create one Drupal CMS project and install this kit into that project.
 
 From the directory that should contain the project:
 
@@ -19,21 +38,6 @@ ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drup
 ```
 
 Start the agent you selected with `ddev codex`, `ddev claude`, or `ddev opencode`. The installer-created project is the rebuild target. Do not create a second Drupal project.
-
-## Canonical Prompt
-
-Replace the bracketed value and give this to the coding agent from the root of the installer-created Drupal project:
-
-```text
-Use the installed agent-ready-drupal-build-kit skill to rebuild the source site in this existing Drupal CMS project.
-
-Source site: [SOURCE_URL]
-
-Do not create another Drupal project. Preserve all existing managed sections in AGENTS.md when adding the build-kit contract.
-Initialize the kit in place, follow the skill and its canonical run instructions, verify the real DDEV site, and produce the review packet.
-As soon as the first meaningful source-shaped route is working, share its DDEV URL with me, then continue the full rebuild and verification loop.
-Do not hand back a partial or representative build as the result.
-```
 
 ## Expected Workspace
 
