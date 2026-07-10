@@ -1,0 +1,14 @@
+schema_version: public-kit.1
+site: ""
+intent_records:
+  - id: ""
+    target_config: ""
+    purpose: ""
+    source_evidence: []
+    rationale: ""
+    asserted_by: ""
+    last_reviewed: ""
+    config_hash: "" # sha256:<64 lowercase hex chars> or not-applicable
+    status: "draft" # draft | hash-valid | accepted | superseded
+    stale_behavior: "treat_as_no_intent"
+evidence_scope: "Durable intent guides review when current and hash-validated. Only human maintainer review should mark intent accepted."

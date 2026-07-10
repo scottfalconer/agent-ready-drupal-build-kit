@@ -1,0 +1,5 @@
+.agents/
+.claude/
+.DS_Store
+*.tgz
+skills-lock.json
