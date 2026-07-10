@@ -67,7 +67,7 @@ With the kit, the agent is instructed to:
 - build an actual Drupal CMS site with DDEV and `drupal/cms`;
 - start from source audit and pattern map before import;
 - use Drupal-native primitives first;
-- evaluate Drupal CMS recipes and templates before custom overlays;
+- record the installed substrate and evaluate bounded Drupal CMS Recipes before custom overlays;
 - record durable intent for load-bearing decisions;
 - verify public routes and editor forms;
 - create blocked stubs for launch-gate evidence that does not exist yet;
@@ -82,7 +82,7 @@ A good run gives you:
 - a local Drupal CMS build that can be inspected;
 - a source audit that says what was observed and what is `UNKNOWN`;
 - a pattern map that turns source patterns into Drupal decisions;
-- a recipe start-point decision that explains what Drupal CMS gives you by construction;
+- an installed-substrate and Recipe-fit decision that explains what Drupal CMS already provides and which bounded capabilities fit the source;
 - durable intent so later agents and maintainers can see why the model exists;
 - a scoped gap list that names the work humans still own;
 - a complete review packet, including blocked gate records instead of missing evidence;

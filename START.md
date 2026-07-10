@@ -12,29 +12,40 @@ Want the fast path? Use the canonical copy-paste prompt in [USAGE.md](USAGE.md).
 
 ## Prerequisites
 
-You will need a few things on your machine first:
+You need:
 
-- Docker running;
-- DDEV installed;
-- Node.js 20 or newer;
-- a local coding agent with filesystem and shell access, such as Claude Code, Codex, Cursor, Windsurf, Cline, RooCode, or a comparable local agentic IDE/tool;
 - a public source URL.
+- permission to inspect and rebuild that site.
+- on macOS, Docker Desktop or OrbStack installed and running. The installer can provision Docker on supported Linux systems, but its macOS path expects a working Docker runtime.
 
-A normal web chat alone is not enough, because the agent must create files and run local commands.
-
-Run this preflight first, or ask the agent to run it:
-
-```bash
-docker info >/dev/null
-ddev version
-node --version
-```
-
-If Docker, DDEV, or Node.js 20+ is unavailable, the fastest fix is the Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer), which sets up the full environment in one command:
+The official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) checks and prepares the remaining stack: DDEV, Drupal CMS, and an in-container coding agent. Run it from the folder that should contain the new project:
 
 ```bash
 bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
 ```
+
+The current installer supports macOS and Linux.
+
+Choose **Drupal CMS** and your preferred coding agent. The installer creates the project and leaves your shell in its root. This is the one Drupal target for the rebuild.
+
+Install the build kit into that target and start Codex:
+
+```bash
+ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy
+ddev codex
+```
+
+`ddev codex` is the Codex example. Use `ddev claude` or `ddev opencode` for the matching installer choice.
+
+Node.js is provided inside DDEV, so a host Node installation is not required. From the project root, the relevant environment checks are:
+
+```bash
+ddev describe
+ddev drush status
+ddev exec node --version
+```
+
+If you already have a clean DDEV Drupal CMS project, skip the installer and install the skill there. A normal web chat alone is not enough because the agent needs filesystem, shell, Drupal, and browser access.
 
 ## Run Shape
 
@@ -46,40 +57,43 @@ Copy the prompt from [USAGE.md](USAGE.md). Replace the bracketed source URL and 
 
 You will not hand-edit anything yourself. The agent does the setup and review loop for you:
 
-1. it keeps the kit as reference material and creates a clean Drupal CMS project workspace beside it;
-2. it copies `AGENTS.md.template` into that workspace as `AGENTS.md`, which is what carries Drupal's best practices into the build;
-3. it fills in the placeholders from your prompt;
-4. it builds the Drupal CMS site with DDEV and `drupal/cms`;
-5. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
-6. it runs an independent mechanical verifier pass that tries to falsify packet and live-site claims;
-7. it runs a blind adversarial product review against the original brief/source-of-truth and target, without showing the reviewer the builder's rationale first;
-8. it produces `open-decisions.md` with only the decisions a human can make;
-9. it copies the needed packet templates from `templates/`, creates `review-packet/` with the evidence, and runs `bin/verify-packet.mjs` before handoff.
+1. it adopts the Drupal CMS project created by the One Line Installer as the target and does not create another site;
+2. it initializes the installed skill in that target;
+3. it merges a concise build-kit project block into `AGENTS.md` while preserving regions managed by Drupal CMS, AI Best Practices, and the One Line Installer; that block points to the detailed contract packaged as `references/build-contract.md`;
+4. it fills in the build-kit placeholders from your prompt and builds in the existing Drupal CMS site;
+5. once the first meaningful source-shaped route works, it shares that real DDEV URL with you and then keeps building;
+6. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
+7. it runs an independent live verification pass that tries to falsify packet and real-site claims;
+8. it runs a blind adversarial product review against the original brief/source-of-truth and target, without showing the reviewer the builder's rationale first;
+9. it produces `open-decisions.md` with only the decisions a human can make;
+10. it uses the installed skill's packet templates, creates `review-packet/` with the evidence, and runs the target-local live verifier before handoff.
 
 ## Workspace Topology
 
-Here is the shape you will end up with:
+Here is the shape you will end up with. Everything belongs to one DDEV project:
 
 ```text
-parent-folder/
-  agent-ready-drupal-build-kit/        # this kit, reference only
-  drupal-project/                     # DDEV Drupal CMS project, your new site
-    AGENTS.md                         # copied from AGENTS.md.template
-    review-packet/                    # evidence and handoff packet
+drupal-project/                                  # the One Line Installer target
+  .ddev/
+  .agents/skills/agent-ready-drupal-build-kit/   # installed workflow, contract, and verifier
+  AGENTS.md                                      # coexisting managed regions
+  config/
+  review-packet/                                 # evidence and handoff packet
+  web/
 ```
 
-The kit folder is not the Drupal site. It sits beside the Drupal project as reference material.
+Do not clone the kit beside this project, create a nested DDEV project, or replace `AGENTS.md` wholesale. The installed skill carries the workflow, templates, gate vocabulary, and verifier into the target.
 
 ## The Four Moves
 
 Under the hood, the agent works in four moves and repeats them as a review loop. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
 1. **Introspect:** read the source site: routes, content inventory, media, design system, public behaviors, and unresolved facts it must not invent.
-2. **Assemble:** stand up DDEV plus `drupal/cms`, decide the recipe start point, declare the composition owner for flexible pages, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, Canvas/Experience Builder or another declared owner where appropriate, theme/config work, and source-like public behavior.
+2. **Assemble:** work on the Drupal CMS substrate already installed in the DDEV target, decide which bounded Recipes fit the audited source, declare the composition owner for flexible pages, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, Canvas/Experience Builder or another declared owner where appropriate, theme/config work, and source-like public behavior.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
-4. **Name gaps and decisions:** list remaining implementation gaps by role, then separately present only the decisions a human must make: production target, provider credentials, legal/privacy approval, accepted route/content dispositions, maintainer signoff, launch go/no-go, and accepted out-of-scope blockers. This decision list is not a reason to stop early; the agent keeps building everything it can before final handoff.
+4. **Name gaps and decisions:** list remaining implementation gaps by role, then separately present only the decisions a human must make: production target, provider credentials, legal/privacy approval, accepted route/content dispositions, maintainer signoff, launch go/no-go, and named acceptance of evidence-backed out-of-scope items. This decision list is not a reason to stop early; the agent keeps building everything it can before final handoff. An external blocker stays blocked and does not count as completed route coverage.
 
-Before handoff, the agent also needs two skeptic passes. The mechanical verifier checks the live Drupal site against the packet for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence. The blind adversarial reviewer sees only the original brief, the target, and source-of-truth materials before public review, then decides whether the produced site is actually good enough.
+Before handoff, the agent also needs two skeptic passes. A fresh independent verifier checks the live Drupal site for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence. The default target-local command independently identifies the DDEV target; binds its origin to the Drupal site UUID, front-page setting, config-sync directory, and clean config status read from that runtime; requires real Git-tracked YAML in that current sync directory; fetches every primary and target-required route; rejects non-success responses even when packet data repeats the same `5xx`; and checks the fetched primary routes' rendered canonical, meta description, and `og:image` against browser evidence. It does not independently perform authenticated editor tasks or prove collection/editor behavior without the separately required falsification evidence. Packet-only data and injected test runtimes cannot authorize completion. The blind adversarial reviewer sees only the original brief, the target, and source-of-truth materials before public review, then decides whether the produced site is actually good enough.
 
 ## The Review Bar
 
@@ -101,6 +115,14 @@ If any answer is "no," the result can still be useful. It just is not yet someth
 
 ## Required Packet
 
-The canonical output list is in [gates.json](gates.json) and [docs/output-inventory.md](docs/output-inventory.md). From the target Drupal project workspace, the agent should run `node ../agent-ready-drupal-build-kit/bin/verify-packet.mjs --packet review-packet` before handoff.
+The canonical output list is in [gates.json](gates.json) and [docs/output-inventory.md](docs/output-inventory.md). From the target Drupal project, the agent should run the installed skill's default live verifier before handoff:
+
+```bash
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
+```
+
+Use `scripts/verify-packet.mjs` only for explicit packet-only lint. Packet-only success never authorizes a complete rebuild claim.
+
+An explicit verifier target must match the current DDEV origin. The complete-local-rebuild verdict remains separate from production readiness and launch approval.
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.

@@ -5,15 +5,30 @@
   "type": "module",
   "description": "Agent instructions and packet verification for local Drupal CMS rebuilds.",
   "license": "MIT",
+  "homepage": "https://github.com/scottfalconer/agent-ready-drupal-build-kit#readme",
+  "bugs": {
+    "url": "https://github.com/scottfalconer/agent-ready-drupal-build-kit/issues"
+  },
+  "keywords": [
+    "drupal",
+    "drupal-cms",
+    "agent-skills",
+    "ai-agent",
+    "site-rebuild",
+    "ddev"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/scottfalconer/agent-ready-drupal-build-kit.git"
   },
   "scripts": {
+    "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
     "test": "node --test tests/*.test.mjs",
+    "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs"
   },
   "bin": {
+    "agent-ready-drupal-verify": "bin/verify.mjs",
     "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs"
   },
   "engines": {

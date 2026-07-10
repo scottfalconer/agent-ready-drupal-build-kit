@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Test
+        run: npm test
+      - name: Check installable skill synchronization
+        run: node scripts/sync-skill-package.mjs --check
+      - name: Check package contents
+        run: npm pack --dry-run --json
