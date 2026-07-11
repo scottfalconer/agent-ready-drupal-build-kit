@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -36,6 +36,18 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
 
   assert.deepEqual(Object.keys(MACHINE_GATE_EVALUATORS).sort(), expected);
   assert.deepEqual([...new Set(gates.gates.map((gate) => gate.blocking))].sort(), ['handoff', 'launch']);
+  assert.equal(Object.hasOwn(MACHINE_GATE_EVALUATORS, 'G-ASSEMBLY-01'), false);
+  assert.deepEqual(gates.nonAuthoritativeRecords, [
+    {
+      id: 'E-ASSEMBLY-01',
+      title: 'Builder-reported assembly rerun exercise evidence',
+      evidenceFile: 'assembly-evidence.json',
+      checkedBy: 'packet-linter',
+      result: 'evidence_recorded',
+      authoritativeForCompletion: false,
+      limitation: 'The packet linter checks record shape and packet-local hashes only. It does not execute assembly entrypoints or independently observe the disposable rerun.'
+    }
+  ]);
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
 });
 
@@ -1085,6 +1097,10 @@ function addQualifyingAssemblyEvidence(packetDir, targetBaseUrl) {
   const afterFailure = inventory('afterFailureRestoration', 8);
   writeJson(join(packetDir, 'assembly-evidence.json'), {
     schemaVersion: 'public-kit.assembly-evidence.1',
+    recordId: 'E-ASSEMBLY-01',
+    reportedResult: 'evidence_recorded',
+    authoritativeForCompletion: false,
+    limitation: 'Builder-authored packet evidence; the verifier does not execute assembly entrypoints or independently observe the exercise.',
     site: targetBaseUrl,
     checkedAt: testCheckedAt,
     reviewer: 'Fixture Assembly Reviewer',
@@ -1192,7 +1208,7 @@ function addQualifyingAssemblyEvidence(packetDir, targetBaseUrl) {
       status: 'pass',
       evidence: [evidenceFiles.run]
     },
-    accepted: true,
+    builderReportedComplete: true,
     blockers: []
   });
 }
@@ -2114,7 +2130,7 @@ test('a coherent but stale packet cannot authorize current local completion', as
   );
 });
 
-test('G-ASSEMBLY-01 fails closed when destructive rerun safeguards are missing', async () => {
+test('E-ASSEMBLY-01 reports builder evidence without affecting completion authority', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'assembly-gate-fail-closed-'));
   const canonicalPacket = join(temp, 'canonical');
   copyTemplatePacket(canonicalPacket);
@@ -2127,6 +2143,14 @@ test('G-ASSEMBLY-01 fails closed when destructive rerun safeguards are missing',
     true,
     JSON.stringify(canonicalReport.completionEvidence, null, 2)
   );
+  assert.deepEqual(canonicalReport.nonAuthoritativeEvidence.assemblyRerun, {
+    recordId: 'E-ASSEMBLY-01',
+    result: 'evidence_recorded',
+    authoritativeForCompletion: false,
+    limitation:
+      'Builder-authored packet evidence was not independently observed. The verifier did not execute any assembly entrypoint or packet-provided command.',
+    reasons: []
+  });
 
   const cases = [
     {
@@ -2197,9 +2221,33 @@ test('G-ASSEMBLY-01 fails closed when destructive rerun safeguards are missing',
     const report = await validatePacket({ packetDir });
 
     assert.equal(report.valid, true, `${name}: ${report.errors.join('\n')}`);
-    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
-    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+    assert.equal(report.completionEvidence.packetSupportsCompletion, true, name);
+    assert.equal(report.nonAuthoritativeEvidence.assemblyRerun.result, 'evidence_incomplete', name);
+    assert.equal(report.nonAuthoritativeEvidence.assemblyRerun.authoritativeForCompletion, false, name);
+    assert.match(report.nonAuthoritativeEvidence.assemblyRerun.reasons.join('\n'), expected, name);
+    assert.match(report.warnings.join('\n'), expected, name);
   }
+
+  const absentPacket = join(temp, 'absent');
+  cpSync(canonicalPacket, absentPacket, { recursive: true });
+  rmSync(join(absentPacket, 'assembly-evidence.json'));
+  const absentReport = await validatePacket({ packetDir: absentPacket });
+  assert.equal(absentReport.valid, true);
+  assert.equal(absentReport.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(absentReport.nonAuthoritativeEvidence.assemblyRerun.result, 'not_recorded');
+  assert.equal(absentReport.nonAuthoritativeEvidence.assemblyRerun.authoritativeForCompletion, false);
+
+  const commandPacket = join(temp, 'packet-command');
+  const commandMarker = join(temp, 'packet-command-executed');
+  cpSync(canonicalPacket, commandPacket, { recursive: true });
+  mutateJson(join(commandPacket, 'assembly-evidence.json'), (assembly) => {
+    assembly.assemblyEntrypoints[0].command = `touch ${commandMarker}`;
+    assembly.dryRun.command = `touch ${commandMarker}`;
+  });
+  const commandReport = await validatePacket({ packetDir: commandPacket });
+  assert.equal(existsSync(commandMarker), false, 'packet-provided commands must never execute');
+  assert.equal(commandReport.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(commandReport.nonAuthoritativeEvidence.assemblyRerun.authoritativeForCompletion, false);
 });
 
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {

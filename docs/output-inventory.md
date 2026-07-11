@@ -28,8 +28,11 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
-- `assembly-evidence.json`
 - `launch-checklist.md`
+
+Optional non-authoritative records:
+
+- `assembly-evidence.json` records a builder-observed disposable rerun exercise. The linter may label it `E-ASSEMBLY-01: evidence_recorded`, but it is not required and cannot authorize or block completion.
 
 ## Generated Verifier Evidence
 
@@ -51,12 +54,13 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
-- `G-ASSEMBLY-01`: require a non-mutating create/update/delete/unchanged plan, stable source-key or UUID identity, provenance-scoped opt-in deletion, an evidenced checksum-stable second-run no-op, survival of extension-owned Drupal/Canvas/navigation/View/sitemap fixtures, tested mid-run failure restoration, disposable-state isolation, and portable dependencies.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
 - `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
+
+`E-ASSEMBLY-01` is intentionally outside the gate vocabulary. Its checklist covers a non-mutating create/update/delete/unchanged plan, stable source-key or UUID identity, provenance-scoped opt-in deletion, a checksum-stable second-run no-op, extension fixture survival, failure restoration, disposable-state isolation, and portable dependencies. Those packet claims remain builder-authored until a verifier-owned runner independently executes a bounded contract.
 
 The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
 

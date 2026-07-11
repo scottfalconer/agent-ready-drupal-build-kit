@@ -8,7 +8,6 @@
     "scoped-gap-list.md",
     "open-decisions.md",
     "off-road-inventory.md",
-    "assembly-evidence.json",
     "maintainer-review.md",
     "operator-run.md",
     "production-target.md",
@@ -24,6 +23,17 @@
   "generatedEvidenceFiles": [
     "evidence/live-verification.json",
     "evidence/packet-verification.json"
+  ],
+  "nonAuthoritativeRecords": [
+    {
+      "id": "E-ASSEMBLY-01",
+      "title": "Builder-reported assembly rerun exercise evidence",
+      "evidenceFile": "assembly-evidence.json",
+      "checkedBy": "packet-linter",
+      "result": "evidence_recorded",
+      "authoritativeForCompletion": false,
+      "limitation": "The packet linter checks record shape and packet-local hashes only. It does not execute assembly entrypoints or independently observe the disposable rerun."
+    }
   ],
   "gates": [
     {
@@ -192,14 +202,6 @@
       "phase": 6,
       "evidenceFile": "off-road-inventory.md",
       "checkedBy": "verifier",
-      "blocking": "handoff"
-    },
-    {
-      "id": "G-ASSEMBLY-01",
-      "title": "Assembly reruns are non-destructive, portable, and extension-safe",
-      "phase": 6,
-      "evidenceFile": "assembly-evidence.json",
-      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

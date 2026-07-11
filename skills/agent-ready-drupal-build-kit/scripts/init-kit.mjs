@@ -247,12 +247,18 @@ function packetPlan(packetPath) {
     throw new Error(`${gatesPath} does not declare reviewPacketFiles`);
   }
 
-  const uniqueFiles = new Set(gates.reviewPacketFiles);
-  if (uniqueFiles.size !== gates.reviewPacketFiles.length) {
-    throw new Error(`${gatesPath} contains duplicate reviewPacketFiles`);
+  const packetFiles = [
+    ...gates.reviewPacketFiles,
+    ...(Array.isArray(gates.nonAuthoritativeRecords)
+      ? gates.nonAuthoritativeRecords.map((record) => record?.evidenceFile)
+      : [])
+  ];
+  const uniqueFiles = new Set(packetFiles);
+  if (uniqueFiles.size !== packetFiles.length) {
+    throw new Error(`${gatesPath} contains duplicate packet evidence files`);
   }
 
-  return gates.reviewPacketFiles.map((packetFile) => {
+  return packetFiles.map((packetFile) => {
     if (typeof packetFile !== 'string' || packetFile !== basename(packetFile) || ['.', '..'].includes(packetFile)) {
       throw new Error(`Unsafe review packet filename in ${gatesPath}: ${String(packetFile)}`);
     }

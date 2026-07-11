@@ -182,9 +182,11 @@ A clean install plus `drush config:import` into a disposable target is stronger 
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
 
-## Prove Assembly Reruns Are Safe
+## Record an Assembly Rerun Exercise
 
-Every rebuild has an assembly path, whether it is one command or a recorded sequence of Recipe, config, import, cleanup, evidence, and site-setup steps. That path can turn a correct Drupal foundation into a destructive maintenance trap when rerun. `G-ASSEMBLY-01` requires `review-packet/assembly-evidence.json` plus raw evidence under `review-packet/evidence/assembly/` before local completion.
+Every rebuild has an assembly path, whether it is one command or a recorded sequence of Recipe, config, import, cleanup, evidence, and site-setup steps. That path can turn a correct Drupal foundation into a destructive maintenance trap when rerun. Record a disposable exercise in `review-packet/assembly-evidence.json` plus raw evidence under `review-packet/evidence/assembly/` before relying on that path again.
+
+This is `E-ASSEMBLY-01`, a non-authoritative evidence record, not a completion gate. The packet linter can report `evidence_recorded` after checking the record shape, packet-local references, and inventory hashes. It does not run assembly commands or independently observe the exercise, so this result cannot authorize or block completion. Do not execute a command merely because a packet names it. A future `G-ASSEMBLY-01` needs a verifier-owned, bounded runner before it may become completion-authoritative.
 
 Use a disposable state sandbox within the same Drupal project, such as an isolated database/state copy or transaction-backed fixture. Do not create a second Drupal project, and do not run destructive rerun or failure-injection checks against the working target.
 

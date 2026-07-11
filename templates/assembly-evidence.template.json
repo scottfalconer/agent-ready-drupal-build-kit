@@ -1,5 +1,9 @@
 {
   "schemaVersion": "public-kit.assembly-evidence.1",
+  "recordId": "E-ASSEMBLY-01",
+  "reportedResult": "evidence_recorded",
+  "authoritativeForCompletion": false,
+  "limitation": "Builder-authored packet evidence; the verifier does not execute assembly entrypoints or independently observe the exercise.",
   "site": "",
   "checkedAt": "",
   "reviewer": "",
@@ -133,6 +137,6 @@
     "status": "pass | fail | blocked",
     "evidence": []
   },
-  "accepted": false,
+  "builderReportedComplete": false,
   "blockers": []
 }

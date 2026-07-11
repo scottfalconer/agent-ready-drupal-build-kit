@@ -264,7 +264,11 @@ User-authored tail.
   assert.match(firstAgents, /https:\/\/source\.example\/site/);
 
   const gates = JSON.parse(readFileSync(join(skillRoot, 'gates.json'), 'utf8'));
-  for (const packetFile of gates.reviewPacketFiles) {
+  const packetEvidenceFiles = [
+    ...gates.reviewPacketFiles,
+    ...gates.nonAuthoritativeRecords.map((record) => record.evidenceFile)
+  ];
+  for (const packetFile of packetEvidenceFiles) {
     assert.equal(existsSync(join(root, 'review-packet', packetFile)), true, packetFile);
   }
 

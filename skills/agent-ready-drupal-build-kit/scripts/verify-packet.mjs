@@ -80,7 +80,6 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
-  'G-ASSEMBLY-01': 'assemblyRerunSafety',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -398,18 +397,22 @@ function hasDeveloperMachinePath(value) {
   );
 }
 
-async function assemblyGateReasons(packetDir, assemblyEvidence) {
+async function assemblyEvidenceRecordReasons(packetDir, assemblyEvidence) {
   const reasons = [];
   const evidenceDir = join(packetDir, 'evidence', 'assembly');
   const basicRecordValid =
     assemblyEvidence?.schemaVersion === 'public-kit.assembly-evidence.1' &&
+    assemblyEvidence?.recordId === 'E-ASSEMBLY-01' &&
+    assemblyEvidence?.reportedResult === 'evidence_recorded' &&
+    assemblyEvidence?.authoritativeForCompletion === false &&
+    /does not execute|not independently/i.test(String(assemblyEvidence?.limitation ?? '')) &&
     String(assemblyEvidence?.site ?? '').trim() &&
     isoTimestamp(assemblyEvidence?.checkedAt) !== null &&
     String(assemblyEvidence?.reviewer ?? '').trim() &&
-    assemblyEvidence?.accepted === true &&
+    assemblyEvidence?.builderReportedComplete === true &&
     arrayOrEmpty(assemblyEvidence?.blockers).length === 0;
   if (!basicRecordValid) {
-    reasons.push('assembly-evidence.json must identify a reviewed, accepted G-ASSEMBLY-01 run with no blockers.');
+    reasons.push('assembly-evidence.json must identify E-ASSEMBLY-01 as non-authoritative evidence_recorded and a complete builder-reported exercise with no blockers.');
   }
 
   const entrypoints = substantiveObjects(assemblyEvidence?.assemblyEntrypoints);
@@ -840,7 +843,8 @@ function validateGateVocabulary(gates, errors) {
   const ids = new Set();
   const knownEvidenceFiles = new Set([
     ...arrayOrEmpty(gates?.reviewPacketFiles),
-    ...arrayOrEmpty(gates?.generatedEvidenceFiles)
+    ...arrayOrEmpty(gates?.generatedEvidenceFiles),
+    ...arrayOrEmpty(gates?.nonAuthoritativeRecords).map((record) => record?.evidenceFile).filter(Boolean)
   ]);
   for (const gate of gates?.gates ?? []) {
     if (!gate.id || ids.has(gate.id)) {
@@ -874,6 +878,26 @@ function validateGateVocabulary(gates, errors) {
   for (const gateId of Object.keys(MACHINE_GATE_EVALUATORS)) {
     if (!ids.has(gateId)) {
       errors.push(`machine evaluator ${gateId} does not correspond to a gate in gates.json.`);
+    }
+  }
+
+  const recordIds = new Set();
+  for (const record of arrayOrEmpty(gates?.nonAuthoritativeRecords)) {
+    if (!record?.id || recordIds.has(record.id) || ids.has(record.id)) {
+      errors.push(`gates.json has a missing or duplicate non-authoritative record id: ${record?.id || '(missing)'}.`);
+    }
+    recordIds.add(record?.id);
+    if (
+      !String(record?.title ?? '').trim() ||
+      !String(record?.evidenceFile ?? '').trim() ||
+      record?.checkedBy !== 'packet-linter' ||
+      record?.result !== 'evidence_recorded' ||
+      record?.authoritativeForCompletion !== false ||
+      !String(record?.limitation ?? '').trim()
+    ) {
+      errors.push(
+        `non-authoritative record ${record?.id || '(missing)'} must declare packet-linter, evidence_recorded, authoritativeForCompletion false, and its limitation.`
+      );
     }
   }
 }
@@ -2413,7 +2437,6 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   reasons.push(...await markdownCompletionReadiness(packetDir));
 
   const {
-    assemblyEvidence,
     blindAdversarialReview,
     browserEvidence,
     drupalReadback,
@@ -2424,7 +2447,6 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     routeMatrix,
     sourceAudit
   } = records;
-  reasons.push(...await assemblyGateReasons(packetDir, assemblyEvidence));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -2952,7 +2974,6 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const completionTimestamps = [
-    ['assembly-evidence.json', assemblyEvidence?.checkedAt],
     ['source-audit.json', sourceAudit?.checkedAt],
     ['pattern-map.json', patternMap?.checkedAt],
     ['route-matrix.json', routeMatrix?.checkedAt],
@@ -2996,7 +3017,9 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     await validateRequiredFiles(packetDir, gates, errors);
   }
 
-  const assemblyEvidence = await readJson(join(packetDir, 'assembly-evidence.json'), []);
+  const assemblyEvidencePath = join(packetDir, 'assembly-evidence.json');
+  const assemblyEvidencePresent = existsSync(assemblyEvidencePath);
+  const assemblyEvidence = assemblyEvidencePresent ? await readJson(assemblyEvidencePath, []) : null;
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
@@ -3028,8 +3051,22 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   );
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
+  const assemblyEvidenceReasons = assemblyEvidencePresent
+    ? await assemblyEvidenceRecordReasons(packetDir, assemblyEvidence)
+    : [];
+  const assemblyEvidenceResult = !assemblyEvidencePresent
+    ? 'not_recorded'
+    : assemblyEvidenceReasons.length === 0
+      ? 'evidence_recorded'
+      : 'evidence_incomplete';
+  if (assemblyEvidenceReasons.length > 0) {
+    warnings.push(
+      ...assemblyEvidenceReasons.map(
+        (reason) => `E-ASSEMBLY-01 is non-authoritative and incomplete: ${reason}`
+      )
+    );
+  }
   const completionReadiness = await packetCompletionReadiness(packetDir, gates, {
-    assemblyEvidence,
     blindAdversarialReview,
     browserEvidence,
     drupalReadback,
@@ -3052,6 +3089,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    nonAuthoritativeEvidence: {
+      assemblyRerun: {
+        recordId: 'E-ASSEMBLY-01',
+        result: assemblyEvidenceResult,
+        authoritativeForCompletion: false,
+        limitation:
+          'Builder-authored packet evidence was not independently observed. The verifier did not execute any assembly entrypoint or packet-provided command.',
+        reasons: assemblyEvidenceReasons
+      }
+    },
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
