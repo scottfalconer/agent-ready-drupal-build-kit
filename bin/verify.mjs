@@ -391,6 +391,13 @@ function findDrupalDdevRoot(cwd) {
   }
 }
 
+function firstNonEmptyLine(value) {
+  return String(value ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? '';
+}
+
 function runDrushResult(projectRoot, environment, args) {
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
   const commands = inContainer
@@ -399,6 +406,7 @@ function runDrushResult(projectRoot, environment, args) {
         [join(projectRoot, 'vendor', 'bin', 'drush'), args]
       ]
     : [['ddev', ['drush', ...args]]];
+  let failure = null;
   for (const [command, commandArgs] of commands) {
     try {
       return {
@@ -406,15 +414,31 @@ function runDrushResult(projectRoot, environment, args) {
         output: execFileSync(command, commandArgs, {
           cwd: projectRoot,
           encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
+          stdio: ['ignore', 'pipe', 'pipe'],
           timeout: 15_000
         }).trim()
       };
-    } catch {
-      // Try the next supported host/container form.
+    } catch (error) {
+      // Try the next supported host/container form, keeping the most informative failure.
+      const candidate = {
+        argv: ['drush', ...args],
+        exitStatus: Number.isInteger(error?.status) ? error.status : null,
+        stderr: firstNonEmptyLine(error?.stderr) || firstNonEmptyLine(error?.message)
+      };
+      if (!failure || (candidate.stderr && !failure.stderr)) {
+        failure = candidate;
+      }
     }
   }
-  return { ok: false, output: '' };
+  return { ok: false, output: '', failure };
+}
+
+function describeDrushFailure(failure) {
+  const exitStatus = failure?.exitStatus === null || failure?.exitStatus === undefined
+    ? 'unavailable'
+    : failure.exitStatus;
+  const stderr = failure?.stderr ? `: ${failure.stderr}` : '';
+  return `\`${(failure?.argv ?? []).join(' ')}\` failed (exit ${exitStatus})${stderr}`;
 }
 
 function runDrush(projectRoot, environment, args) {
@@ -528,7 +552,9 @@ function inspectDrupalRuntime(cwd, environment) {
       configStatusClean: false,
       configSyncTracked: false,
       configSyncDirectory: '',
+      drushCommandFailures: [],
       frontPage: '',
+      identityReadbackFailed: false,
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
@@ -537,19 +563,27 @@ function inspectDrupalRuntime(cwd, environment) {
     };
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
-  const bootstrap = runDrush(projectRoot, environment, ['status', '--field=bootstrap']);
-  const uuidOutput = runDrush(projectRoot, environment, ['config:get', 'system.site', '--field=uuid']);
+  const drushCommandFailures = [];
+  const readDrush = (args) => {
+    const result = runDrushResult(projectRoot, environment, args);
+    if (!result.ok) {
+      drushCommandFailures.push(describeDrushFailure(result.failure ?? { argv: ['drush', ...args] }));
+    }
+    return result;
+  };
+  const bootstrapResult = readDrush(['status', '--field=bootstrap']);
+  // Drush 13 removed `config:get --field`; the key-argument form works on Drush 12 and 13.
+  const uuidResult = readDrush(['config:get', 'system.site', 'uuid', '--format=string']);
   const frontPage = cleanScalar(
-    runDrush(projectRoot, environment, ['config:get', 'system.site', 'page.front', '--format=string'])
+    readDrush(['config:get', 'system.site', 'page.front', '--format=string']).output
   );
-  const configSyncDirectory = cleanScalar(
-    runDrush(projectRoot, environment, ['status', '--field=config-sync'])
-  );
-  const drupalRoot = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=root']));
-  const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
+  const configSyncDirectory = cleanScalar(readDrush(['status', '--field=config-sync']).output);
+  const drupalRoot = cleanScalar(readDrush(['status', '--field=root']).output);
+  const configStatus = readDrush(['config:status', '--format=json']);
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
-  const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
-  const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
+  const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
+  const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
+  const identityReadbackFailed = !bootstrapResult.ok || !uuidResult.ok;
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
   return {
     baseUrl,
@@ -558,10 +592,16 @@ function inspectDrupalRuntime(cwd, environment) {
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
     drupalRoot,
+    drushCommandFailures,
     frontPage,
+    identityReadbackFailed,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
-    reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
+    reason: confirmed
+      ? ''
+      : drushCommandFailures.length > 0
+        ? `Drush runtime inspection command failed: ${drushCommandFailures[0]}`
+        : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
     trackedConfigYamlFiles: trackedConfig.yamlFiles
@@ -1189,8 +1229,17 @@ export async function verifyLive({
   if (!packetReport.completionEvidence?.packetCompletionReady) {
     completionBlockedReasons.push('Required packet evidence is still template-like, unresolved, or not accepted.');
   }
+  const runtimeDrushCommandFailures = Array.isArray(inspectedDrupalRuntime.drushCommandFailures)
+    ? inspectedDrupalRuntime.drushCommandFailures.filter(Boolean)
+    : [];
+  for (const failure of runtimeDrushCommandFailures) {
+    completionBlockedReasons.push(`Drush runtime inspection command failed: ${failure}`);
+  }
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
-    completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
+    // A failed identity readback command must never be reported as an identity mismatch.
+    if (inspectedDrupalRuntime.identityReadbackFailed !== true) {
+      completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
+    }
   }
   if (!drupalRuntimeTargetMatches) {
     completionBlockedReasons.push('Current DDEV runtime base URL does not match the live target origin.');
@@ -1263,6 +1312,8 @@ export async function verifyLive({
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
+      drushCommandFailures: runtimeDrushCommandFailures,
+      identityReadbackFailed: inspectedDrupalRuntime.identityReadbackFailed === true,
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
       targetOriginMatches: drupalRuntimeTargetMatches,

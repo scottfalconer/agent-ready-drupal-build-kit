@@ -967,8 +967,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.checkedAt = testCheckedAt;
   readback.commands = [
     'drush status',
-    'drush config:get system.site --field=uuid',
-    'drush config:get system.site --field=page.front',
+    'drush config:get system.site uuid --format=string',
+    'drush config:get system.site page.front --format=string',
     'drush php:eval config sync directory',
     'drush config:status',
     'git ls-files config/sync/*.yml'
@@ -1371,10 +1371,18 @@ if (args[0] !== 'drush') {
   process.exit(1);
 }
 const command = args.slice(1).join(' ');
+if (command.startsWith('config:get') && command.includes('--field')) {
+  process.stderr.write('The "--field" option does not exist.\\n');
+  process.exit(1);
+}
+if (process.env.FAKE_DDEV_UUID_READBACK_FAILS === '1' && command === 'config:get system.site uuid --format=string') {
+  process.stderr.write('Command "config:get" is not defined.\\n');
+  process.exit(1);
+}
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
   ['status --field=root', 'web'],
-  ['config:get system.site --field=uuid', '${testSiteUuid}'],
+  ['config:get system.site uuid --format=string', '${testSiteUuid}'],
   ['config:get system.site page.front --format=string', '/'],
   ['status --field=config-sync', '../config/sync'],
   ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]']
@@ -1433,8 +1441,47 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(dirtyReport.drupalRuntime.configStatusClean, false);
       assert.equal(dirtyReport.completeLocalRebuildClaimAllowed, false);
       assert.match(dirtyReport.completionBlockedReasons.join('\n'), /config status is not clean/i);
+
+      const failedReadbackResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_UUID_READBACK_FAILS: '1' }
+      });
+      assert.equal(failedReadbackResult.status, 2, failedReadbackResult.stderr);
+      const failedReadbackReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(failedReadbackReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(failedReadbackReport.drupalRuntime.identityReadbackFailed, true);
+      assert.match(
+        failedReadbackReport.drupalRuntime.drushCommandFailures.join('\n'),
+        /drush config:get system\.site uuid --format=string.*exit 1.*Command "config:get" is not defined\./
+      );
+      assert.match(
+        failedReadbackReport.drupalRuntime.reason,
+        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string/
+      );
+      const failedReadbackBlockedReasons = failedReadbackReport.completionBlockedReasons.join('\n');
+      assert.match(
+        failedReadbackBlockedReasons,
+        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string.*Command "config:get" is not defined\./
+      );
+      assert.doesNotMatch(failedReadbackBlockedReasons, /runtime identity does not match/i);
     }
   );
+});
+
+test('the verifier never emits the Drush 13-removed config:get --field form', () => {
+  const verifierSource = readFileSync(join(repoRoot, 'bin', 'verify.mjs'), 'utf8');
+  const argvLiterals = [...verifierSource.matchAll(/(?:runDrush(?:Result)?|readDrush)\([^[)]*\[([^\]]*)\]/g)]
+    .map(([, args]) => [...args.matchAll(/'([^']*)'/g)].map(([, value]) => value));
+  assert.ok(argvLiterals.length >= 6, 'expected to find the runDrush argv literals in bin/verify.mjs');
+  for (const argv of argvLiterals) {
+    if (argv[0] === 'config:get') {
+      assert.ok(
+        !argv.some((argument) => argument.startsWith('--field')),
+        `config:get must not use --field (removed in Drush 13): drush ${argv.join(' ')}`
+      );
+    }
+  }
 });
 
 test('completion fails closed when structured gate evidence or applicability dispositions are missing', async () => {
