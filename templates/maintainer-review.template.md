@@ -100,7 +100,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Lists, grids, schedules, directories, archives, catalogs, feeds, and search results are backed by structured content plus Views or another documented Drupal-native collection owner.
 - [ ] Every collection route has a collection ownership ledger entry with source item count, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence.
 - [ ] Per-route item reconciliation compares source and target counts for repeated items such as videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, and locations.
-- [ ] Every required field in a recurring collection has a source-derived semantic rule and matching independent/Drupal-readback counts; equal entity counts do not hide empty values, broken references, invalid ordering, or placeholders.
+- [ ] Every required field in a recurring collection has a source requirement mapped one-to-one to an exact target rule, independent check, Drupal-readback row, and actual evaluated/passing entity IDs; unexplained zero applicability and non-itemized exceptions fail.
 - [ ] The target model fits the load-bearing source patterns.
 - [ ] Filterable, sortable, relational, governed, and reusable values are typed fields, taxonomy terms, or entity references rather than hidden in body text.
 - [ ] Dates, venues, categories, people, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationships are modeled as Drupal fields/references where those values affect visitors, editors, filters, search, SEO, integrations, or future agents.
@@ -148,7 +148,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Regulated or claim-sensitive content has source/review status, required disclosure/label text, warning/restriction fields, audience/suitability fields, and blocked-evidence notes where relevant.
 - [ ] FAQ, advice/article, retailer/location, legal/footer, professional/audience-specific, and contact workflows are modeled explicitly where the source requires them.
 - [ ] Media strategy is explicit: Drupal media references, source assets, unavailable assets, placeholders, or external references are not conflated.
-- [ ] Reachable source assets reconcile by class and observed role to managed Media, genuine external-provider ownership, or item-level blockers; unresolved, invalid-role, and unexplained duplicate-placement findings are empty.
+- [ ] Source assets reconcile by class, role, observed origin, and delivery mechanism to actual managed Media IDs plus fields/Canvas props, genuine hosted providers plus provider-capable fields, real theme files, excluded tracking, or item-level blockers; unreachable items block completion and inventory/readback IDs and counts agree.
 - [ ] Public source assets use managed Media and image styles, or the packet documents why raw URI fields, CDN hotlinks, or placeholders remain.
 - [ ] Alt text, responsive image styles, image reuse, and hero/thumbnail/social-image field decisions are explicit.
 - [ ] Primary navigation and footer navigation are owned by Drupal menus/blocks or have a documented exception.

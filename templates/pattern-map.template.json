@@ -19,18 +19,38 @@
         "id": "",
         "sourceAssetInventoryId": "",
         "assetClass": "image | document | video | audio | other",
-        "sourceRole": "content | brand | download | embed | provider_owned | icon | tracking | decorative | other",
+        "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+        "deliveryBehavior": "source_owned_file | hosted_embed | hosted_service | theme_asset | tracking_resource | other",
+        "deliveryMechanism": "file_url | iframe | oembed | provider_api | inline | tracking_request | other",
         "sourceReachableCount": null,
-        "targetOwner": "managed_media | external_provider | documented_exception",
+        "targetOwner": "managed_media | external_provider | theme_asset | excluded_non_content | documented_exception",
+        "targetUseRole": "content | brand | download | embed | theme_icon | theme_decorative | tracking_excluded | other",
+        "ownerSurface": "media_reference_field | canvas_component_prop | provider_embed_field | theme_asset | excluded_non_content | documented_exception",
         "mediaBundle": "",
         "referenceFields": [],
+        "componentProps": [],
+        "themeAssetPaths": [],
         "externalProvider": {
           "name": "",
           "origin": "",
+          "serviceBehavior": "hosted_embed | hosted_service",
+          "integrationType": "iframe | oembed | provider_api",
+          "evidence": ""
+        },
+        "roleMappingException": {
+          "name": "",
+          "rationale": "",
           "evidence": ""
         },
         "exceptionCount": 0,
         "exceptionEvidence": "",
+        "exceptions": [
+          {
+            "sourceItemId": "",
+            "reason": "",
+            "evidence": ""
+          }
+        ],
         "accepted": false,
         "notes": ""
       }
@@ -86,6 +106,8 @@
     "semanticIntegrityRules": [
       {
         "id": "",
+        "sourceRequirementId": "",
+        "sourceRoute": "",
         "sourceObject": "",
         "entityType": "",
         "bundle": "",
@@ -97,6 +119,14 @@
         "expectedTargetPassCount": null,
         "exceptionCount": 0,
         "exceptionEvidence": "",
+        "exceptions": [
+          {
+            "sourceItemId": "",
+            "targetEntityId": "",
+            "reason": "",
+            "evidence": ""
+          }
+        ],
         "accepted": false,
         "notes": ""
       }

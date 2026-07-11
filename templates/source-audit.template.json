@@ -28,10 +28,41 @@
     {
       "id": "",
       "assetClass": "image | document | video | audio | other",
-      "sourceRole": "content | brand | download | embed | provider_owned | icon | tracking | decorative | other",
+      "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+      "deliveryBehavior": "source_owned_file | hosted_embed | hosted_service | theme_asset | tracking_resource | other",
+      "deliveryMechanism": "file_url | iframe | oembed | provider_api | inline | tracking_request | other",
+      "observedSourceOrigins": [],
       "discoveredCount": null,
       "reachableCount": null,
       "unreachableCount": null,
+      "unreachableItems": [
+        {
+          "sourceItemId": "",
+          "reason": "",
+          "boundary": "private | credentialed | fetch_failure | other",
+          "evidence": "",
+          "blocksCompletion": true
+        }
+      ],
+      "evidence": "",
+      "notes": ""
+    }
+  ],
+  "collectionSemanticRequirements": [
+    {
+      "id": "",
+      "sourceRoute": "",
+      "sourceObject": "",
+      "field": "",
+      "comparedField": "",
+      "rule": "population_parity | value_parity | ordered_fields | reference_integrity | non_placeholder",
+      "operator": "eq | ne | lt | lte | gt | gte | not_applicable",
+      "sourceApplicableCount": null,
+      "zeroApplicabilityException": {
+        "name": "",
+        "rationale": "",
+        "evidence": ""
+      },
       "evidence": "",
       "notes": ""
     }

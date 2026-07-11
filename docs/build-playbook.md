@@ -89,8 +89,8 @@ The verifier must emit `review-packet/independent-verification.json`. At minimum
 - cold-reader label checks for editor-facing content type labels;
 - composition fidelity proving the actual target owner matches the declaration or a target-bound accepted deviation;
 - a field-output falsification check for every load-bearing field and every field claimed to affect anonymous output;
-- a semantic-integrity check for every required field in a recurring collection, using a stable rule ID and matching target/readback counts;
-- source-asset provenance checks that reconcile every reachable asset to managed Media, a genuine external provider, or an item-level blocker, with no unresolved role or duplicate-placement findings;
+- a semantic-integrity check for every source requirement on a required recurring field, preserving the exact route/object, entity/bundle, field/comparison, rule, operator, applicability, and matching target/readback counts;
+- source-asset provenance checks that reconcile every reachable asset by observed origin and delivery behavior to managed Media, a genuine hosted provider, a theme asset, excluded non-content tracking, or an item-level blocker, with no unresolved role or duplicate-placement findings;
 - direct database cleanup or destructive import cleanup recorded as local-only off-road work with a production-safe alternative.
 
 Agent-resolvable failures from this pass are work items. A genuine external blocker must be evidenced and leaves completion blocked; it cannot substitute for route coverage. This pass can prove the packet is current and internally honest. It does not prove the target is good enough for the user's requested outcome.
@@ -166,11 +166,11 @@ Every run should emit comparable Drupal readback. At minimum include:
 - `ddev drush status`, `ddev drush config:get system.site --field=uuid`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
 - Drupal CMS/core versions from `ddev composer show` and `ddev drush status`, plus the Recipe runner actually available in the target;
 - the active config sync directory and the real YAML paths Git tracks in that exact directory;
-- content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
-- field-value statistics keyed to each declared recurring-content semantic rule, including evaluated, passing, and violating entity counts;
+- content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes; media-reference storage rows include entity type, bundle, field, storage type, `media` target type, and target bundles while preserving Drupal's `null` (all bundles) versus `[]` (no bundles) distinction;
+- field-value statistics keyed one-to-one to each source requirement and target semantic rule, including exact semantic identity plus evaluated/passing entity IDs and violating entity counts reconciled to the actual entity inventory;
 - nodes including unpublished/default/demo content, aliases including duplicates, redirects, menus/menu links, blocks, Views, Canvas pages when available, and unexpected public routes;
 - media counts/items, source asset locations, alt text, responsive image styles, and whether imports rely on cached local evidence or live remote downloads.
-- media-reference statistics keyed to each ownership-ledger row, including managed, external-provider, and unresolved counts.
+- media-reference statistics keyed one-to-one to each ownership-ledger row, including actual managed Media IDs, exact bundle/reference-field or Canvas component-prop ownership, provider-capable field settings, hosted-provider, real theme-file, excluded-non-content, blocked, and unresolved counts.
 
 If root `config/sync` is empty but Drupal's active sync directory is `web/sites/default/files/sync` or another path, say that plainly. A reviewer should not have to guess where the real config export lives.
 
@@ -236,7 +236,7 @@ Source audit and migration evidence are not normal editorial fields. `Source URL
 
 The collection ownership gate is concrete. Every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like ledger row needs the source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. Counts must be equal unless a named owner accepts a specific evidence-backed exclusion; private or unreachable items need evidence of that boundary. Detail pages, individual node routes, and sample items do not satisfy a collection route. A route-level 200/H1 check is not collection parity.
 
-Count parity is not semantic parity. For every required collection field, declare a stable rule ID and the source-applicable count. Use the smallest rule that represents the source fact: populated-value parity, normalized value parity, an ordered-field comparison such as start before end, entity-reference integrity, or absence of placeholder values. Independent target evaluation and Drupal readback must agree on evaluated, passing, and violating counts. Exceptions reduce the expected target pass count only when they are item-level and packet-evidenced.
+Count parity is not semantic parity. For every required collection field, record a source requirement ID with source route/object, field, optional comparison field, rule, operator, source-applicable count, and source evidence. Map exactly one target rule to each requirement, including the Drupal entity/bundle, then carry the same identity and evaluated/passing entity IDs through independent target evaluation, Drupal readback, and the actual entity inventory. Zero source applicability requires a named rationale and packet-local evidence. Target exceptions reduce the expected pass count only when each exception has a unique source item ID, reason, and packet-local evidence.
 
 The editor gate is practical: a non-admin editor must be able to add a new representative item, fill meaningful fields, save it, and see it appear in the expected public View, listing, detail route, search result, menu placement, or Canvas composition without code changes. If that cannot happen, the build has not proved Drupal ownership of the content.
 
@@ -491,7 +491,7 @@ When media is usable, import or stage it into Drupal-managed file storage, refer
 
 URL/image fields can be useful evidence carriers, but they should not silently replace a real Drupal media strategy.
 
-Reconcile assets by source role, not only file count. Group audited assets by stable inventory ID, asset class, and observed role such as content, brand, download, embed, provider-owned, icon, tracking, or decorative. Each reachable group must map to managed Media, genuine external-provider behavior, or an item-level documented exception. External-provider ownership is valid only for source-classified embeds/provider-owned behavior and must name an evidenced provider origin distinct from the source and target; it cannot relabel first-party images or downloads to avoid migration. Independent checks must report unresolved assets, incompatible role assignments, and unexplained duplicate placements; zero unresolved findings is required for completion.
+Reconcile assets by source role, observed origin (`inline` for inline source assets), and observed delivery behavior/mechanism, not only file count; split inventory rows when origins or behaviors differ. Content, brand, and download assets map to actual managed Media IDs through real media-reference fields or typed Canvas component props. Hosted embeds/services bind `iframe`, oEmbed, or provider-API source behavior to a provider-capable field with packet-local settings evidence and the sole observed provider origin; raw file/CDN delivery cannot use this path, while genuine hosted document/image viewers can. Icons and decorative assets map to regular files under the target project, and tracking maps to excluded non-content ownership. Every item exception needs a unique source item ID, reason, and evidence; unreachable source items remain blockers. Ledger, check, readback, and actual Drupal inventory reconcile one-to-one.
 
 ## Content Field Formats
 

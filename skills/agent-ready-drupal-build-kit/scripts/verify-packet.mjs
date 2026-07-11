@@ -65,7 +65,59 @@ const SEMANTIC_INTEGRITY_RULES = new Set([
   'non_placeholder'
 ]);
 const SEMANTIC_COMPARISON_OPERATORS = new Set(['eq', 'ne', 'lt', 'lte', 'gt', 'gte']);
-const MEDIA_TARGET_OWNERS = new Set(['managed_media', 'external_provider', 'documented_exception']);
+const MEDIA_ASSET_CLASSES = new Set(['image', 'document', 'video', 'audio', 'other']);
+const MEDIA_SOURCE_ROLES = new Set(['content', 'brand', 'download', 'embed', 'icon', 'tracking', 'decorative', 'other']);
+const MEDIA_DELIVERY_BEHAVIORS = new Set([
+  'source_owned_file',
+  'hosted_embed',
+  'hosted_service',
+  'theme_asset',
+  'tracking_resource',
+  'other'
+]);
+const MEDIA_DELIVERY_MECHANISMS = new Set([
+  'file_url',
+  'iframe',
+  'oembed',
+  'provider_api',
+  'inline',
+  'tracking_request',
+  'other'
+]);
+const MEDIA_TARGET_OWNERS = new Set([
+  'managed_media',
+  'external_provider',
+  'theme_asset',
+  'excluded_non_content',
+  'documented_exception'
+]);
+const MEDIA_TARGET_USE_ROLES = new Set([
+  'content',
+  'brand',
+  'download',
+  'embed',
+  'theme_icon',
+  'theme_decorative',
+  'tracking_excluded',
+  'other'
+]);
+const MEDIA_OWNER_SURFACES = new Set([
+  'media_reference_field',
+  'canvas_component_prop',
+  'provider_embed_field',
+  'theme_asset',
+  'excluded_non_content',
+  'documented_exception'
+]);
+const MEDIA_STANDARD_ROLE_MAPPINGS = Object.freeze({
+  content: { targetOwner: 'managed_media', targetUseRole: 'content', ownerSurface: 'media_reference_field' },
+  brand: { targetOwner: 'managed_media', targetUseRole: 'brand', ownerSurface: 'media_reference_field' },
+  download: { targetOwner: 'managed_media', targetUseRole: 'download', ownerSurface: 'media_reference_field' },
+  embed: { targetOwner: 'external_provider', targetUseRole: 'embed', ownerSurface: 'provider_embed_field' },
+  icon: { targetOwner: 'theme_asset', targetUseRole: 'theme_icon', ownerSurface: 'theme_asset' },
+  decorative: { targetOwner: 'theme_asset', targetUseRole: 'theme_decorative', ownerSurface: 'theme_asset' },
+  tracking: { targetOwner: 'excluded_non_content', targetUseRole: 'tracking_excluded', ownerSurface: 'excluded_non_content' }
+});
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -251,6 +303,210 @@ function nonNegativeIntegerValue(value) {
   return number !== null && Number.isInteger(number) && number >= 0 ? number : null;
 }
 
+function exactStableValueMatch(left, right) {
+  const leftText = String(left ?? '').trim();
+  const rightText = String(right ?? '').trim();
+  return Boolean(leftText && rightText && leftText === rightText);
+}
+
+function exactOptionalStableValueMatch(left, right) {
+  const leftText = String(left ?? '').trim();
+  const rightText = String(right ?? '').trim();
+  return !leftText && !rightText ? true : exactStableValueMatch(leftText, rightText);
+}
+
+function validUniqueStringList(values) {
+  const strings = arrayOrEmpty(values).map((value) => String(value ?? '').trim());
+  return strings.every(Boolean) && new Set(strings).size === strings.length;
+}
+
+function exactStringSetMatch(left, right) {
+  const leftValues = arrayOrEmpty(left).map((value) => String(value ?? '').trim());
+  const rightValues = arrayOrEmpty(right).map((value) => String(value ?? '').trim());
+  if (!validUniqueStringList(left) || !validUniqueStringList(right) || leftValues.length !== rightValues.length) {
+    return false;
+  }
+  const rightSet = new Set(rightValues);
+  return leftValues.every((value) => rightSet.has(value));
+}
+
+function recordIdsExactlyMatch(records, key, expectedIds) {
+  const ids = records.map((record) => String(record?.[key] ?? '').trim());
+  return ids.length === expectedIds.size &&
+    ids.every((id) => id && expectedIds.has(id)) &&
+    new Set(ids).size === ids.length;
+}
+
+async function itemExceptionsValid(packetDir, values, expectedCount) {
+  if (!Array.isArray(values) || values.length !== expectedCount) {
+    return false;
+  }
+  const ids = values.map((record) => String(record?.sourceItemId ?? '').trim());
+  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
+    return false;
+  }
+  const evidence = await Promise.all(values.map((record) => nonEmptyPacketEvidence(packetDir, record?.evidence)));
+  return values.every((record, index) =>
+    String(record?.reason ?? '').trim() && evidence[index]
+  );
+}
+
+function semanticDefinitionValid(record) {
+  const orderedFieldsValid = record?.rule !== 'ordered_fields' || (
+    String(record?.comparedField ?? '').trim() &&
+    SEMANTIC_COMPARISON_OPERATORS.has(record?.operator)
+  );
+  const nonOrderedOperatorValid = record?.rule === 'ordered_fields' || record?.operator === 'not_applicable';
+  return SEMANTIC_INTEGRITY_RULES.has(record?.rule) && orderedFieldsValid && nonOrderedOperatorValid;
+}
+
+function semanticDefinitionMatches(left, right) {
+  return normalizeRouteKey(left?.sourceRoute) === normalizeRouteKey(right?.sourceRoute) &&
+    exactStableValueMatch(left?.sourceObject, right?.sourceObject) &&
+    exactStableValueMatch(left?.field, right?.field) &&
+    exactOptionalStableValueMatch(left?.comparedField, right?.comparedField) &&
+    left?.rule === right?.rule &&
+    left?.operator === right?.operator &&
+    nonNegativeIntegerValue(left?.sourceApplicableCount) === nonNegativeIntegerValue(right?.sourceApplicableCount);
+}
+
+function sourceRoleDeliveryMatches(sourceRole, deliveryBehavior) {
+  if (['content', 'brand', 'download'].includes(sourceRole)) {
+    return deliveryBehavior === 'source_owned_file';
+  }
+  if (sourceRole === 'embed') {
+    return ['hosted_embed', 'hosted_service'].includes(deliveryBehavior);
+  }
+  if (['icon', 'decorative'].includes(sourceRole)) {
+    return ['source_owned_file', 'theme_asset'].includes(deliveryBehavior);
+  }
+  if (sourceRole === 'tracking') {
+    return deliveryBehavior === 'tracking_resource';
+  }
+  return sourceRole === 'other' && deliveryBehavior === 'other';
+}
+
+function deliveryMechanismMatches(deliveryBehavior, deliveryMechanism) {
+  const allowed = {
+    source_owned_file: new Set(['file_url']),
+    hosted_embed: new Set(['iframe', 'oembed']),
+    hosted_service: new Set(['iframe', 'oembed', 'provider_api']),
+    theme_asset: new Set(['file_url', 'inline']),
+    tracking_resource: new Set(['tracking_request']),
+    other: new Set(['other'])
+  };
+  return allowed[deliveryBehavior]?.has(deliveryMechanism) === true;
+}
+
+function standardMediaRoleMappingMatches(record) {
+  const expected = MEDIA_STANDARD_ROLE_MAPPINGS[record?.sourceRole];
+  const managedCanvasAlternative = ['content', 'brand', 'download'].includes(record?.sourceRole) &&
+    record?.targetOwner === 'managed_media' &&
+    record?.targetUseRole === record.sourceRole &&
+    record?.ownerSurface === 'canvas_component_prop';
+  return managedCanvasAlternative || (Boolean(expected) &&
+    record?.targetOwner === expected.targetOwner &&
+    record?.targetUseRole === expected.targetUseRole &&
+    record?.ownerSurface === expected.ownerSurface);
+}
+
+function fieldReferenceParts(value) {
+  const parts = String(value ?? '').trim().split('.');
+  return parts.length === 3 && parts.every(Boolean)
+    ? { entityType: parts[0], bundle: parts[1], field: parts[2] }
+    : null;
+}
+
+function referenceFieldRecord(fieldStorage, reference) {
+  const expected = fieldReferenceParts(reference);
+  if (!expected) {
+    return null;
+  }
+  return fieldStorage.find((record) => {
+    const identityMatches = exactStableValueMatch(record?.entityType, expected.entityType) &&
+      exactStableValueMatch(record?.bundle, expected.bundle) &&
+      exactStableValueMatch(record?.field, expected.field);
+    return identityMatches && String(record?.type ?? '').trim();
+  }) ?? null;
+}
+
+function referenceFieldExists(fieldStorage, reference, {
+  managedMedia = false,
+  mediaBundle = '',
+  providerField = false
+} = {}) {
+  const record = referenceFieldRecord(fieldStorage, reference);
+  if (!record) {
+    return false;
+  }
+  if (providerField) {
+    const providerCapableType = ['link', 'string', 'string_long'].includes(record.type) ||
+      /(?:embed|oembed|remote_video|youtube|vimeo|provider)/.test(record.type);
+    return providerCapableType && ['uri', 'provider_id', 'embed_config'].includes(record.providerValueType);
+  }
+  if (managedMedia) {
+    const targetBundleAllowed = record.targetBundles === null || (
+      Array.isArray(record.targetBundles) &&
+      record.targetBundles.some((bundle) => exactStableValueMatch(bundle, mediaBundle))
+    );
+    return ['entity_reference', 'entity_reference_revisions'].includes(record.type) &&
+      record.targetType === 'media' &&
+      targetBundleAllowed;
+  }
+  return true;
+}
+
+function componentPropExists(componentProps, reference, mediaBundle) {
+  const parts = String(reference ?? '').trim().split('.');
+  if (parts.length < 2 || parts.some((part) => !part)) {
+    return false;
+  }
+  const prop = parts.pop();
+  const componentId = parts.join('.');
+  return componentProps.some((record) => {
+    const bundleAllowed = record?.allowedMediaBundles === null || (
+      Array.isArray(record?.allowedMediaBundles) &&
+      record.allowedMediaBundles.some((bundle) => exactStableValueMatch(bundle, mediaBundle))
+    );
+    return exactStableValueMatch(record?.componentId, componentId) &&
+      exactStableValueMatch(record?.prop, prop) &&
+      ['media', 'entity_reference'].includes(record?.propType) &&
+      bundleAllowed;
+  });
+}
+
+async function targetRegularFileExists(packetDir, value) {
+  const projectRoot = resolve(dirname(packetDir));
+  const path = String(value ?? '').trim();
+  if (!path) {
+    return false;
+  }
+  const candidate = resolve(projectRoot, path);
+  if (!isWithin(projectRoot, candidate) || !existsSync(candidate)) {
+    return false;
+  }
+  try {
+    const realCandidate = realpathSync(candidate);
+    return isWithin(realpathSync(projectRoot), realCandidate) && (await stat(realCandidate)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function actualEntityIds(drupalReadback, entityType, bundle) {
+  const generic = substantiveObjects(drupalReadback?.content?.entities)
+    .filter((record) =>
+      exactStableValueMatch(record.entityType, entityType) && exactStableValueMatch(record.bundle, bundle)
+    );
+  const nodes = entityType === 'node'
+    ? substantiveObjects(drupalReadback?.content?.nodes).filter((record) => exactStableValueMatch(record.type, bundle))
+    : [];
+  const media = entityType === 'media'
+    ? substantiveObjects(drupalReadback?.media?.items).filter((record) => exactStableValueMatch(record.bundle, bundle))
+    : [];
+  return new Set([...generic, ...nodes, ...media].map((record) => String(record.id ?? '').trim()).filter(Boolean));
+}
+
 function successfulStatus(value) {
   const status = numericValue(value);
   return status !== null && status >= 200 && status < 300;
@@ -328,6 +584,14 @@ function httpUrl(value) {
   } catch {
     return null;
   }
+}
+
+function normalizedObservedOrigin(value) {
+  const text = String(value ?? '').trim();
+  if (text === 'inline') {
+    return text;
+  }
+  return httpUrl(text)?.origin ?? '';
 }
 
 function isWithin(root, path) {
@@ -754,11 +1018,13 @@ async function independentStructuredGateReasons({
     .filter((route) => route.source && route.target);
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
   const recurringObjects = substantiveObjects(patternMap?.structuredContentModel?.recurringSourceObjects);
+  const sourceSemanticRequirements = substantiveObjects(sourceAudit?.collectionSemanticRequirements);
   const semanticRules = substantiveObjects(patternMap?.structuredContentModel?.semanticIntegrityRules);
   const sourceAssetInventory = substantiveObjects(sourceAudit?.assetInventory);
   const sourceAssetScope = sourceAudit?.assetInventoryScope ?? {};
   const mediaOwnershipScope = patternMap?.mediaOwnership?.scope ?? {};
   const mediaOwnershipLedger = substantiveObjects(patternMap?.mediaOwnership?.ledger);
+  const fieldStorage = substantiveObjects(drupalReadback?.content?.fieldStorage);
   const browserItemCounts = arrayOrEmpty(browserEvidence?.publicRouteChecks)
     .flatMap((check) => substantiveObjects(check?.renderedItemCounts).map((count) => ({
       ...count,
@@ -990,15 +1256,77 @@ async function independentStructuredGateReasons({
 
   const semanticChecks = substantiveObjects(independentVerification?.fieldSemanticChecks);
   const semanticReadback = substantiveObjects(drupalReadback?.content?.fieldValueStats);
-  if (collectionEvidenceRequired && semanticRules.length === 0) {
-    reasons.push('pattern-map.json must declare field-level semantic integrity rules for in-scope recurring collections.');
+  if (collectionEvidenceRequired && sourceSemanticRequirements.length === 0) {
+    reasons.push('source-audit.json must declare source-derived semantic requirements for in-scope recurring collections.');
   }
-  if (!collectionEvidenceRequired && semanticRules.length > 0) {
-    reasons.push('pattern-map.json semantic integrity rules require collectionScope.applies=true.');
+  if (!collectionEvidenceRequired && (sourceSemanticRequirements.length > 0 || semanticRules.length > 0)) {
+    reasons.push('source semantic requirements and target semantic integrity rules require collectionScope.applies=true.');
   }
+
+  const acceptedCollectionLedger = collectionLedger.filter((record) => record?.accepted === true);
+  const semanticRequirementIds = new Set();
+  const semanticRequirementContexts = new Map();
+  for (const requirement of sourceSemanticRequirements) {
+    const id = String(requirement.id ?? '').trim();
+    const sourceApplicableCount = nonNegativeIntegerValue(requirement.sourceApplicableCount);
+    const zeroException = requirement.zeroApplicabilityException ?? {};
+    const zeroExceptionEvidencePresent = sourceApplicableCount === 0 && await nonEmptyPacketEvidence(
+      packetDir,
+      zeroException.evidence
+    );
+    const matchingLedgers = acceptedCollectionLedger.filter((ledger) =>
+      normalizeRouteKey(ledger.sourceRoute) === normalizeRouteKey(requirement.sourceRoute) &&
+      exactStableValueMatch(ledger.sourceObject, requirement.sourceObject) &&
+      arrayOrEmpty(ledger.requiredFields).some((field) => exactStableValueMatch(field, requirement.field))
+    );
+    const ledger = matchingLedgers.length === 1 ? matchingLedgers[0] : null;
+    const ledgerSourceCount = nonNegativeIntegerValue(ledger?.sourceItemCount);
+    if (
+      !id ||
+      semanticRequirementIds.has(id) ||
+      !normalizeRouteKey(requirement.sourceRoute) ||
+      !String(requirement.sourceObject ?? '').trim() ||
+      !String(requirement.field ?? '').trim() ||
+      !semanticDefinitionValid(requirement) ||
+      sourceApplicableCount === null ||
+      !String(requirement.evidence ?? '').trim() ||
+      !ledger ||
+      ledgerSourceCount === null ||
+      sourceApplicableCount > ledgerSourceCount ||
+      (sourceApplicableCount === 0 && (
+        !String(zeroException.name ?? '').trim() ||
+        !String(zeroException.rationale ?? '').trim() ||
+        !zeroExceptionEvidencePresent
+      ))
+    ) {
+      reasons.push(`source-audit.json semantic requirement ${id || '(missing id)'} must be unique, source-derived, collection-bound, count-bounded, and evidence any zero-applicability exception.`);
+      continue;
+    }
+    semanticRequirementIds.add(id);
+    semanticRequirementContexts.set(id, { ledger, requirement });
+  }
+
+  if (collectionEvidenceRequired) {
+    for (const ledger of acceptedCollectionLedger) {
+      for (const field of arrayOrEmpty(ledger.requiredFields)) {
+        const matchingRequirements = [...semanticRequirementContexts.values()].filter((context) =>
+          context.ledger === ledger && exactStableValueMatch(context.requirement.field, field)
+        );
+        if (matchingRequirements.length === 0) {
+          reasons.push(`source-audit.json needs a semantic requirement for required collection field ${ledger.contentTypeOrBundle}.${field}.`);
+        }
+      }
+    }
+  }
+
   const semanticRuleIds = new Set();
+  const mappedSemanticRequirementIds = new Set();
   for (const rule of semanticRules) {
     const id = String(rule.id ?? '').trim();
+    const sourceRequirementId = String(rule.sourceRequirementId ?? '').trim();
+    const context = semanticRequirementContexts.get(sourceRequirementId);
+    const requirement = context?.requirement;
+    const ledger = context?.ledger;
     const sourceApplicableCount = nonNegativeIntegerValue(rule.sourceApplicableCount);
     const expectedTargetPassCount = nonNegativeIntegerValue(rule.expectedTargetPassCount);
     const exceptionCount = nonNegativeIntegerValue(rule.exceptionCount);
@@ -1006,33 +1334,64 @@ async function independentStructuredGateReasons({
       packetDir,
       rule.exceptionEvidence
     );
-    const orderedFieldsValid = rule.rule !== 'ordered_fields' || (
-      String(rule.comparedField ?? '').trim() &&
-      SEMANTIC_COMPARISON_OPERATORS.has(rule.operator)
+    const exceptionRecordsValid = exceptionCount !== null && await itemExceptionsValid(
+      packetDir,
+      rule.exceptions,
+      exceptionCount
     );
-    const nonOrderedOperatorValid = rule.rule === 'ordered_fields' || rule.operator === 'not_applicable';
     if (
       !id ||
       semanticRuleIds.has(id) ||
-      !String(rule.sourceObject ?? '').trim() ||
+      !sourceRequirementId ||
+      mappedSemanticRequirementIds.has(sourceRequirementId) ||
+      !context ||
       !String(rule.entityType ?? '').trim() ||
       !String(rule.bundle ?? '').trim() ||
-      !String(rule.field ?? '').trim() ||
-      !SEMANTIC_INTEGRITY_RULES.has(rule.rule) ||
-      !orderedFieldsValid ||
-      !nonOrderedOperatorValid ||
+      !semanticDefinitionValid(rule) ||
+      !semanticDefinitionMatches(rule, requirement) ||
+      !exactStableValueMatch(rule.entityType, ledger?.drupalEntityType) ||
+      !exactStableValueMatch(rule.bundle, ledger?.contentTypeOrBundle) ||
+      !fieldStorage.some((field) =>
+        exactStableValueMatch(field.entityType, rule.entityType) &&
+        exactStableValueMatch(field.bundle, rule.bundle) &&
+        exactStableValueMatch(field.field, rule.field)
+      ) ||
+      (rule.rule === 'ordered_fields' && !fieldStorage.some((field) =>
+        exactStableValueMatch(field.entityType, rule.entityType) &&
+        exactStableValueMatch(field.bundle, rule.bundle) &&
+        exactStableValueMatch(field.field, rule.comparedField)
+      )) ||
       sourceApplicableCount === null ||
       expectedTargetPassCount === null ||
       exceptionCount === null ||
       expectedTargetPassCount + exceptionCount !== sourceApplicableCount ||
+      !exceptionRecordsValid ||
       (exceptionCount > 0 && !exceptionEvidencePresent) ||
       rule.accepted !== true
     ) {
-      reasons.push(`pattern-map.json semantic integrity rule ${id || '(missing id)'} must be accepted, uniquely identified, count-reconciled, and evidence any exceptions.`);
+      reasons.push(`pattern-map.json semantic integrity rule ${id || '(missing id)'} must map one-to-one to its source requirement and exactly preserve entity, bundle, field, comparison, operator, and source applicability.`);
       continue;
     }
     semanticRuleIds.add(id);
+    mappedSemanticRequirementIds.add(sourceRequirementId);
+  }
+  if (
+    mappedSemanticRequirementIds.size !== semanticRequirementIds.size ||
+    [...semanticRequirementIds].some((id) => !mappedSemanticRequirementIds.has(id))
+  ) {
+    reasons.push('pattern-map.json semantic integrity rules must map one-to-one to every valid source semantic requirement.');
+  }
+  if (
+    !recordIdsExactlyMatch(semanticChecks, 'ruleId', semanticRuleIds) ||
+    !recordIdsExactlyMatch(semanticReadback, 'ruleId', semanticRuleIds)
+  ) {
+    reasons.push('Semantic rule IDs must reconcile one-to-one across pattern-map.json, independent-verification.json, and drupal-readback.json with no duplicate or unknown rows.');
+  }
 
+  for (const rule of semanticRules.filter((candidate) => semanticRuleIds.has(String(candidate.id ?? '').trim()))) {
+    const id = String(rule.id).trim();
+    const sourceRequirementId = String(rule.sourceRequirementId).trim();
+    const expectedTargetPassCount = nonNegativeIntegerValue(rule.expectedTargetPassCount);
     const check = semanticChecks.find((candidate) => String(candidate.ruleId ?? '').trim() === id);
     const readback = semanticReadback.find((candidate) => String(candidate.ruleId ?? '').trim() === id);
     const checkEvidencePresent = check && await nonEmptyPacketEvidence(
@@ -1046,42 +1405,58 @@ async function independentStructuredGateReasons({
     const readbackEvaluatedCount = nonNegativeIntegerValue(readback?.evaluatedCount);
     const readbackPassCount = nonNegativeIntegerValue(readback?.passCount);
     const readbackViolationCount = nonNegativeIntegerValue(readback?.violationCount);
+    const checkEvaluatedIds = arrayOrEmpty(check?.evaluatedEntityIds);
+    const checkPassingIds = arrayOrEmpty(check?.passingEntityIds);
+    const readbackEvaluatedIds = arrayOrEmpty(readback?.evaluatedEntityIds);
+    const readbackPassingIds = arrayOrEmpty(readback?.passingEntityIds);
+    const actualIds = actualEntityIds(drupalReadback, rule.entityType, rule.bundle);
+    const checkIdentityMatches = check &&
+      String(check.sourceRequirementId ?? '').trim() === sourceRequirementId &&
+      semanticDefinitionMatches(check, rule) &&
+      exactStableValueMatch(check.entityType, rule.entityType) &&
+      exactStableValueMatch(check.bundle, rule.bundle);
+    const readbackIdentityMatches = readback &&
+      String(readback.sourceRequirementId ?? '').trim() === sourceRequirementId &&
+      semanticDefinitionMatches(readback, rule) &&
+      exactStableValueMatch(readback.entityType, rule.entityType) &&
+      exactStableValueMatch(readback.bundle, rule.bundle);
     if (
       !check ||
       !readback ||
       check.status !== 'pass' ||
-      !exactIdentityMatch(check.entityType, rule.entityType) ||
-      !exactIdentityMatch(check.bundle, rule.bundle) ||
-      !exactIdentityMatch(check.field, rule.field) ||
+      !checkIdentityMatches ||
+      !readbackIdentityMatches ||
       checkEvaluatedCount !== expectedTargetPassCount ||
       checkPassCount !== expectedTargetPassCount ||
       checkViolationCount !== 0 ||
+      !Array.isArray(check?.evaluatedEntityIds) ||
+      !Array.isArray(check?.passingEntityIds) ||
+      !Array.isArray(check?.violatingEntityIds) ||
+      !Array.isArray(readback?.evaluatedEntityIds) ||
+      !Array.isArray(readback?.passingEntityIds) ||
+      !validUniqueStringList(checkEvaluatedIds) ||
+      !validUniqueStringList(checkPassingIds) ||
+      !validUniqueStringList(readbackEvaluatedIds) ||
+      !validUniqueStringList(readbackPassingIds) ||
+      checkEvaluatedIds.length !== checkEvaluatedCount ||
+      checkPassingIds.length !== checkPassCount ||
+      !exactStringSetMatch(checkEvaluatedIds, readbackEvaluatedIds) ||
+      !exactStringSetMatch(checkPassingIds, readbackPassingIds) ||
+      checkPassingIds.some((entityId) => !checkEvaluatedIds.map(String).includes(String(entityId))) ||
+      checkEvaluatedIds.some((entityId) => !actualIds.has(String(entityId))) ||
       arrayOrEmpty(check.violatingEntityIds).length > 0 ||
       readbackEvaluatedCount !== checkEvaluatedCount ||
       readbackPassCount !== checkPassCount ||
       readbackViolationCount !== checkViolationCount ||
       !checkEvidencePresent
     ) {
-      reasons.push(`independent-verification.json must pass semantic integrity rule ${id} with zero violations and counts matching Drupal readback.`);
-    }
-  }
-  if (collectionEvidenceRequired) {
-    for (const ledger of collectionLedger.filter((record) => record?.accepted === true)) {
-      for (const field of arrayOrEmpty(ledger.requiredFields)) {
-        if (!semanticRules.some((rule) =>
-          rule.accepted === true &&
-          exactIdentityMatch(rule.sourceObject, ledger.sourceObject) &&
-          exactIdentityMatch(rule.bundle, ledger.contentTypeOrBundle) &&
-          exactIdentityMatch(rule.field, field)
-        )) {
-          reasons.push(`pattern-map.json needs a semantic integrity rule for required collection field ${ledger.contentTypeOrBundle}.${field}.`);
-        }
-      }
+      reasons.push(`independent-verification.json must pass semantic integrity rule ${id} with exact rule identity, zero violations, and matching Drupal readback.`);
     }
   }
 
   const sourceHasMediaSignals = hasMeaningfulEntry(sourceAudit?.mediaSignals);
   const sourceAssetIds = new Set();
+  const validSourceAssetsById = new Map();
   let reachableSourceAssetCount = 0;
   if (
     sourceAssetScope.reviewed !== true ||
@@ -1096,23 +1471,54 @@ async function independentStructuredGateReasons({
     const discoveredCount = nonNegativeIntegerValue(asset.discoveredCount);
     const reachableCount = nonNegativeIntegerValue(asset.reachableCount);
     const unreachableCount = nonNegativeIntegerValue(asset.unreachableCount);
+    const observedOriginValues = arrayOrEmpty(asset.observedSourceOrigins);
+    const observedOrigins = observedOriginValues.map(normalizedObservedOrigin).filter(Boolean);
+    const unreachableItems = arrayOrEmpty(asset.unreachableItems);
+    const unreachableEvidence = await Promise.all(
+      unreachableItems.map((item) => nonEmptyPacketEvidence(packetDir, item?.evidence))
+    );
+    const unreachableItemIds = unreachableItems.map((item) => String(item?.sourceItemId ?? '').trim());
+    const unreachableItemsValid = Array.isArray(asset.unreachableItems) &&
+      unreachableCount !== null &&
+      unreachableItems.length === unreachableCount &&
+      unreachableItemIds.every(Boolean) &&
+      new Set(unreachableItemIds).size === unreachableItemIds.length &&
+      unreachableItems.every((item, index) =>
+        String(item?.reason ?? '').trim() &&
+        ['private', 'credentialed', 'fetch_failure', 'other'].includes(item?.boundary) &&
+        item?.blocksCompletion === true &&
+        unreachableEvidence[index]
+      );
     if (
       !id ||
       sourceAssetIds.has(id) ||
-      !String(asset.assetClass ?? '').trim() ||
-      !String(asset.sourceRole ?? '').trim() ||
+      !MEDIA_ASSET_CLASSES.has(asset.assetClass) ||
+      !MEDIA_SOURCE_ROLES.has(asset.sourceRole) ||
+      !MEDIA_DELIVERY_BEHAVIORS.has(asset.deliveryBehavior) ||
+      !MEDIA_DELIVERY_MECHANISMS.has(asset.deliveryMechanism) ||
+      !sourceRoleDeliveryMatches(asset.sourceRole, asset.deliveryBehavior) ||
+      !deliveryMechanismMatches(asset.deliveryBehavior, asset.deliveryMechanism) ||
+      !Array.isArray(asset.observedSourceOrigins) ||
+      observedOriginValues.length === 0 ||
+      observedOrigins.length !== observedOriginValues.length ||
+      new Set(observedOrigins).size !== observedOrigins.length ||
       discoveredCount === null ||
       discoveredCount === 0 ||
       reachableCount === null ||
       unreachableCount === null ||
       discoveredCount !== reachableCount + unreachableCount ||
+      !unreachableItemsValid ||
       !String(asset.evidence ?? '').trim()
     ) {
-      reasons.push(`source-audit.json asset inventory row ${id || '(missing id)'} must be uniquely identified and reconcile discovered, reachable, and unreachable counts.`);
+      reasons.push(`source-audit.json asset inventory row ${id || '(missing id)'} must use a valid source role, delivery behavior, observed origin, and reconciled discovered/reachable/unreachable counts.`);
       continue;
     }
     sourceAssetIds.add(id);
+    validSourceAssetsById.set(id, asset);
     reachableSourceAssetCount += reachableCount;
+    if (unreachableCount > 0) {
+      reasons.push(`source-audit.json asset inventory row ${id} contains unreachable source assets that remain completion blockers.`);
+    }
   }
   if (sourceAssetScope.applies !== (reachableSourceAssetCount > 0)) {
     reasons.push('source-audit.json assetInventoryScope.applies must reflect whether the audited source has reachable public assets.');
@@ -1130,17 +1536,24 @@ async function independentStructuredGateReasons({
 
   const mediaChecks = substantiveObjects(independentVerification?.mediaProvenanceChecks);
   const mediaReadback = substantiveObjects(drupalReadback?.media?.referenceStats);
+  const componentPropReadback = substantiveObjects(drupalReadback?.media?.componentProps);
+  const actualMediaItems = substantiveObjects(drupalReadback?.media?.items);
   const mediaLedgerIds = new Set();
   const mediaLedgerCountsByAsset = new Map();
   for (const ledger of mediaOwnershipLedger) {
     const id = String(ledger.id ?? '').trim();
     const sourceAssetId = String(ledger.sourceAssetInventoryId ?? '').trim();
-    const sourceAsset = sourceAssetInventory.find((asset) => String(asset.id ?? '').trim() === sourceAssetId);
+    const sourceAsset = validSourceAssetsById.get(sourceAssetId);
     const sourceReachableCount = nonNegativeIntegerValue(ledger.sourceReachableCount);
     const exceptionCount = nonNegativeIntegerValue(ledger.exceptionCount);
     const exceptionEvidencePresent = exceptionCount > 0 && await nonEmptyPacketEvidence(
       packetDir,
       ledger.exceptionEvidence
+    );
+    const exceptionRecordsValid = exceptionCount !== null && await itemExceptionsValid(
+      packetDir,
+      ledger.exceptions,
+      exceptionCount
     );
     const provider = ledger.externalProvider ?? {};
     const providerUrl = httpUrl(provider.origin);
@@ -1150,31 +1563,117 @@ async function independentStructuredGateReasons({
       packetDir,
       provider.evidence
     );
+    const observedSourceOrigins = new Set(
+      arrayOrEmpty(sourceAsset?.observedSourceOrigins).map(normalizedObservedOrigin).filter(Boolean)
+    );
+    const mappingException = ledger.roleMappingException ?? {};
+    const mappingExceptionEvidencePresent = await nonEmptyPacketEvidence(packetDir, mappingException.evidence);
+    const roleMappingAccepted = standardMediaRoleMappingMatches(ledger) || (
+      String(mappingException.name ?? '').trim() &&
+      String(mappingException.rationale ?? '').trim() &&
+      mappingExceptionEvidencePresent
+    );
+    const referenceFields = arrayOrEmpty(ledger.referenceFields);
+    const componentProps = arrayOrEmpty(ledger.componentProps);
+    const themeAssetPaths = arrayOrEmpty(ledger.themeAssetPaths);
+    const referenceFieldsExist = referenceFields.every((reference) => referenceFieldExists(
+      fieldStorage,
+      reference,
+      {
+        managedMedia: ledger.targetOwner === 'managed_media',
+        mediaBundle: ledger.mediaBundle,
+        providerField: ledger.targetOwner === 'external_provider'
+      }
+    ));
+    const providerFieldEvidence = await Promise.all(referenceFields.map((reference) => {
+      const field = referenceFieldRecord(fieldStorage, reference);
+      return ledger.targetOwner !== 'external_provider'
+        ? true
+        : nonEmptyPacketEvidence(packetDir, field?.providerSettingsEvidence);
+    }));
+    const componentPropsExist = componentProps.every((reference) =>
+      componentPropExists(componentPropReadback, reference, ledger.mediaBundle)
+    );
+    const themeAssetFilesExist = await Promise.all(
+      themeAssetPaths.map((path) => targetRegularFileExists(packetDir, path))
+    );
+    const providerOriginMatchesSource = providerUrl && observedSourceOrigins.has(providerUrl.origin);
     if (
       !id ||
       mediaLedgerIds.has(id) ||
       !sourceAsset ||
-      !exactIdentityMatch(ledger.assetClass, sourceAsset?.assetClass) ||
-      !exactIdentityMatch(ledger.sourceRole, sourceAsset?.sourceRole) ||
+      !exactStableValueMatch(ledger.assetClass, sourceAsset?.assetClass) ||
+      !exactStableValueMatch(ledger.sourceRole, sourceAsset?.sourceRole) ||
+      ledger.deliveryBehavior !== sourceAsset?.deliveryBehavior ||
+      ledger.deliveryMechanism !== sourceAsset?.deliveryMechanism ||
       sourceReachableCount === null ||
       sourceReachableCount === 0 ||
       exceptionCount === null ||
       exceptionCount > sourceReachableCount ||
+      !exceptionRecordsValid ||
+      !Array.isArray(ledger.referenceFields) ||
+      !Array.isArray(ledger.componentProps) ||
+      !Array.isArray(ledger.themeAssetPaths) ||
       !MEDIA_TARGET_OWNERS.has(ledger.targetOwner) ||
+      !MEDIA_TARGET_USE_ROLES.has(ledger.targetUseRole) ||
+      !MEDIA_OWNER_SURFACES.has(ledger.ownerSurface) ||
+      !roleMappingAccepted ||
       (ledger.targetOwner === 'managed_media' && (
         !String(ledger.mediaBundle ?? '').trim() ||
-        arrayOrEmpty(ledger.referenceFields).length === 0
+        !Array.isArray(ledger.referenceFields) ||
+        !Array.isArray(ledger.componentProps) ||
+        !validUniqueStringList(referenceFields) ||
+        !validUniqueStringList(componentProps) ||
+        !(
+          (ledger.ownerSurface === 'media_reference_field' &&
+            referenceFields.length > 0 && componentProps.length === 0 && referenceFieldsExist) ||
+          (ledger.ownerSurface === 'canvas_component_prop' &&
+            componentProps.length > 0 && referenceFields.length === 0 && componentPropsExist)
+        ) ||
+        themeAssetPaths.length > 0
       )) ||
       (ledger.targetOwner === 'external_provider' && (
-        !['embed', 'provider_owned'].includes(ledger.sourceRole) ||
-        arrayOrEmpty(ledger.referenceFields).length === 0 ||
+        !['hosted_embed', 'hosted_service'].includes(sourceAsset?.deliveryBehavior) ||
+        !['iframe', 'oembed', 'provider_api'].includes(sourceAsset?.deliveryMechanism) ||
+        referenceFields.length === 0 ||
+        !Array.isArray(ledger.referenceFields) ||
+        !validUniqueStringList(referenceFields) ||
+        !referenceFieldsExist ||
+        providerFieldEvidence.some((present) => !present) ||
+        componentProps.length > 0 ||
+        String(ledger.mediaBundle ?? '').trim() ||
+        themeAssetPaths.length > 0 ||
         !String(provider.name ?? '').trim() ||
         !providerUrl ||
+        observedSourceOrigins.size !== 1 ||
+        !providerOriginMatchesSource ||
+        provider.serviceBehavior !== sourceAsset?.deliveryBehavior ||
+        provider.integrationType !== sourceAsset?.deliveryMechanism ||
         providerUrl.origin === sourceBaseUrl?.origin ||
         providerUrl.origin === targetBaseUrl?.origin ||
         !providerEvidencePresent
       )) ||
-      (ledger.targetOwner === 'documented_exception' && exceptionCount !== sourceReachableCount) ||
+      (ledger.targetOwner === 'theme_asset' && (
+        String(ledger.mediaBundle ?? '').trim() ||
+        referenceFields.length > 0 ||
+        componentProps.length > 0 ||
+        !Array.isArray(ledger.themeAssetPaths) ||
+        themeAssetPaths.length === 0 ||
+        !validUniqueStringList(themeAssetPaths) ||
+        themeAssetFilesExist.some((exists) => !exists)
+      )) ||
+      (ledger.targetOwner === 'excluded_non_content' && (
+        String(ledger.mediaBundle ?? '').trim() ||
+        referenceFields.length > 0 ||
+        componentProps.length > 0 ||
+        themeAssetPaths.length > 0 ||
+        !String(ledger.notes ?? '').trim()
+      )) ||
+      (ledger.targetOwner === 'documented_exception' && (
+        exceptionCount !== sourceReachableCount ||
+        ledger.targetUseRole !== 'other' ||
+        ledger.ownerSurface !== 'documented_exception'
+      )) ||
       (exceptionCount > 0 && !exceptionEvidencePresent) ||
       ledger.accepted !== true
     ) {
@@ -1186,7 +1685,22 @@ async function independentStructuredGateReasons({
       sourceAssetId,
       (mediaLedgerCountsByAsset.get(sourceAssetId) ?? 0) + sourceReachableCount
     );
+  }
 
+  if (
+    !recordIdsExactlyMatch(mediaChecks, 'ledgerId', mediaLedgerIds) ||
+    !recordIdsExactlyMatch(mediaReadback, 'ledgerId', mediaLedgerIds)
+  ) {
+    reasons.push('Media ledger IDs must reconcile one-to-one across pattern-map.json, independent-verification.json, and drupal-readback.json with no duplicate or unknown rows.');
+  }
+
+  const claimedManagedMediaIds = new Set();
+  for (const ledger of mediaOwnershipLedger.filter((candidate) => mediaLedgerIds.has(String(candidate.id ?? '').trim()))) {
+    const id = String(ledger.id).trim();
+    const sourceAssetId = String(ledger.sourceAssetInventoryId).trim();
+    const sourceReachableCount = nonNegativeIntegerValue(ledger.sourceReachableCount);
+    const exceptionCount = nonNegativeIntegerValue(ledger.exceptionCount);
+    const providerUrl = httpUrl(ledger.externalProvider?.origin);
     const check = mediaChecks.find((candidate) => String(candidate.ledgerId ?? '').trim() === id);
     const readback = mediaReadback.find((candidate) => String(candidate.ledgerId ?? '').trim() === id);
     const checkEvidencePresent = check && await nonEmptyPacketEvidence(
@@ -1195,38 +1709,97 @@ async function independentStructuredGateReasons({
       independentEvidenceDir
     );
     const managedMediaCount = nonNegativeIntegerValue(check?.managedMediaCount);
+    const managedMediaIds = arrayOrEmpty(check?.managedMediaIds);
+    const readbackManagedMediaIds = arrayOrEmpty(readback?.managedMediaIds);
     const externalProviderCount = nonNegativeIntegerValue(check?.externalProviderCount);
+    const themeAssetCount = nonNegativeIntegerValue(check?.themeAssetCount);
+    const excludedNonContentCount = nonNegativeIntegerValue(check?.excludedNonContentCount);
     const itemBlockedCount = nonNegativeIntegerValue(check?.itemBlockedCount);
     const unresolvedCount = nonNegativeIntegerValue(check?.unresolvedCount);
     const checkedSourceCount = nonNegativeIntegerValue(check?.sourceReachableCount);
     const allowedOwnedCount = sourceReachableCount - exceptionCount;
     const targetOwnerCountsMatch =
-      (ledger.targetOwner === 'managed_media' && managedMediaCount === allowedOwnedCount && externalProviderCount === 0) ||
-      (ledger.targetOwner === 'external_provider' && externalProviderCount === allowedOwnedCount && managedMediaCount === 0) ||
-      (ledger.targetOwner === 'documented_exception' && managedMediaCount === 0 && externalProviderCount === 0);
+      (ledger.targetOwner === 'managed_media' && managedMediaCount === allowedOwnedCount && externalProviderCount === 0 && themeAssetCount === 0 && excludedNonContentCount === 0) ||
+      (ledger.targetOwner === 'external_provider' && externalProviderCount === allowedOwnedCount && managedMediaCount === 0 && themeAssetCount === 0 && excludedNonContentCount === 0) ||
+      (ledger.targetOwner === 'theme_asset' && themeAssetCount === allowedOwnedCount && managedMediaCount === 0 && externalProviderCount === 0 && excludedNonContentCount === 0) ||
+      (ledger.targetOwner === 'excluded_non_content' && excludedNonContentCount === allowedOwnedCount && managedMediaCount === 0 && externalProviderCount === 0 && themeAssetCount === 0) ||
+      (ledger.targetOwner === 'documented_exception' && managedMediaCount === 0 && externalProviderCount === 0 && themeAssetCount === 0 && excludedNonContentCount === 0);
+    const expectedProviderOrigin = ledger.targetOwner === 'external_provider' ? providerUrl?.origin ?? '' : '';
+    let duplicateManagedMediaId = false;
+    for (const mediaId of managedMediaIds.map(String)) {
+      if (claimedManagedMediaIds.has(mediaId)) {
+        duplicateManagedMediaId = true;
+      }
+      claimedManagedMediaIds.add(mediaId);
+    }
+    const managedMediaItemsMatch = managedMediaIds.every((mediaId) => actualMediaItems.some((item) =>
+      String(item.id ?? '').trim() === String(mediaId) && exactStableValueMatch(item.bundle, ledger.mediaBundle)
+    ));
+    const bundleInventoryCount = nonNegativeIntegerValue(drupalReadback?.media?.countsByType?.[ledger.mediaBundle]);
+    const identityMatches = (record) => {
+      const recordProviderOrigin = ledger.targetOwner === 'external_provider'
+        ? httpUrl(record?.providerOrigin)?.origin ?? ''
+        : String(record?.providerOrigin ?? '').trim();
+      return Boolean(record) &&
+        Array.isArray(record.referenceFields) &&
+        Array.isArray(record.componentProps) &&
+        Array.isArray(record.themeAssetPaths) &&
+        String(record.sourceAssetInventoryId ?? '').trim() === sourceAssetId &&
+        exactStableValueMatch(record.assetClass, ledger.assetClass) &&
+        exactStableValueMatch(record.sourceRole, ledger.sourceRole) &&
+        record.deliveryBehavior === ledger.deliveryBehavior &&
+        record.deliveryMechanism === ledger.deliveryMechanism &&
+        record.targetOwner === ledger.targetOwner &&
+        record.targetUseRole === ledger.targetUseRole &&
+        record.ownerSurface === ledger.ownerSurface &&
+        exactOptionalStableValueMatch(record.mediaBundle, ledger.mediaBundle) &&
+        exactStringSetMatch(record.referenceFields, ledger.referenceFields) &&
+        exactStringSetMatch(record.componentProps, ledger.componentProps) &&
+        exactStringSetMatch(record.themeAssetPaths, ledger.themeAssetPaths) &&
+        recordProviderOrigin === expectedProviderOrigin &&
+        nonNegativeIntegerValue(record.sourceReachableCount) === sourceReachableCount;
+    };
     if (
       !check ||
       !readback ||
       check.status !== 'pass' ||
+      !identityMatches(check) ||
+      !identityMatches(readback) ||
       checkedSourceCount !== sourceReachableCount ||
       managedMediaCount === null ||
+      !Array.isArray(check?.managedMediaIds) ||
+      !Array.isArray(readback?.managedMediaIds) ||
+      !validUniqueStringList(managedMediaIds) ||
+      !validUniqueStringList(readbackManagedMediaIds) ||
+      managedMediaIds.length !== managedMediaCount ||
+      !exactStringSetMatch(managedMediaIds, readbackManagedMediaIds) ||
+      !managedMediaItemsMatch ||
+      duplicateManagedMediaId ||
+      (managedMediaCount > 0 && (bundleInventoryCount === null || bundleInventoryCount < managedMediaCount)) ||
       externalProviderCount === null ||
+      themeAssetCount === null ||
+      excludedNonContentCount === null ||
       itemBlockedCount === null ||
       unresolvedCount !== 0 ||
-      managedMediaCount + externalProviderCount + itemBlockedCount + unresolvedCount !== sourceReachableCount ||
+      managedMediaCount + externalProviderCount + themeAssetCount + excludedNonContentCount + itemBlockedCount + unresolvedCount !== sourceReachableCount ||
       itemBlockedCount !== exceptionCount ||
       !targetOwnerCountsMatch ||
+      !Array.isArray(check.invalidRoleAssignments) ||
+      !Array.isArray(check.duplicatePlacementFindings) ||
       arrayOrEmpty(check.invalidRoleAssignments).length > 0 ||
       arrayOrEmpty(check.duplicatePlacementFindings).length > 0 ||
       nonNegativeIntegerValue(readback.managedMediaCount) !== managedMediaCount ||
       nonNegativeIntegerValue(readback.externalProviderCount) !== externalProviderCount ||
+      nonNegativeIntegerValue(readback.themeAssetCount) !== themeAssetCount ||
+      nonNegativeIntegerValue(readback.excludedNonContentCount) !== excludedNonContentCount ||
+      nonNegativeIntegerValue(readback.itemBlockedCount) !== itemBlockedCount ||
       nonNegativeIntegerValue(readback.unresolvedCount) !== unresolvedCount ||
       !checkEvidencePresent
     ) {
       reasons.push(`independent-verification.json must reconcile media provenance row ${id} with Drupal readback, zero unresolved assets, and no invalid-role or duplicate-placement findings.`);
     }
   }
-  for (const asset of sourceAssetInventory) {
+  for (const asset of validSourceAssetsById.values()) {
     const id = String(asset.id ?? '').trim();
     const reachableCount = nonNegativeIntegerValue(asset.reachableCount);
     if (reachableCount > 0 && mediaLedgerCountsByAsset.get(id) !== reachableCount) {
@@ -2936,6 +3509,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const drupalCommands = arrayOrEmpty(drupalReadback?.commands).map((command) => String(command));
   const drupalContent = drupalReadback?.content ?? {};
   const drupalRouting = drupalReadback?.routing ?? {};
+  const managedMediaReadbackRequired = substantiveObjects(patternMap?.mediaOwnership?.ledger).some((ledger) =>
+    ledger.targetOwner === 'managed_media' &&
+    nonNegativeIntegerValue(ledger.sourceReachableCount) > nonNegativeIntegerValue(ledger.exceptionCount)
+  );
   if (
     drupalReadback?.readbackComplete !== true ||
     arrayOrEmpty(drupalReadback?.blockers).length > 0 ||
@@ -2968,7 +3545,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     (!hasMeaningfulEntry(drupalContent.nodes) && !hasMeaningfulEntry(drupalContent.canvasPages)) ||
     arrayOrEmpty(drupalContent.defaultOrDemoContent).length > 0 ||
     (collectionEvidenceRequired && !hasMeaningfulEntry(drupalReadback?.views)) ||
-    ((sourceAudit?.assetInventoryScope?.applies === true || hasMeaningfulEntry(sourceAudit?.mediaSignals) || hasMeaningfulEntry(patternMap?.media)) &&
+    ((managedMediaReadbackRequired || hasMeaningfulEntry(patternMap?.media)) &&
       (!hasMeaningfulEntry(drupalReadback?.media?.items) ||
         !isJsonObject(drupalReadback?.media?.countsByType) ||
         Object.keys(drupalReadback.media.countsByType).length === 0)) ||

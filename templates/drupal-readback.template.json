@@ -23,8 +23,39 @@
     "unpublishedNodes": [],
     "defaultOrDemoContent": [],
     "contentTypes": [],
-    "fieldStorage": [],
-    "fieldValueStats": [],
+    "fieldStorage": [
+      {
+        "entityType": "",
+        "bundle": "",
+        "field": "",
+        "type": "",
+        "targetType": "",
+        "targetBundles": null,
+        "providerValueType": "uri | provider_id | embed_config | not_applicable",
+        "providerSettingsEvidence": ""
+      }
+    ],
+    "entities": [],
+    "fieldValueStats": [
+      {
+        "ruleId": "",
+        "sourceRequirementId": "",
+        "sourceRoute": "",
+        "sourceObject": "",
+        "entityType": "",
+        "bundle": "",
+        "field": "",
+        "comparedField": "",
+        "rule": "population_parity | value_parity | ordered_fields | reference_integrity | non_placeholder",
+        "operator": "eq | ne | lt | lte | gt | gte | not_applicable",
+        "sourceApplicableCount": null,
+        "evaluatedCount": null,
+        "evaluatedEntityIds": [],
+        "passCount": null,
+        "passingEntityIds": [],
+        "violationCount": null
+      }
+    ],
     "formDisplays": [],
     "viewDisplays": [],
     "canvasPages": []
@@ -40,7 +71,40 @@
   "media": {
     "countsByType": {},
     "items": [],
-    "referenceStats": []
+    "componentProps": [
+      {
+        "componentId": "",
+        "prop": "",
+        "propType": "media | entity_reference",
+        "allowedMediaBundles": null
+      }
+    ],
+    "referenceStats": [
+      {
+        "ledgerId": "",
+        "sourceAssetInventoryId": "",
+        "assetClass": "image | document | video | audio | other",
+        "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+        "deliveryBehavior": "source_owned_file | hosted_embed | hosted_service | theme_asset | tracking_resource | other",
+        "deliveryMechanism": "file_url | iframe | oembed | provider_api | inline | tracking_request | other",
+        "targetOwner": "managed_media | external_provider | theme_asset | excluded_non_content | documented_exception",
+        "targetUseRole": "content | brand | download | embed | theme_icon | theme_decorative | tracking_excluded | other",
+        "ownerSurface": "media_reference_field | canvas_component_prop | provider_embed_field | theme_asset | excluded_non_content | documented_exception",
+        "mediaBundle": "",
+        "referenceFields": [],
+        "componentProps": [],
+        "themeAssetPaths": [],
+        "providerOrigin": "",
+        "sourceReachableCount": null,
+        "managedMediaCount": null,
+        "managedMediaIds": [],
+        "externalProviderCount": null,
+        "themeAssetCount": null,
+        "excludedNonContentCount": null,
+        "itemBlockedCount": null,
+        "unresolvedCount": null
+      }
+    ]
   },
   "views": [],
   "workflows": [],
