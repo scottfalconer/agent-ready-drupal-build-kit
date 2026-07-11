@@ -1,0 +1,138 @@
+{
+  "schemaVersion": "public-kit.assembly-evidence.1",
+  "site": "",
+  "checkedAt": "",
+  "reviewer": "",
+  "assemblyEntrypoints": [
+    {
+      "name": "",
+      "command": "",
+      "workingDirectory": "",
+      "stableIdentityStrategy": "",
+      "portableDependencies": false,
+      "absoluteDeveloperPaths": [],
+      "evidence": []
+    }
+  ],
+  "verificationEnvironment": {
+    "disposableSnapshotUsed": false,
+    "workingTargetUsed": true,
+    "snapshotIdentity": "",
+    "snapshotCreationEvidence": [],
+    "restorationStrategy": "",
+    "restorationEvidence": []
+  },
+  "dryRun": {
+    "command": "",
+    "mutatedState": true,
+    "inventory": {
+      "creates": [],
+      "updates": [],
+      "deletes": [],
+      "unchanged": []
+    },
+    "allOperationClassesReported": false,
+    "status": "pass | fail | blocked",
+    "evidence": []
+  },
+  "identityAndDeletion": {
+    "stableIdentityKinds": [],
+    "editableTitlesUsedAsIdentity": true,
+    "numericIdsUsedAsIdentity": true,
+    "provenanceNamespace": "",
+    "deletesRestrictedToProvenanceNamespace": false,
+    "destructiveOptInRequired": false,
+    "destructiveOptInDefault": "enabled | disabled",
+    "unscopedDeletionPossible": true,
+    "evidence": []
+  },
+  "inventories": {
+    "beforeFirstRun": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    },
+    "afterFirstRun": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    },
+    "beforeSecondRun": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    },
+    "afterSecondRun": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    },
+    "beforeFailureInjection": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    },
+    "afterFailureRestoration": {
+      "sha256": "",
+      "recordCount": 0,
+      "evidence": []
+    }
+  },
+  "firstRun": {
+    "status": "pass | fail | blocked",
+    "creates": 0,
+    "updates": 0,
+    "deletes": 0,
+    "unchanged": 0,
+    "evidence": []
+  },
+  "extensionSurvival": {
+    "insertedAfterFirstRun": [
+      {
+        "kind": "node | canvas_page | canvas_component | menu_link | alias | view | sitemap",
+        "stableIdentity": "",
+        "ownership": "extension",
+        "survivedSecondRun": false,
+        "beforeEvidence": [],
+        "afterEvidence": []
+      }
+    ],
+    "allSurvived": false,
+    "evidence": []
+  },
+  "secondRun": {
+    "status": "pass | fail | blocked",
+    "creates": 0,
+    "updates": 0,
+    "deletes": 0,
+    "unchanged": 0,
+    "noOp": false,
+    "evidence": []
+  },
+  "failureRestoration": {
+    "failureInjected": false,
+    "failurePoint": "",
+    "failureObserved": false,
+    "transactionRolledBackOrSnapshotRestored": false,
+    "beforeSha256": "",
+    "afterSha256": "",
+    "workingTargetUntouched": false,
+    "status": "pass | fail | blocked",
+    "evidence": []
+  },
+  "portableDependencies": {
+    "repoRelativeOrDeclaredRuntimeOnly": false,
+    "absoluteDeveloperPaths": [],
+    "dependencies": [
+      {
+        "name": "",
+        "source": "",
+        "evidence": []
+      }
+    ],
+    "status": "pass | fail | blocked",
+    "evidence": []
+  },
+  "accepted": false,
+  "blockers": []
+}

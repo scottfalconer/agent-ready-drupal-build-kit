@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -46,6 +47,10 @@ function mutateJson(path, mutate) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
   mutate(value);
   writeJson(path, value);
+}
+
+function fileSha256(path) {
+  return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
 }
 
 function crc32(buffer) {
@@ -997,6 +1002,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.blockers = [];
   writeJson(readbackPath, readback);
 
+  addQualifyingAssemblyEvidence(packetDir, targetBaseUrl);
+
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
@@ -1008,6 +1015,186 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+}
+
+function addQualifyingAssemblyEvidence(packetDir, targetBaseUrl) {
+  const evidenceDir = join(packetDir, 'evidence', 'assembly');
+  mkdirSync(evidenceDir, { recursive: true });
+  const evidenceFiles = {
+    run: 'assembly-run.json',
+    snapshot: 'snapshot.json',
+    restoration: 'restoration.json',
+    beforeFirstRun: 'inventory-before-first.json',
+    afterFirstRun: 'inventory-after-first.json',
+    beforeSecondRun: 'inventory-before-second.json',
+    afterSecondRun: 'inventory-after-second.json',
+    beforeFailureInjection: 'inventory-before-failure.json',
+    afterFailureRestoration: 'inventory-after-restoration.json'
+  };
+  writeJson(join(evidenceDir, evidenceFiles.run), {
+    command: 'ddev exec node scripts/assemble.mjs --verify',
+    result: 'pass'
+  });
+  writeJson(join(evidenceDir, evidenceFiles.snapshot), {
+    snapshot: 'fixture-disposable-snapshot',
+    workingTargetUsed: false
+  });
+  writeJson(join(evidenceDir, evidenceFiles.restoration), {
+    method: 'database snapshot restoration',
+    result: 'pass'
+  });
+  writeJson(join(evidenceDir, evidenceFiles.beforeFirstRun), { phase: 'before-first', records: [] });
+  writeJson(join(evidenceDir, evidenceFiles.afterFirstRun), {
+    phase: 'after-first',
+    records: [{ sourceKey: 'fixture:homepage' }]
+  });
+  const secondRunInventory = {
+    phase: 'second-run',
+    records: [
+      { sourceKey: 'fixture:homepage' },
+      { sourceKey: 'extension:node' },
+      { sourceKey: 'extension:canvas-page' },
+      { sourceKey: 'extension:canvas-component' },
+      { sourceKey: 'extension:menu-link' },
+      { sourceKey: 'extension:alias' },
+      { sourceKey: 'extension:view' },
+      { sourceKey: 'extension:sitemap' }
+    ]
+  };
+  writeJson(join(evidenceDir, evidenceFiles.beforeSecondRun), secondRunInventory);
+  writeJson(join(evidenceDir, evidenceFiles.afterSecondRun), secondRunInventory);
+  const failureInventory = { phase: 'failure-injection', records: secondRunInventory.records };
+  writeJson(join(evidenceDir, evidenceFiles.beforeFailureInjection), failureInventory);
+  writeJson(join(evidenceDir, evidenceFiles.afterFailureRestoration), failureInventory);
+
+  const inventory = (name, recordCount) => ({
+    sha256: fileSha256(join(evidenceDir, evidenceFiles[name])),
+    recordCount,
+    evidence: [evidenceFiles[name]]
+  });
+  const extensionKinds = [
+    'node',
+    'canvas_page',
+    'canvas_component',
+    'menu_link',
+    'alias',
+    'view',
+    'sitemap'
+  ];
+  const beforeFailure = inventory('beforeFailureInjection', 8);
+  const afterFailure = inventory('afterFailureRestoration', 8);
+  writeJson(join(packetDir, 'assembly-evidence.json'), {
+    schemaVersion: 'public-kit.assembly-evidence.1',
+    site: targetBaseUrl,
+    checkedAt: testCheckedAt,
+    reviewer: 'Fixture Assembly Reviewer',
+    assemblyEntrypoints: [
+      {
+        name: 'fixture assembly',
+        command: 'ddev exec node scripts/assemble.mjs',
+        workingDirectory: '.',
+        stableIdentityStrategy: 'source keys and UUIDs',
+        portableDependencies: true,
+        absoluteDeveloperPaths: [],
+        evidence: [evidenceFiles.run]
+      }
+    ],
+    verificationEnvironment: {
+      disposableSnapshotUsed: true,
+      workingTargetUsed: false,
+      snapshotIdentity: 'fixture-disposable-snapshot',
+      snapshotCreationEvidence: [evidenceFiles.snapshot],
+      restorationStrategy: 'Restore the disposable database snapshot.',
+      restorationEvidence: [evidenceFiles.restoration]
+    },
+    dryRun: {
+      command: 'ddev exec node scripts/assemble.mjs --dry-run',
+      mutatedState: false,
+      inventory: {
+        creates: [{ sourceKey: 'fixture:homepage' }],
+        updates: [],
+        deletes: [],
+        unchanged: []
+      },
+      allOperationClassesReported: true,
+      status: 'pass',
+      evidence: [evidenceFiles.run]
+    },
+    identityAndDeletion: {
+      stableIdentityKinds: ['source_key', 'uuid', 'config_machine_name'],
+      editableTitlesUsedAsIdentity: false,
+      numericIdsUsedAsIdentity: false,
+      provenanceNamespace: 'fixture:',
+      deletesRestrictedToProvenanceNamespace: true,
+      destructiveOptInRequired: true,
+      destructiveOptInDefault: 'disabled',
+      unscopedDeletionPossible: false,
+      evidence: [evidenceFiles.run]
+    },
+    inventories: {
+      beforeFirstRun: inventory('beforeFirstRun', 0),
+      afterFirstRun: inventory('afterFirstRun', 1),
+      beforeSecondRun: inventory('beforeSecondRun', 8),
+      afterSecondRun: inventory('afterSecondRun', 8),
+      beforeFailureInjection: beforeFailure,
+      afterFailureRestoration: afterFailure
+    },
+    firstRun: {
+      status: 'pass',
+      creates: 1,
+      updates: 0,
+      deletes: 0,
+      unchanged: 0,
+      evidence: [evidenceFiles.run]
+    },
+    extensionSurvival: {
+      insertedAfterFirstRun: extensionKinds.map((kind) => ({
+        kind,
+        stableIdentity: `extension:${kind}`,
+        ownership: 'extension',
+        survivedSecondRun: true,
+        beforeEvidence: [evidenceFiles.beforeSecondRun],
+        afterEvidence: [evidenceFiles.afterSecondRun]
+      })),
+      allSurvived: true,
+      evidence: [evidenceFiles.run]
+    },
+    secondRun: {
+      status: 'pass',
+      creates: 0,
+      updates: 0,
+      deletes: 0,
+      unchanged: 8,
+      noOp: true,
+      evidence: [evidenceFiles.run]
+    },
+    failureRestoration: {
+      failureInjected: true,
+      failurePoint: 'after entity writes and before config completion',
+      failureObserved: true,
+      transactionRolledBackOrSnapshotRestored: true,
+      beforeSha256: beforeFailure.sha256,
+      afterSha256: afterFailure.sha256,
+      workingTargetUntouched: true,
+      status: 'pass',
+      evidence: [evidenceFiles.restoration]
+    },
+    portableDependencies: {
+      repoRelativeOrDeclaredRuntimeOnly: true,
+      absoluteDeveloperPaths: [],
+      dependencies: [
+        {
+          name: 'Node.js',
+          source: 'package.json engines.node',
+          evidence: [evidenceFiles.run]
+        }
+      ],
+      status: 'pass',
+      evidence: [evidenceFiles.run]
+    },
+    accepted: true,
+    blockers: []
+  });
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -1905,6 +2092,7 @@ test('a coherent but stale packet cannot authorize current local completion', as
 
   const staleCheckedAt = '2020-01-01T00:00:00Z';
   for (const file of [
+    'assembly-evidence.json',
     'source-audit.json',
     'pattern-map.json',
     'route-matrix.json',
@@ -1924,6 +2112,94 @@ test('a coherent but stale packet cannot authorize current local completion', as
     report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
     /newest completion evidence is older than seven days/i
   );
+});
+
+test('G-ASSEMBLY-01 fails closed when destructive rerun safeguards are missing', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'assembly-gate-fail-closed-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    true,
+    JSON.stringify(canonicalReport.completionEvidence, null, 2)
+  );
+
+  const cases = [
+    {
+      name: 'dry-run-inventory',
+      expected: /dry run.*creates, updates, deletes, and unchanged/i,
+      mutate: (assembly) => { delete assembly.dryRun.inventory.unchanged; }
+    },
+    {
+      name: 'stable-identity-and-provenance',
+      expected: /stable source keys\/UUIDs.*provenance namespace/i,
+      mutate: (assembly) => {
+        assembly.identityAndDeletion.stableIdentityKinds = ['title', 'numeric_id'];
+        assembly.identityAndDeletion.editableTitlesUsedAsIdentity = true;
+        assembly.identityAndDeletion.deletesRestrictedToProvenanceNamespace = false;
+      }
+    },
+    {
+      name: 'second-run-no-op',
+      expected: /second assembly run.*checksum-stable no-op/i,
+      mutate: (assembly) => {
+        assembly.secondRun.updates = 1;
+        assembly.secondRun.noOp = false;
+      }
+    },
+    {
+      name: 'extension-survival',
+      expected: /extension-owned nodes, Canvas pages\/components.*survive/i,
+      mutate: (assembly) => {
+        assembly.extensionSurvival.insertedAfterFirstRun = assembly.extensionSurvival.insertedAfterFirstRun
+          .filter((fixture) => fixture.kind !== 'canvas_component');
+      }
+    },
+    {
+      name: 'failure-restoration',
+      expected: /mid-run failure.*rollback or restoration/i,
+      mutate: (assembly) => {
+        assembly.failureRestoration.transactionRolledBackOrSnapshotRestored = false;
+      }
+    },
+    {
+      name: 'inventory-checksum',
+      expected: /bind every before\/after inventory checksum/i,
+      mutate: (assembly) => {
+        assembly.inventories.afterSecondRun.sha256 = `sha256:${'0'.repeat(64)}`;
+      }
+    },
+    {
+      name: 'working-target',
+      expected: /disposable snapshot.*never the working target/i,
+      mutate: (assembly) => {
+        assembly.verificationEnvironment.workingTargetUsed = true;
+      }
+    },
+    {
+      name: 'portable-dependencies',
+      expected: /dependencies are portable.*developer-machine absolute paths/i,
+      mutate: (assembly) => {
+        assembly.portableDependencies.dependencies[0].source = '/Users/example/dev/tool/package.json';
+      }
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'assembly-evidence.json'), mutate);
+
+    const report = await validatePacket({ packetDir });
+
+    assert.equal(report.valid, true, `${name}: ${report.errors.join('\n')}`);
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
 });
 
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {

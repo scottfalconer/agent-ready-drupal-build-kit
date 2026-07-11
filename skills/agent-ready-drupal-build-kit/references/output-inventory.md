@@ -28,6 +28,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
+- `assembly-evidence.json`
 - `launch-checklist.md`
 
 ## Generated Verifier Evidence
@@ -50,6 +51,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
+- `G-ASSEMBLY-01`: require a non-mutating create/update/delete/unchanged plan, stable source-key or UUID identity, provenance-scoped opt-in deletion, an evidenced checksum-stable second-run no-op, survival of extension-owned Drupal/Canvas/navigation/View/sitemap fixtures, tested mid-run failure restoration, disposable-state isolation, and portable dependencies.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
 - `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.

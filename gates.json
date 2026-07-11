@@ -8,6 +8,7 @@
     "scoped-gap-list.md",
     "open-decisions.md",
     "off-road-inventory.md",
+    "assembly-evidence.json",
     "maintainer-review.md",
     "operator-run.md",
     "production-target.md",
@@ -191,6 +192,14 @@
       "phase": 6,
       "evidenceFile": "off-road-inventory.md",
       "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ASSEMBLY-01",
+      "title": "Assembly reruns are non-destructive, portable, and extension-safe",
+      "phase": 6,
+      "evidenceFile": "assembly-evidence.json",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

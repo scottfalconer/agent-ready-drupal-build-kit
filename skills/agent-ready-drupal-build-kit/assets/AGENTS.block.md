@@ -15,6 +15,7 @@ Non-negotiable gates:
 - Keep configuration in a non-empty tracked sync directory and prove active configuration has no drift from it. Record clean-install/import reproduction separately only when it was actually run.
 - Test actual anonymous routes and realistic non-admin editor tasks against the running Drupal site. Every custom or repeating public bundle needs an editor workflow, and load-bearing/anonymous-output fields need falsification checks.
 - Preserve real packet-local evidence and separate builder work from independent and blind review.
+- Prove assembly reruns in disposable state, never the working target: dry-run inventory, stable source-key/UUID identity, provenance-scoped opt-in deletion, a checksum-stable second-run no-op, extension fixture survival, failure restoration, and portable dependencies.
 - Treat packet-only validation and injected test runtimes as diagnostic only. The default live-target verifier must independently inspect the current DDEV origin and Git-tracked config YAML before it may derive local completion authorization.
 
 Default verification:

@@ -195,6 +195,21 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 - Run Starter and route drift cleanup before handoff. Check `/home`, `/page/1`, `/privacy-policy`, raw `/node/*` routes, starter Canvas pages, stale menu/footer links, unpublished starter pages, duplicate aliases, and aliases that normalize to the wrong final URL. Remove, redirect, publish, or explicitly block each one.
 - For analytics, click tracking, collection, or provider callbacks, prefer documented no-op/local-only stubs. Do not log raw payloads by default. If a custom endpoint is unavoidable, validate the event shape, avoid secret/private data, mark it local-only unless production requirements are known, and record the production integration as a scoped gap.
 
+### Assembly Rerun Safety Gate
+
+Every rebuild has an assembly path, whether it is one command or a recorded sequence of Recipe, config, import, evidence, cleanup, and site-setup steps. Before accepting the build, prove that complete path is safe to rerun. Record the result in `review-packet/assembly-evidence.json` and store the raw plans, inventories, logs, and restoration records under `review-packet/evidence/assembly/`.
+
+- Add a non-mutating dry-run mode that reports four explicit operation classes: creates, updates, deletes, and unchanged records. Empty classes must still be present.
+- Address content by stable source keys or UUIDs. Config entities may additionally use stable machine names. Editable titles and target-local numeric IDs are not assembly identities.
+- Scope every delete to an explicit provenance-owned namespace. Deletion must require an explicit destructive opt-in that is disabled by default; an assembly command may not delete unrelated site or extension state.
+- Exercise the first run and the second run in a disposable state sandbox inside the one Drupal project. Never run destructive verification against the working target. The second run must create, update, and delete zero records, and its before/after inventory bytes must hash identically.
+- Between the first and second runs, insert extension-owned fixtures for a node, Canvas page, Canvas component, menu link, alias, View, and sitemap addition. Prove each stable identity survives the second run.
+- Inject a failure after mutations have begun and prove a database transaction rolls back or the disposable snapshot is restored. The before-failure and after-restoration inventory bytes must hash identically, and the working target must remain untouched.
+- Record inventories before and after the first run, second run, and failure-restoration exercise. In `assembly-evidence.json`, each `sha256` is the SHA-256 of the first packet-local inventory evidence file named by that record.
+- Keep every assembly and test dependency repository-relative or supplied by a declared runtime such as DDEV. Absolute developer-machine paths are failed portability evidence.
+
+`G-ASSEMBLY-01` fails closed when any required operation class, stable identity rule, provenance boundary, second-run no-op, extension-survival fixture, inventory checksum, failure restoration, disposable-state boundary, or portable dependency proof is absent.
+
 ### Phase 3: Durable Intent
 
 - For every major architectural decision, content type, View, workflow, integration boundary, custom controller, or recipe/overlay decision, append a durable intent record.
@@ -293,7 +308,7 @@ This command binds the packet to the identified live target and the current DDEV
 
 Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
-Completion packet readiness is semantic, not a file-presence check. Source audit, pattern map, field-output matrix, parity, browser/editor evidence, Drupal readback, operator run, recipe decision, scoped gaps, open decisions, off-road inventory, durable intent, and maintainer verdict must contain run-specific accepted evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Launch checklist and production-target records remain required handoff boundaries, but they do not by themselves authorize or block the narrower complete-local-rebuild claim.
+Completion packet readiness is semantic, not a file-presence check. Source audit, pattern map, field-output matrix, assembly-rerun evidence, parity, browser/editor evidence, Drupal readback, operator run, recipe decision, scoped gaps, open decisions, off-road inventory, durable intent, and maintainer verdict must contain run-specific accepted evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Launch checklist and production-target records remain required handoff boundaries, but they do not by themselves authorize or block the narrower complete-local-rebuild claim.
 
 For explicit structural lint only, run `node [KIT_LOCAL_PATH]/scripts/verify-packet.mjs --packet review-packet` or add `--packet-only` to the default verifier. Packet-only success can never authorize a complete rebuild claim.
 
@@ -726,4 +741,5 @@ Gate records, either accepted evidence or blocked stubs:
 - packet verifier report under `evidence/packet-verification.json`;
 - Drupal readback;
 - field-output matrix;
+- assembly rerun safety evidence;
 - launch checklist.

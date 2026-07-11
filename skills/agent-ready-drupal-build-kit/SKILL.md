@@ -51,6 +51,7 @@ Build the real Drupal site, not a static lookalike, screenshot, packet-only arti
 5. Export configuration to a non-empty tracked sync directory and prove active configuration has no drift from it. Record a separate clean-install/import reproduction run only when one was actually performed. Record local-only database cleanup and other off-road work.
 6. Test anonymous public routes and a realistic non-admin editor workflow. Every custom public bundle and every bundle that owns repeating public content needs this workflow. A representative editor must be able to add or change recurring content and see it on the expected public route without code changes. Independently falsify each load-bearing field and each field claimed to affect anonymous output.
 7. Keep `review-packet/` current using the initialized templates. Record facts and evidence, not optimistic summaries.
+8. Prove the complete assembly/import/setup path can rerun in a disposable state sandbox, never the working target. Record `assembly-evidence.json`: a non-mutating four-class dry-run plan, stable source-key/UUID identity, provenance-scoped opt-in deletes, a checksum-stable second-run no-op, extension-owned fixture survival, failure restoration, and portable dependencies.
 
 ## Review and verification
 

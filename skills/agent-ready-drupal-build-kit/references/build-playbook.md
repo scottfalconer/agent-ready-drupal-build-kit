@@ -182,6 +182,24 @@ A clean install plus `drush config:import` into a disposable target is stronger 
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
 
+## Prove Assembly Reruns Are Safe
+
+Every rebuild has an assembly path, whether it is one command or a recorded sequence of Recipe, config, import, cleanup, evidence, and site-setup steps. That path can turn a correct Drupal foundation into a destructive maintenance trap when rerun. `G-ASSEMBLY-01` requires `review-packet/assembly-evidence.json` plus raw evidence under `review-packet/evidence/assembly/` before local completion.
+
+Use a disposable state sandbox within the same Drupal project, such as an isolated database/state copy or transaction-backed fixture. Do not create a second Drupal project, and do not run destructive rerun or failure-injection checks against the working target.
+
+The evidence sequence is:
+
+1. Run a non-mutating dry run that always lists creates, updates, deletes, and unchanged records.
+2. Run assembly once and capture byte-stable inventory evidence before and after.
+3. Insert extension-owned fixtures for a node, Canvas page, Canvas component, menu link, alias, View, and sitemap addition.
+4. Run assembly again. Creates, updates, and deletes must all be zero; every extension fixture must survive; before/after inventory evidence must have the same SHA-256.
+5. Restore the disposable baseline, inject a mid-run failure after mutations begin, and prove transaction rollback or snapshot restoration with matching before/after inventory hashes.
+
+Assembly identities are stable source keys or UUIDs; config entities may additionally use stable machine names. Do not match content by editable title or target-local numeric ID. Every delete must be restricted to a named provenance namespace and require an explicit destructive flag that defaults off.
+
+For each inventory record, compute `sha256` from the exact bytes of its first `evidence` file. Keep commands and dependencies repository-relative or provided by a declared runtime such as DDEV. Paths under an individual developer's home or temp directory are not portable evidence.
+
 ## SEO Is Rendered Output, Not Enabled Modules
 
 For public-facing rebuilds, SEO and social metadata are part of public behavior. Prefer the maintained Drupal CMS SEO recipe or configured contrib path when available, then map tokens and defaults to fields the target model actually has.

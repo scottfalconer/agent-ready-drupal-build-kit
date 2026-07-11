@@ -80,6 +80,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
+  'G-ASSEMBLY-01': 'assemblyRerunSafety',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -362,6 +363,241 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   } catch {
     return false;
   }
+}
+
+async function packetEvidenceSha256(packetDir, reference, evidenceDir) {
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
+  if (!evidencePath) {
+    return '';
+  }
+  try {
+    const evidenceStat = await stat(evidencePath);
+    if (!evidenceStat.isFile() || evidenceStat.size === 0) {
+      return '';
+    }
+    return `sha256:${createHash('sha256').update(await readFile(evidencePath)).digest('hex')}`;
+  } catch {
+    return '';
+  }
+}
+
+async function allPacketEvidencePresent(packetDir, references, evidenceDir) {
+  const values = arrayOrEmpty(references);
+  if (values.length === 0) {
+    return false;
+  }
+  const results = await Promise.all(
+    values.map((reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir))
+  );
+  return results.every(Boolean);
+}
+
+function hasDeveloperMachinePath(value) {
+  return /(?:^|[\s"'=])(?:\/Users\/[^/\s]+|\/home\/[^/\s]+|[a-z]:\\Users\\[^\\\s]+|\/private\/(?:tmp|var)\/)/i.test(
+    String(value ?? '')
+  );
+}
+
+async function assemblyGateReasons(packetDir, assemblyEvidence) {
+  const reasons = [];
+  const evidenceDir = join(packetDir, 'evidence', 'assembly');
+  const basicRecordValid =
+    assemblyEvidence?.schemaVersion === 'public-kit.assembly-evidence.1' &&
+    String(assemblyEvidence?.site ?? '').trim() &&
+    isoTimestamp(assemblyEvidence?.checkedAt) !== null &&
+    String(assemblyEvidence?.reviewer ?? '').trim() &&
+    assemblyEvidence?.accepted === true &&
+    arrayOrEmpty(assemblyEvidence?.blockers).length === 0;
+  if (!basicRecordValid) {
+    reasons.push('assembly-evidence.json must identify a reviewed, accepted G-ASSEMBLY-01 run with no blockers.');
+  }
+
+  const entrypoints = substantiveObjects(assemblyEvidence?.assemblyEntrypoints);
+  let entrypointEvidenceValid = entrypoints.length > 0;
+  for (const entrypoint of entrypoints) {
+    entrypointEvidenceValid &&=
+      Boolean(String(entrypoint?.name ?? '').trim()) &&
+      Boolean(String(entrypoint?.command ?? '').trim()) &&
+      Boolean(String(entrypoint?.workingDirectory ?? '').trim()) &&
+      /source.?key|uuid|config.?machine.?name|plugin.?id/i.test(String(entrypoint?.stableIdentityStrategy ?? '')) &&
+      entrypoint?.portableDependencies === true &&
+      arrayOrEmpty(entrypoint?.absoluteDeveloperPaths).length === 0 &&
+      !hasDeveloperMachinePath(entrypoint?.command) &&
+      !hasDeveloperMachinePath(entrypoint?.workingDirectory) &&
+      await allPacketEvidencePresent(packetDir, entrypoint?.evidence, evidenceDir);
+  }
+  if (!entrypointEvidenceValid) {
+    reasons.push('assembly-evidence.json must list portable assembly entrypoints with stable source-key/UUID identity and packet-local evidence.');
+  }
+
+  const environment = assemblyEvidence?.verificationEnvironment ?? {};
+  if (
+    environment.disposableSnapshotUsed !== true ||
+    environment.workingTargetUsed !== false ||
+    !String(environment.snapshotIdentity ?? '').trim() ||
+    !String(environment.restorationStrategy ?? '').trim() ||
+    !(await allPacketEvidencePresent(packetDir, environment.snapshotCreationEvidence, evidenceDir)) ||
+    !(await allPacketEvidencePresent(packetDir, environment.restorationEvidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json must prove rerun testing used a disposable snapshot and never the working target.');
+  }
+
+  const dryRun = assemblyEvidence?.dryRun ?? {};
+  const dryRunInventory = dryRun?.inventory ?? {};
+  if (
+    dryRun.status !== 'pass' ||
+    !String(dryRun.command ?? '').trim() ||
+    hasDeveloperMachinePath(dryRun.command) ||
+    dryRun.mutatedState !== false ||
+    dryRun.allOperationClassesReported !== true ||
+    !['creates', 'updates', 'deletes', 'unchanged'].every((key) => Array.isArray(dryRunInventory[key])) ||
+    !(await allPacketEvidencePresent(packetDir, dryRun.evidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json dry run must be non-mutating and inventory creates, updates, deletes, and unchanged records with evidence.');
+  }
+
+  const identity = assemblyEvidence?.identityAndDeletion ?? {};
+  const stableIdentityKinds = arrayOrEmpty(identity.stableIdentityKinds).map((value) => String(value).trim());
+  if (
+    stableIdentityKinds.length === 0 ||
+    !stableIdentityKinds.some((value) => ['source_key', 'uuid'].includes(value)) ||
+    stableIdentityKinds.some((value) => /title|numeric|(?:^|_)id$/.test(value)) ||
+    identity.editableTitlesUsedAsIdentity !== false ||
+    identity.numericIdsUsedAsIdentity !== false ||
+    !String(identity.provenanceNamespace ?? '').trim() ||
+    identity.deletesRestrictedToProvenanceNamespace !== true ||
+    identity.destructiveOptInRequired !== true ||
+    identity.destructiveOptInDefault !== 'disabled' ||
+    identity.unscopedDeletionPossible !== false ||
+    !(await allPacketEvidencePresent(packetDir, identity.evidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json must use stable source keys/UUIDs and restrict opt-in deletion to an explicit provenance namespace.');
+  }
+
+  const inventories = assemblyEvidence?.inventories ?? {};
+  const inventoryNames = [
+    'beforeFirstRun',
+    'afterFirstRun',
+    'beforeSecondRun',
+    'afterSecondRun',
+    'beforeFailureInjection',
+    'afterFailureRestoration'
+  ];
+  let inventoriesValid = true;
+  for (const name of inventoryNames) {
+    const inventory = inventories?.[name] ?? {};
+    const references = arrayOrEmpty(inventory.evidence);
+    const firstEvidenceHash = references.length > 0
+      ? await packetEvidenceSha256(packetDir, references[0], evidenceDir)
+      : '';
+    inventoriesValid &&=
+      HASH_RE.test(String(inventory.sha256 ?? '')) &&
+      Number.isSafeInteger(inventory.recordCount) &&
+      inventory.recordCount >= 0 &&
+      firstEvidenceHash === inventory.sha256 &&
+      await allPacketEvidencePresent(packetDir, references, evidenceDir);
+  }
+  if (!inventoriesValid) {
+    reasons.push('assembly-evidence.json must bind every before/after inventory checksum to non-empty packet-local evidence.');
+  }
+
+  const firstRun = assemblyEvidence?.firstRun ?? {};
+  const firstRunOperationCount = ['creates', 'updates', 'deletes']
+    .map((key) => firstRun[key])
+    .filter((value) => Number.isSafeInteger(value) && value >= 0)
+    .reduce((sum, value) => sum + value, 0);
+  if (
+    firstRun.status !== 'pass' ||
+    !['creates', 'updates', 'deletes', 'unchanged'].every(
+      (key) => Number.isSafeInteger(firstRun[key]) && firstRun[key] >= 0
+    ) ||
+    firstRunOperationCount === 0 ||
+    !(await allPacketEvidencePresent(packetDir, firstRun.evidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json must record an evidenced successful first assembly run with concrete operations.');
+  }
+
+  const requiredExtensionKinds = new Set([
+    'node',
+    'canvas_page',
+    'canvas_component',
+    'menu_link',
+    'alias',
+    'view',
+    'sitemap'
+  ]);
+  const extensionSurvival = assemblyEvidence?.extensionSurvival ?? {};
+  const extensionFixtures = substantiveObjects(extensionSurvival.insertedAfterFirstRun);
+  const observedExtensionKinds = new Set(extensionFixtures.map((fixture) => fixture.kind));
+  let extensionFixturesValid =
+    extensionSurvival.allSurvived === true &&
+    [...requiredExtensionKinds].every((kind) => observedExtensionKinds.has(kind)) &&
+    await allPacketEvidencePresent(packetDir, extensionSurvival.evidence, evidenceDir);
+  for (const fixture of extensionFixtures) {
+    extensionFixturesValid &&=
+      requiredExtensionKinds.has(fixture.kind) &&
+      Boolean(String(fixture.stableIdentity ?? '').trim()) &&
+      fixture.ownership === 'extension' &&
+      fixture.survivedSecondRun === true &&
+      await allPacketEvidencePresent(packetDir, fixture.beforeEvidence, evidenceDir) &&
+      await allPacketEvidencePresent(packetDir, fixture.afterEvidence, evidenceDir);
+  }
+  if (!extensionFixturesValid) {
+    reasons.push('assembly-evidence.json must prove extension-owned nodes, Canvas pages/components, menu links, aliases, Views, and sitemap additions survive the second run.');
+  }
+
+  const secondRun = assemblyEvidence?.secondRun ?? {};
+  if (
+    secondRun.status !== 'pass' ||
+    secondRun.creates !== 0 ||
+    secondRun.updates !== 0 ||
+    secondRun.deletes !== 0 ||
+    !Number.isSafeInteger(secondRun.unchanged) ||
+    secondRun.unchanged < 1 ||
+    secondRun.noOp !== true ||
+    inventories?.beforeSecondRun?.sha256 !== inventories?.afterSecondRun?.sha256 ||
+    !(await allPacketEvidencePresent(packetDir, secondRun.evidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json must prove the second assembly run is an evidenced checksum-stable no-op.');
+  }
+
+  const failure = assemblyEvidence?.failureRestoration ?? {};
+  if (
+    failure.status !== 'pass' ||
+    failure.failureInjected !== true ||
+    failure.failureObserved !== true ||
+    !String(failure.failurePoint ?? '').trim() ||
+    failure.transactionRolledBackOrSnapshotRestored !== true ||
+    failure.workingTargetUntouched !== true ||
+    !HASH_RE.test(String(failure.beforeSha256 ?? '')) ||
+    failure.beforeSha256 !== failure.afterSha256 ||
+    failure.beforeSha256 !== inventories?.beforeFailureInjection?.sha256 ||
+    failure.afterSha256 !== inventories?.afterFailureRestoration?.sha256 ||
+    !(await allPacketEvidencePresent(packetDir, failure.evidence, evidenceDir))
+  ) {
+    reasons.push('assembly-evidence.json must simulate a mid-run failure and prove checksum-stable rollback or restoration without touching the working target.');
+  }
+
+  const portability = assemblyEvidence?.portableDependencies ?? {};
+  const dependencies = substantiveObjects(portability.dependencies);
+  let portabilityValid =
+    portability.status === 'pass' &&
+    portability.repoRelativeOrDeclaredRuntimeOnly === true &&
+    arrayOrEmpty(portability.absoluteDeveloperPaths).length === 0 &&
+    dependencies.length > 0 &&
+    await allPacketEvidencePresent(packetDir, portability.evidence, evidenceDir);
+  for (const dependency of dependencies) {
+    portabilityValid &&=
+      Boolean(String(dependency.name ?? '').trim()) &&
+      Boolean(String(dependency.source ?? '').trim()) &&
+      !hasDeveloperMachinePath(dependency.source) &&
+      await allPacketEvidencePresent(packetDir, dependency.evidence, evidenceDir);
+  }
+  if (!portabilityValid) {
+    reasons.push('assembly-evidence.json must prove all assembly/test dependencies are portable and contain no developer-machine absolute paths.');
+  }
+
+  return reasons;
 }
 
 function safeImageDimensions(width, height) {
@@ -2177,6 +2413,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   reasons.push(...await markdownCompletionReadiness(packetDir));
 
   const {
+    assemblyEvidence,
     blindAdversarialReview,
     browserEvidence,
     drupalReadback,
@@ -2187,6 +2424,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     routeMatrix,
     sourceAudit
   } = records;
+  reasons.push(...await assemblyGateReasons(packetDir, assemblyEvidence));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -2714,6 +2952,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const completionTimestamps = [
+    ['assembly-evidence.json', assemblyEvidence?.checkedAt],
     ['source-audit.json', sourceAudit?.checkedAt],
     ['pattern-map.json', patternMap?.checkedAt],
     ['route-matrix.json', routeMatrix?.checkedAt],
@@ -2757,6 +2996,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     await validateRequiredFiles(packetDir, gates, errors);
   }
 
+  const assemblyEvidence = await readJson(join(packetDir, 'assembly-evidence.json'), []);
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
@@ -2789,6 +3029,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
   const completionReadiness = await packetCompletionReadiness(packetDir, gates, {
+    assemblyEvidence,
     blindAdversarialReview,
     browserEvidence,
     drupalReadback,
