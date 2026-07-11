@@ -26,7 +26,8 @@
     "fieldStorage": [],
     "formDisplays": [],
     "viewDisplays": [],
-    "canvasPages": []
+    "canvasPages": [],
+    "placedContentBlocks": []
   },
   "routing": {
     "aliases": [],
@@ -42,7 +43,52 @@
   },
   "views": [],
   "workflows": [],
-  "rolesAndPermissionsNotes": [],
+  "webforms": [
+    {
+      "webform": "",
+      "status": "open | closed",
+      "publicRoutes": [],
+      "handlerIds": [],
+      "submissionViewRole": "",
+      "spamProtection": {
+        "protector": "honeypot | captcha | friendlycaptcha | js_only | none",
+        "rendersInAnonymousHtml": false,
+        "renderedMarkupSignal": "",
+        "jsOnlyAcceptedBy": "",
+        "jsOnlyRationale": ""
+      }
+    }
+  ],
+  "capabilityCoverage": [
+    {
+      "capabilityModule": "scheduler | content_moderation",
+      "entityType": "node",
+      "bundle": "",
+      "enabledForBundle": false,
+      "configSource": "",
+      "gapAcceptedBy": "",
+      "gapRationale": ""
+    }
+  ],
+  "rolesAndPermissionsNotes": [
+    {
+      "surface": "",
+      "surfaceType": "node_bundle | block_content | menu | webform | taxonomy | media | other",
+      "renderedOnPublicRoutes": [],
+      "editorRole": "",
+      "grantingPermissions": [],
+      "capabilities": {
+        "create": false,
+        "editAny": false,
+        "delete": false,
+        "publish": false
+      },
+      "disposition": "editor_editable | admin_only_accepted",
+      "adminOnlyAcceptedBy": "",
+      "adminOnlyRationale": "",
+      "generatedFrom": ""
+    }
+  ],
   "readbackComplete": false,
   "blockers": []
 }

@@ -502,6 +502,74 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   }
 }
 
+function identityKey(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function drushRolePermissions(projectRoot, environment) {
+  const result = runDrushResult(projectRoot, environment, ['role:list', '--format=json']);
+  if (!result.ok) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).map(([role, record]) => [
+        role,
+        (Array.isArray(record?.perms) ? record.perms : []).map((permission) => String(permission))
+      ])
+    );
+  } catch {
+    return null;
+  }
+}
+
+function scanTrackedEditorCapabilityConfig(projectRoot, yamlFiles) {
+  const moderatedBundles = [];
+  const schedulerEnabledBundles = [];
+  const webformConfigs = [];
+  for (const path of yamlFiles) {
+    const name = basename(path);
+    const webformMatch = name.match(/^webform\.webform\.([^.]+)\.yml$/);
+    const nodeTypeMatch = name.match(/^node\.type\.([^.]+)\.yml$/);
+    const workflowMatch = /^workflows\.workflow\.[^.]+\.yml$/.test(name);
+    if (!webformMatch && !nodeTypeMatch && !workflowMatch) {
+      continue;
+    }
+    let text;
+    try {
+      text = readFileSync(join(projectRoot, path), 'utf8');
+    } catch {
+      continue;
+    }
+    if (webformMatch) {
+      const handlersLine = text.match(/^handlers:[ \t]*(.*)$/m);
+      const handlersEmpty = !handlersLine ||
+        /^\{\s*\}$/.test(handlersLine[1].trim()) ||
+        (handlersLine[1].trim() === '' && !/^handlers:[ \t]*\n[ \t]+\S/m.test(text));
+      webformConfigs.push({
+        file: path,
+        handlersEmpty,
+        id: webformMatch[1],
+        status: cleanScalar(text.match(/^status:[ \t]*(\S+)/m)?.[1] ?? 'open')
+      });
+    } else if (nodeTypeMatch) {
+      if (/scheduler:\s*\n(?:[ \t]+\S.*\n)*?[ \t]+publish_enable:\s*true/.test(text)) {
+        schedulerEnabledBundles.push(nodeTypeMatch[1]);
+      }
+    } else if (workflowMatch) {
+      const nodeBundles = text.match(/entity_types:\s*\n[ \t]+node:\s*\n((?:[ \t]+-[ \t]+\S+[ \t]*\n?)+)/);
+      for (const bundle of nodeBundles?.[1]?.matchAll(/-[ \t]+(\S+)/g) ?? []) {
+        moderatedBundles.push(cleanScalar(bundle[1]));
+      }
+    }
+  }
+  return { moderatedBundles, schedulerEnabledBundles, webformConfigs };
+}
+
 function configStatusIsClean(result) {
   if (!result.ok) {
     return false;
@@ -529,11 +597,15 @@ function inspectDrupalRuntime(cwd, environment) {
       configSyncTracked: false,
       configSyncDirectory: '',
       frontPage: '',
+      moderatedBundles: null,
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
+      rolePermissions: null,
+      schedulerEnabledBundles: null,
       siteUuid: '',
       trackedConfigDirectory: '',
-      trackedConfigYamlFiles: []
+      trackedConfigYamlFiles: [],
+      webformConfigs: null
     };
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
@@ -548,6 +620,7 @@ function inspectDrupalRuntime(cwd, environment) {
   const drupalRoot = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=root']));
   const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
+  const capabilityConfig = scanTrackedEditorCapabilityConfig(projectRoot, trackedConfig.yamlFiles);
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
@@ -559,12 +632,16 @@ function inspectDrupalRuntime(cwd, environment) {
     configSyncDirectory,
     drupalRoot,
     frontPage,
+    moderatedBundles: capabilityConfig.moderatedBundles,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
+    rolePermissions: drushRolePermissions(projectRoot, environment),
+    schedulerEnabledBundles: capabilityConfig.schedulerEnabledBundles,
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
-    trackedConfigYamlFiles: trackedConfig.yamlFiles
+    trackedConfigYamlFiles: trackedConfig.yamlFiles,
+    webformConfigs: capabilityConfig.webformConfigs
   };
 }
 
@@ -950,6 +1027,121 @@ async function verifyRoute(baseUrl, expected) {
   }
 }
 
+const SPAM_PROTECTION_MARKUP_SIGNALS = new Map([
+  ['honeypot', {
+    description: 'a hidden honeypot element and honeypot_time timestamp field',
+    patterns: [/name\s*=\s*["'][^"']*honeypot_time/i, /display\s*:\s*none/i]
+  }],
+  ['captcha', {
+    description: 'a rendered captcha wrapper element',
+    patterns: [/(?:class|data-drupal-selector)\s*=\s*["'][^"']*captcha/i]
+  }],
+  ['friendlycaptcha', {
+    description: 'a rendered frc- widget element',
+    patterns: [/\bfrc-(?:captcha|widget)\b/i]
+  }]
+]);
+
+function declaredRenderedWebformProtections(drupalReadback) {
+  return (Array.isArray(drupalReadback?.webforms) ? drupalReadback.webforms : []).filter((webform) =>
+    webform?.status === 'open' &&
+    webform?.spamProtection?.rendersInAnonymousHtml === true &&
+    SPAM_PROTECTION_MARKUP_SIGNALS.has(webform?.spamProtection?.protector) &&
+    Array.isArray(webform?.publicRoutes) &&
+    webform.publicRoutes.some((route) => normalizePath(route))
+  );
+}
+
+async function verifyWebformSpamProtection(baseUrl, webform) {
+  const name = String(webform.webform || webform.id || '').trim() || '(unnamed webform)';
+  const protector = webform.spamProtection.protector;
+  const signal = SPAM_PROTECTION_MARKUP_SIGNALS.get(protector);
+  const routePath = normalizePath(webform.publicRoutes.find((route) => normalizePath(route)));
+  const requestedUrl = new URL(routePath.replace(/^\//, ''), new URL('/', baseUrl));
+  const errors = [];
+  try {
+    const response = await requestFollowingRedirects(requestedUrl);
+    if (response.status < 200 || response.status >= 300) {
+      errors.push(`webform ${name} public route ${routePath} returned HTTP ${response.status}; rendered spam protection cannot be verified.`);
+    } else if (!signal.patterns.every((pattern) => pattern.test(response.body))) {
+      errors.push(`webform ${name} declares ${protector} protection but ${signal.description} does not render in the fetched anonymous HTML at ${routePath}.`);
+    }
+    return { errors, passed: errors.length === 0, protector, requestedUrl: requestedUrl.href, routePath, webform: name };
+  } catch (error) {
+    errors.push(`webform ${name} public route ${routePath} could not be fetched: ${error.message}`);
+    return { errors, passed: false, protector, requestedUrl: requestedUrl.href, routePath, webform: name };
+  }
+}
+
+function editorPermissionCompletionIssues(drupalReadback, rolePermissions) {
+  const editableRows = (Array.isArray(drupalReadback?.rolesAndPermissionsNotes)
+    ? drupalReadback.rolesAndPermissionsNotes
+    : []).filter((row) => row?.disposition === 'editor_editable');
+  if (editableRows.length === 0) {
+    return [];
+  }
+  if (!rolePermissions || typeof rolePermissions !== 'object' || Array.isArray(rolePermissions)) {
+    return ['Live editor-role permissions could not be read through Drush to confirm the declared editor-editable surfaces.'];
+  }
+  const issues = [];
+  for (const row of editableRows) {
+    const surface = String(row.surface ?? '').trim() || '(missing surface)';
+    const rolePerms = Object.entries(rolePermissions)
+      .find(([role]) => identityKey(role) === identityKey(row.editorRole))?.[1];
+    if (!rolePerms) {
+      issues.push(`Declared editor role ${row.editorRole || '(missing role)'} for surface ${surface} does not exist in the live runtime.`);
+      continue;
+    }
+    const heldPermissions = new Set(rolePerms.map(identityKey));
+    for (const permission of Array.isArray(row.grantingPermissions) ? row.grantingPermissions : []) {
+      if (!heldPermissions.has(identityKey(permission))) {
+        issues.push(`Live editor role ${row.editorRole} is missing declared permission ${permission} for surface ${surface}.`);
+      }
+    }
+  }
+  return issues;
+}
+
+function webformConfigCompletionIssues(drupalReadback, webformConfigs) {
+  if (!Array.isArray(webformConfigs)) {
+    return [];
+  }
+  const declaredWebforms = Array.isArray(drupalReadback?.webforms) ? drupalReadback.webforms : [];
+  const issues = [];
+  for (const config of webformConfigs.filter((candidate) => candidate.status !== 'closed')) {
+    if (config.handlersEmpty) {
+      issues.push(`Tracked config ${config.file} declares open webform ${config.id} with no submission handlers.`);
+    }
+    if (!declaredWebforms.some((webform) => identityKey(webform?.webform || webform?.id) === identityKey(config.id))) {
+      issues.push(`Open webform ${config.id} in tracked config has no drupal-readback.json webform disposition record.`);
+    }
+  }
+  return issues;
+}
+
+function capabilityCoverageCompletionIssues(drupalReadback, runtime) {
+  const enabledClaims = (Array.isArray(drupalReadback?.capabilityCoverage) ? drupalReadback.capabilityCoverage : [])
+    .filter((row) => row?.enabledForBundle === true);
+  const issues = [];
+  for (const row of enabledClaims) {
+    const bundle = String(row.bundle ?? '').trim();
+    const runtimeBundles = row.capabilityModule === 'scheduler'
+      ? runtime.schedulerEnabledBundles
+      : row.capabilityModule === 'content_moderation'
+        ? runtime.moderatedBundles
+        : undefined;
+    if (runtimeBundles === undefined) {
+      continue;
+    }
+    if (!Array.isArray(runtimeBundles)) {
+      issues.push(`Live ${row.capabilityModule} coverage could not be read from tracked config to confirm node.${bundle}.`);
+    } else if (!runtimeBundles.some((candidate) => identityKey(candidate) === identityKey(bundle))) {
+      issues.push(`drupal-readback.json claims ${row.capabilityModule} is enabled for node.${bundle} but tracked config does not enable it.`);
+    }
+  }
+  return issues;
+}
+
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
@@ -1091,6 +1283,16 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  const webformSpamProtectionChecks = target && explicitTargetFetchAllowed
+    ? await Promise.all(
+        declaredRenderedWebformProtections(drupalReadback).map((webform) =>
+          verifyWebformSpamProtection(target.url, webform)
+        )
+      )
+    : [];
+  for (const check of webformSpamProtectionChecks) {
+    liveErrors.push(...check.errors);
+  }
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -1158,6 +1360,12 @@ export async function verifyLive({
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
     packetTrackedConfigYamlFiles.length > 0 &&
     packetTrackedConfigYamlFiles.every((path) => runtimeTrackedConfigSet.has(path));
+  const editorCapabilityIssues = [
+    ...editorPermissionCompletionIssues(drupalReadback, inspectedDrupalRuntime.rolePermissions),
+    ...webformConfigCompletionIssues(drupalReadback, inspectedDrupalRuntime.webformConfigs),
+    ...capabilityCoverageCompletionIssues(drupalReadback, inspectedDrupalRuntime)
+  ];
+  const drupalRuntimeEditorCapabilitiesMatch = editorCapabilityIssues.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -1167,7 +1375,8 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
-    drupalRuntimeTrackedConfigReadbackMatches;
+    drupalRuntimeTrackedConfigReadbackMatches &&
+    drupalRuntimeEditorCapabilitiesMatch;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
@@ -1210,6 +1419,7 @@ export async function verifyLive({
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
   }
+  completionBlockedReasons.push(...editorCapabilityIssues);
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
   }
@@ -1231,6 +1441,7 @@ export async function verifyLive({
     errors: packetReport.errors.map((error) => sharedMessage(error, absolutePacketDir)),
     warnings: packetReport.warnings.map((warning) => sharedMessage(warning, absolutePacketDir))
   };
+  const { rolePermissions: inspectedRolePermissions, ...runtimeReportFields } = inspectedDrupalRuntime;
 
   return {
     schemaVersion: 'public-kit.live-verification.1',
@@ -1255,10 +1466,14 @@ export async function verifyLive({
     },
     routeChecks,
     targetRequiredRouteChecks,
+    webformSpamProtectionChecks,
     liveTargetValid,
     drupalRuntime: {
-      ...inspectedDrupalRuntime,
+      ...runtimeReportFields,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
+      editorCapabilityIssues,
+      editorCapabilitiesMatchPacket: drupalRuntimeEditorCapabilitiesMatch,
+      rolePermissionsInspected: Boolean(inspectedDrupalRuntime.rolePermissions),
       configStatusClean: drupalRuntimeConfigStatusClean,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),

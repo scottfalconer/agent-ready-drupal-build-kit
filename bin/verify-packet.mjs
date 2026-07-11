@@ -1234,6 +1234,165 @@ async function independentStructuredGateReasons({
     }
   }
 
+  const permissionRows = substantiveObjects(drupalReadback?.rolesAndPermissionsNotes);
+  const editorEditableRow = (row) =>
+    row?.disposition === 'editor_editable' &&
+    String(row.editorRole ?? '').trim() &&
+    !privilegedEditorIdentity(row.editorRole) &&
+    hasMeaningfulEntry(row.grantingPermissions);
+  const adminOnlyAcceptedRow = (row) =>
+    row?.disposition === 'admin_only_accepted' &&
+    String(row.adminOnlyAcceptedBy ?? '').trim() &&
+    String(row.adminOnlyRationale ?? '').trim();
+  for (const row of permissionRows) {
+    if (
+      !String(row.surface ?? '').trim() ||
+      !String(row.surfaceType ?? '').trim() ||
+      !String(row.generatedFrom ?? '').trim() ||
+      (!editorEditableRow(row) && !adminOnlyAcceptedRow(row))
+    ) {
+      reasons.push(`drupal-readback.json rolesAndPermissionsNotes row ${row.surface || '(missing surface)'} must be a generated capability record with a non-admin editor role and granting permissions or a named admin-only acceptance.`);
+    }
+  }
+  for (const bundleName of requiredNodeBundles) {
+    if (!permissionRows.some((row) =>
+      row.surfaceType === 'node_bundle' && exactIdentityMatch(row.surface, `node.${bundleName}`)
+    )) {
+      reasons.push(`drupal-readback.json rolesAndPermissionsNotes must include a generated capability row for node.${bundleName}.`);
+    }
+  }
+
+  const declaredWebforms = substantiveObjects(drupalReadback?.webforms);
+  const openWebforms = declaredWebforms.filter((webform) => webform.status !== 'closed');
+  const editorSurfaceChecks = substantiveObjects(independentVerification?.editorSurfaceChecks);
+  const contentBearingSurfaces = [
+    ...substantiveObjects(drupalReadback?.content?.placedContentBlocks).map((block) => ({
+      bundle: String(block?.bundle || block?.type || block?.id || '').trim(),
+      entityType: 'block_content'
+    })),
+    ...substantiveObjects(drupalReadback?.routing?.menus).map((menu) => ({
+      bundle: String(menu?.id || menu?.menu || '').trim(),
+      entityType: 'menu'
+    })),
+    ...declaredWebforms.map((webform) => ({
+      bundle: String(webform?.webform || webform?.id || '').trim(),
+      entityType: 'webform'
+    }))
+  ].filter((surface) => surface.bundle);
+  for (const surface of contentBearingSurfaces) {
+    const surfaceKey = `${surface.entityType}.${surface.bundle}`;
+    const row = permissionRows.find((candidate) => exactIdentityMatch(candidate.surface, surfaceKey));
+    if (!row || (!editorEditableRow(row) && !adminOnlyAcceptedRow(row))) {
+      reasons.push(`drupal-readback.json rolesAndPermissionsNotes must map content-bearing surface ${surfaceKey} to a non-admin editor capability or a named admin-only acceptance.`);
+      continue;
+    }
+    if (!editorEditableRow(row)) {
+      continue;
+    }
+    if (!editorWorkflowChecks.some((check) =>
+      exactIdentityMatch(check?.entityType, surface.entityType) && exactIdentityMatch(check?.bundle, surface.bundle)
+    )) {
+      reasons.push(`browser-evidence.json needs a passing non-admin editor workflow mapped to ${surfaceKey}.`);
+    }
+    const surfaceCheck = editorSurfaceChecks.find((candidate) => exactIdentityMatch(candidate.surface, surfaceKey));
+    if (
+      !surfaceCheck ||
+      surfaceCheck.status !== 'pass' ||
+      surfaceCheck.editFormReached !== true ||
+      !String(surfaceCheck.editorRole ?? '').trim() ||
+      privilegedEditorIdentity(surfaceCheck.editorRole) ||
+      privilegedEditorIdentity(surfaceCheck.editorUser) ||
+      !String(surfaceCheck.evidence ?? '').trim()
+    ) {
+      reasons.push(`independent-verification.json needs a passing editor-surface check proving the editor role reaches the ${surfaceKey} edit form.`);
+    }
+  }
+
+  const publicWebformChecks = substantiveObjects(independentVerification?.publicWebformChecks);
+  for (const webform of openWebforms) {
+    const name = String(webform.webform || webform.id || '').trim() || '(unnamed webform)';
+    const protection = webform.spamProtection ?? {};
+    const renderedProtector = ['honeypot', 'captcha', 'friendlycaptcha'].includes(protection.protector) &&
+      protection.rendersInAnonymousHtml === true &&
+      String(protection.renderedMarkupSignal ?? '').trim();
+    const jsOnlyAccepted = protection.protector === 'js_only' &&
+      String(protection.jsOnlyAcceptedBy ?? '').trim() &&
+      String(protection.jsOnlyRationale ?? '').trim();
+    if (
+      !hasMeaningfulEntry(webform.publicRoutes) ||
+      !hasMeaningfulEntry(webform.handlerIds) ||
+      !String(webform.submissionViewRole ?? '').trim() ||
+      privilegedEditorIdentity(webform.submissionViewRole) ||
+      (!renderedProtector && !jsOnlyAccepted)
+    ) {
+      reasons.push(`drupal-readback.json webform ${name} must declare a public route, non-empty submission handlers, a named non-admin submission-view role, and spam protection that renders in anonymous HTML or a named JS-only exception.`);
+    }
+    const check = publicWebformChecks.find((candidate) => exactIdentityMatch(candidate.webform, name));
+    if (
+      !check ||
+      check.status !== 'pass' ||
+      !normalizeRouteKey(check.route) ||
+      !String(check.submissionDestination ?? '').trim() ||
+      check.submissionViewRoleVerified !== true ||
+      (protection.rendersInAnonymousHtml === true && !String(check.spamProtectionRenderedSignal ?? '').trim()) ||
+      !String(check.evidence ?? '').trim()
+    ) {
+      reasons.push(`independent-verification.json needs a passing public-webform check for webform ${name}.`);
+    }
+  }
+
+  const enabledModules = arrayOrEmpty(drupalReadback?.drupal?.enabledModules).map((module) => String(module ?? '').trim());
+  const capabilityRows = substantiveObjects(drupalReadback?.capabilityCoverage);
+  for (const capabilityModule of ['scheduler', 'content_moderation'].filter((module) => enabledModules.includes(module))) {
+    for (const bundleName of requiredNodeBundles) {
+      const row = capabilityRows.find((candidate) =>
+        candidate.capabilityModule === capabilityModule &&
+        exactIdentityMatch(candidate.entityType, 'node') &&
+        exactIdentityMatch(candidate.bundle, bundleName)
+      );
+      const enabledWithConfig = row && row.enabledForBundle === true && String(row.configSource ?? '').trim();
+      const gapAccepted = row && row.enabledForBundle === false &&
+        String(row.gapAcceptedBy ?? '').trim() &&
+        String(row.gapRationale ?? '').trim();
+      if (!enabledWithConfig && !gapAccepted) {
+        reasons.push(`drupal-readback.json capabilityCoverage must record ${capabilityModule} enablement for node.${bundleName} from exported config or a named gap acceptance.`);
+      }
+    }
+  }
+
+  const defaultSaveProbes = substantiveObjects(browserEvidence?.editorDefaultSaveProbes);
+  if (
+    defaultSaveProbes.length === 0 ||
+    defaultSaveProbes.some((probe) =>
+      probe.status !== 'pass' ||
+      probe.savedWithAllFormDefaults !== true ||
+      !String(probe.editorUser ?? '').trim() ||
+      privilegedEditorIdentity(probe.editorUser) ||
+      privilegedEditorIdentity(probe.editorRole) ||
+      typeof probe.anonymouslyVisibleAfterSave !== 'boolean' ||
+      (probe.anonymouslyVisibleAfterSave === false && !String(probe.documentedPublishStep ?? '').trim()) ||
+      !String(probe.evidence ?? '').trim()
+    )
+  ) {
+    reasons.push('browser-evidence.json must record a passing non-admin editor default-save probe: one save with all form defaults, whether the result is anonymously visible, and the documented publish step when it is not.');
+  }
+
+  const rejectedAuthoringChecks = substantiveObjects(browserEvidence?.rejectedAuthoringSurfaceChecks);
+  if (!canvasEvidenceRequired) {
+    for (const authoringSystem of ['canvas', 'experience_builder'].filter((module) => enabledModules.includes(module))) {
+      const check = rejectedAuthoringChecks.find((candidate) => candidate.authoringSystem === authoringSystem);
+      if (
+        !check ||
+        check.status !== 'pass' ||
+        check.editorFacingAffordancesRemovedOrHidden !== true ||
+        !String(check.removalMethod ?? '').trim() ||
+        !String(check.evidence ?? '').trim()
+      ) {
+        reasons.push(`browser-evidence.json must prove the rejected authoring system ${authoringSystem} exposes no editor-facing affordances (uninstall it or strip its permissions, menu links, and dashboard entry points).`);
+      }
+    }
+  }
+
   const labelChecks = substantiveObjects(independentVerification?.coldReaderLabelChecks);
   if (
     labelChecks.length === 0 ||

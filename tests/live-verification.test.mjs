@@ -265,12 +265,18 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
     frontPage: '/',
+    moderatedBundles: [],
     mode: 'test-injected',
     project: 'fixture',
     reason: '',
+    rolePermissions: {
+      content_editor: ['create page content', 'edit any page content', 'administer main menu items']
+    },
+    schedulerEnabledBundles: [],
     siteUuid: testSiteUuid,
     trackedConfigDirectory: 'config/sync',
     trackedConfigYamlFiles: ['config/sync/system.site.yml', 'config/sync/system.theme.yml'],
+    webformConfigs: [],
     ...overrides
   };
 }
@@ -528,6 +534,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     }
   ];
   independent.canvasComponentModelChecks = [];
+  independent.editorSurfaceChecks = [
+    {
+      surface: 'menu.main',
+      surfaceType: 'menu',
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      editFormRoute: '/admin/structure/menu/manage/main',
+      editFormReached: true,
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }
+  ];
+  independent.publicWebformChecks = [];
   independent.editorAddRowChecks = [];
   independent.fieldOutputFalsification = [
     {
@@ -956,6 +975,39 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       blockers: []
     }
   ];
+  browser.editorWorkflowChecks.push({
+    workflow: 'menu',
+    entityType: 'menu',
+    bundle: 'main',
+    editorUser: 'editor',
+    editorRole: 'content editor',
+    drupalRoute: '/admin/structure/menu/manage/main',
+    taskPerformed: 'Edited the Home menu link as the non-admin editor.',
+    formScreenshot: 'evidence/blind-adversarial-review/target-desktop.png',
+    resultScreenshot: 'evidence/blind-adversarial-review/target-mobile.png',
+    fieldsAndWidgetsVerified: ['menu link title', 'menu link path'],
+    publicOutputAffected: '/',
+    visualOrBehaviorResult: 'The public navigation label changed.',
+    status: 'pass',
+    acceptedExceptions: [],
+    accepted: true,
+    blockers: []
+  });
+  browser.editorDefaultSaveProbes = [
+    {
+      entityType: 'node',
+      bundle: 'page',
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      savedWithAllFormDefaults: true,
+      resultUrl: '/',
+      anonymouslyVisibleAfterSave: true,
+      documentedPublishStep: '',
+      status: 'pass',
+      evidence: 'evidence/blind-adversarial-review/editor-task.json'
+    }
+  ];
+  browser.rejectedAuthoringSurfaceChecks = [];
   browser.canvasAuthoringChecks = [];
   browser.missingBrowserEvidence = [];
   browser.browserEvidenceComplete = true;
@@ -990,9 +1042,37 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.content.fieldStorage = [{ field: 'body', type: 'text_long' }];
   readback.content.formDisplays = [{ bundle: 'page', mode: 'default' }];
   readback.content.viewDisplays = [{ bundle: 'page', mode: 'full' }];
+  readback.content.placedContentBlocks = [];
   readback.routing.menus = [{ id: 'main', label: 'Main navigation' }];
   readback.routing.menuLinks = [{ menu: 'main', title: 'Home', url: '/' }];
-  readback.rolesAndPermissionsNotes = ['Content editor can create and edit Page content.'];
+  readback.webforms = [];
+  readback.capabilityCoverage = [];
+  readback.rolesAndPermissionsNotes = [
+    {
+      surface: 'node.page',
+      surfaceType: 'node_bundle',
+      renderedOnPublicRoutes: ['/'],
+      editorRole: 'content editor',
+      grantingPermissions: ['create page content', 'edit any page content'],
+      capabilities: { create: true, editAny: true, delete: false, publish: true },
+      disposition: 'editor_editable',
+      adminOnlyAcceptedBy: '',
+      adminOnlyRationale: '',
+      generatedFrom: 'drush role:list and exported user.role config'
+    },
+    {
+      surface: 'menu.main',
+      surfaceType: 'menu',
+      renderedOnPublicRoutes: ['/'],
+      editorRole: 'content editor',
+      grantingPermissions: ['administer main menu items'],
+      capabilities: { create: true, editAny: true, delete: false, publish: false },
+      disposition: 'editor_editable',
+      adminOnlyAcceptedBy: '',
+      adminOnlyRationale: '',
+      generatedFrom: 'drush role:list and exported user.role config'
+    }
+  ];
   readback.readbackComplete = true;
   readback.blockers = [];
   writeJson(readbackPath, readback);
@@ -1336,6 +1416,124 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
   );
 });
 
+test('live verifier checks rendered webform spam protection and runtime editor capability claims', async () => {
+  let honeypotRenders = true;
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url.split('?')[0] === '/contact') {
+        const honeypot = honeypotRenders
+          ? '<div style="display: none !important;"><input name="url" value=""></div><input type="hidden" name="honeypot_time" value="123">'
+          : '';
+        response.end(`<!doctype html><html><head><title>Contact</title></head><body><h1>Contact</h1><form>${honeypot}</form></body></html>`);
+        return;
+      }
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-editor-capability-'));
+      const canonicalPacket = join(temp, 'canonical');
+      copyTemplatePacket(canonicalPacket);
+      writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(canonicalPacket, baseUrl);
+      mutateJson(join(canonicalPacket, 'drupal-readback.json'), (value) => {
+        value.webforms = [{
+          webform: 'contact',
+          status: 'open',
+          publicRoutes: ['/contact'],
+          handlerIds: ['email_confirmation'],
+          submissionViewRole: 'content editor',
+          spamProtection: {
+            protector: 'honeypot',
+            rendersInAnonymousHtml: true,
+            renderedMarkupSignal: 'hidden honeypot element and honeypot_time field',
+            jsOnlyAcceptedBy: '',
+            jsOnlyRationale: ''
+          }
+        }];
+      });
+      const runVerify = (drupalRuntime, packetDir = canonicalPacket) => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime
+      });
+
+      const renderedReport = await runVerify(injectedDrupalRuntime(baseUrl));
+      assert.equal(renderedReport.webformSpamProtectionChecks.length, 1);
+      assert.equal(
+        renderedReport.webformSpamProtectionChecks[0].passed,
+        true,
+        renderedReport.webformSpamProtectionChecks[0].errors.join('\n')
+      );
+      assert.equal(renderedReport.valid, true, renderedReport.errors.join('\n'));
+
+      honeypotRenders = false;
+      const strippedReport = await runVerify(injectedDrupalRuntime(baseUrl));
+      assert.equal(strippedReport.valid, false);
+      assert.equal(strippedReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        strippedReport.errors.join('\n'),
+        /webform contact declares honeypot protection but .* does not render in the fetched anonymous HTML at \/contact/
+      );
+      honeypotRenders = true;
+
+      const permissionReport = await runVerify(injectedDrupalRuntime(baseUrl, {
+        rolePermissions: { content_editor: ['create page content'] }
+      }));
+      assert.equal(permissionReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(permissionReport.drupalRuntime.editorCapabilitiesMatchPacket, false);
+      assert.match(
+        permissionReport.completionBlockedReasons.join('\n'),
+        /missing declared permission edit any page content for surface node\.page/
+      );
+
+      const unreadableRolesReport = await runVerify(injectedDrupalRuntime(baseUrl, { rolePermissions: null }));
+      assert.equal(unreadableRolesReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        unreadableRolesReport.completionBlockedReasons.join('\n'),
+        /editor-role permissions could not be read/i
+      );
+
+      const emptyHandlerReport = await runVerify(injectedDrupalRuntime(baseUrl, {
+        webformConfigs: [
+          { file: 'config/sync/webform.webform.feedback.yml', handlersEmpty: true, id: 'feedback', status: 'open' }
+        ]
+      }));
+      assert.equal(emptyHandlerReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        emptyHandlerReport.completionBlockedReasons.join('\n'),
+        /open webform feedback with no submission handlers/
+      );
+      assert.match(
+        emptyHandlerReport.completionBlockedReasons.join('\n'),
+        /no drupal-readback\.json webform disposition record/
+      );
+
+      const schedulerPacket = join(temp, 'scheduler-claim');
+      cpSync(canonicalPacket, schedulerPacket, { recursive: true });
+      mutateJson(join(schedulerPacket, 'drupal-readback.json'), (value) => {
+        value.capabilityCoverage = [{
+          capabilityModule: 'scheduler',
+          entityType: 'node',
+          bundle: 'page',
+          enabledForBundle: true,
+          configSource: 'config/sync/node.type.page.yml',
+          gapAcceptedBy: '',
+          gapRationale: ''
+        }];
+      });
+      const schedulerReport = await runVerify(injectedDrupalRuntime(baseUrl), schedulerPacket);
+      assert.equal(schedulerReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        schedulerReport.completionBlockedReasons.join('\n'),
+        /claims scheduler is enabled for node\.page but tracked config does not enable it/
+      );
+    }
+  );
+});
+
 test('CLI discovers the DDEV Drupal runtime and requires clean status plus real Git-tracked config YAML', async () => {
   let liveBaseUrl = '';
   await withHttpServer(
@@ -1356,6 +1554,17 @@ test('CLI discovers the DDEV Drupal runtime and requires clean status plus real 
       writeFileSync(join(targetRoot, '.ddev', 'config.yaml'), 'name: fake-runtime\ntype: drupal11\ndocroot: web\n');
       writeFileSync(join(targetRoot, 'config', 'sync', 'system.site.yml'), `uuid: ${testSiteUuid}\n`);
       writeFileSync(join(targetRoot, 'config', 'sync', 'system.theme.yml'), 'default: fixture_theme\nadmin: claro\n');
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'webform.webform.contact.yml'),
+        `status: open
+id: contact
+title: Contact
+handlers:
+  email_confirmation:
+    id: email
+    label: Email confirmation
+`
+      );
 
       const fakeBin = join(targetRoot, 'fake-bin');
       mkdirSync(fakeBin);
@@ -1377,7 +1586,13 @@ const outputs = new Map([
   ['config:get system.site --field=uuid', '${testSiteUuid}'],
   ['config:get system.site page.front --format=string', '/'],
   ['status --field=config-sync', '../config/sync'],
-  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]']
+  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]'],
+  ['role:list --format=json', JSON.stringify({
+    content_editor: {
+      label: 'Content Editor',
+      perms: ['create page content', 'edit any page content', 'administer main menu items', 'edit any webform']
+    }
+  })]
 ]);
 if (!outputs.has(command)) {
   process.stderr.write('Unexpected fake Drush command: ' + command + '\\n');
@@ -1391,6 +1606,67 @@ process.stdout.write(outputs.get(command) + '\\n');
       copyTemplatePacket(packetDir);
       writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
       addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.drupal.trackedConfigYamlFiles.push('config/sync/webform.webform.contact.yml');
+        readback.webforms = [{
+          webform: 'contact',
+          status: 'open',
+          publicRoutes: ['/'],
+          handlerIds: ['email_confirmation'],
+          submissionViewRole: 'content editor',
+          spamProtection: {
+            protector: 'js_only',
+            rendersInAnonymousHtml: false,
+            renderedMarkupSignal: '',
+            jsOnlyAcceptedBy: 'Fixture Owner',
+            jsOnlyRationale: 'The fixture protector renders only through JavaScript.'
+          }
+        }];
+        readback.rolesAndPermissionsNotes.push({
+          surface: 'webform.contact',
+          surfaceType: 'webform',
+          renderedOnPublicRoutes: ['/'],
+          editorRole: 'content editor',
+          grantingPermissions: ['edit any webform'],
+          capabilities: { create: true, editAny: true, delete: false, publish: false },
+          disposition: 'editor_editable',
+          adminOnlyAcceptedBy: '',
+          adminOnlyRationale: '',
+          generatedFrom: 'drush role:list and exported user.role config'
+        });
+      });
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        browser.editorWorkflowChecks.push({
+          ...browser.editorWorkflowChecks[0],
+          workflow: 'other',
+          entityType: 'webform',
+          bundle: 'contact',
+          drupalRoute: '/admin/structure/webform/manage/contact',
+          taskPerformed: 'Edited the contact webform as the non-admin editor.'
+        });
+      });
+      mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+        independent.editorSurfaceChecks.push({
+          surface: 'webform.contact',
+          surfaceType: 'webform',
+          editorUser: 'editor',
+          editorRole: 'content editor',
+          editFormRoute: '/admin/structure/webform/manage/contact',
+          editFormReached: true,
+          status: 'pass',
+          evidence: 'claim-evidence.json'
+        });
+        independent.publicWebformChecks = [{
+          webform: 'contact',
+          route: '/',
+          submissionDestination: 'email handler email_confirmation',
+          submissionViewRole: 'content editor',
+          submissionViewRoleVerified: true,
+          spamProtectionRenderedSignal: '',
+          status: 'pass',
+          evidence: 'claim-evidence.json'
+        }];
+      });
 
       const verifierArgs = [join(repoRoot, 'bin', 'verify.mjs'), '--packet', 'review-packet'];
       const cleanEnvironment = {
@@ -1410,7 +1686,12 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.match(untrackedReport.completionBlockedReasons.join('\n'), /Git-tracked.*YAML/i);
 
       execFileSync('git', ['init', '-q'], { cwd: targetRoot });
-      execFileSync('git', ['add', 'config/sync/system.site.yml', 'config/sync/system.theme.yml'], { cwd: targetRoot });
+      execFileSync('git', [
+        'add',
+        'config/sync/system.site.yml',
+        'config/sync/system.theme.yml',
+        'config/sync/webform.webform.contact.yml'
+      ], { cwd: targetRoot });
 
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(cleanResult.status, 0, cleanResult.stderr);
@@ -1528,6 +1809,152 @@ test('completion fails closed when structured gate evidence or applicability dis
       mutate: (value) => {
         value.packetFreshnessChecks = value.packetFreshnessChecks.filter((check) => check.artifact !== 'pattern-map.json');
       }
+    },
+    {
+      name: 'missing-default-save-probe',
+      file: 'browser-evidence.json',
+      expected: /default-save probe/i,
+      mutate: (value) => { value.editorDefaultSaveProbes = []; }
+    },
+    {
+      name: 'invisible-default-save-without-publish-step',
+      file: 'browser-evidence.json',
+      expected: /default-save probe/i,
+      mutate: (value) => {
+        value.editorDefaultSaveProbes[0].anonymouslyVisibleAfterSave = false;
+        value.editorDefaultSaveProbes[0].documentedPublishStep = '';
+      }
+    },
+    {
+      name: 'menu-surface-without-editor-workflow',
+      file: 'browser-evidence.json',
+      expected: /editor workflow mapped to menu\.main/i,
+      mutate: (value) => {
+        value.editorWorkflowChecks = value.editorWorkflowChecks.filter((check) => check.entityType !== 'menu');
+      }
+    },
+    {
+      name: 'menu-surface-without-verifier-edit-form-proof',
+      file: 'independent-verification.json',
+      expected: /editor-surface check proving the editor role reaches the menu\.main edit form/i,
+      mutate: (value) => { value.editorSurfaceChecks = []; }
+    },
+    {
+      name: 'node-bundle-without-capability-row',
+      file: 'drupal-readback.json',
+      expected: /capability row for node\.page/i,
+      mutate: (value) => {
+        value.rolesAndPermissionsNotes = value.rolesAndPermissionsNotes.filter((row) => row.surface !== 'node.page');
+      }
+    },
+    {
+      name: 'privileged-editor-capability-role',
+      file: 'drupal-readback.json',
+      expected: /rolesAndPermissionsNotes row node\.page/i,
+      mutate: (value) => { value.rolesAndPermissionsNotes[0].editorRole = 'administrator'; }
+    },
+    {
+      name: 'placed-block-without-editor-capability',
+      file: 'drupal-readback.json',
+      expected: /map content-bearing surface block_content\.alert_banner/i,
+      mutate: (value) => {
+        value.content.placedContentBlocks = [
+          { id: 'alert_banner', bundle: 'alert_banner', label: 'Alert banner', region: 'header', theme: 'fixture_theme' }
+        ];
+      }
+    },
+    {
+      name: 'admin-only-surface-without-named-acceptance',
+      file: 'drupal-readback.json',
+      expected: /map content-bearing surface block_content\.alert_banner/i,
+      mutate: (value) => {
+        value.content.placedContentBlocks = [
+          { id: 'alert_banner', bundle: 'alert_banner', label: 'Alert banner', region: 'header', theme: 'fixture_theme' }
+        ];
+        value.rolesAndPermissionsNotes.push({
+          surface: 'block_content.alert_banner',
+          surfaceType: 'block_content',
+          renderedOnPublicRoutes: ['/'],
+          editorRole: '',
+          grantingPermissions: [],
+          capabilities: { create: false, editAny: false, delete: false, publish: false },
+          disposition: 'admin_only_accepted',
+          adminOnlyAcceptedBy: '',
+          adminOnlyRationale: 'Left admin-only without a named accepter.',
+          generatedFrom: 'drush role:list'
+        });
+      }
+    },
+    {
+      name: 'webform-without-handlers-or-rendered-spam-protection',
+      file: 'drupal-readback.json',
+      expected: /webform contact must declare a public route, non-empty submission handlers/i,
+      mutate: (value) => {
+        value.webforms = [{
+          webform: 'contact',
+          status: 'open',
+          publicRoutes: ['/contact'],
+          handlerIds: [],
+          submissionViewRole: 'content editor',
+          spamProtection: {
+            protector: 'none',
+            rendersInAnonymousHtml: false,
+            renderedMarkupSignal: '',
+            jsOnlyAcceptedBy: '',
+            jsOnlyRationale: ''
+          }
+        }];
+      }
+    },
+    {
+      name: 'js-only-spam-protection-without-named-exception',
+      file: 'drupal-readback.json',
+      expected: /webform contact must declare a public route, non-empty submission handlers/i,
+      mutate: (value) => {
+        value.webforms = [{
+          webform: 'contact',
+          status: 'open',
+          publicRoutes: ['/contact'],
+          handlerIds: ['email_confirmation'],
+          submissionViewRole: 'content editor',
+          spamProtection: {
+            protector: 'js_only',
+            rendersInAnonymousHtml: false,
+            renderedMarkupSignal: '',
+            jsOnlyAcceptedBy: '',
+            jsOnlyRationale: ''
+          }
+        }];
+      }
+    },
+    {
+      name: 'scheduler-enabled-without-bundle-coverage',
+      file: 'drupal-readback.json',
+      expected: /capabilityCoverage must record scheduler enablement for node\.page/i,
+      mutate: (value) => { value.drupal.enabledModules.push('scheduler'); }
+    },
+    {
+      name: 'moderation-gap-without-named-acceptance',
+      file: 'drupal-readback.json',
+      expected: /capabilityCoverage must record content_moderation enablement for node\.page/i,
+      mutate: (value) => {
+        value.drupal.enabledModules.push('content_moderation');
+        value.capabilityCoverage = [{
+          capabilityModule: 'content_moderation',
+          entityType: 'node',
+          bundle: 'page',
+          enabledForBundle: false,
+          configSource: '',
+          gapAcceptedBy: '',
+          gapRationale: 'Gap recorded without a named accepter.'
+        }];
+      }
+    },
+    {
+      name: 'rejected-authoring-system-still-facing-editors',
+      file: 'drupal-readback.json',
+      expected: /rejected authoring system canvas exposes no editor-facing affordances/i,
+      mutate: (value) => { value.drupal.enabledModules.push('canvas'); }
     }
   ];
 
@@ -1670,6 +2097,63 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
         });
         mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
           value.routeDriftDispositionChecks = [];
+        });
+      }
+    },
+    {
+      name: 'declared-webform-without-verifier-check',
+      expected: [/passing public-webform check for webform contact/i],
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+          value.webforms = [{
+            webform: 'contact',
+            status: 'open',
+            publicRoutes: ['/contact'],
+            handlerIds: ['email_confirmation'],
+            submissionViewRole: 'content editor',
+            spamProtection: {
+              protector: 'honeypot',
+              rendersInAnonymousHtml: true,
+              renderedMarkupSignal: 'hidden honeypot element and honeypot_time field',
+              jsOnlyAcceptedBy: '',
+              jsOnlyRationale: ''
+            }
+          }];
+          value.rolesAndPermissionsNotes.push({
+            surface: 'webform.contact',
+            surfaceType: 'webform',
+            renderedOnPublicRoutes: ['/contact'],
+            editorRole: 'content editor',
+            grantingPermissions: ['edit any webform'],
+            capabilities: { create: true, editAny: true, delete: false, publish: false },
+            disposition: 'editor_editable',
+            adminOnlyAcceptedBy: '',
+            adminOnlyRationale: '',
+            generatedFrom: 'drush role:list and exported user.role config'
+          });
+        });
+        mutateJson(join(packetDir, 'browser-evidence.json'), (value) => {
+          value.editorWorkflowChecks.push({
+            ...value.editorWorkflowChecks[0],
+            workflow: 'other',
+            entityType: 'webform',
+            bundle: 'contact',
+            drupalRoute: '/admin/structure/webform/manage/contact',
+            taskPerformed: 'Edited the contact webform as the non-admin editor.'
+          });
+        });
+        mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+          value.editorSurfaceChecks.push({
+            surface: 'webform.contact',
+            surfaceType: 'webform',
+            editorUser: 'editor',
+            editorRole: 'content editor',
+            editFormRoute: '/admin/structure/webform/manage/contact',
+            editFormReached: true,
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          });
+          value.publicWebformChecks = [];
         });
       }
     },

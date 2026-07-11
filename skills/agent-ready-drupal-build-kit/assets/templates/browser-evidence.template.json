@@ -96,6 +96,32 @@
       "blockers": []
     }
   ],
+  "editorDefaultSaveProbes": [
+    {
+      "entityType": "",
+      "bundle": "",
+      "editorUser": "",
+      "editorRole": "",
+      "savedWithAllFormDefaults": false,
+      "resultUrl": "",
+      "anonymouslyVisibleAfterSave": false,
+      "documentedPublishStep": "",
+      "status": "pass | needs-review | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "rejectedAuthoringSurfaceChecks": [
+    {
+      "authoringSystem": "canvas | experience_builder | layout_builder | other",
+      "moduleEnabled": false,
+      "contentReachableByEditorRole": false,
+      "editorFacingAffordancesRemovedOrHidden": false,
+      "removalMethod": "uninstall | permissions_stripped | menu_links_removed | dashboard_blocks_hidden | other",
+      "editorRole": "",
+      "status": "pass | needs-review | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "canvasAuthoringChecks": [
     {
       "publicRoute": "",

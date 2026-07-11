@@ -340,11 +340,15 @@ At minimum, browser evidence must cover:
 - source and target examples for every major public page pattern: landing, listing, detail, taxonomy/category, search/discovery, form/contact, legal/footer, and media/embed routes where present;
 - every primary route identified in `route-matrix.json`;
 - any route whose design, behavior, or source intent differs from the dominant template;
-- non-admin editor create/edit workflows for every custom content type and load-bearing workflow.
+- non-admin editor create/edit workflows for every custom content type, every load-bearing workflow, and every content-bearing surface rendered on public routes (placed content blocks, menus, webforms) unless a named admin-only acceptance is recorded;
+- one editor save with all form defaults, recording whether the result is anonymously visible and the documented publish step when it is not;
+- for each enabled authoring system the composition decision rejected (Canvas/Experience Builder), evidence that its editor-facing affordances are removed or hidden.
 
 For each public route check, record source URL/final URL, target URL/final URL, viewport, source screenshot, target screenshot, optional diff image or diff score when the tool supports it, title, H1, key visible body intent, section order, header/footer treatment, typography and spacing notes, media placement, functional behavior notes, accepted exceptions, and pass/fail status.
 
 For each editor workflow check, record editor user/role, Drupal route, task performed, screenshots or captured evidence for the form and result, fields/widgets verified, public output affected, failures, accepted exceptions, and pass/fail status.
+
+Populate `drupal-readback.json` `rolesAndPermissionsNotes` with a mechanically generated surface-by-capability table from role config: every used node bundle plus every placed content block, menu, and webform, each mapped to a non-admin editor role and its granting permissions or to a named admin-only acceptance. Public webforms additionally need non-empty submission handlers in exported `webform.webform.*.yml`, a named non-admin submission-view role, and spam protection that renders in the fetched anonymous HTML (hidden honeypot element plus timestamp field, captcha wrapper, or `frc-` widget) or a named JS-only exception. When scheduler or moderation modules are enabled, record per-bundle enablement from exported config or a named gap acceptance in `capabilityCoverage`.
 
 If browser evidence is missing or failing, return to the review loop. A target that is only source-inspired is not visually complete.
 
@@ -382,7 +386,7 @@ Before final handoff, answer this completion gate:
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
 - First-fold and brand-defining assets are present or explicitly dispositioned for primary routes.
 - Source-like public behavior is implemented or blocked for search, filters, pagination, forms, embeds, provider links, redirects, and canonical routes.
-- Drupal editor experience is verified for every custom public bundle, every repeating public bundle, and every load-bearing workflow; every load-bearing or anonymous-output field has a falsification check.
+- Drupal editor experience is verified for every custom public bundle, every repeating public bundle, every load-bearing workflow, and every content-bearing public surface (placed blocks, menus, webforms) or a named admin-only acceptance; every load-bearing or anonymous-output field has a falsification check.
 - Non-admin editor add-a-row tasks prove new representative collection items appear publicly without code changes.
 - Target-required routes such as privacy/legal/footer links, sitemap/robots when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links resolve as intended.
 - Review packet evidence is current and matches the live Drupal site.

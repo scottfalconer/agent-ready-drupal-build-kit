@@ -227,7 +227,7 @@
     },
     {
       "id": "G-EDITOR-01",
-      "title": "Authenticated non-admin editor browser tasks verified",
+      "title": "Non-admin editor tasks verified across nodes, blocks, menus, and webforms",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",

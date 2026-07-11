@@ -236,6 +236,30 @@
       "evidence": ""
     }
   ],
+  "editorSurfaceChecks": [
+    {
+      "surface": "",
+      "surfaceType": "node_bundle | block_content | menu | webform | taxonomy | media | other",
+      "editorUser": "",
+      "editorRole": "",
+      "editFormRoute": "",
+      "editFormReached": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "publicWebformChecks": [
+    {
+      "webform": "",
+      "route": "",
+      "submissionDestination": "",
+      "submissionViewRole": "",
+      "submissionViewRoleVerified": false,
+      "spamProtectionRenderedSignal": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "editorAddRowChecks": [
     {
       "objectType": "",

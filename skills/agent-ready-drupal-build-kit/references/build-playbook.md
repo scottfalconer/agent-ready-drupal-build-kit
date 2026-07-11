@@ -194,6 +194,12 @@ Drupal access and workflow are part of the build, not admin polish. Every custom
 
 Seed at least one editor user for local verification. Run add/edit form checks as that user, not uid=1. Independently change every load-bearing field and every field claimed to affect anonymous output, then verify the expected public route changes. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
 
+The gate covers every content-bearing entity rendered on public routes, not only node bundles. Placed content blocks, menus, and webforms must each map to a declared editor-role permission with add/edit evidence, or carry a named admin-only acceptance with a rationale. Generate the bundle-by-capability table in `drupal-readback.json` mechanically from role config and Drush readback rather than writing it as prose; the verifier confirms the declared role actually holds each granting permission in the live runtime.
+
+Public webforms need a declared submission destination and a named non-admin role with submission-view access: a form whose exported `webform.webform.*.yml` has empty handlers and admin-only submission access is a silent black hole. Spam protection must render in the fetched anonymous HTML — a hidden honeypot element plus its timestamp field, a captcha wrapper, or an `frc-` widget — not merely appear in the enabled-module list; a JS-only protector needs a named accepted exception instead.
+
+Include one save with all form defaults in the editor probe and record whether the result is anonymously visible; if it is not, document the exact publish step. When scheduler or moderation modules are enabled, assert per-bundle enablement from exported `node.type` and workflow config or record a named gap acceptance. When the composition decision rejects an authoring tool such as Canvas, remove or hide its editor-facing affordances (uninstall, or strip permissions, menu links, and dashboard entry points) and record the evidence — an enabled authoring system with zero editor-reachable content is a failed editor surface.
+
 ## Drupal Build Primitives
 
 Name the expected primitives in the build brief and align them to the encoded Drupal CMS baseline. A Drupal CMS rebuild should use Drupal to hold the site architecture:
