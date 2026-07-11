@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +57,7 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const VERIFIER_HASHES_FILE = 'VERIFIER-HASHES.json';
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -146,6 +147,83 @@ function isDirectRun() {
   } catch {
     return false;
   }
+}
+
+function fileSha256OrEmpty(path) {
+  try {
+    return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
+  } catch {
+    return '';
+  }
+}
+
+// Tamper-evident provenance, not security: a modified verifier can lie about its own
+// hash, but the published VERIFIER-HASHES.json lets packet reviewers and CI recompute
+// which verifier bytes actually produced a report.
+export function verifierSelfEvidence(kitRoot = KIT_ROOT, scriptsDir = dirname(SCRIPT_PATH)) {
+  const files = {
+    'gates.json': fileSha256OrEmpty(join(kitRoot, 'gates.json')),
+    'verify-packet.mjs': fileSha256OrEmpty(join(scriptsDir, 'verify-packet.mjs')),
+    'verify.mjs': fileSha256OrEmpty(join(scriptsDir, 'verify.mjs'))
+  };
+  const canonical = Object.entries(files).map(([name, hash]) => `${name}:${hash}`).join('\n');
+  return {
+    files,
+    verifierSelfHash: `sha256:${createHash('sha256').update(canonical).digest('hex')}`
+  };
+}
+
+export function verifierProvenance(kitRoot = KIT_ROOT, scriptsDir = dirname(SCRIPT_PATH)) {
+  const { files, verifierSelfHash } = verifierSelfEvidence(kitRoot, scriptsDir);
+  let manifest = null;
+  try {
+    manifest = JSON.parse(readFileSync(join(kitRoot, VERIFIER_HASHES_FILE), 'utf8'));
+  } catch {
+    manifest = null;
+  }
+  const publishedSelfHash = String(manifest?.verifierSelfHash ?? '');
+  return {
+    files,
+    kitVersion: String(manifest?.kitVersion ?? ''),
+    manifestFile: VERIFIER_HASHES_FILE,
+    matchesPublishedHashes:
+      Object.values(files).every((hash) => HASH_RE.test(hash)) &&
+      HASH_RE.test(publishedSelfHash) &&
+      publishedSelfHash === verifierSelfHash,
+    publishedSelfHash,
+    verifierSelfHash
+  };
+}
+
+async function verifierProvenanceReasons(packetDir, provenance) {
+  const reasons = [];
+  if (!provenance.matchesPublishedHashes) {
+    reasons.push(
+      `verifier modified: the running verifier self-hash ${provenance.verifierSelfHash} does not match the published ${provenance.manifestFile} hash ${provenance.publishedSelfHash || '(missing)'}; a modified verifier cannot be self-accepted and requires a named human acceptance recorded in open-decisions.md.`
+    );
+  }
+
+  const liveReportPath = join(packetDir, 'evidence', 'live-verification.json');
+  if (!existsSync(liveReportPath)) {
+    return reasons;
+  }
+  let liveReport = null;
+  try {
+    liveReport = JSON.parse(await readFile(liveReportPath, 'utf8'));
+  } catch {
+    liveReport = null;
+  }
+  const recordedHash = String(liveReport?.verifierProvenance?.verifierSelfHash ?? '');
+  if (!HASH_RE.test(recordedHash)) {
+    reasons.push(
+      'verifier modified: evidence/live-verification.json records no verifier self-hash, so no published verifier can be shown to have produced it; rerun the unmodified live verifier.'
+    );
+  } else if (recordedHash !== provenance.publishedSelfHash) {
+    reasons.push(
+      `verifier modified: evidence/live-verification.json was produced by verifier self-hash ${recordedHash}, which does not match the published ${provenance.manifestFile} hash; a modified verifier cannot be self-accepted and requires a named human acceptance recorded in open-decisions.md.`
+    );
+  }
+  return reasons;
 }
 
 async function readJson(path, errors) {
@@ -2799,6 +2877,9 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     routeMatrix,
     sourceAudit
   });
+  const provenance = verifierProvenance();
+  const provenanceReasons = await verifierProvenanceReasons(packetDir, provenance);
+  const packetCompletionReady = completionReadiness.packetCompletionReady && provenanceReasons.length === 0;
 
   return {
     schemaVersion: 'public-kit.packet-verification.1',
@@ -2811,15 +2892,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    verifierProvenance: provenance,
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
-      packetCompletionReady: completionReadiness.packetCompletionReady,
-      packetCompletionBlockedReasons: completionReadiness.reasons,
+      packetCompletionReady,
+      packetCompletionBlockedReasons: [...completionReadiness.reasons, ...provenanceReasons],
       packetSupportsCompletion:
         independentVerificationSupportsCompletion &&
         blindAdversarialReviewSupportsCompletion &&
-        completionReadiness.packetCompletionReady
+        packetCompletionReady
     },
     completeLocalRebuildClaimAllowed: false,
     valid: errors.length === 0,

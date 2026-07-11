@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   cpSync,
   existsSync,
@@ -12,9 +13,11 @@ import {
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+import { verifierSelfEvidence } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const skillRoot = join(repoRoot, 'skills', 'agent-ready-drupal-build-kit');
@@ -44,6 +47,22 @@ function makeDrupalTarget(prefix = 'skill-target-') {
 
 function occurrenceCount(content, needle) {
   return content.split(needle).length - 1;
+}
+
+function makeIsolatedRepo(prefix) {
+  const parent = mkdtempSync(join(tmpdir(), prefix));
+  const isolatedRepo = join(parent, 'repo');
+  const excluded = new Set([
+    join(repoRoot, '.git'),
+    join(repoRoot, 'node_modules')
+  ]);
+  cpSync(repoRoot, isolatedRepo, {
+    recursive: true,
+    filter(source) {
+      return ![...excluded].some((path) => source === path || source.startsWith(`${path}/`));
+    }
+  });
+  return isolatedRepo;
 }
 
 test('installable skill describes an in-place target and only installed runtime paths', () => {
@@ -374,23 +393,11 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(27 files\)/);
+  assert.match(result.stdout, /is in sync \(29 files\)/);
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
-  const parent = mkdtempSync(join(tmpdir(), 'skill-sync-repo-'));
-  const isolatedRepo = join(parent, 'repo');
-  const excluded = new Set([
-    join(repoRoot, '.git'),
-    join(repoRoot, 'node_modules')
-  ]);
-  cpSync(repoRoot, isolatedRepo, {
-    recursive: true,
-    filter(source) {
-      return ![...excluded].some((path) => source === path || source.startsWith(`${path}/`));
-    }
-  });
-
+  const isolatedRepo = makeIsolatedRepo('skill-sync-repo-');
   const isolatedSync = join(isolatedRepo, 'scripts', 'sync-skill-package.mjs');
   const copiedGates = join(isolatedRepo, 'skills', 'agent-ready-drupal-build-kit', 'gates.json');
   const copiedVerifier = join(isolatedRepo, 'skills', 'agent-ready-drupal-build-kit', 'scripts', 'verify.mjs');
@@ -411,7 +418,65 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(27 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(29 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
+});
+
+test('published verifier hashes manifest matches shipped root and skill verifier bytes', () => {
+  const rootManifestText = readFileSync(join(repoRoot, 'VERIFIER-HASHES.json'), 'utf8');
+  const skillManifestText = readFileSync(join(skillRoot, 'VERIFIER-HASHES.json'), 'utf8');
+  assert.equal(rootManifestText, skillManifestText);
+
+  const manifest = JSON.parse(rootManifestText);
+  const packageVersion = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version;
+  assert.equal(manifest.schemaVersion, 'public-kit.verifier-hashes.1');
+  assert.equal(manifest.kitVersion, packageVersion);
+
+  const rootEvidence = verifierSelfEvidence(repoRoot, join(repoRoot, 'bin'));
+  const skillEvidence = verifierSelfEvidence(skillRoot, join(skillRoot, 'scripts'));
+  assert.equal(rootEvidence.verifierSelfHash, manifest.verifierSelfHash);
+  assert.equal(skillEvidence.verifierSelfHash, manifest.verifierSelfHash);
+  assert.deepEqual(rootEvidence.files, manifest.files);
+});
+
+test('a modified verifier downgrades its own report to blocked as verifier modified', () => {
+  const isolatedRepo = makeIsolatedRepo('skill-provenance-repo-');
+  const gates = JSON.parse(readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
+  const packetDir = join(dirname(isolatedRepo), 'review-packet');
+  mkdirSync(packetDir, { recursive: true });
+  for (const file of gates.reviewPacketFiles) {
+    const parsed = parse(file);
+    cpSync(join(isolatedRepo, 'templates', `${parsed.name}.template${parsed.ext}`), join(packetDir, file));
+  }
+  const verifier = join(isolatedRepo, 'bin', 'verify-packet.mjs');
+  const verifierArgs = [verifier, '--packet', packetDir, '--out', join(packetDir, 'evidence', 'packet-verification.json')];
+  const readReport = () => JSON.parse(readFileSync(join(packetDir, 'evidence', 'packet-verification.json'), 'utf8'));
+
+  const pristine = spawnSync(process.execPath, verifierArgs, { cwd: isolatedRepo, encoding: 'utf8' });
+  assert.equal(pristine.status, 0, pristine.stderr);
+  const pristineReport = readReport();
+  assert.equal(pristineReport.verifierProvenance.matchesPublishedHashes, true);
+  assert.doesNotMatch(
+    pristineReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /verifier modified/
+  );
+
+  appendFileSync(verifier, '\n// builder-weakened gate\n');
+  const modified = spawnSync(process.execPath, verifierArgs, { cwd: isolatedRepo, encoding: 'utf8' });
+  assert.equal(modified.status, 0, modified.stderr);
+  const modifiedReport = readReport();
+  assert.equal(modifiedReport.verifierProvenance.matchesPublishedHashes, false);
+  const blockedReasons = modifiedReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.match(blockedReasons, /verifier modified/);
+  assert.match(blockedReasons, /named human acceptance recorded in open-decisions\.md/);
+  assert.equal(modifiedReport.completionEvidence.packetCompletionReady, false);
+  assert.equal(modifiedReport.completionEvidence.packetSupportsCompletion, false);
+
+  const check = spawnSync(process.execPath, [join(isolatedRepo, 'scripts', 'sync-skill-package.mjs'), '--check'], {
+    cwd: isolatedRepo,
+    encoding: 'utf8'
+  });
+  assert.notEqual(check.status, 0);
+  assert.match(check.stderr, /VERIFIER-HASHES\.json/);
 });

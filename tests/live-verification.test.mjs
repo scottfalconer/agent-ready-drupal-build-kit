@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -2759,4 +2759,77 @@ test('blind completion evidence rejects a text file named like a screenshot', as
   assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
   assert.match(report.errors.join('\n'), /checks\.actualRequestedOutcome must be pass/);
   assert.match(report.errors.join('\n'), /must be a credible packet-local PNG, JPEG, WebP, or GIF capture/);
+});
+
+test('a live report recorded by a modified or unrecorded verifier downgrades completion to blocked', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'provenance-recorded-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  const liveReportPath = join(packetDir, 'evidence', 'live-verification.json');
+
+  writeJson(liveReportPath, { schemaVersion: 'public-kit.live-verification.1' });
+  const unrecorded = await validatePacket({ packetDir });
+  assert.equal(unrecorded.verifierProvenance.matchesPublishedHashes, true);
+  assert.equal(
+    unrecorded.verifierProvenance.kitVersion,
+    JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
+  );
+  assert.equal(unrecorded.completionEvidence.packetCompletionReady, false);
+  assert.match(
+    unrecorded.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /verifier modified: evidence\/live-verification\.json records no verifier self-hash/
+  );
+
+  writeJson(liveReportPath, {
+    schemaVersion: 'public-kit.live-verification.1',
+    verifierProvenance: { verifierSelfHash: `sha256:${'a'.repeat(64)}` }
+  });
+  const tampered = await validatePacket({ packetDir });
+  assert.equal(tampered.completionEvidence.packetCompletionReady, false);
+  assert.equal(tampered.completionEvidence.packetSupportsCompletion, false);
+  const tamperedReasons = tampered.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.match(tamperedReasons, /verifier modified/);
+  assert.match(tamperedReasons, /named human acceptance recorded in open-decisions\.md/);
+
+  writeJson(liveReportPath, {
+    schemaVersion: 'public-kit.live-verification.1',
+    verifierProvenance: { verifierSelfHash: tampered.verifierProvenance.publishedSelfHash }
+  });
+  const matching = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    matching.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /verifier modified/
+  );
+});
+
+test('live verifier embeds provenance and warns when a sibling installed kit copy drifts by bytes', async () => {
+  const fakeRoot = mkdtempSync(join(tmpdir(), 'sibling-drift-'));
+  mkdirSync(join(fakeRoot, '.ddev'), { recursive: true });
+  writeFileSync(join(fakeRoot, '.ddev', 'config.yaml'), 'name: kit-test\ntype: drupal11\ndocroot: web\n');
+  const skillRoot = join(repoRoot, 'skills', 'agent-ready-drupal-build-kit');
+  const agentsCopy = join(fakeRoot, '.agents', 'skills', 'agent-ready-drupal-build-kit');
+  const claudeCopy = join(fakeRoot, '.claude', 'skills', 'agent-ready-drupal-build-kit');
+  cpSync(skillRoot, agentsCopy, { recursive: true });
+  cpSync(skillRoot, claudeCopy, { recursive: true });
+  appendFileSync(join(claudeCopy, 'scripts', 'verify.mjs'), '\n// patched by builder\n');
+
+  const packetDir = join(fakeRoot, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://rebuild.example-city.ddev.site'));
+
+  const report = await verifyLive({
+    packetDir,
+    targetUrl: 'https://rebuild.example-city.ddev.site',
+    cwd: fakeRoot,
+    environment: {},
+    drupalRuntime: injectedDrupalRuntime('')
+  });
+
+  assert.equal(report.verifierProvenance.matchesPublishedHashes, true);
+  assert.match(report.verifierProvenance.verifierSelfHash, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(report.verifierProvenance.installedKitCopies.length, 2);
+  const warnings = report.warnings.join('\n');
+  assert.match(warnings, /\.claude\/skills\/agent-ready-drupal-build-kit does not byte-match the running verifier/);
+  assert.doesNotMatch(warnings, /\.agents\/skills\/agent-ready-drupal-build-kit does not byte-match/);
 });

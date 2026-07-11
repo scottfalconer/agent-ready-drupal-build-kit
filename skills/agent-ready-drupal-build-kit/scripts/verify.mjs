@@ -2,13 +2,13 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePacket } from './verify-packet.mjs';
+import { validatePacket, verifierProvenance, verifierSelfEvidence } from './verify-packet.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
@@ -566,6 +566,55 @@ function inspectDrupalRuntime(cwd, environment) {
     trackedConfigDirectory: trackedConfig.directory,
     trackedConfigYamlFiles: trackedConfig.yamlFiles
   };
+}
+
+// One canonical installed kit copy should certify a build. Multi-agent installs can
+// leave byte-drifted siblings under .agents/skills and .claude/skills, where the
+// verdict silently depends on which copy runs; surface that drift as report warnings.
+function installedKitCopies(cwd) {
+  const projectRoot = findDrupalDdevRoot(cwd);
+  if (!projectRoot) {
+    return [];
+  }
+  let ownScriptsDir = dirname(SCRIPT_PATH);
+  try {
+    ownScriptsDir = realpathSync(ownScriptsDir);
+  } catch {
+    // Keep the unresolved path; copies then simply never match the running verifier.
+  }
+  const copies = [];
+  for (const agentDirectory of ['.agents', '.claude']) {
+    const skillsParent = join(projectRoot, agentDirectory, 'skills');
+    let entries = [];
+    try {
+      entries = readdirSync(skillsParent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const copyRoot = join(skillsParent, entry.name);
+      const scriptsDir = join(copyRoot, 'scripts');
+      if (
+        !existsSync(join(copyRoot, 'gates.json')) ||
+        !existsSync(join(scriptsDir, 'verify.mjs')) ||
+        !existsSync(join(scriptsDir, 'verify-packet.mjs'))
+      ) {
+        continue;
+      }
+      let isRunningCopy = false;
+      try {
+        isRunningCopy = realpathSync(scriptsDir) === ownScriptsDir;
+      } catch {
+        isRunningCopy = false;
+      }
+      copies.push({
+        isRunningCopy,
+        path: relative(projectRoot, copyRoot).split(sep).join('/'),
+        verifierSelfHash: verifierSelfEvidence(copyRoot, scriptsDir).verifierSelfHash
+      });
+    }
+  }
+  return copies;
 }
 
 function environmentTargetUrl(environment) {
@@ -1168,12 +1217,25 @@ export async function verifyLive({
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
     drupalRuntimeTrackedConfigReadbackMatches;
+  const provenance = verifierProvenance();
+  const kitCopies = installedKitCopies(cwd);
+  const liveWarnings = kitCopies
+    .filter((copy) => copy.verifierSelfHash !== provenance.verifierSelfHash)
+    .map((copy) =>
+      `Installed kit copy at ${copy.path} does not byte-match the running verifier scripts and gates.json; keep one canonical installed copy so the verdict does not depend on which copy runs.`
+    );
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
     packetSupportsCompletion &&
-    drupalRuntimeSupportsCompletion;
+    drupalRuntimeSupportsCompletion &&
+    provenance.matchesPublishedHashes;
   const completionBlockedReasons = [];
+  if (!provenance.matchesPublishedHashes) {
+    completionBlockedReasons.push(
+      `verifier modified: the running verifier self-hash does not match the published ${provenance.manifestFile} hash; a modified verifier cannot be self-accepted and requires a named human acceptance recorded in open-decisions.md.`
+    );
+  }
   if (!packetReport.valid) {
     completionBlockedReasons.push('Packet validation failed.');
   }
@@ -1253,6 +1315,10 @@ export async function verifyLive({
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       targetFingerprintInputVersion: 1
     },
+    verifierProvenance: {
+      ...provenance,
+      installedKitCopies: kitCopies
+    },
     routeChecks,
     targetRequiredRouteChecks,
     liveTargetValid,
@@ -1276,7 +1342,7 @@ export async function verifyLive({
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
-    warnings: sharedPacketReport.warnings
+    warnings: [...sharedPacketReport.warnings, ...liveWarnings]
   };
 }
 

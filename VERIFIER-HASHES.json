@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "public-kit.verifier-hashes.1",
+  "kitVersion": "0.1.0",
+  "verifierSelfHash": "sha256:4f817ee42b546e4aad618dd1a6d094189106ee9df1f404a0dcf2536677dea805",
+  "files": {
+    "gates.json": "sha256:0247b96f35621f7a81d282a315a3e09ede211727d066c988a5c942fa8d9a51b8",
+    "verify-packet.mjs": "sha256:37f26b4408ca9918b474946faa3861f5e40f4ca6d40117665166f2a120635a99",
+    "verify.mjs": "sha256:94a5cee00c749ea8be35e3e00c9499dd2c3a40537f7e2273a2d164dc07fff86b"
+  }
+}

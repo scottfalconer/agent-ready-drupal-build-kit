@@ -6,19 +6,23 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  statSync
+  statSync,
+  writeFileSync
 } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { verifierSelfEvidence } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const skillRoot = join(repoRoot, 'skills', 'agent-ready-drupal-build-kit');
+const VERIFIER_HASHES_FILE = 'VERIFIER-HASHES.json';
 
 function usage() {
   return `Usage: node scripts/sync-skill-package.mjs [--check|--write] [--assets-only] [--quiet]
 
 Keep canonical root gates/templates/references and verifier entrypoints byte-for-byte aligned
-with the self-contained installable Agent Skill.
+with the self-contained installable Agent Skill, and publish the verifier hashes manifest
+both copies report provenance against.
 
   --check        Report drift without writing (default)
   --write        Copy canonical files into the skill package
@@ -75,6 +79,7 @@ function copyPlan(assetsOnly) {
   ];
 
   if (!assetsOnly) {
+    const manifest = verifierHashesManifest();
     plan.push(
       {
         source: join(repoRoot, 'bin', 'verify.mjs'),
@@ -85,38 +90,61 @@ function copyPlan(assetsOnly) {
         source: join(repoRoot, 'bin', 'verify-packet.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-packet.mjs'),
         executable: true
-      }
+      },
+      { content: manifest, destination: join(repoRoot, VERIFIER_HASHES_FILE) },
+      { content: manifest, destination: join(skillRoot, VERIFIER_HASHES_FILE) }
     );
   }
   return plan;
+}
+
+// The published tamper-evident manifest is derived from the canonical root sources;
+// the synced skill copy is byte-identical, so one manifest covers both layouts.
+function verifierHashesManifest() {
+  const { version } = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  const { files, verifierSelfHash } = verifierSelfEvidence(repoRoot, join(repoRoot, 'bin'));
+  return `${JSON.stringify({
+    schemaVersion: 'public-kit.verifier-hashes.1',
+    kitVersion: version,
+    verifierSelfHash,
+    files
+  }, null, 2)}\n`;
 }
 
 function sameBytes(left, right) {
   return existsSync(left) && existsSync(right) && readFileSync(left).equals(readFileSync(right));
 }
 
+function planEntryInSync({ content, destination, executable, source }) {
+  if (content !== undefined) {
+    return existsSync(destination) && readFileSync(destination, 'utf8') === content;
+  }
+  return sameBytes(source, destination) && (!executable || (statSync(destination).mode & 0o111) !== 0);
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   const plan = copyPlan(options.assetsOnly);
-  const missingSources = plan.filter(({ source }) => !existsSync(source));
+  const missingSources = plan.filter(({ source }) => source && !existsSync(source));
   if (missingSources.length > 0) {
     throw new Error(`Missing canonical source files:\n${missingSources.map(({ source }) => `- ${source}`).join('\n')}`);
   }
 
   if (options.mode === 'write') {
-    for (const { destination, executable, source } of plan) {
+    for (const { content, destination, executable, source } of plan) {
       mkdirSync(dirname(destination), { recursive: true });
-      copyFileSync(source, destination);
+      if (content !== undefined) {
+        writeFileSync(destination, content);
+      } else {
+        copyFileSync(source, destination);
+      }
       if (executable) {
         chmodSync(destination, 0o755);
       }
     }
   }
 
-  const drift = plan.filter(({ destination, executable, source }) => (
-    !sameBytes(source, destination) ||
-    (executable && (statSync(destination).mode & 0o111) === 0)
-  ));
+  const drift = plan.filter((entry) => !planEntryInSync(entry));
   if (drift.length > 0) {
     throw new Error(`Installable skill package is out of sync:\n${drift.map(({ destination }) => `- ${destination}`).join('\n')}`);
   }
