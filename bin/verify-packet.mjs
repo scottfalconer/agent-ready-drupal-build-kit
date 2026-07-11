@@ -1142,6 +1142,14 @@ async function independentStructuredGateReasons({
       packetDir,
       ledger.exceptionEvidence
     );
+    const provider = ledger.externalProvider ?? {};
+    const providerUrl = httpUrl(provider.origin);
+    const sourceBaseUrl = httpUrl(routeMatrix?.sourceBaseUrl);
+    const targetBaseUrl = httpUrl(routeMatrix?.targetBaseUrl);
+    const providerEvidencePresent = ledger.targetOwner === 'external_provider' && await nonEmptyPacketEvidence(
+      packetDir,
+      provider.evidence
+    );
     if (
       !id ||
       mediaLedgerIds.has(id) ||
@@ -1157,7 +1165,15 @@ async function independentStructuredGateReasons({
         !String(ledger.mediaBundle ?? '').trim() ||
         arrayOrEmpty(ledger.referenceFields).length === 0
       )) ||
-      (ledger.targetOwner === 'external_provider' && arrayOrEmpty(ledger.referenceFields).length === 0) ||
+      (ledger.targetOwner === 'external_provider' && (
+        !['embed', 'provider_owned'].includes(ledger.sourceRole) ||
+        arrayOrEmpty(ledger.referenceFields).length === 0 ||
+        !String(provider.name ?? '').trim() ||
+        !providerUrl ||
+        providerUrl.origin === sourceBaseUrl?.origin ||
+        providerUrl.origin === targetBaseUrl?.origin ||
+        !providerEvidencePresent
+      )) ||
       (ledger.targetOwner === 'documented_exception' && exceptionCount !== sourceReachableCount) ||
       (exceptionCount > 0 && !exceptionEvidencePresent) ||
       ledger.accepted !== true

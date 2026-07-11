@@ -1456,6 +1456,29 @@ test('semantic field and media provenance gates reject count-only or misowned ev
       }
     },
     {
+      name: 'first-party-asset-relabeled-as-external-provider',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+          const ledger = value.mediaOwnership.ledger[0];
+          ledger.targetOwner = 'external_provider';
+          ledger.mediaBundle = '';
+          ledger.externalProvider = {
+            name: 'Asset host',
+            origin: 'https://provider.example',
+            evidence: 'claim-evidence.json'
+          };
+        });
+        mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+          value.mediaProvenanceChecks[0].managedMediaCount = 0;
+          value.mediaProvenanceChecks[0].externalProviderCount = 1;
+        });
+        mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+          value.media.referenceStats[0].managedMediaCount = 0;
+          value.media.referenceStats[0].externalProviderCount = 1;
+        });
+      }
+    },
+    {
       name: 'unresolved-asset',
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'independent-verification.json'), (value) => {

@@ -385,7 +385,7 @@ Before final handoff, answer this completion gate:
 - Per-route item reconciliation complete: repeated items on each load-bearing route match source counts, or a named owner has accepted a specific evidence-backed exclusion.
 - Collection ownership ledger complete: every declared row includes source/target count reconciliation, Drupal content/entity plus View/collection ownership, and non-admin editor add-a-row evidence.
 - Recurring-content semantics reconciled: every required collection field has a passing field-level rule with counts matching independent Drupal readback and zero unresolved violations.
-- Public media inventory reconciled: every reachable asset is managed in Drupal Media, deliberately owned by a genuine external provider, or item-blocked; asset roles and placements have no unresolved findings.
+- Public media inventory reconciled: every reachable asset is managed in Drupal Media, deliberately owned by a genuine external provider, or item-blocked; external-provider ownership is allowed only for source-classified embeds/provider-owned behavior with a named non-source provider origin and evidence, never as a relabeling escape for first-party content or downloads; asset roles and placements have no unresolved findings.
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
 - First-fold and brand-defining assets are present or explicitly dispositioned for primary routes.
 - Source-like public behavior is implemented or blocked for search, filters, pagination, forms, embeds, provider links, redirects, and canonical routes.

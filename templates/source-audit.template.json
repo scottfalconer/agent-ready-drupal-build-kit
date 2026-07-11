@@ -28,7 +28,7 @@
     {
       "id": "",
       "assetClass": "image | document | video | audio | other",
-      "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+      "sourceRole": "content | brand | download | embed | provider_owned | icon | tracking | decorative | other",
       "discoveredCount": null,
       "reachableCount": null,
       "unreachableCount": null,

@@ -491,7 +491,7 @@ When media is usable, import or stage it into Drupal-managed file storage, refer
 
 URL/image fields can be useful evidence carriers, but they should not silently replace a real Drupal media strategy.
 
-Reconcile assets by source role, not only file count. Group audited assets by stable inventory ID, asset class, and observed role such as content, brand, download, embed, icon, tracking, or decorative. Each reachable group must map to managed Media, genuine external-provider behavior, or an item-level documented exception. Independent checks must report unresolved assets, incompatible role assignments, and unexplained duplicate placements; zero unresolved findings is required for completion.
+Reconcile assets by source role, not only file count. Group audited assets by stable inventory ID, asset class, and observed role such as content, brand, download, embed, provider-owned, icon, tracking, or decorative. Each reachable group must map to managed Media, genuine external-provider behavior, or an item-level documented exception. External-provider ownership is valid only for source-classified embeds/provider-owned behavior and must name an evidenced provider origin distinct from the source and target; it cannot relabel first-party images or downloads to avoid migration. Independent checks must report unresolved assets, incompatible role assignments, and unexplained duplicate placements; zero unresolved findings is required for completion.
 
 ## Content Field Formats
 
