@@ -29,7 +29,7 @@ Lifecycle evidence lives under `review-packet/evidence/lifecycle/` and is genera
 
 A pre-lifecycle packet remains structurally valid. A historical green report without a strong state fingerprint is legacy, unbound evidence and must not be silently promoted into a baseline.
 
-The intrinsic site fingerprint covers portable tracked configuration and runtime code, effective active configuration and database-update state, declared editorial entity bundles and their revisions/translations, privacy-screened public author data, managed `public://` file bytes, and stable route semantics. The passing report also retains a manifest of the packet and evidence bytes it consumed. Verifier version, target origin/raw responses, and a digest-only machine-local environment binding remain evidence bindings rather than intrinsic site components, so a router-port or local override change requires a fresh inspection without pretending Drupal content changed.
+The intrinsic site fingerprint covers portable tracked configuration and runtime code, effective active configuration and database-update state, declared editorial entity bundles and their revisions/translations, privacy-screened public author data, managed `public://` file bytes, and stable route semantics. The passing report also retains a manifest of the packet and evidence bytes it consumed. Verifier version, target origin/raw responses, PHP version, database driver, effective-settings digest, Config Split directory paths, and other digest-only machine-local environment bindings remain evidence rather than intrinsic site components, so a router-port or local runtime change requires a fresh inspection without pretending Drupal content changed.
 
 ## Anchors And Change Types
 

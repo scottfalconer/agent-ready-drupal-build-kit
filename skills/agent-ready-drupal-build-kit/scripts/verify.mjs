@@ -1298,6 +1298,38 @@ function inspectDrupalRuntimeFacts(projectRoot, environment) {
   }
 }
 
+export function stateBoundRuntimeFacts(facts = {}) {
+  const intrinsic = {
+    schemaVersion: 'public-kit.drupal-intrinsic-runtime-facts.1',
+    coreVersion: facts?.coreVersion ?? '',
+    activeConfigEntryCount: facts?.activeConfigEntryCount ?? 0,
+    effectiveActiveConfigSha256: facts?.effectiveActiveConfigSha256 ?? '',
+    systemSchemaEntryCount: facts?.systemSchemaEntryCount ?? 0,
+    systemSchemaSha256: facts?.systemSchemaSha256 ?? '',
+    databaseUpdateStatusConfirmed: facts?.databaseUpdateStatusConfirmed === true,
+    pendingDatabaseUpdateCount: facts?.pendingDatabaseUpdateCount ?? 0,
+    databaseUpdatesPending: facts?.databaseUpdatesPending === true
+  };
+  const environment = {
+    schemaVersion: 'public-kit.drupal-runtime-environment.1',
+    phpVersion: facts?.phpVersion ?? '',
+    databaseDriver: facts?.databaseDriver ?? '',
+    effectiveSettingsEntryCount: facts?.effectiveSettingsEntryCount ?? 0,
+    effectiveSettingsHmacSha256: facts?.effectiveSettingsHmacSha256 ?? '',
+    configSplitDirectories: Array.isArray(facts?.configSplitDirectories)
+      ? [...facts.configSplitDirectories].sort(comparePortable)
+      : []
+  };
+  return {
+    intrinsic,
+    environmentBinding: {
+      schemaVersion: 'public-kit.runtime-environment-binding.1',
+      entryCount: Object.keys(environment).length - 1,
+      fingerprint: stateSha256(environment)
+    }
+  };
+}
+
 function declaredEditorialRoots(fieldOutputMatrix) {
   const roots = new Map();
   for (const row of Array.isArray(fieldOutputMatrix?.bundles) ? fieldOutputMatrix.bundles : []) {
@@ -2403,25 +2435,13 @@ export async function verifyLive({
         ])
       )
     };
-    const runtimeFacts = {
-      schemaVersion: inspectedDrupalRuntime.runtimeFacts?.schemaVersion ?? '',
-      fingerprint: inspectedDrupalRuntime.runtimeFacts?.fingerprint ?? '',
-      coreVersion: inspectedDrupalRuntime.runtimeFacts?.coreVersion ?? '',
-      phpVersion: inspectedDrupalRuntime.runtimeFacts?.phpVersion ?? '',
-      databaseDriver: inspectedDrupalRuntime.runtimeFacts?.databaseDriver ?? '',
-      activeConfigEntryCount: inspectedDrupalRuntime.runtimeFacts?.activeConfigEntryCount ?? 0,
-      effectiveActiveConfigSha256: inspectedDrupalRuntime.runtimeFacts?.effectiveActiveConfigSha256 ?? '',
-      systemSchemaEntryCount: inspectedDrupalRuntime.runtimeFacts?.systemSchemaEntryCount ?? 0,
-      systemSchemaSha256: inspectedDrupalRuntime.runtimeFacts?.systemSchemaSha256 ?? '',
-      effectiveSettingsEntryCount: inspectedDrupalRuntime.runtimeFacts?.effectiveSettingsEntryCount ?? 0,
-      effectiveSettingsHmacSha256: inspectedDrupalRuntime.runtimeFacts?.effectiveSettingsHmacSha256 ?? '',
-      databaseUpdateStatusConfirmed: inspectedDrupalRuntime.runtimeFacts?.databaseUpdateStatusConfirmed === true,
-      pendingDatabaseUpdateCount: inspectedDrupalRuntime.runtimeFacts?.pendingDatabaseUpdateCount ?? 0,
-      databaseUpdatesPending: inspectedDrupalRuntime.runtimeFacts?.databaseUpdatesPending === true,
-      configSplitDirectories: Array.isArray(inspectedDrupalRuntime.runtimeFacts?.configSplitDirectories)
-        ? [...inspectedDrupalRuntime.runtimeFacts.configSplitDirectories].sort(comparePortable)
-        : []
-    };
+    // Only Drupal-owned facts participate in the intrinsic site fingerprint.
+    // PHP/database choices and the digest of effective settings remain
+    // machine-local evidence beside that fingerprint.
+    const {
+      intrinsic: runtimeFacts,
+      environmentBinding: runtimeEnvironmentBinding
+    } = stateBoundRuntimeFacts(inspectedDrupalRuntime.runtimeFacts);
     const packetEvidence = packetEvidenceManifest(
       absolutePacketDir,
       outPath || join(absolutePacketDir, 'evidence', 'live-verification.json')
@@ -2437,6 +2457,7 @@ export async function verifyLive({
       entityInventory,
       routeManifest: routeStateManifest,
       runtimeFacts,
+      runtimeEnvironmentBinding,
       packetFingerprint: packetEvidence.fingerprint,
       packetEvidenceManifest: packetEvidence,
       verifierFingerprint: verifierFingerprint()
