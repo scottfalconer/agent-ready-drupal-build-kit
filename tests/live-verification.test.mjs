@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -8,7 +8,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { verifyLive } from '../bin/verify.mjs';
+import {
+  anonymousPublicRoute,
+  customCodeDeclarationErrors,
+  enumerateCustomCode,
+  parseRoutingYamlRoutes,
+  verifyLive
+} from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1541,6 +1547,170 @@ example_site.admin_settings:
       assert.equal(declaredReport.valid, true, declaredReport.errors.join('\n'));
     }
   );
+});
+
+function writeCustomCodeFixtureRoot(prefix) {
+  const targetRoot = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(targetRoot, '.ddev'), { recursive: true });
+  writeFileSync(join(targetRoot, '.ddev', 'config.yaml'), 'name: fixture\ntype: drupal11\ndocroot: web\n');
+  mkdirSync(join(targetRoot, 'web', 'modules', 'custom'), { recursive: true });
+  return targetRoot;
+}
+
+test('routing parser and anonymous classifier implement the mechanical public-route definition', () => {
+  const routes = parseRoutingYamlRoutes('\uFEFF' + `bom.first:
+  path: '/bom-first'
+  requirements:
+    _access: 'TRUE'
+
+open.access:
+  path: '/open'
+  requirements:
+    _access: TRUE
+
+anon.role:
+  path: '/anon-role'
+  requirements:
+    _role: 'anonymous+authenticated'
+
+and.permissions:
+  path: '/and-permissions'
+  requirements:
+    _permission: 'access content,view media'
+
+and.mixed:
+  path: '/and-mixed'
+  requirements:
+    _permission: 'access content,administer nodes'
+
+or.permissions:
+  path: '/or-permissions'
+  requirements:
+    _permission: 'administer nodes+access content'
+
+format.and.method.ignored:
+  path: '/feed.xml'
+  requirements:
+    _permission: 'access content'
+    _format: 'xml'
+    _method: 'GET'
+
+logged.in.only:
+  path: '/logged-in'
+  requirements:
+    _access: 'TRUE'
+    _user_is_logged_in: 'TRUE'
+
+inline.flow:
+  path: '/inline'
+  requirements: { _permission: 'access content,view media', _format: 'json' }
+
+inline.admin:
+  path: '/inline-admin'
+  requirements: { _permission: 'administer site configuration' }
+
+no.requirements:
+  path: '/no-requirements'
+`);
+  const byName = new Map(routes.map((route) => [route.name, route]));
+  assert.equal(byName.get('bom.first')?.path, '/bom-first', 'a UTF-8 BOM must not drop the first route');
+  assert.equal(
+    byName.get('inline.flow')?.requirements._permission,
+    'access content,view media',
+    'inline-flow requirements must not split on commas inside quoted scalars'
+  );
+  assert.deepEqual(
+    routes.filter((route) => anonymousPublicRoute(route)).map((route) => route.name).sort(),
+    ['and.permissions', 'anon.role', 'bom.first', 'format.and.method.ignored', 'inline.flow', 'open.access', 'or.permissions']
+  );
+});
+
+test('symlinked custom modules and routing files are enumerated and fail closed when undeclared', () => {
+  const targetRoot = writeCustomCodeFixtureRoot('custom-code-symlink-');
+  const customRoot = join(targetRoot, 'web', 'modules', 'custom');
+
+  const hiddenSource = join(targetRoot, 'packages', 'hidden_mod');
+  mkdirSync(join(hiddenSource, 'src', 'Controller'), { recursive: true });
+  writeFileSync(
+    join(hiddenSource, 'hidden_mod.routing.yml'),
+    "hidden_mod.feed:\n  path: '/hidden-feed'\n  requirements:\n    _access: 'TRUE'\n"
+  );
+  writeFileSync(join(hiddenSource, 'src', 'Controller', 'HiddenController.php'), '<?php\n');
+  symlinkSync(hiddenSource, join(hiddenSource, 'loop'));
+  symlinkSync(hiddenSource, join(customRoot, 'hidden_mod'));
+
+  const plainModule = join(customRoot, 'plain_mod');
+  mkdirSync(plainModule, { recursive: true });
+  const detachedRouting = join(targetRoot, 'packages', 'plain_mod.routing.yml');
+  writeFileSync(detachedRouting, "plain_mod.page:\n  path: '/plain-page'\n  requirements:\n    _access: 'TRUE'\n");
+  symlinkSync(detachedRouting, join(plainModule, 'plain_mod.routing.yml'));
+  symlinkSync(join(targetRoot, 'missing-target'), join(customRoot, 'broken_link'));
+
+  const customCode = enumerateCustomCode(targetRoot);
+  assert.deepEqual(customCode.modules.map((module) => module.machineName), ['hidden_mod', 'plain_mod']);
+  assert.deepEqual(customCode.modules[0].publicRoutes.map((route) => route.path), ['/hidden-feed']);
+  assert.deepEqual(customCode.modules[0].controllers, [
+    'web/modules/custom/hidden_mod/src/Controller/HiddenController.php'
+  ]);
+  assert.deepEqual(customCode.modules[1].publicRoutes.map((route) => route.path), ['/plain-page']);
+  assert.match(
+    customCode.errors.join('\n'),
+    /web\/modules\/custom\/broken_link is a symlink that could not be resolved/
+  );
+
+  const errors = customCodeDeclarationErrors({
+    customCode,
+    offRoadInventoryText: 'No custom modules or themes.',
+    routeMatrix: { sourceBaseUrl: 'https://fixture-source.example' },
+    sourceSiteName: 'Fixture Source'
+  });
+  const combined = errors.join('\n');
+  assert.match(combined, /\/hidden-feed is a machine-derived public custom route/);
+  assert.match(combined, /\/plain-page is a machine-derived public custom route/);
+  assert.match(combined, /no Custom code enumeration row for web\/modules\/custom\/hidden_mod/);
+});
+
+test('CC-row reconciliation requires an exact path cell, not a substring match', () => {
+  const targetRoot = writeCustomCodeFixtureRoot('custom-code-prefix-');
+  for (const name of ['events', 'events_feed']) {
+    mkdirSync(join(targetRoot, 'web', 'modules', 'custom', name), { recursive: true });
+  }
+  const errors = customCodeDeclarationErrors({
+    customCode: enumerateCustomCode(targetRoot),
+    offRoadInventoryText: [
+      '| ID | Path | Kind | Public routes | Controllers | Disposition | Accepted by | Rationale |',
+      '| CC-001 | web/modules/custom/events_feed | module | none | none | accepted | Fixture Maintainer | Feed module |'
+    ].join('\n'),
+    routeMatrix: { sourceBaseUrl: 'https://fixture-source.example' },
+    sourceSiteName: 'Fixture Source'
+  });
+  assert.match(errors.join('\n'), /no Custom code enumeration row for web\/modules\/custom\/events;/);
+  assert.ok(
+    !errors.some((error) => error.includes('no Custom code enumeration row for web/modules/custom/events_feed')),
+    'the exactly-declared module is not flagged'
+  );
+});
+
+test('unreadable custom code directories fail closed instead of scanning as empty', (t) => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('permission bits do not restrict root');
+    return;
+  }
+  const targetRoot = writeCustomCodeFixtureRoot('custom-code-unreadable-');
+  const customRoot = join(targetRoot, 'web', 'modules', 'custom');
+  mkdirSync(join(customRoot, 'locked_mod'), { recursive: true });
+  chmodSync(customRoot, 0o000);
+  try {
+    const customCode = enumerateCustomCode(targetRoot);
+    assert.equal(customCode.scanned, true);
+    assert.deepEqual(customCode.modules, []);
+    assert.match(
+      customCode.errors.join('\n'),
+      /web\/modules\/custom could not be listed for custom code enumeration/
+    );
+  } finally {
+    chmodSync(customRoot, 0o755);
+  }
 });
 
 test('packet completion fails closed when the off-road inventory omits the custom code enumeration', async () => {

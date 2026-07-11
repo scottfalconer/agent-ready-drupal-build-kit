@@ -538,13 +538,37 @@ function yamlScalar(value) {
   return text.replace(/\s+#.*$/, '').trim();
 }
 
-function parseRoutingYamlRoutes(yamlText) {
+function splitInlineFlowPairs(text) {
+  const pairs = [];
+  let current = '';
+  let quote = '';
+  for (const character of String(text)) {
+    if (quote) {
+      current += character;
+      if (character === quote) {
+        quote = '';
+      }
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      current += character;
+    } else if (character === ',') {
+      pairs.push(current);
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  pairs.push(current);
+  return pairs;
+}
+
+export function parseRoutingYamlRoutes(yamlText) {
   const routes = [];
   let current = null;
   let propertyIndent = -1;
   let openBlock = '';
   let openBlockIndent = -1;
-  for (const rawLine of String(yamlText).split(/\r?\n/)) {
+  for (const rawLine of String(yamlText).replace(/^\uFEFF/, '').split(/\r?\n/)) {
     const expanded = rawLine.replace(/\t/g, '  ');
     const content = expanded.trim();
     if (!content || content.startsWith('#')) {
@@ -579,7 +603,7 @@ function parseRoutingYamlRoutes(yamlText) {
       if (key === 'path' && value) {
         current.path = value;
       } else if (key === 'requirements' && keyValue[2].trim().startsWith('{')) {
-        for (const pair of keyValue[2].trim().replace(/^\{|\}\s*$/g, '').split(',')) {
+        for (const pair of splitInlineFlowPairs(keyValue[2].trim().replace(/^\{|\}\s*$/g, ''))) {
           const separator = pair.indexOf(':');
           if (separator !== -1) {
             current.requirements[yamlScalar(pair.slice(0, separator))] = yamlScalar(pair.slice(separator + 1));
@@ -608,7 +632,7 @@ function routeRequirementGrantsAnonymous(key, value) {
   return false;
 }
 
-function anonymousPublicRoute(route) {
+export function anonymousPublicRoute(route) {
   const accessKeys = Object.keys(route.requirements).filter(
     (key) => key.startsWith('_') && !['_content_type_format', '_format', '_method'].includes(key)
   );
@@ -618,22 +642,55 @@ function anonymousPublicRoute(route) {
   );
 }
 
-function walkFiles(directory) {
+function resolvedDirent(parentDirectory, entry, errors, describePath) {
+  // Symlinked modules/themes (composer path repositories) are real Drupal code;
+  // following links here keeps a symlink from hiding custom code from the scan.
+  if (!entry.isSymbolicLink()) {
+    return entry;
+  }
+  try {
+    return statSync(join(parentDirectory, entry.name));
+  } catch (error) {
+    errors.push(
+      `${describePath} is a symlink that could not be resolved for custom code enumeration: ${error.message}`
+    );
+    return null;
+  }
+}
+
+function walkFiles(directory, errors, describeDirectory) {
   const files = [];
-  const stack = [directory];
+  const stack = [{ path: directory, label: describeDirectory }];
+  const visitedDirectories = new Set();
   while (stack.length > 0) {
-    const currentDirectory = stack.pop();
+    const { path: currentDirectory, label } = stack.pop();
+    try {
+      const realDirectory = realpathSync(currentDirectory);
+      if (visitedDirectories.has(realDirectory)) {
+        continue;
+      }
+      visitedDirectories.add(realDirectory);
+    } catch (error) {
+      errors.push(`${label} could not be resolved for custom code enumeration: ${error.message}`);
+      continue;
+    }
     let entries;
     try {
       entries = readdirSync(currentDirectory, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      errors.push(`${label} could not be listed for custom code enumeration: ${error.message}`);
       continue;
     }
     for (const entry of entries) {
       const path = join(currentDirectory, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(path);
-      } else if (entry.isFile()) {
+      const entryLabel = `${label}/${entry.name}`;
+      const stats = resolvedDirent(currentDirectory, entry, errors, entryLabel);
+      if (!stats) {
+        continue;
+      }
+      if (stats.isDirectory()) {
+        stack.push({ path, label: entryLabel });
+      } else if (stats.isFile()) {
         files.push(path);
       }
     }
@@ -641,7 +698,7 @@ function walkFiles(directory) {
   return files.sort();
 }
 
-function enumerateCustomCode(projectRoot) {
+export function enumerateCustomCode(projectRoot) {
   if (!projectRoot) {
     return { scanned: false, docroot: '', errors: [], modules: [], themes: [] };
   }
@@ -651,22 +708,33 @@ function enumerateCustomCode(projectRoot) {
   const themes = [];
   for (const [kind, collection] of [['modules', modules], ['themes', themes]]) {
     const customRoot = join(projectRoot, docroot, kind, 'custom');
+    const customRootLabel = [docroot, kind, 'custom'].join('/');
     let entries;
     try {
       entries = readdirSync(customRoot, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        errors.push(`${customRootLabel} could not be listed for custom code enumeration: ${error.message}`);
+      }
       continue;
     }
-    for (const entry of entries.filter((candidate) => candidate.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+    const directoryNames = [];
+    for (const entry of entries) {
+      const stats = resolvedDirent(customRoot, entry, errors, `${customRootLabel}/${entry.name}`);
+      if (stats?.isDirectory()) {
+        directoryNames.push(entry.name);
+      }
+    }
+    for (const name of directoryNames.sort((a, b) => a.localeCompare(b))) {
       const record = {
         controllers: [],
         kind: kind === 'modules' ? 'module' : 'theme',
-        machineName: entry.name,
-        path: [docroot, kind, 'custom', entry.name].join('/'),
+        machineName: name,
+        path: [docroot, kind, 'custom', name].join('/'),
         publicRoutes: [],
         routingFiles: []
       };
-      for (const file of walkFiles(join(customRoot, entry.name))) {
+      for (const file of walkFiles(join(customRoot, name), errors, record.path)) {
         const relativeFile = relative(projectRoot, file).split(sep).join('/');
         if (/\.routing\.yml$/i.test(relativeFile)) {
           record.routingFiles.push(relativeFile);
@@ -728,7 +796,7 @@ function acceptedCustomCodeNaming(row) {
   return /^accepted$/i.test(disposition ?? '') && named(acceptedBy) && named(rationale);
 }
 
-function customCodeDeclarationErrors({ customCode, offRoadInventoryText, routeMatrix, sourceSiteName }) {
+export function customCodeDeclarationErrors({ customCode, offRoadInventoryText, routeMatrix, sourceSiteName }) {
   const errors = [...customCode.errors];
   if (!customCode.scanned) {
     return errors;
@@ -750,7 +818,11 @@ function customCodeDeclarationErrors({ customCode, offRoadInventoryText, routeMa
   const enumerationRows = inventoryText.split(/\r?\n/).filter((line) => /^\|\s*CC-/i.test(line.trim()));
   const sourceTokens = sourceNameTokens(routeMatrix?.sourceBaseUrl, sourceSiteName);
   for (const entry of [...customCode.modules, ...customCode.themes]) {
-    const row = enumerationRows.find((candidate) => candidate.includes(entry.path));
+    // Exact cell match: substring matching would let web/modules/custom/events
+    // ride on a row declaring web/modules/custom/events_feed.
+    const row = enumerationRows.find((candidate) =>
+      candidate.split('|').some((cell) => cell.trim() === entry.path)
+    );
     if (!row) {
       errors.push(
         `off-road-inventory.md has no Custom code enumeration row for ${entry.path}; every custom module and theme on disk needs a CC- row.`
