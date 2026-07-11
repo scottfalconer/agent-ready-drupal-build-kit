@@ -34,11 +34,12 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   const expected = gates.gates.filter((gate) => gate.checkedBy !== 'human').map((gate) => gate.id).sort();
 
   assert.deepEqual(Object.keys(MACHINE_GATE_EVALUATORS).sort(), expected);
+  assert.equal(MACHINE_GATE_EVALUATORS['G-HANDOFF-01'], 'humanDecisionPresentation');
   assert.deepEqual([...new Set(gates.gates.map((gate) => gate.blocking))].sort(), ['handoff', 'launch']);
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
 });
 
-test('gates.json defines checker semantics, including the pending-human-acceptance rule', () => {
+test('gates.json defines checker semantics, including the non-authoritative human-record rule', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
   for (const checker of new Set(gates.gates.map((gate) => gate.checkedBy))) {
     assert.ok(
@@ -46,9 +47,10 @@ test('gates.json defines checker semantics, including the pending-human-acceptan
       `checkedBySemantics must define ${checker}`
     );
   }
-  assert.match(gates.checkedBySemantics.human, /leaves acceptance pending/i);
-  assert.match(gates.checkedBySemantics.human, /differs from the recorded builder identity/i);
-  assert.match(gates.checkedBySemantics.human, /mechanically verified, awaiting human signoff/i);
+  assert.match(gates.checkedBySemantics.human, /builder-writable/i);
+  assert.match(gates.checkedBySemantics.human, /self-attested record status/i);
+  assert.match(gates.checkedBySemantics.human, /does not authenticate/i);
+  assert.match(gates.checkedBySemantics.human, /does not use them to determine machine completion/i);
 });
 
 function writeJson(path, value) {
@@ -445,6 +447,37 @@ No off-road moves were used in this fixture.
 site: "${targetBaseUrl}"
 intent_records: []
 evidence_scope: "No durable intent records apply to this fixture."
+`);
+}
+
+function writeOpenDecisionRow(packetDir, {
+  currentEvidence = 'unrelated-evidence',
+  includeAcceptedSummary = true,
+  openSummary = '1',
+  status = 'open'
+} = {}) {
+  const routeMatrix = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8'));
+  const acceptedSummary = includeAcceptedSummary ? '- Decisions accepted: None\n' : '';
+  writeFileSync(join(packetDir, 'open-decisions.md'), `# Open Decisions
+
+## Site
+
+- Source URL: ${routeMatrix.sourceBaseUrl}
+- Target site name: Fixture rebuild
+- Target workspace: DDEV fixture
+- Date: 2026-07-09
+
+## Decisions
+
+| ID | Decision needed | Human owner | Current evidence | Options | Recommended default | Impact if deferred | Needed by gate | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| DEC-900 | Review accepted deviation | Owner/Maintainer | ${currentEvidence} | Accept / reject / revise | Review evidence | Scope remains human-unapproved | G-HANDOFF-01 | ${status} |
+
+## Handoff Summary
+
+- Decisions still open: ${openSummary}
+${acceptedSummary}- Decisions blocked by missing external input: None
+- Agent-resolvable work deliberately excluded from this file: None
 `);
 }
 
@@ -1199,6 +1232,13 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
       copyTemplatePacket(packetDir);
       writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
       addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateText(join(packetDir, 'operator-run.md'), (text) =>
+        text.replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted'));
+      mutateText(join(packetDir, 'maintainer-review.md'), (text) =>
+        text.replace(
+          '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
+          '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
+        ));
 
       const packetOnlyReport = await validatePacket({ packetDir });
       assert.equal(packetOnlyReport.valid, true, packetOnlyReport.errors.join('\n'));
@@ -1212,6 +1252,10 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
         independentVerification: 'self-attested',
         blindAdversarialReview: 'self-attested'
       });
+      assert.equal(
+        packetOnlyReport.completionEvidence.scopeDispositionAttribution,
+        'builder-writable-self-attested'
+      );
       assert.equal(packetOnlyReport.claimScope, 'complete-local-rebuild');
       assert.equal(packetOnlyReport.productionReadinessEvaluated, false);
       assert.equal(packetOnlyReport.launchReady, false);
@@ -1414,6 +1458,13 @@ process.stdout.write(outputs.get(command) + '\\n');
       copyTemplatePacket(packetDir);
       writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
       addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateText(join(packetDir, 'operator-run.md'), (text) =>
+        text.replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted'));
+      mutateText(join(packetDir, 'maintainer-review.md'), (text) =>
+        text.replace(
+          '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
+          '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
+        ));
 
       const verifierArgs = [join(repoRoot, 'bin', 'verify.mjs'), '--packet', 'review-packet'];
       const cleanEnvironment = {
@@ -1437,8 +1488,9 @@ process.stdout.write(outputs.get(command) + '\\n');
 
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(cleanResult.status, 0, cleanResult.stderr);
-      assert.match(cleanResult.stdout, /complete local rebuild claim authorized/);
+      assert.match(cleanResult.stdout, /complete local rebuild machine claim authorized/);
       assert.match(cleanResult.stdout, /independence evidence: self-attested/);
+      assert.match(cleanResult.stdout, /recorded local-rebuild operator\/maintainer status: pending, self-attested record only/);
       const cleanReport = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
       assert.equal(cleanReport.target.resolutionSource, 'ddev-describe');
       assert.equal(cleanReport.drupalRuntime.mode, 'ddev-host');
@@ -1448,6 +1500,8 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
       assert.equal(cleanReport.verdict, 'complete-local-rebuild');
+      assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
+      assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
@@ -1819,17 +1873,20 @@ test('self-authored count and exclusion dispositions cannot hide collection shor
   }
 });
 
-test('human-gate acceptance and builder-accepted deviations fail closed', async () => {
+test('human-gate records are reported separately while packet contradictions fail closed', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'human-gate-regressions-'));
   const canonicalPacket = join(temp, 'canonical');
   copyTemplatePacket(canonicalPacket);
   writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
   addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
 
-  const cases = [
+  const humanRecordCases = [
     {
       name: 'maintainer-acceptance-pending',
-      expected: /maintainer-review\.md stake-my-name acceptance is pending.*awaiting human signoff/i,
+      gate: 'G-MAINTAINER-01',
+      expectedGateStatus: 'pending',
+      expectedLocalStatus: 'pending',
+      expectedRecordComplete: true,
       mutate: (packetDir) => mutateText(join(packetDir, 'maintainer-review.md'), (text) =>
         text.replace(
           '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
@@ -1838,25 +1895,111 @@ test('human-gate acceptance and builder-accepted deviations fail closed', async 
     },
     {
       name: 'maintainer-self-signed',
-      expected: /maintainer-review\.md acceptance.*distinct from the recorded builder identity/i,
+      gate: 'G-MAINTAINER-01',
+      expectedGateStatus: 'recorded-accepted',
+      expectedLocalStatus: 'recorded-accepted',
+      expectedRecordComplete: true,
+      expectedIdentityComparison: 'same-string',
       mutate: (packetDir) => mutateText(join(packetDir, 'maintainer-review.md'), (text) =>
         text.replace('- Reviewer: Fixture Maintainer', '- Reviewer: fixture-builder-agent'))
     },
     {
       name: 'operator-acceptance-pending',
-      expected: /operator-run\.md repeatability acceptance is pending.*awaiting human signoff/i,
+      gate: 'G-OPERATOR-01',
+      expectedGateStatus: 'pending',
+      expectedLocalStatus: 'pending',
+      expectedRecordComplete: true,
       mutate: (packetDir) => mutateText(join(packetDir, 'operator-run.md'), (text) =>
         text.replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted'))
     },
     {
       name: 'operator-self-signed',
-      expected: /operator-run\.md acceptance.*distinct from the recorded builder identity/i,
+      gate: 'G-OPERATOR-01',
+      expectedGateStatus: 'recorded-accepted',
+      expectedLocalStatus: 'recorded-accepted',
+      expectedRecordComplete: true,
+      expectedIdentityComparison: 'same-string',
       mutate: (packetDir) => mutateText(join(packetDir, 'operator-run.md'), (text) =>
         text.replace('- Name: Fixture Operator', '- Name: fixture-builder-agent'))
     },
     {
+      name: 'operator-accepted-with-restrictions',
+      gate: 'G-OPERATOR-01',
+      expectedGateStatus: 'recorded-accepted-with-restrictions',
+      expectedLocalStatus: 'recorded-accepted-with-restrictions',
+      expectedRecordComplete: true,
+      mutate: (packetDir) => mutateText(join(packetDir, 'operator-run.md'), (text) =>
+        text
+          .replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted')
+          .replace('- [ ] Repeatability accepted with restrictions', '- [x] Repeatability accepted with restrictions'))
+    },
+    {
+      name: 'operator-choice-with-incomplete-record',
+      gate: 'G-OPERATOR-01',
+      expectedGateStatus: 'recorded-accepted',
+      expectedLocalStatus: 'pending',
+      expectedRecordComplete: false,
+      mutate: (packetDir) => mutateText(join(packetDir, 'operator-run.md'), (text) =>
+        text.replace('- Command transcript: drupal-readback.json commands', '- Command transcript:'))
+    },
+    {
+      name: 'operator-choice-with-unknown-identity',
+      gate: 'G-OPERATOR-01',
+      expectedGateStatus: 'recorded-accepted',
+      expectedLocalStatus: 'pending',
+      expectedRecordComplete: false,
+      mutate: (packetDir) => mutateText(join(packetDir, 'operator-run.md'), (text) =>
+        text.replace('- Name: Fixture Operator', '- Name: UNKNOWN'))
+    }
+  ];
+
+  const gateVocabulary = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const expectedHumanGateIds = gateVocabulary.gates
+    .filter((record) => record.checkedBy === 'human')
+    .map((record) => record.id)
+    .sort();
+
+  for (const {
+    name,
+    gate,
+    expectedGateStatus,
+    expectedIdentityComparison,
+    expectedLocalStatus,
+    expectedRecordComplete,
+    mutate
+  } of humanRecordCases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutate(packetDir);
+
+    const report = await validatePacket({ packetDir });
+
+    assert.equal(
+      report.completionEvidence.packetSupportsCompletion,
+      true,
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n')
+    );
+    assert.equal(report.recordedHumanGateStatus.affectsMachineCompletion, false, name);
+    assert.equal(report.recordedHumanGateStatus.authentication, 'self-attested-record-only', name);
+    assert.deepEqual(Object.keys(report.recordedHumanGateStatus.gates).sort(), expectedHumanGateIds, name);
+    assert.equal(report.completionEvidence.humanDecisionPresentationStatus, 'presented-consistently', name);
+    assert.equal(report.recordedHumanGateStatus.localRebuildStatus, expectedLocalStatus, name);
+    assert.equal(report.recordedHumanGateStatus.gates[gate].status, expectedGateStatus, name);
+    assert.equal(report.recordedHumanGateStatus.gates[gate].recordComplete, expectedRecordComplete, name);
+    if (expectedIdentityComparison) {
+      assert.equal(
+        report.recordedHumanGateStatus.gates[gate].identityStringComparison,
+        expectedIdentityComparison,
+        name
+      );
+    }
+  }
+
+  const contradictionCases = [
+    {
       name: 'none-declaration-with-off-road-rows',
       expected: /open-decisions\.md cannot declare "Decisions still open: None".*OR- exception rows/i,
+      expectedPresentation: 'contradictory',
       mutate: (packetDir) => mutateText(join(packetDir, 'off-road-inventory.md'), (text) =>
         text.replace('No off-road moves were used in this fixture.', [
           '| ID | Area | Off-road move | Drupal-native option considered | Why exception exists | Evidence | Status |',
@@ -1867,6 +2010,7 @@ test('human-gate acceptance and builder-accepted deviations fail closed', async 
     {
       name: 'none-declaration-with-blind-accepted-out-of-scope',
       expected: /open-decisions\.md cannot declare "Decisions still open: None".*accepted_out_of_scope defects/i,
+      expectedPresentation: 'contradictory',
       mutate: (packetDir) => mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
         blind.productDefects = [{
           id: 'DEF-001',
@@ -1881,8 +2025,114 @@ test('human-gate acceptance and builder-accepted deviations fail closed', async 
       })
     },
     {
+      name: 'unrelated-decision-does-not-present-blind-deviation',
+      expected: /Current evidence cell; missing DEF-001/i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+          blind.productDefects = [{
+            id: 'DEF-001',
+            severity: 'low',
+            status: 'accepted_out_of_scope',
+            acceptedBy: 'Fixture Owner',
+            acceptedReason: 'The provider-owned widget is outside the machine-evaluated scope.',
+            evidence: ['editor-task.json'],
+            notes: ''
+          }];
+          blind.summary.acceptedOutOfScopeIssueCount = 1;
+        });
+        writeOpenDecisionRow(packetDir);
+      }
+    },
+    {
+      name: 'deviation-reference-must-match-exact-token',
+      expected: /Current evidence cell; missing OR-001/i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => {
+        mutateText(join(packetDir, 'off-road-inventory.md'), (text) =>
+          text.replace('No off-road moves were used in this fixture.', [
+            '| ID | Area | Off-road move | Drupal-native option considered | Why exception exists | Evidence | Status |',
+            '| --- | --- | --- | --- | --- | --- | --- |',
+            '| OR-001 | Public copy | Hardcoded footer copy in Twig | Menu/block ownership | Source-fixed footer | theme evidence | accepted |'
+          ].join('\n')));
+        writeOpenDecisionRow(packetDir, { currentEvidence: 'OR-0010' });
+      }
+    },
+    {
+      name: 'owner-approved-count-exclusion-needs-exact-decision',
+      expected: /missing count-exclusion:\/->\/:gallery-image/i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+          routeMatrix.perRouteItemReconciliation = [{
+            sourcePath: '/',
+            targetPath: '/',
+            itemType: 'Gallery image',
+            sourceCount: 10,
+            targetRenderedCount: 5,
+            targetDrupalEntityCount: 5,
+            mismatchDisposition: 'owner_approved_exclusion',
+            acceptedBy: 'Fixture Owner',
+            dispositionEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+            accepted: true,
+            notes: 'Five unavailable images are excluded.'
+          }];
+        });
+        writeOpenDecisionRow(packetDir);
+      }
+    },
+    {
+      name: 'parity-exclusion-needs-token-safe-identity',
+      expected: /stable IDs.*addressableSurface\.exclusions\[0\]/i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'parity-report.json'), (parity) => {
+          parity.addressableSurface.exclusions = [{ name: 'Legal pages', reason: 'Owner disposition.' }];
+          parity.addressableSurface.routesExcluded = 1;
+        });
+        writeOpenDecisionRow(packetDir, { currentEvidence: 'parity-exclusion:Legal pages' });
+      }
+    },
+    {
+      name: 'composition-owner-deviation-needs-exact-decision',
+      expected: /missing composition-deviation:\//i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+          const check = independent.compositionModelFidelityChecks[0];
+          check.actualCompositionOwner = 'canvas_page';
+          check.deviationRecordRequired = true;
+          check.deviationRecordPresent = true;
+          check.deviationTargetUrl = 'https://target.example/';
+          check.deviationRationale = 'Accepted target-bound fallback.';
+          check.deviationEvidence = 'claim-evidence.json';
+        });
+        writeOpenDecisionRow(packetDir);
+      }
+    },
+    {
+      name: 'none-summary-cannot-hide-open-row',
+      expected: /cannot declare "Decisions still open: None" while a DEC row remains open/i,
+      expectedPresentation: 'contradictory',
+      mutate: (packetDir) => writeOpenDecisionRow(packetDir, { openSummary: 'None', status: 'open' })
+    },
+    {
+      name: 'missing-handoff-summary-is-incomplete',
+      expected: /exact handoff summaries/i,
+      expectedPresentation: 'incomplete',
+      mutate: (packetDir) => writeOpenDecisionRow(packetDir, { includeAcceptedSummary: false })
+    },
+    {
+      name: 'none-declaration-must-be-exact',
+      expected: /exact Decisions still open: None declaration/i,
+      expectedPresentation: 'incomplete',
+      mutate: (packetDir) => mutateText(join(packetDir, 'open-decisions.md'), (text) =>
+        text.replace('- Decisions still open: None', '- Decisions still open: None yet'))
+    },
+    {
       name: 'human-review-without-named-reviewer',
-      expected: /human_review requires a named human reviewer/i,
+      expected: /human_review requires a recorded reviewer label/i,
+      expectedPresentation: 'presented-consistently',
       mutate: (packetDir) => mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
         browser.publicRouteChecks[0].visualComparison.method = 'human_review';
         browser.publicRouteChecks[0].visualComparison.reviewer = '';
@@ -1890,7 +2140,7 @@ test('human-gate acceptance and builder-accepted deviations fail closed', async 
     }
   ];
 
-  for (const { name, expected, mutate } of cases) {
+  for (const { name, expected, expectedPresentation, mutate } of contradictionCases) {
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
@@ -1899,7 +2149,95 @@ test('human-gate acceptance and builder-accepted deviations fail closed', async 
 
     assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
     assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+    assert.equal(report.completionEvidence.humanDecisionPresentationStatus, expectedPresentation, name);
   }
+
+  const visualMethodCases = [
+    { name: 'empty-visual-method', method: '', expected: /visualComparison\.method must be/ },
+    { name: 'unknown-visual-method', method: 'manual_review', expected: /visualComparison\.method must be/ },
+    { name: 'structural-review-is-diagnostic', method: 'structural_review', expected: /diagnostic-only/ },
+    { name: 'other-review-is-diagnostic', method: 'other', expected: /diagnostic-only/ },
+    {
+      name: 'pixel-diff-needs-real-image',
+      method: 'pixel_diff',
+      expected: /real bounded packet-local diff image/,
+      configure: (visualComparison) => {
+        visualComparison.diffImage = 'missing-diff.png';
+        visualComparison.diffScore = 0.1;
+      }
+    },
+    {
+      name: 'pixel-diff-cannot-reuse-source-capture',
+      method: 'pixel_diff',
+      expected: /distinct real bounded packet-local diff image/,
+      configure: (visualComparison, check) => {
+        visualComparison.diffImage = check.sourceScreenshot;
+        visualComparison.diffScore = 0.1;
+      }
+    }
+  ];
+  for (const { name, method, expected, configure } of visualMethodCases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+      for (const check of browser.publicRouteChecks) {
+        check.visualComparison.method = method;
+        configure?.(check.visualComparison, check);
+      }
+    });
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const exactDeviationPacket = join(temp, 'exact-deviation-reference');
+  cpSync(canonicalPacket, exactDeviationPacket, { recursive: true });
+  mutateJson(join(exactDeviationPacket, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects = [{
+      id: 'DEF-001',
+      severity: 'low',
+      status: 'accepted_out_of_scope',
+      acceptedBy: 'Fixture Owner',
+      acceptedReason: 'The provider-owned widget is outside the machine-evaluated scope.',
+      evidence: ['editor-task.json'],
+      notes: ''
+    }];
+    blind.summary.acceptedOutOfScopeIssueCount = 1;
+  });
+  writeOpenDecisionRow(exactDeviationPacket, { currentEvidence: 'DEF-001' });
+  const exactDeviationReport = await validatePacket({ packetDir: exactDeviationPacket });
+  assert.equal(
+    exactDeviationReport.completionEvidence.packetSupportsCompletion,
+    true,
+    exactDeviationReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+  assert.equal(
+    exactDeviationReport.completionEvidence.humanDecisionPresentationStatus,
+    'presented-consistently'
+  );
+
+  const pixelDiffPacket = join(temp, 'pixel-diff-with-real-image');
+  cpSync(canonicalPacket, pixelDiffPacket, { recursive: true });
+  const pixelDiffEvidenceDir = join(pixelDiffPacket, 'evidence', 'browser');
+  mkdirSync(pixelDiffEvidenceDir, { recursive: true });
+  mutateJson(join(pixelDiffPacket, 'browser-evidence.json'), (browser) => {
+    for (const [index, check] of browser.publicRouteChecks.entries()) {
+      const diffName = `diff-${check.viewport.name}.png`;
+      writeFileSync(
+        join(pixelDiffEvidenceDir, diffName),
+        screenshotPng(20 + index, check.viewport.width, check.viewport.height)
+      );
+      check.visualComparison.method = 'pixel_diff';
+      check.visualComparison.diffImage = `evidence/browser/${diffName}`;
+      check.visualComparison.diffScore = 0.01;
+    }
+  });
+  const pixelDiffReport = await validatePacket({ packetDir: pixelDiffPacket });
+  assert.equal(
+    pixelDiffReport.completionEvidence.packetSupportsCompletion,
+    true,
+    pixelDiffReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
 
   const namedReviewerPacket = join(temp, 'human-review-with-named-reviewer');
   cpSync(canonicalPacket, namedReviewerPacket, { recursive: true });
@@ -2100,7 +2438,11 @@ test('blanket-filled packet templates remain valid lint but cannot support compl
   assert.equal(report.completionEvidence.packetCompletionReady, false);
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /source-audit\.json/);
-  assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /maintainer-review\.md/);
+  assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /recipe-start-point\.md/);
+  assert.doesNotMatch(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /operator-run\.md|maintainer-review\.md/
+  );
 });
 
 test('completed Markdown can retain instructional references to UNKNOWN without being treated as unresolved', async () => {
@@ -2795,12 +3137,12 @@ test('default CLI exits 2 when live checks pass but completion evidence is incom
       ], repoRoot, { env: { ...process.env, DDEV_PRIMARY_URL: baseUrl } });
 
       assert.equal(result.status, 2, result.stderr);
-      assert.match(result.stderr, /completion remains blocked/);
-      assert.match(result.stderr, /mechanically verified, awaiting human signoff/);
+      assert.match(result.stderr, /machine authorization remains blocked by required machine evidence/);
       const report = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
       assert.equal(report.valid, true);
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
-      assert.equal(report.verdict, 'mechanically-verified-awaiting-human-signoff');
+      assert.equal(report.verdict, 'machine-incomplete');
+      assert.equal(report.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(report.packetDir, 'review-packet');
       assert.doesNotMatch(JSON.stringify(report), new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     }

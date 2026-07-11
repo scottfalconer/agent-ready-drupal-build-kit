@@ -24,7 +24,16 @@
 
 ## Boundary
 
-This is a `checkedBy: human` gate record: the builder agent fills the evidence fields, but only a named human distinct from the builder identity accepts the target.
+This is a human-facing `checkedBy: human` gate record. An authorized production owner should record the decision below. Because this file is builder-writable, the local verifier reports the choice and attribution as self-attested status only; it does not authenticate the approver, and this production decision does not affect the complete-local-rebuild machine verdict.
+
+## Recorded Human Status
+
+- Approver:
+- Builder identity:
+- Reviewed at:
+
+- [ ] Production target accepted
+- [ ] Production target not accepted
 
 Disposable lab evidence is not production target evidence.
 

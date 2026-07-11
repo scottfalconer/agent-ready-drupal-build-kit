@@ -7,10 +7,10 @@ Parity is easy to overstate. This spec keeps parity tied to evidence.
 Define the addressable surface before scoring parity:
 
 - public routes in scope;
-- routes intentionally excluded by a named human or maintainer decision with reason and evidence;
+- routes intentionally excluded by a recorded owner/maintainer disposition with reason and evidence; local packet attribution is self-attested and authenticated approval is separate;
 - routes blocked by private access, provider ownership, or unresolved redirects, with evidence of that boundary;
 - functional behaviors in scope for the target;
-- functional behaviors explicitly excluded by a named human or maintainer decision with reason and evidence.
+- functional behaviors explicitly excluded by a recorded owner/maintainer disposition with reason and evidence; local packet attribution is self-attested and authenticated approval is separate.
 
 Score parity only over the accepted addressable surface. Do not hide excluded or blocked routes; list them separately. An external blocker leaves parity blocked and cannot stand in for route coverage.
 
@@ -54,7 +54,7 @@ Examples:
 
 Visual and content parity are part of the default build goal.
 
-Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a named, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a named owner accepts a specific evidence-backed count exclusion.
+Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a recorded-attribution, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a recorded owner label, reason, and evidence disposition a specific count exclusion. Local attribution is self-attested; authenticated approval is separate.
 
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
 

@@ -9,7 +9,7 @@
 - Builder identity:
 - Date:
 
-`Builder identity` names the agent/runtime that produced the build. The operator `Name` and `Reviewer` are human identities and must differ from it.
+`Builder identity` names the agent/runtime that produced the build. `Name` and `Reviewer` are recorded labels, not authenticated identities. The local verifier reports whether the strings match but does not infer that a different string proves an independent human.
 
 ## Run Evidence
 
@@ -31,7 +31,7 @@
 
 ## Decision
 
-This is the `G-OPERATOR-01` human acceptance. The builder agent fills the run evidence but leaves these boxes unchecked; only the named human operator records the decision. Until then the verifier caps the run at exit `2`: mechanically verified, awaiting human signoff.
+This is the human-facing `G-OPERATOR-01` record. An authorized operator should record the decision. Because this file is builder-writable, the local verifier reports the choice as self-attested status only; pending or recorded acceptance does not change the machine completion verdict or exit code.
 
 - [ ] Repeatability not reviewed
 - [ ] Repeatability blocked

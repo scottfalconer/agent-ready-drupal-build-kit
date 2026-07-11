@@ -98,7 +98,7 @@ Every run asks:
 
 The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
-This is a complete-local-rebuild bar, not production approval. An agent-only run tops out at mechanically verified, awaiting human signoff (verifier exit `2`); the full completion claim also needs the named human acceptances recorded for the packet's human-checked gates. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+This is a complete-local-rebuild machine bar, not production or human approval. The default verifier can authorize that local machine claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
 
 For the full case, see [docs/positioning.md](docs/positioning.md): who this is for, why Drupal CMS, why the kit, and when not to use it.
 

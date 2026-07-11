@@ -1187,7 +1187,7 @@ export async function verifyLive({
     completionBlockedReasons.push('Blind adversarial review evidence does not support completion.');
   }
   if (!packetReport.completionEvidence?.packetCompletionReady) {
-    completionBlockedReasons.push('Required packet evidence is still template-like, unresolved, or not accepted.');
+    completionBlockedReasons.push('Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.');
   }
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
     completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
@@ -1272,11 +1272,12 @@ export async function verifyLive({
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
+    recordedHumanGateStatus: sharedPacketReport.recordedHumanGateStatus,
     completeLocalRebuildClaimAllowed,
     verdict: completeLocalRebuildClaimAllowed
       ? 'complete-local-rebuild'
       : packetReport.valid && liveTargetValid
-        ? 'mechanically-verified-awaiting-human-signoff'
+        ? 'machine-incomplete'
         : 'blocked',
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
@@ -1319,9 +1320,10 @@ async function main() {
     const independenceSummary = [
       ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
     ].join(', ') || 'not-declared';
-    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized (independence evidence: ${independenceSummary}). Report: ${args.out}\n`);
+    const recordedHumanStatus = report.recordedHumanGateStatus?.localRebuildStatus ?? 'pending';
+    process.stdout.write(`Live target and packet verification passed; complete local rebuild machine claim authorized (independence evidence: ${independenceSummary}; recorded local-rebuild operator/maintainer status: ${recordedHumanStatus}, self-attested record only). Report: ${args.out}\n`);
   } else {
-    process.stderr.write(`Live target checks passed; the verdict ceiling is mechanically verified, awaiting human signoff — completion remains blocked by pending acceptance or required review evidence. Report: ${args.out}\n`);
+    process.stderr.write(`Live target checks passed, but complete local rebuild machine authorization remains blocked by required machine evidence. Report: ${args.out}\n`);
     process.exitCode = 2;
   }
 }

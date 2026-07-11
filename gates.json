@@ -1,7 +1,7 @@
 {
   "schemaVersion": "public-kit.gates.1",
   "checkedBySemantics": {
-    "human": "The builder agent fills the evidence fields but leaves acceptance pending. Only a named human whose identity differs from the recorded builder identity may record acceptance; until that happens the default verifier caps the run at exit 2: mechanically verified, awaiting human signoff.",
+    "human": "A human-facing packet record may contain a typed name and decision, but those fields are builder-writable. The local verifier reports them as self-attested record status, does not authenticate a person or infer independence from different strings, and does not use them to determine machine completion, verdict, or exit code. Authenticated human approval belongs in a separate external workflow when required.",
     "verify-script": "The installed verifier scripts evaluate this gate mechanically from packet and live-target evidence.",
     "verifier": "A fresh independent verifier context records this gate's evidence and the packet verifier checks it mechanically; its independence declarations are builder-writable and reported as self-attested.",
     "blind-verifier": "A blind reviewer context that did not build the target records this gate's evidence from the brief, target, and source-of-truth materials only; its independence declarations are builder-writable and reported as self-attested."
@@ -220,7 +220,7 @@
       "title": "Human-only open decisions are presented in final handoff",
       "phase": 6,
       "evidenceFile": "open-decisions.md",
-      "checkedBy": "human",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {
