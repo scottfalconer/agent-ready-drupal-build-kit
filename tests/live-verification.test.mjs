@@ -153,6 +153,7 @@ function liveRouteMatrix(baseUrl) {
       candidateRoutesFromMetadata: [],
       candidateRoutesFromAssets: [],
       candidateRoutesFromSitemapsOrRobots: [],
+      candidateRoutesFromImportedContentBodies: [],
       candidateRoutesFromNamingPatterns: [],
       curlOnlyRoutesRejected: [],
       expansionComplete: true,
@@ -227,6 +228,10 @@ function liveRouteMatrix(baseUrl) {
         accepted: true,
         notes: ''
       }
+    ],
+    renderedLinksChecked: [],
+    menuAndFooterLinksChecked: [
+      { href: '/', status: 200, finalPath: '/', disposition: '', acceptedBy: '', rationale: '' }
     ],
     starterRouteCleanup: {
       checkedPaths: ['/home', '/page/1', '/privacy-policy'],
@@ -1046,7 +1051,11 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.match(report.completionBlockedReasons.join(' '), /Independent verification/);
     }
   );
-  assert.equal(requestCount, 2, 'primary and target-required route checks should both fetch the declared target');
+  assert.equal(
+    requestCount,
+    4,
+    'primary, target-required, declared-link, and front-page crawl checks should all fetch the declared target'
+  );
 });
 
 test('live route verification rejects identity mismatches and accepts a declared same-origin redirect', async () => {
@@ -1149,6 +1158,9 @@ test('live route verification rejects identity mismatches and accepts a declared
       routeMatrix.targetRequiredRoutes[0].targetFinalPath = '/home';
       routeMatrix.targetRequiredRoutes[0].targetStatus = 302;
       routeMatrix.targetRequiredRoutes[0].expectedPublicBehavior = 'redirect';
+      routeMatrix.menuAndFooterLinksChecked = [
+        { href: '/', status: 302, finalPath: '/home', disposition: '', acceptedBy: '', rationale: '' }
+      ];
       writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
 
       const report = await verifyLive({
@@ -1334,6 +1346,328 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
       }
     }
   );
+});
+
+test('live verifier samples the full route matrix with a reproducible recorded seed', async () => {
+  let brokenSections = false;
+  await withHttpServer(
+    (request, response) => {
+      const path = request.url.split('?')[0];
+      if (brokenSections && path !== '/') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><head><title>Not found</title></head><body><h1>Not found</h1></body></html>');
+        return;
+      }
+      const title = path === '/' ? 'Target site' : 'Section';
+      const h1 = path === '/' ? 'Target home' : 'Section';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>${title}</title></head><body><h1>${h1}</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-route-sample-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      for (let index = 0; index < 10; index += 1) {
+        routeMatrix.routes.push({
+          sourcePath: `/section-${index}`,
+          targetPath: `/section-${index}`,
+          targetStatus: 200,
+          targetFinalPath: `/section-${index}`,
+          targetTitle: '',
+          targetH1: '',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      }
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const run = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        routeSampleSeed: 'fixture-seed'
+      });
+
+      const healthyReport = await run();
+      assert.equal(healthyReport.valid, true, healthyReport.errors.join('\n'));
+      assert.equal(healthyReport.routeSample.seed, 'fixture-seed');
+      assert.equal(healthyReport.routeSample.populationSize, 10);
+      assert.equal(healthyReport.routeSample.sampleSize, 3);
+      assert.equal(healthyReport.routeSample.checks.every((check) => check.passed), true);
+
+      const repeatReport = await run();
+      assert.deepEqual(
+        repeatReport.routeSample.sampledTargetPaths,
+        healthyReport.routeSample.sampledTargetPaths,
+        'the recorded seed must reproduce the same sample'
+      );
+
+      const defaultSeedReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.ok(defaultSeedReport.routeSample.seed, 'an unseeded run must still record its seed');
+
+      brokenSections = true;
+      const brokenReport = await run();
+      assert.equal(brokenReport.valid, false);
+      assert.equal(brokenReport.liveTargetValid, false);
+      assert.match(brokenReport.errors.join('\n'), /\/section-\d+ returned status 404; expected 200/);
+    }
+  );
+});
+
+test('rendered-link crawl fails on broken same-origin links unless a named owner disposition exists', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const path = request.url.split('?')[0];
+      if (path === '/broken.aspx') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><head><title>Not found</title></head><body><h1>Not found</h1></body></html>');
+        return;
+      }
+      const nav = path === '/'
+        ? '<nav><a href="/about">About</a><a href="/broken.aspx?AID=1">Old alerts</a><a href="https://elsewhere.example/off-site">Off-site</a></nav>'
+        : '';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>${nav}<h1>Target home</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-link-crawl-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const run = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      const brokenReport = await run();
+      assert.equal(brokenReport.valid, false);
+      assert.match(
+        brokenReport.errors.join('\n'),
+        /Rendered link \/broken\.aspx\?AID=1 \(found on \/\) returned HTTP 404/
+      );
+      assert.equal(brokenReport.renderedLinkCrawl.discoveredSameOriginLinkCount, 2, 'cross-origin links stay out of the crawl');
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.renderedLinksChecked = [{
+          href: '/broken.aspx?AID=1',
+          status: 404,
+          finalPath: '/broken.aspx',
+          disposition: 'owner_accepted_broken',
+          acceptedBy: 'Example Owner',
+          rationale: 'The legacy platform alert surface is intentionally retired.'
+        }];
+      });
+      const dispositionedReport = await run();
+      assert.equal(dispositionedReport.valid, true, dispositionedReport.errors.join('\n'));
+      const dispositionedCheck = dispositionedReport.renderedLinkCrawl.checks.find(
+        (check) => check.path === '/broken.aspx?AID=1'
+      );
+      assert.equal(dispositionedCheck.dispositionAccepted, true);
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.renderedLinksChecked[0].disposition = '';
+        routeMatrix.renderedLinksChecked[0].acceptedBy = '';
+        routeMatrix.renderedLinksChecked[0].rationale = '';
+      });
+      const undispositionedReport = await run();
+      assert.equal(undispositionedReport.valid, false);
+      assert.match(
+        undispositionedReport.errors.join('\n'),
+        /declares HTTP 404 without an owner_accepted_broken disposition/
+      );
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.renderedLinksChecked = [];
+        routeMatrix.menuAndFooterLinksChecked = ['Home', 'About'];
+      });
+      const labelsOnlyReport = await run();
+      assert.equal(labelsOnlyReport.valid, false);
+      assert.match(labelsOnlyReport.errors.join('\n'), /"Home" is a bare label; per-link records/);
+    }
+  );
+});
+
+test('declared source-to-target mappings must materialize as 301 redirects or carry a no-redirect disposition', async () => {
+  let legacyBehavior = 'missing';
+  await withHttpServer(
+    (request, response) => {
+      const path = request.url.split('?')[0];
+      if (path === '/legacy-news.aspx' || path === '/old-calendar.aspx') {
+        if (legacyBehavior === 'permanent') {
+          response.writeHead(301, { location: '/news' });
+        } else if (legacyBehavior === 'temporary') {
+          response.writeHead(302, { location: '/news' });
+        } else {
+          response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        }
+        response.end();
+        return;
+      }
+      const title = path === '/news' ? 'News' : 'Target site';
+      const h1 = path === '/news' ? 'News' : 'Target home';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>${title}</title></head><body><h1>${h1}</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-redirect-materialization-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push({
+        sourcePath: '/legacy-news.aspx',
+        targetPath: '/news',
+        targetStatus: 200,
+        targetFinalPath: '/news',
+        targetTitle: 'News',
+        targetH1: 'News',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'The legacy platform news route maps to /news.'
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const run = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        routeSampleSeed: 'fixture-seed'
+      });
+
+      const missingReport = await run();
+      assert.equal(missingReport.valid, false);
+      assert.match(
+        missingReport.errors.join('\n'),
+        /\/legacy-news\.aspx is mapped to \/news in routes but returned initial status 404/
+      );
+
+      legacyBehavior = 'temporary';
+      const temporaryReport = await run();
+      assert.equal(temporaryReport.valid, false);
+      assert.match(temporaryReport.errors.join('\n'), /returned initial status 302/);
+
+      legacyBehavior = 'permanent';
+      const permanentReport = await run();
+      assert.equal(permanentReport.valid, true, permanentReport.errors.join('\n'));
+      assert.equal(permanentReport.redirectMaterializationChecks[0].passed, true);
+
+      legacyBehavior = 'missing';
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.routes[1].noRedirectDisposition = {
+          acceptedBy: 'Example Owner',
+          rationale: 'Legacy URLs are intentionally not preserved for this rebuild.'
+        };
+      });
+      const dispositionedReport = await run();
+      assert.equal(dispositionedReport.valid, true, dispositionedReport.errors.join('\n'));
+      assert.equal(dispositionedReport.redirectMaterializationChecks[0].checked, false);
+      assert.equal(dispositionedReport.redirectMaterializationChecks[0].passed, true);
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.routes.splice(1, 1);
+        value.browserFirstRouteExpansion.candidateRoutesFromImportedContentBodies = ['/old-calendar.aspx'];
+        value.sourceRouteDriftClassification = [{
+          sourcePath: '/old-calendar.aspx',
+          sourceStatus: 200,
+          classification: 'legacy',
+          targetDisposition: 'redirect',
+          targetPath: '/news',
+          ownerDecisionEvidence: 'The legacy calendar route redirects to the news listing.',
+          accepted: true,
+          notes: 'Redirect disposition recorded.'
+        }];
+      });
+      const driftReport = await run();
+      assert.equal(driftReport.valid, false);
+      assert.match(
+        driftReport.errors.join('\n'),
+        /\/old-calendar\.aspx is mapped to \/news in sourceRouteDriftClassification but returned initial status 404/
+      );
+    }
+  );
+});
+
+test('packet verification hard-fails labels-only link arrays and missing per-link menu records', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'per-link-record-regressions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    true,
+    canonicalReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const cases = [
+    {
+      name: 'labels-only-menu-links',
+      expected: /menuAndFooterLinksChecked must contain re-fetchable per-link records/i,
+      mutate: (value) => { value.menuAndFooterLinksChecked = ['Home', 'Departments', 'Contact']; }
+    },
+    {
+      name: 'labels-only-rendered-links',
+      expected: /renderedLinksChecked must contain re-fetchable per-link records/i,
+      mutate: (value) => { value.renderedLinksChecked = ['Read more']; }
+    },
+    {
+      name: 'record-missing-final-path',
+      expected: /menuAndFooterLinksChecked must contain re-fetchable per-link records/i,
+      mutate: (value) => { value.menuAndFooterLinksChecked = [{ href: '/', status: 200, finalPath: '' }]; }
+    },
+    {
+      name: 'undispositioned-broken-link-record',
+      expected: /broken links without an owner_accepted_broken disposition/i,
+      mutate: (value) => {
+        value.renderedLinksChecked = [{ href: '/broken.aspx', status: 404, finalPath: '/broken.aspx' }];
+      }
+    },
+    {
+      name: 'declared-5xx-link-record',
+      expected: /declared 5xx links/i,
+      mutate: (value) => {
+        value.renderedLinksChecked = [{
+          href: '/erroring',
+          status: 500,
+          finalPath: '/erroring',
+          disposition: 'owner_accepted_broken',
+          acceptedBy: 'Example Owner',
+          rationale: 'A 5xx is a server defect, not an acceptable disposition.'
+        }];
+      }
+    },
+    {
+      name: 'no-menu-link-records',
+      expected: /menuAndFooterLinksChecked must record at least one per-link menu or footer check/i,
+      mutate: (value) => { value.menuAndFooterLinksChecked = []; }
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'route-matrix.json'), mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
 });
 
 test('CLI discovers the DDEV Drupal runtime and requires clean status plus real Git-tracked config YAML', async () => {

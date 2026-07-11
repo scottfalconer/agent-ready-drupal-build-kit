@@ -16,24 +16,35 @@ const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
 Verify the packet against the real target by default.
 
 Options:
-  --packet <path>      Review packet directory (default: review-packet)
-  --target-url <url>   Explicit target URL (otherwise detect current DDEV target)
-  --out <path>         Report path (default: review-packet/evidence/live-verification.json)
-  --packet-only        Run structural packet lint only; never authorizes completion
-  --help               Show this help`;
+  --packet <path>           Review packet directory (default: review-packet)
+  --target-url <url>        Explicit target URL (otherwise detect current DDEV target)
+  --out <path>              Report path (default: review-packet/evidence/live-verification.json)
+  --route-sample-seed <s>   Seed for the full-route-matrix sample (default: random, recorded in the report)
+  --packet-only             Run structural packet lint only; never authorizes completion
+  --help                    Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+// Sampling the full routes array on every run (fresh seed, recorded for reproducibility)
+// defeats teaching-to-the-test against the fixed primaryRoutes list.
+const ROUTE_SAMPLE_RATE = 0.15;
+const ROUTE_SAMPLE_MIN = 3;
+const LINK_CRAWL_CONTENT_PAGE_COUNT = 5;
+const LIVE_FETCH_CONCURRENCY = 8;
+const PER_LINK_RECORD_FIELDS = ['menuAndFooterLinksChecked', 'renderedLinksChecked'];
+const NON_ROUTE_LINK_EXTENSION_RE =
+  /\.(?:7z|avif|bmp|css|docx?|eot|gif|gz|ico|jpe?g|js|json|m4[av]|mjs|mov|mp[34]|ogg|otf|pdf|png|pptx?|rar|svg|tar|tiff?|ttf|txt|wav|webm|webp|woff2?|xlsx?|xml|zip)$/i;
 
 class UsageError extends Error {}
 
 function parseArgs(argv) {
-  const args = { packet: 'review-packet', out: '', packetOnly: false, targetUrl: '' };
+  const args = { packet: 'review-packet', out: '', packetOnly: false, routeSampleSeed: '', targetUrl: '' };
   const valueOptions = new Map([
     ['--packet', 'packet'],
     ['--out', 'out'],
+    ['--route-sample-seed', 'routeSampleSeed'],
     ['--target-url', 'targetUrl']
   ]);
 
@@ -686,6 +697,295 @@ function expectedTargetRequiredRoute(record) {
   };
 }
 
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function requestUrlForPath(baseUrl, path) {
+  return new URL(String(path ?? '').replace(/^\//, ''), new URL('/', baseUrl));
+}
+
+function seededRandom(seed) {
+  let state = Number.parseInt(sha256(String(seed)).slice(0, 8), 16) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let mixed = state;
+    mixed = Math.imul(mixed ^ (mixed >>> 15), mixed | 1);
+    mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61);
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function seededSample(items, sampleSize, random) {
+  const pool = [...items];
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [pool[index], pool[swap]] = [pool[swap], pool[index]];
+  }
+  return pool.slice(0, Math.max(0, sampleSize));
+}
+
+async function mapWithConcurrency(items, limit, task) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function expectedSampledRoute(record) {
+  const targetPath = normalizePath(record?.targetPath);
+  const declaredStatus = record?.targetStatus;
+  const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
+    ? Number(declaredStatus)
+    : 200;
+  return {
+    accepted: record?.accepted === true,
+    expectedBehavior: record?.expectedRedirect === true ? 'redirect' : 'public_200',
+    expectedFinalPath: normalizePath(record?.targetFinalPath || targetPath),
+    expectedH1: normalizeText(record?.targetH1),
+    expectedStatus,
+    expectedTitle: normalizeText(record?.targetTitle),
+    identityRequired: false,
+    matchesBrowserRenderedSource: true,
+    renderedSeo: null,
+    routeKind: 'sampled',
+    statusUsesInitialResponse: record?.expectedRedirect === true,
+    targetPath
+  };
+}
+
+function anchorHrefs(html) {
+  return matchingTags(html, 'a', () => true)
+    .map((attributes) => String(attributes.href ?? '').trim())
+    .filter(Boolean);
+}
+
+function sameOriginLinkPath(href, pageUrl, targetOrigin) {
+  let url;
+  try {
+    url = new URL(href, pageUrl);
+  } catch {
+    return '';
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.origin !== targetOrigin ||
+    NON_ROUTE_LINK_EXTENSION_RE.test(url.pathname)
+  ) {
+    return '';
+  }
+  return `${url.pathname}${url.search}`;
+}
+
+function acceptedBrokenLinkDisposition(record) {
+  return record?.disposition === 'owner_accepted_broken' &&
+    Boolean(String(record?.acceptedBy ?? '').trim()) &&
+    Boolean(String(record?.rationale ?? '').trim());
+}
+
+function acceptedBrokenLinkDispositions(routeMatrix) {
+  const dispositions = new Map();
+  for (const field of PER_LINK_RECORD_FIELDS) {
+    for (const record of arrayOrEmpty(routeMatrix?.[field])) {
+      if (record && typeof record === 'object' && !Array.isArray(record) && acceptedBrokenLinkDisposition(record)) {
+        const path = normalizePath(record.href);
+        if (path) {
+          dispositions.set(path, {
+            acceptedBy: String(record.acceptedBy).trim(),
+            field,
+            rationale: String(record.rationale).trim()
+          });
+        }
+      }
+    }
+  }
+  return dispositions;
+}
+
+function declaredPerLinkEntries(routeMatrix) {
+  const entries = [];
+  for (const field of PER_LINK_RECORD_FIELDS) {
+    for (const entry of arrayOrEmpty(routeMatrix?.[field])) {
+      const isRecord = Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry);
+      const isUntouchedTemplateRow = isRecord && !Object.values(entry).some((value) =>
+        (typeof value === 'string' && value.trim()) ||
+        (typeof value === 'number' && Number.isFinite(value)) ||
+        value === true
+      );
+      if (!isUntouchedTemplateRow) {
+        entries.push({ entry, field });
+      }
+    }
+  }
+  return entries;
+}
+
+async function verifyDeclaredLink(baseUrl, field, record) {
+  const label = `route-matrix.json ${field}`;
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      errors: [`${label} entry ${JSON.stringify(record)} is a bare label; per-link records with href, observed status, and finalPath are required.`],
+      field,
+      href: typeof record === 'string' ? record : '',
+      passed: false
+    };
+  }
+  const errors = [];
+  const href = String(record.href ?? '').trim();
+  const declaredStatus = record.status === null || record.status === '' ? Number.NaN : Number(record.status);
+  const declaredFinalPath = normalizePath(record.finalPath);
+  let requestPath = '';
+  if (href) {
+    try {
+      const url = new URL(href, new URL('/', baseUrl));
+      if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && url.origin === baseUrl.origin) {
+        requestPath = `${url.pathname}${url.search}`;
+      }
+    } catch {
+      // An unparsable href cannot be re-fetched and fails below.
+    }
+  }
+  if (!href || !Number.isFinite(declaredStatus) || !declaredFinalPath) {
+    errors.push(`${label} entry ${JSON.stringify(href || record)} must declare href, the observed HTTP status, and finalPath.`);
+  } else if (!requestPath) {
+    errors.push(`${label} href ${JSON.stringify(href)} does not resolve to a fetchable same-origin route on the live target.`);
+  }
+  if (Number.isFinite(declaredStatus) && declaredStatus >= 400 && !acceptedBrokenLinkDisposition(record)) {
+    errors.push(`${label} href ${JSON.stringify(href)} declares HTTP ${declaredStatus} without an owner_accepted_broken disposition naming acceptedBy and a rationale.`);
+  }
+  if (errors.length > 0) {
+    return { errors, field, href, passed: false };
+  }
+  try {
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, requestPath));
+    const actualStatus = REDIRECT_STATUSES.has(declaredStatus) ? response.initialStatus : response.status;
+    if (actualStatus !== declaredStatus) {
+      errors.push(`${label} href ${JSON.stringify(href)} returned status ${actualStatus}; the packet record declares ${declaredStatus}.`);
+    }
+    if (normalizePath(response.finalUrl) !== declaredFinalPath) {
+      errors.push(`${label} href ${JSON.stringify(href)} resolved to ${normalizePath(response.finalUrl)}; the packet record declares ${declaredFinalPath}.`);
+    }
+    return { actualStatus, errors, field, finalUrl: response.finalUrl, href, passed: errors.length === 0 };
+  } catch (error) {
+    errors.push(`${label} href ${JSON.stringify(href)} could not be fetched: ${error.message}`);
+    return { errors, field, href, passed: false };
+  }
+}
+
+async function fetchCrawlPage(baseUrl, path) {
+  try {
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, path));
+    return response.status >= 200 && response.status < 300
+      ? { finalUrl: response.finalUrl, html: response.body }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyCrawledLink(baseUrl, link, dispositions) {
+  const errors = [];
+  const disposition = dispositions.get(normalizePath(link.path)) ?? null;
+  const foundOn = [...link.foundOn].sort();
+  const record = {
+    dispositionAccepted: Boolean(disposition),
+    dispositionAcceptedBy: disposition?.acceptedBy ?? '',
+    foundOn,
+    path: link.path
+  };
+  try {
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, link.path));
+    if ((response.status < 200 || response.status >= 400) && !disposition) {
+      errors.push(`Rendered link ${link.path} (found on ${foundOn.join(', ')}) returned HTTP ${response.status}; rewrite the link or record an owner_accepted_broken disposition in route-matrix.json.`);
+    }
+    return { ...record, errors, finalPath: normalizePath(response.finalUrl), passed: errors.length === 0, status: response.status };
+  } catch (error) {
+    if (!disposition) {
+      errors.push(`Rendered link ${link.path} (found on ${foundOn.join(', ')}) could not be fetched: ${error.message}`);
+    }
+    return { ...record, errors, finalPath: '', passed: errors.length === 0, status: 0 };
+  }
+}
+
+function redirectMaterializationExpectations(routeMatrix) {
+  const expectations = new Map();
+  for (const row of arrayOrEmpty(routeMatrix?.routes)) {
+    const sourcePath = normalizePath(row?.sourcePath);
+    const targetPath = normalizePath(row?.targetPath);
+    if (!sourcePath || !targetPath || sourcePath === targetPath) {
+      continue;
+    }
+    const disposition = row?.noRedirectDisposition;
+    const dispositionAccepted =
+      Boolean(String(disposition?.acceptedBy ?? '').trim()) &&
+      Boolean(String(disposition?.rationale ?? '').trim());
+    expectations.set(sourcePath, {
+      declaredIn: 'routes',
+      expectedFinalPath: normalizePath(row?.targetFinalPath || row?.targetPath),
+      noRedirectDisposition: dispositionAccepted
+        ? { acceptedBy: String(disposition.acceptedBy).trim(), rationale: String(disposition.rationale).trim() }
+        : null,
+      sourcePath
+    });
+  }
+  for (const record of arrayOrEmpty(routeMatrix?.sourceRouteDriftClassification)) {
+    const sourcePath = normalizePath(record?.sourcePath);
+    const targetPath = normalizePath(record?.targetPath);
+    if (
+      record?.targetDisposition !== 'redirect' ||
+      !sourcePath ||
+      !targetPath ||
+      sourcePath === targetPath ||
+      expectations.has(sourcePath)
+    ) {
+      continue;
+    }
+    expectations.set(sourcePath, {
+      declaredIn: 'sourceRouteDriftClassification',
+      expectedFinalPath: targetPath,
+      noRedirectDisposition: null,
+      sourcePath
+    });
+  }
+  return [...expectations.values()];
+}
+
+async function verifyRedirectMaterialization(baseUrl, expectation) {
+  if (expectation.noRedirectDisposition) {
+    return { ...expectation, checked: false, errors: [], passed: true };
+  }
+  const errors = [];
+  try {
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, expectation.sourcePath));
+    if (response.initialStatus !== 301) {
+      errors.push(`${expectation.sourcePath} is mapped to ${expectation.expectedFinalPath} in ${expectation.declaredIn} but returned initial status ${response.initialStatus} on the target; materialize an HTTP 301 redirect or record a noRedirectDisposition with acceptedBy and a rationale.`);
+    }
+    if (normalizePath(response.finalUrl) !== expectation.expectedFinalPath) {
+      errors.push(`${expectation.sourcePath} resolved to ${normalizePath(response.finalUrl)}; the declared mapping expects ${expectation.expectedFinalPath}.`);
+    }
+    return {
+      ...expectation,
+      checked: true,
+      errors,
+      finalPath: normalizePath(response.finalUrl),
+      initialStatus: response.initialStatus,
+      passed: errors.length === 0
+    };
+  } catch (error) {
+    errors.push(`${expectation.sourcePath} is mapped to ${expectation.expectedFinalPath} but could not be verified on the target: ${error.message}`);
+    return { ...expectation, checked: true, errors, passed: false };
+  }
+}
+
 function requiredOriginMatch(errors, label, value, expectedOrigin) {
   const text = String(value ?? '').trim();
   if (!text) {
@@ -825,7 +1125,7 @@ function completionEvidenceTargetErrors({
 }
 
 async function verifyRoute(baseUrl, expected) {
-  const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
+  const requestedUrl = requestUrlForPath(baseUrl, expected.targetPath);
   const errors = [];
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
@@ -955,7 +1255,8 @@ export async function verifyLive({
   targetUrl = '',
   cwd = process.cwd(),
   environment = process.env,
-  drupalRuntime = null
+  drupalRuntime = null,
+  routeSampleSeed = ''
 } = {}) {
   const absolutePacketDir = resolve(cwd, packetDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
@@ -1090,6 +1391,104 @@ export async function verifyLive({
     : [];
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
+  }
+
+  const fetchChecksEnabled = Boolean(target) && explicitTargetFetchAllowed;
+  const routeRows = arrayOrEmpty(routeMatrix.routes);
+  const verifiedTargetPaths = new Set(
+    [
+      ...primaryRoutes.map((route) => normalizePath(route?.targetPath || route?.sourcePath)),
+      ...targetRequiredRoutes.map((route) => normalizePath(route?.targetPath))
+    ].filter(Boolean)
+  );
+  const sampleSeed = String(routeSampleSeed ?? '').trim() ||
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const random = seededRandom(sampleSeed);
+  const samplePopulation = [];
+  const samplePopulationPaths = new Set();
+  for (const row of routeRows) {
+    const rowTargetPath = normalizePath(row?.targetPath);
+    if (!rowTargetPath || verifiedTargetPaths.has(rowTargetPath) || samplePopulationPaths.has(rowTargetPath)) {
+      continue;
+    }
+    samplePopulationPaths.add(rowTargetPath);
+    samplePopulation.push(row);
+  }
+  const sampleSize = Math.min(
+    samplePopulation.length,
+    Math.max(ROUTE_SAMPLE_MIN, Math.ceil(samplePopulation.length * ROUTE_SAMPLE_RATE))
+  );
+  const sampledRows = seededSample(samplePopulation, sampleSize, random);
+  const sampledTargetPaths = sampledRows.map((row) => normalizePath(row?.targetPath));
+  const sampledRouteChecks = fetchChecksEnabled
+    ? await mapWithConcurrency(sampledRows, LIVE_FETCH_CONCURRENCY, (row) =>
+        verifyRoute(target.url, expectedSampledRoute(row)))
+    : [];
+  for (const route of sampledRouteChecks) {
+    liveErrors.push(...route.errors);
+  }
+  for (const path of sampledTargetPaths) {
+    verifiedTargetPaths.add(path);
+  }
+
+  const brokenLinkDispositions = acceptedBrokenLinkDispositions(routeMatrix);
+  const renderedLinkCrawl = { checks: [], crawledPages: [], discoveredSameOriginLinkCount: 0 };
+  if (fetchChecksEnabled) {
+    const crawlSeedPaths = [
+      '/',
+      ...sampledTargetPaths.filter((path) => path && path !== '/').slice(0, LINK_CRAWL_CONTENT_PAGE_COUNT)
+    ];
+    const discoveredLinks = new Map();
+    for (const seedPath of crawlSeedPaths) {
+      const page = await fetchCrawlPage(target.url, seedPath);
+      if (!page) {
+        if (seedPath === '/') {
+          liveErrors.push('The front page could not be crawled for rendered same-origin links.');
+        }
+        continue;
+      }
+      renderedLinkCrawl.crawledPages.push(seedPath);
+      for (const href of anchorHrefs(page.html)) {
+        const linkPath = sameOriginLinkPath(href, page.finalUrl, target.url.origin);
+        if (!linkPath) {
+          continue;
+        }
+        const existing = discoveredLinks.get(linkPath);
+        if (existing) {
+          existing.foundOn.add(seedPath);
+        } else {
+          discoveredLinks.set(linkPath, { foundOn: new Set([seedPath]), path: linkPath });
+        }
+      }
+    }
+    renderedLinkCrawl.discoveredSameOriginLinkCount = discoveredLinks.size;
+    const crawlTargets = [...discoveredLinks.values()].filter(
+      (link) => !verifiedTargetPaths.has(normalizePath(link.path))
+    );
+    renderedLinkCrawl.checks = await mapWithConcurrency(crawlTargets, LIVE_FETCH_CONCURRENCY, (link) =>
+      verifyCrawledLink(target.url, link, brokenLinkDispositions));
+    for (const check of renderedLinkCrawl.checks) {
+      liveErrors.push(...check.errors);
+    }
+  }
+
+  const declaredLinkChecks = fetchChecksEnabled
+    ? await mapWithConcurrency(declaredPerLinkEntries(routeMatrix), LIVE_FETCH_CONCURRENCY, ({ entry, field }) =>
+        verifyDeclaredLink(target.url, field, entry))
+    : [];
+  for (const check of declaredLinkChecks) {
+    liveErrors.push(...check.errors);
+  }
+
+  const redirectMaterializationChecks = fetchChecksEnabled
+    ? await mapWithConcurrency(
+        redirectMaterializationExpectations(routeMatrix),
+        LIVE_FETCH_CONCURRENCY,
+        (expectation) => verifyRedirectMaterialization(target.url, expectation)
+      )
+    : [];
+  for (const check of redirectMaterializationChecks) {
+    liveErrors.push(...check.errors);
   }
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
@@ -1255,6 +1654,18 @@ export async function verifyLive({
     },
     routeChecks,
     targetRequiredRouteChecks,
+    routeSample: {
+      seed: sampleSeed,
+      sampleRate: ROUTE_SAMPLE_RATE,
+      minimumSampleSize: ROUTE_SAMPLE_MIN,
+      populationSize: samplePopulation.length,
+      sampleSize: sampledRows.length,
+      sampledTargetPaths,
+      checks: sampledRouteChecks
+    },
+    renderedLinkCrawl,
+    declaredLinkChecks,
+    redirectMaterializationChecks,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
@@ -1294,6 +1705,7 @@ async function main() {
     ? await validatePacket({ packetDir: resolve(args.packet) })
     : await verifyLive({
         packetDir: args.packet,
+        routeSampleSeed: args.routeSampleSeed,
         targetUrl: args.targetUrl
       });
   await mkdir(dirname(args.out), { recursive: true });

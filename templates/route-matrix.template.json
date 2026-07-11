@@ -11,6 +11,7 @@
     "candidateRoutesFromMetadata": [],
     "candidateRoutesFromAssets": [],
     "candidateRoutesFromSitemapsOrRobots": [],
+    "candidateRoutesFromImportedContentBodies": [],
     "candidateRoutesFromNamingPatterns": [],
     "curlOnlyRoutesRejected": [],
     "expansionComplete": false,
@@ -136,12 +137,34 @@
       "targetTitle": "",
       "targetH1": "",
       "expectedRedirect": false,
+      "noRedirectDisposition": {
+        "acceptedBy": "",
+        "rationale": ""
+      },
       "accepted": false,
       "notes": ""
     }
   ],
-  "renderedLinksChecked": [],
-  "menuAndFooterLinksChecked": [],
+  "renderedLinksChecked": [
+    {
+      "href": "",
+      "status": null,
+      "finalPath": "",
+      "disposition": "",
+      "acceptedBy": "",
+      "rationale": ""
+    }
+  ],
+  "menuAndFooterLinksChecked": [
+    {
+      "href": "",
+      "status": null,
+      "finalPath": "",
+      "disposition": "",
+      "acceptedBy": "",
+      "rationale": ""
+    }
+  ],
   "legalAndPrivacyRoutesChecked": [],
   "starterRouteCleanup": {
     "checkedPaths": [

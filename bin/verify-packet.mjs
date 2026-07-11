@@ -2268,6 +2268,31 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('route-matrix.json still records blocked, missing, or wrong-pattern routes.');
   }
 
+  const brokenLinkDispositionAccepted = (record) =>
+    record?.disposition === 'owner_accepted_broken' &&
+    String(record?.acceptedBy ?? '').trim() &&
+    String(record?.rationale ?? '').trim();
+  for (const field of ['menuAndFooterLinksChecked', 'renderedLinksChecked']) {
+    const entries = arrayOrEmpty(routeMatrix?.[field]);
+    const labelOnlyEntries = entries.filter((entry) => !isJsonObject(entry));
+    const linkRecords = substantiveObjects(entries);
+    if (
+      labelOnlyEntries.length > 0 ||
+      linkRecords.some((record) =>
+        !normalizeRouteKey(record.href) ||
+        !finiteNumberValue(record.status) ||
+        !normalizeRouteKey(record.finalPath) ||
+        numericValue(record.status) >= 500 ||
+        (numericValue(record.status) >= 400 && !brokenLinkDispositionAccepted(record))
+      )
+    ) {
+      reasons.push(`route-matrix.json ${field} must contain re-fetchable per-link records with href, observed status, and finalPath; bare text labels, declared 5xx links, and broken links without an owner_accepted_broken disposition cannot complete.`);
+    }
+  }
+  if (substantiveObjects(routeMatrix?.menuAndFooterLinksChecked).length === 0) {
+    reasons.push('route-matrix.json menuAndFooterLinksChecked must record at least one per-link menu or footer check for the live verifier to re-fetch.');
+  }
+
   const expansion = routeMatrix?.browserFirstRouteExpansion ?? {};
   const discoveredSourceRoutes = new Set([
     ...arrayOrEmpty(expansion.browserRenderedSeedRoutes),
@@ -2276,6 +2301,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     ...arrayOrEmpty(expansion.candidateRoutesFromMetadata),
     ...arrayOrEmpty(expansion.candidateRoutesFromAssets),
     ...arrayOrEmpty(expansion.candidateRoutesFromSitemapsOrRobots),
+    ...arrayOrEmpty(expansion.candidateRoutesFromImportedContentBodies),
     ...arrayOrEmpty(expansion.candidateRoutesFromNamingPatterns)
   ].map(routeLikeValue).filter(Boolean));
   const driftRecords = substantiveObjects(routeMatrix?.sourceRouteDriftClassification);
