@@ -123,6 +123,6 @@ ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --
 
 Use `scripts/verify-packet.mjs` only for explicit packet-only lint. Packet-only success never authorizes a complete rebuild claim.
 
-An explicit verifier target must match the current DDEV origin. An agent-only run tops out at exit `2`: mechanically verified, awaiting human signoff. The full complete-local-rebuild verdict also needs the named human acceptances in the operator, open-decisions, and maintainer records, and it remains separate from production readiness and launch approval.
+An explicit verifier target must match the current DDEV origin. A machine-complete agent-only run tops out at exit `2`: mechanically verified, awaiting human signoff. Incomplete machine-evaluated packet or Drupal-runtime evidence gets the distinct `machine-incomplete` verdict, also at exit `2`; it must not be presented as waiting only on a human. The full complete-local-rebuild verdict also needs the named human acceptances in the operator, open-decisions, and maintainer records, and it remains separate from production readiness and launch approval.
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.

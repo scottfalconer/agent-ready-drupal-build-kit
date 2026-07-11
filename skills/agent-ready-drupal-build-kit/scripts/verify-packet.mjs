@@ -97,6 +97,10 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-SEO-01': 'renderedSeo'
 });
 
+function missingMachineEvaluatorMessage(gateId) {
+  return `gate ${gateId} is non-human but has no machine evaluator.`;
+}
+
 // Attribute verifier findings to gate ids so reports stay machine-consumable per gate.
 // A finding is matched by the packet evidence file it names plus gate-specific keywords;
 // a finding that names an evidence file but matches no sibling keyword lands on that
@@ -266,9 +270,15 @@ export function perGateResults(gates, messages, { evaluatedGateIds = [] } = {}) 
     .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
     .map((gate) => {
       const gateId = String(gate.id);
-      const errors = findings.get(gateId) ?? [];
+      const errors = [...(findings.get(gateId) ?? [])];
       const evaluator = gate.checkedBy === 'human' ? 'human' : (MACHINE_GATE_EVALUATORS[gateId] ?? '');
-      const evaluatorRan = gate.checkedBy !== 'human' && evaluated.has(gateId);
+      if (gate.checkedBy !== 'human' && !evaluator) {
+        const missingEvaluator = missingMachineEvaluatorMessage(gateId);
+        if (!errors.includes(missingEvaluator)) {
+          errors.push(missingEvaluator);
+        }
+      }
+      const evaluatorRan = gate.checkedBy !== 'human' && Boolean(evaluator) && evaluated.has(gateId);
       let status = evaluatorRan ? 'pass' : 'not_evaluated';
       if (errors.length > 0) {
         status = 'fail';
@@ -1125,7 +1135,7 @@ function validateGateVocabulary(gates, errors) {
       errors.push(`gate ${gate.id} blocking ${gate.blocking} must be handoff or launch.`);
     }
     if (gate.checkedBy !== 'human' && !Object.hasOwn(MACHINE_GATE_EVALUATORS, gate.id)) {
-      errors.push(`gate ${gate.id} is non-human but has no machine evaluator.`);
+      errors.push(missingMachineEvaluatorMessage(gate.id));
     }
   }
 
@@ -2468,11 +2478,11 @@ function escapedRegex(value) {
 }
 
 function markdownField(text, label) {
-  return text.match(new RegExp(`^\\s*-\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*-[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
 }
 
 function markdownPlainField(text, label) {
-  return text.match(new RegExp(`^\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
 }
 
 function checkedStatement(text, statement) {
@@ -2493,6 +2503,11 @@ function unresolvedMarkdownUnknown(text) {
 
 async function markdownCompletionReadiness(packetDir, records = {}) {
   const reasons = [];
+  const humanAcceptancePendingReasons = [];
+  const addHumanAcceptancePendingReason = (reason) => {
+    reasons.push(reason);
+    humanAcceptancePendingReasons.push(reason);
+  };
   const patternMap = records.patternMap;
   const texts = Object.fromEntries(
     await Promise.all(
@@ -2538,12 +2553,12 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     !uncheckedStatement(operator, 'Repeatability not reviewed') ||
     !uncheckedStatement(operator, 'Repeatability blocked')
   ) {
-    reasons.push('operator-run.md repeatability acceptance is pending a named human operator; the verdict ceiling is mechanically verified, awaiting human signoff.');
+    addHumanAcceptancePendingReason('operator-run.md repeatability acceptance is pending a named human operator; the verdict ceiling is mechanically verified, awaiting human signoff.');
   } else if (
     identitiesMatch(markdownField(operator, 'Name'), operatorBuilderIdentity) ||
     identitiesMatch(markdownField(operator, 'Reviewer'), operatorBuilderIdentity)
   ) {
-    reasons.push('operator-run.md acceptance must come from a named human operator and reviewer distinct from the recorded builder identity.');
+    addHumanAcceptancePendingReason('operator-run.md acceptance must come from a named human operator and reviewer distinct from the recorded builder identity.');
   }
 
   const maintainer = texts['maintainer-review.md'];
@@ -2568,9 +2583,9 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     !checkedStatement(maintainer, 'I would stake my name on this as a complete local Drupal CMS rebuild.') ||
     !uncheckedStatement(maintainer, 'I would not stake my name on this as a complete local Drupal CMS rebuild.')
   ) {
-    reasons.push('maintainer-review.md stake-my-name acceptance is pending a named human maintainer; the verdict ceiling is mechanically verified, awaiting human signoff.');
+    addHumanAcceptancePendingReason('maintainer-review.md stake-my-name acceptance is pending a named human maintainer; the verdict ceiling is mechanically verified, awaiting human signoff.');
   } else if (identitiesMatch(markdownField(maintainer, 'Reviewer'), maintainerBuilderIdentity)) {
-    reasons.push('maintainer-review.md acceptance must be recorded by a named human maintainer distinct from the recorded builder identity.');
+    addHumanAcceptancePendingReason('maintainer-review.md acceptance must be recorded by a named human maintainer distinct from the recorded builder identity.');
   }
 
   const recipe = texts['recipe-start-point.md'];
@@ -2631,7 +2646,7 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     builderAcceptedDeviationSources.push('parity-report.json addressable-surface exclusions');
   }
   if (noOpenDecisions && builderAcceptedDeviationSources.length > 0) {
-    reasons.push(`open-decisions.md cannot declare "Decisions still open: None" while ${builderAcceptedDeviationSources.join(', ')} record accepted deviations awaiting human ratification.`);
+    addHumanAcceptancePendingReason(`open-decisions.md cannot declare "Decisions still open: None" while ${builderAcceptedDeviationSources.join(', ')} record accepted deviations awaiting human ratification.`);
   }
   if (
     ['Site', 'Checked at', 'Reviewer'].some((field) => !markdownField(offRoad, field)) ||
@@ -2740,13 +2755,21 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     reasons.push('maintainer-review.md cannot claim load-bearing decisions are captured while durable-intent.yml records no intent for the content types or Views declared in pattern-map.json.');
   }
 
-  return reasons;
+  return { humanAcceptancePendingReasons, reasons };
 }
 
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
+  const humanAcceptancePendingReasons = [];
   if (!gates) {
-    return { evaluatedGateIds: [], packetCompletionReady: false, reasons: ['Gate vocabulary could not be loaded.'] };
+    return {
+      evaluatedGateIds: [],
+      humanAcceptancePendingReasons,
+      machineCompletionReady: false,
+      onlyHumanAcceptancePending: false,
+      packetCompletionReady: false,
+      reasons: ['Gate vocabulary could not be loaded.']
+    };
   }
 
   for (const packetFile of arrayOrEmpty(gates.reviewPacketFiles)) {
@@ -2777,7 +2800,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
 
-  reasons.push(...await markdownCompletionReadiness(packetDir, records));
+  const markdownReadiness = await markdownCompletionReadiness(packetDir, records);
+  reasons.push(...markdownReadiness.reasons);
+  humanAcceptancePendingReasons.push(...markdownReadiness.humanAcceptancePendingReasons);
 
   const {
     blindAdversarialReview,
@@ -3345,8 +3370,13 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('The newest completion evidence is older than seven days and must be refreshed against the current target.');
   }
 
+  const humanPendingSet = new Set(humanAcceptancePendingReasons);
+  const machineCompletionReady = reasons.every((reason) => humanPendingSet.has(reason));
   return {
     evaluatedGateIds: Object.keys(MACHINE_GATE_EVALUATORS).filter((gateId) => gateId !== 'G-VERIFY-02'),
+    humanAcceptancePendingReasons,
+    machineCompletionReady,
+    onlyHumanAcceptancePending: reasons.length > 0 && machineCompletionReady,
     packetCompletionReady: reasons.length === 0,
     reasons
   };
@@ -3446,9 +3476,14 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     routeMatrix,
     sourceAudit
   });
+  const machineCompletionReady = errors.length === 0 && completionReadiness.machineCompletionReady;
+  const completionBlockedReasons = [...completionReadiness.reasons];
+  if (!machineCompletionReady) {
+    completionBlockedReasons.push('G-VERIFY-01 packet machine-evaluated completion readiness did not pass.');
+  }
 
   const sharedErrors = errors.map((error) => sharedPacketMessage(error, packetDir));
-  const sharedCompletionBlockedReasons = completionReadiness.reasons.map((reason) =>
+  const sharedCompletionBlockedReasons = completionBlockedReasons.map((reason) =>
     sharedPacketMessage(reason, packetDir)
   );
 
@@ -3473,9 +3508,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         independentVerification: independenceAttestation(independentVerification?.verifier),
         blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
       },
+      humanAcceptancePendingReasons: completionReadiness.humanAcceptancePendingReasons.map((reason) =>
+        sharedPacketMessage(reason, packetDir)
+      ),
+      machineCompletionReady,
+      onlyHumanAcceptancePending:
+        errors.length === 0 && completionReadiness.onlyHumanAcceptancePending,
       packetCompletionReady: completionReadiness.packetCompletionReady,
       packetCompletionBlockedReasons: sharedCompletionBlockedReasons,
       packetSupportsCompletion:
+        machineCompletionReady &&
         independentVerificationSupportsCompletion &&
         blindAdversarialReviewSupportsCompletion &&
         completionReadiness.packetCompletionReady

@@ -1126,6 +1126,10 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.match(report.target.targetFingerprint, /^sha256:[a-f0-9]{64}$/);
       assert.equal(report.target.resolutionSource, 'ddev-environment');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.equal(report.machineCompletionReady, false);
+      assert.equal(report.onlyHumanAcceptancePending, false);
+      assert.equal(report.verdict, 'machine-incomplete');
+      assert.ok(report.machineIncompleteGateIds.length > 0);
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
         report.packetVerification.completionEvidence.packetCompletionBlockedReasons.join('\n'),
@@ -1524,6 +1528,8 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(untrackedReport.completeLocalRebuildClaimAllowed, false);
       assert.equal(untrackedReport.drupalRuntime.configSyncTracked, false);
       assert.equal(untrackedReport.drupalRuntime.trackedConfigYamlPresent, false);
+      assert.equal(untrackedReport.machineCompletionReady, false);
+      assert.equal(untrackedReport.verdict, 'machine-incomplete');
       assert.match(untrackedReport.completionBlockedReasons.join('\n'), /Git-tracked.*YAML/i);
 
       execFileSync('git', ['init', '-q'], { cwd: targetRoot });
@@ -1541,7 +1547,50 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
+      assert.equal(cleanReport.machineCompletionReady, true);
+      assert.equal(cleanReport.onlyHumanAcceptancePending, false);
       assert.equal(cleanReport.verdict, 'complete-local-rebuild');
+
+      const maintainerReviewPath = join(packetDir, 'maintainer-review.md');
+      const acceptedMaintainerReview = readFileSync(maintainerReviewPath, 'utf8');
+      writeFileSync(
+        maintainerReviewPath,
+        acceptedMaintainerReview.replace(
+          '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
+          '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
+        )
+      );
+      const humanPendingResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: cleanEnvironment
+      });
+      assert.equal(humanPendingResult.status, 2, humanPendingResult.stderr);
+      assert.match(humanPendingResult.stderr, /mechanically verified, awaiting human signoff/i);
+      const humanPendingReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(humanPendingReport.machineCompletionReady, true);
+      assert.deepEqual(humanPendingReport.machineIncompleteGateIds, []);
+      assert.equal(humanPendingReport.onlyHumanAcceptancePending, true);
+      assert.equal(humanPendingReport.verdict, 'mechanically-verified-awaiting-human-signoff');
+      writeFileSync(maintainerReviewPath, acceptedMaintainerReview);
+
+      writeFileSync(
+        maintainerReviewPath,
+        acceptedMaintainerReview.replace('- Reviewer: Fixture Maintainer', '- Reviewer:')
+      );
+      const malformedHumanRecordResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: cleanEnvironment
+      });
+      assert.equal(malformedHumanRecordResult.status, 2, malformedHumanRecordResult.stderr);
+      assert.match(malformedHumanRecordResult.stderr, /machine-evaluated packet or Drupal runtime evidence is incomplete/i);
+      const malformedHumanRecordReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(malformedHumanRecordReport.machineCompletionReady, false);
+      assert.equal(malformedHumanRecordReport.onlyHumanAcceptancePending, false);
+      assert.equal(malformedHumanRecordReport.verdict, 'machine-incomplete');
+      assert.ok(malformedHumanRecordReport.machineIncompleteGateIds.includes('G-VERIFY-01'));
+      writeFileSync(maintainerReviewPath, acceptedMaintainerReview);
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
@@ -1551,6 +1600,9 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(dirtyReport.valid, true, dirtyReport.errors.join('\n'));
       assert.equal(dirtyReport.drupalRuntime.configStatusClean, false);
       assert.equal(dirtyReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(dirtyReport.machineCompletionReady, false);
+      assert.equal(dirtyReport.onlyHumanAcceptancePending, false);
+      assert.equal(dirtyReport.verdict, 'machine-incomplete');
       assert.match(dirtyReport.completionBlockedReasons.join('\n'), /config status is not clean/i);
     }
   );
@@ -2984,7 +3036,7 @@ test('default mode does not trust the packet target URL as runtime discovery', a
   assert.equal(requestCount, 0);
 });
 
-test('default CLI exits 2 when live checks pass but completion evidence is incomplete', async () => {
+test('default CLI reports machine-incomplete when live checks pass but machine evidence is incomplete', async () => {
   await withHttpServer(
     (_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
@@ -3003,12 +3055,14 @@ test('default CLI exits 2 when live checks pass but completion evidence is incom
       ], repoRoot, { env: { ...process.env, DDEV_PRIMARY_URL: baseUrl } });
 
       assert.equal(result.status, 2, result.stderr);
-      assert.match(result.stderr, /completion remains blocked/);
-      assert.match(result.stderr, /mechanically verified, awaiting human signoff/);
+      assert.match(result.stderr, /machine-evaluated packet or Drupal runtime evidence is incomplete/i);
+      assert.doesNotMatch(result.stderr, /awaiting human signoff/i);
       const report = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
       assert.equal(report.valid, true);
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
-      assert.equal(report.verdict, 'mechanically-verified-awaiting-human-signoff');
+      assert.equal(report.machineCompletionReady, false);
+      assert.equal(report.onlyHumanAcceptancePending, false);
+      assert.equal(report.verdict, 'machine-incomplete');
       assert.equal(report.packetDir, 'review-packet');
       assert.doesNotMatch(JSON.stringify(report), new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     }
@@ -3148,6 +3202,19 @@ test('packet reports emit machine-readable per-gate results for the full gate vo
   const noEvaluators = perGateResults(gates, [], { evaluatedGateIds: [] });
   assert.equal(noEvaluators.some((gate) => gate.status === 'pass'), false);
   assert.equal(noEvaluators.find((gate) => gate.gateId === 'G-VERIFY-02').evaluatorRan, false);
+
+  const missingEvaluator = perGateResults({
+    gates: [{
+      id: 'G-UNREGISTERED-01',
+      checkedBy: 'verifier',
+      blocking: 'handoff',
+      evidenceFile: 'missing-evaluator.json'
+    }]
+  }, [], { evaluatedGateIds: ['G-UNREGISTERED-01'] })[0];
+  assert.equal(missingEvaluator.evaluator, '');
+  assert.equal(missingEvaluator.evaluatorRan, false);
+  assert.equal(missingEvaluator.status, 'fail');
+  assert.match(missingEvaluator.errors.join('\n'), /has no machine evaluator/i);
 });
 
 test('every packet and generated evidence file has a gate attribution home derived from gates.json', () => {

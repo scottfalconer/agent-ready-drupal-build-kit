@@ -98,7 +98,7 @@ Every run asks:
 
 The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
-This is a complete-local-rebuild bar, not production approval. An agent-only run tops out at mechanically verified, awaiting human signoff (verifier exit `2`); the full completion claim also needs the named human acceptances recorded for the packet's human-checked gates. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+This is a complete-local-rebuild bar, not production approval. A machine-complete agent-only run tops out at mechanically verified, awaiting human signoff (verifier exit `2`); a run with incomplete machine-evaluated evidence is reported separately as `machine-incomplete`. The full completion claim also needs the named human acceptances recorded for the packet's human-checked gates. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
 
 For the full case, see [docs/positioning.md](docs/positioning.md): who this is for, why Drupal CMS, why the kit, and when not to use it.
 

@@ -629,14 +629,14 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
   return { source, url: parseHttpUrl(value, 'Live target URL') };
 }
 
-// Extend the packet per-gate results with live-run findings: live errors AND live
-// completion-blocked reasons both flow through gate attribution, so a run blocked by
+// Extend the packet per-gate results with live-run findings: live errors AND
+// completion-blocked reasons flow through gate attribution, so a run blocked by
 // DDEV runtime-identity or config-authority mismatches always surfaces at least one
 // failing gate. Findings that name a packet evidence file join that gate's errors;
 // everything else lands on G-VERIFY-02, the live-verifier gate, so no live finding
 // disappears from per-gate triage. Per-gate results stay diagnostic: completion
 // authority remains with valid and completeLocalRebuildClaimAllowed.
-function liveGateResults(packetGateResults, gates, liveFindingMessages, liveTargetValid) {
+function liveGateResults(packetGateResults, gates, liveFindingMessages, liveVerificationPassed) {
   const liveFindings = attributeFindingsToGates(liveFindingMessages, gates, {
     residualGateId: LIVE_RESIDUAL_GATE_ID
   });
@@ -646,17 +646,39 @@ function liveGateResults(packetGateResults, gates, liveFindingMessages, liveTarg
     if (result.gateId !== 'G-VERIFY-02') {
       return { ...result, status: errors.length > 0 ? 'fail' : result.status, errors };
     }
-    if (!liveTargetValid && errors.length === 0) {
+    const evaluator = MACHINE_GATE_EVALUATORS?.[result.gateId] ?? '';
+    if (!evaluator) {
+      errors.push(`gate ${result.gateId} is non-human but has no machine evaluator.`);
+    } else if (!liveVerificationPassed && errors.length === 0) {
       errors.push('Live target identity or route verification failed.');
     }
     return {
       gateId: result.gateId,
-      evaluator: MACHINE_GATE_EVALUATORS?.[result.gateId] ?? 'liveVerification',
-      evaluatorRan: true,
-      status: liveTargetValid && errors.length === 0 ? 'pass' : 'fail',
+      evaluator,
+      evaluatorRan: Boolean(evaluator),
+      status: liveVerificationPassed && Boolean(evaluator) && errors.length === 0 ? 'pass' : 'fail',
       errors
     };
   });
+}
+
+function machineHandoffReadiness(gates, gateResults) {
+  const resultByGateId = new Map(
+    (Array.isArray(gateResults) ? gateResults : []).map((result) => [result.gateId, result])
+  );
+  const requiredGateIds = (Array.isArray(gates?.gates) ? gates.gates : [])
+    .filter((gate) => gate?.blocking === 'handoff' && gate?.checkedBy !== 'human')
+    .map((gate) => String(gate.id ?? '').trim())
+    .filter(Boolean);
+  const incompleteGateIds = requiredGateIds.filter((gateId) => {
+    const result = resultByGateId.get(gateId);
+    return !result || !result.evaluator || result.evaluatorRan !== true || result.status !== 'pass';
+  });
+  return {
+    incompleteGateIds,
+    ready: requiredGateIds.length > 0 && incompleteGateIds.length === 0,
+    requiredGateIds
+  };
 }
 
 function matchingRouteRecord(routeMatrix, targetPath) {
@@ -1270,44 +1292,52 @@ export async function verifyLive({
     packetSupportsCompletion &&
     drupalRuntimeSupportsCompletion;
   const completionBlockedReasons = [];
+  const addCompletionBlockedReason = (reason) => {
+    const normalized = String(reason ?? '').trim();
+    if (normalized && !completionBlockedReasons.includes(normalized)) {
+      completionBlockedReasons.push(normalized);
+    }
+  };
   if (!packetReport.valid) {
-    completionBlockedReasons.push('Packet validation failed.');
+    addCompletionBlockedReason('Packet validation failed.');
   }
   if (!liveTargetValid) {
-    completionBlockedReasons.push('Live target identity or route verification failed.');
+    addCompletionBlockedReason('Live target identity or route verification failed.');
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
-    completionBlockedReasons.push('Independent verification evidence does not support completion.');
+    addCompletionBlockedReason('Independent verification evidence does not support completion.');
   }
   if (!packetReport.completionEvidence?.blindAdversarialReviewSupportsCompletion) {
-    completionBlockedReasons.push('Blind adversarial review evidence does not support completion.');
+    addCompletionBlockedReason('Blind adversarial review evidence does not support completion.');
   }
   if (!packetReport.completionEvidence?.packetCompletionReady) {
-    completionBlockedReasons.push('Required packet evidence is still template-like, unresolved, or not accepted.');
+    for (const reason of packetReport.completionEvidence?.packetCompletionBlockedReasons ?? []) {
+      addCompletionBlockedReason(reason);
+    }
   }
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
-    completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
+    addCompletionBlockedReason('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
   }
   if (!drupalRuntimeTargetMatches) {
-    completionBlockedReasons.push('Current DDEV runtime base URL does not match the live target origin.');
+    addCompletionBlockedReason('Current DDEV runtime base URL does not match the live target origin.');
   }
   if (!drupalRuntimeFrontPageMatches) {
-    completionBlockedReasons.push('Current DDEV front-page setting does not match drupal-readback.json.');
+    addCompletionBlockedReason('Current DDEV front-page setting does not match drupal-readback.json.');
   }
   if (!drupalRuntimeConfigSyncMatches) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not match drupal-readback.json.');
+    addCompletionBlockedReason('Current DDEV config-sync directory does not match drupal-readback.json.');
   }
   if (!drupalRuntimeConfigStatusClean) {
-    completionBlockedReasons.push('Current DDEV config status is not clean or could not be verified.');
+    addCompletionBlockedReason('Current DDEV config status is not clean or could not be verified.');
   }
   if (!drupalRuntimeConfigSyncTracked) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
+    addCompletionBlockedReason('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
-    completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
+    addCompletionBlockedReason('Current Git-tracked config evidence does not match drupal-readback.json.');
   }
   if (!runtimeAuthoritativeForCompletion) {
-    completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
+    addCompletionBlockedReason('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
   }
 
   const targetFingerprintInput = JSON.stringify({
@@ -1329,6 +1359,29 @@ export async function verifyLive({
   };
   const sharedLiveErrors = liveErrors.map((error) => sharedMessage(error, absolutePacketDir));
   const gateVocabulary = await readGateVocabulary();
+  const gateResults = liveGateResults(
+    sharedPacketReport.gateResults,
+    gateVocabulary,
+    [...sharedLiveErrors, ...completionBlockedReasons],
+    liveTargetValid && drupalRuntimeSupportsCompletion
+  );
+  const machineHandoff = machineHandoffReadiness(gateVocabulary, gateResults);
+  const structurallyValid = packetReport.valid && liveTargetValid;
+  const machineCompletionReady =
+    structurallyValid &&
+    packetReport.completionEvidence?.machineCompletionReady === true &&
+    machineHandoff.ready;
+  const onlyHumanAcceptancePending =
+    machineCompletionReady &&
+    packetReport.completionEvidence?.onlyHumanAcceptancePending === true &&
+    !completeLocalRebuildClaimAllowed;
+  const verdict = completeLocalRebuildClaimAllowed
+    ? 'complete-local-rebuild'
+    : !structurallyValid
+      ? 'blocked'
+      : onlyHumanAcceptancePending
+        ? 'mechanically-verified-awaiting-human-signoff'
+        : 'machine-incomplete';
 
   // v2 report invariant: every gateResults[].errors string appears verbatim in
   // errors[], completionBlockedReasons, or the embedded
@@ -1374,20 +1427,15 @@ export async function verifyLive({
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
-    gateResults: liveGateResults(
-      sharedPacketReport.gateResults,
-      gateVocabulary,
-      [...sharedLiveErrors, ...completionBlockedReasons],
-      liveTargetValid
-    ),
+    gateResults,
+    machineCompletionReady,
+    machineIncompleteGateIds: machineHandoff.incompleteGateIds,
+    machineRequiredGateIds: machineHandoff.requiredGateIds,
+    onlyHumanAcceptancePending,
     completeLocalRebuildClaimAllowed,
-    verdict: completeLocalRebuildClaimAllowed
-      ? 'complete-local-rebuild'
-      : packetReport.valid && liveTargetValid
-        ? 'mechanically-verified-awaiting-human-signoff'
-        : 'blocked',
+    verdict,
     completionBlockedReasons,
-    valid: packetReport.valid && liveTargetValid,
+    valid: structurallyValid,
     errors: [...sharedPacketReport.errors, ...sharedLiveErrors],
     warnings: sharedPacketReport.warnings
   };
@@ -1428,8 +1476,11 @@ async function main() {
       ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
     ].join(', ') || 'not-declared';
     process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized (independence evidence: ${independenceSummary}). Report: ${args.out}\n`);
-  } else {
+  } else if (report.onlyHumanAcceptancePending) {
     process.stderr.write(`Live target checks passed; the verdict ceiling is mechanically verified, awaiting human signoff — completion remains blocked by pending acceptance or required review evidence. Report: ${args.out}\n`);
+    process.exitCode = 2;
+  } else {
+    process.stderr.write(`Live target checks passed, but required machine-evaluated packet or Drupal runtime evidence is incomplete. Report: ${args.out}\n`);
     process.exitCode = 2;
   }
 }
