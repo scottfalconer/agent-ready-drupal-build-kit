@@ -590,7 +590,7 @@ Before calling the local build successful, record:
 - exported config;
 - active config sync directory, non-empty Git-tracked YAML in that exact current directory, representative YAML, and clean active-to-sync status independently read from the live DDEV target; record clean-import reproduction separately only if it was run;
 - optional Agent Skills used, including repo, selected skill, version or commit SHA, and any conflict with this `AGENTS.md`;
-- unfiltered Drupal readback, including `system.site` UUID, front-page setting, config sync directory, all nodes including unpublished/default/demo content, all aliases including duplicates, menu links, media counts, Canvas pages when available, themes, config status, and unexpected public routes;
+- unfiltered Drupal readback generated only by the installed skill's `scripts/generate-readback.mjs` (never hand-authored), including `system.site` UUID, front-page setting, config sync directory, all nodes including unpublished/default/demo content, per-bundle published/raw counts with owner-explained deltas, all aliases including duplicates, menu links, media counts, Canvas pages when available, themes, config status, and unexpected public routes;
 - content inventory, media inventory, and import/recreation counts;
 - design-system capture and target theme evidence;
 - browser evidence for visitor-facing visual/functional claims and authenticated non-admin editor tasks;

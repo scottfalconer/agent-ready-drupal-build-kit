@@ -25,6 +25,15 @@
       ]
     }
   ],
+  "coverageExclusions": [
+    {
+      "entityType": "",
+      "bundle": "",
+      "machineName": "",
+      "reason": "",
+      "acceptedBy": ""
+    }
+  ],
   "fieldsWithNoPublicEffect": [],
   "hardcodedPublicStrings": [],
   "rawFieldValueRendering": [],

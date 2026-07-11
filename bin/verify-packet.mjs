@@ -272,6 +272,18 @@ function identityKey(value) {
   return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+function collapsedText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function checkCarriesRawObservable(check) {
+  return Boolean(
+    (String(check.command ?? '').trim() && String(check.outputExcerpt ?? '').trim()) ||
+    String(check.httpStatusLine ?? '').trim() ||
+    String(check.evidencePath ?? '').trim()
+  );
+}
+
 function identitiesMatch(left, right) {
   const leftKey = identityKey(left);
   const rightKey = identityKey(right);
@@ -401,7 +413,9 @@ async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
             String(check.name ?? '').trim() &&
             String(check.method ?? '').trim() &&
             check.result === 'pass' &&
-            String(check.observation ?? '').trim()
+            String(check.observation ?? '').trim() &&
+            collapsedText(check.observation) !== collapsedText(claim.claim) &&
+            checkCarriesRawObservable(check)
         )
       );
     });
@@ -1258,6 +1272,60 @@ async function independentStructuredGateReasons({
     reasons.push('independent-verification.json direct-database cleanup checks must be local-only, recorded, passing, and name a production-safe alternative.');
   }
 
+  const absenceClaimRe = /\bno\s+(?:orphan(?:ed)?|trash(?:ed)?|soft[- ]?deleted|leftover|residual|stray)\b/i;
+  const absenceChecks = substantiveObjects(independentVerification?.absenceClaimChecks);
+  const passingAbsenceChecks = absenceChecks.filter((check) =>
+    check.status === 'pass' &&
+    check.coversSoftDeletedRows === true &&
+    String(check.queryOrCommand ?? '').trim() &&
+    String(check.rawResultExcerpt ?? '').trim() &&
+    collapsedText(check.rawResultExcerpt) !== collapsedText(check.claim) &&
+    String(check.evidence ?? '').trim()
+  );
+  if (absenceChecks.length !== passingAbsenceChecks.length) {
+    reasons.push('independent-verification.json absence-claim checks must pass with a soft-delete-covering query, a raw result excerpt distinct from the claim, and evidence.');
+  }
+  const absenceClaimTexts = [
+    ...arrayOrEmpty(independentVerification?.completionClaims).flatMap((claim) => [
+      claim?.claim,
+      ...arrayOrEmpty(claim?.falsificationChecks)
+    ]),
+    ...databaseCleanupChecks.flatMap((check) => [check?.evidence, check?.productionSafeAlternative])
+  ].map((value) => String(value ?? ''));
+  if (absenceClaimTexts.some((text) => absenceClaimRe.test(text)) && passingAbsenceChecks.length === 0) {
+    reasons.push('independent-verification.json absence claims (no orphan/trash/soft-deleted rows) require a passing absenceClaimChecks row backed by a query result covering soft-deleted rows.');
+  }
+
+  const qaTeardown = independentVerification?.qaTeardown ?? {};
+  if (qaTeardown.fixtureContentCreated === true) {
+    const residueRows = substantiveObjects(qaTeardown.residueInventory);
+    const purged = ['trash_purge', 'ui_delete_plus_trash_purge'].includes(qaTeardown.teardownMethod) &&
+      qaTeardown.fixtureTitledRowsAbsent === true &&
+      Boolean(String(qaTeardown.postTeardownQuery ?? '').trim()) &&
+      Boolean(String(qaTeardown.postTeardownQueryResultExcerpt ?? '').trim());
+    const inventoried = qaTeardown.teardownMethod === 'residue_inventory' &&
+      residueRows.length > 0 &&
+      residueRows.every((row) =>
+        String(row.entityType ?? '').trim() &&
+        finiteNumberValue(row.id) &&
+        String(row.title ?? '').trim()
+      );
+    if (qaTeardown.status !== 'pass' || (!purged && !inventoried) || !String(qaTeardown.evidence ?? '').trim()) {
+      reasons.push('independent-verification.json QA teardown must purge trash with a post-teardown query proving fixture-titled rows are absent, or record an explicit residue inventory with entity ids and titles.');
+    }
+  } else if (
+    qaTeardown.fixtureContentCreated !== false ||
+    qaTeardown.teardownMethod !== 'not_applicable' ||
+    !String(qaTeardown.notes ?? '').trim()
+  ) {
+    reasons.push('independent-verification.json qaTeardown must record a trash-aware teardown of created QA fixture content or explicitly declare not_applicable with a reason.');
+  }
+
+  const localWcagClaimRe = /\bwcag\b[\s\S]{0,80}?\b(?:pass(?:ed|es)?|complian(?:t|ce)|conforman(?:t|ce))\b|\b(?:pass(?:ed|es)?|complian(?:t|ce)|conforman(?:t|ce))\b[\s\S]{0,80}?\bwcag\b/i;
+  if (localWcagClaimRe.test(JSON.stringify(independentVerification ?? {}))) {
+    reasons.push('independent-verification.json must not assert WCAG conformance in local completion evidence; accessibility certification is launch-only G-LAUNCH-01 evidence requiring a named tool with stored per-URL output.');
+  }
+
   const freshnessChecks = substantiveObjects(independentVerification?.packetFreshnessChecks);
   const freshnessArtifacts = new Set(freshnessChecks.filter((check) =>
     check.status === 'pass' &&
@@ -1368,7 +1436,7 @@ async function validateIndependentVerification(packetDir, independentVerificatio
     }
     if (!semanticallyBoundEvidence) {
       errors.push(
-        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks.`
+        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks carrying a raw observable (command with output excerpt, HTTP status line, or evidence path) whose observation does not restate the claim.`
       );
     }
   }
@@ -1993,6 +2061,71 @@ function unresolvedMarkdownUnknown(text) {
   return /:\s*`?UNKNOWN`?\s*$/im.test(text) || /\|\s*UNKNOWN\s*\|/i.test(text);
 }
 
+function configYamlScalar(text, key) {
+  const match = text.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, 'm'));
+  return match ? match[1].trim().replace(/^(['"])(.*)\1$/s, '$2').trim() : '';
+}
+
+async function fieldConfigCoverageReasons(packetDir, drupalReadback, fieldOutputMatrix) {
+  const reasons = [];
+  const trackedDirectory = String(drupalReadback?.drupal?.trackedConfigDirectory ?? '').trim().replaceAll('\\', '/');
+  if (!trackedDirectory) {
+    return reasons;
+  }
+  const projectRoot = dirname(resolve(packetDir));
+  const configDir = resolve(projectRoot, trackedDirectory);
+  if (!isWithin(projectRoot, configDir) || !existsSync(configDir)) {
+    return reasons;
+  }
+  let entries;
+  try {
+    entries = await readdir(configDir);
+  } catch {
+    return reasons;
+  }
+
+  const bundles = substantiveObjects(fieldOutputMatrix?.bundles);
+  const exclusions = substantiveObjects(fieldOutputMatrix?.coverageExclusions);
+  for (const fileName of entries.filter((name) => /^field\.field\..+\.ya?ml$/i.test(name)).sort()) {
+    let text = '';
+    try {
+      text = await readFile(join(configDir, fileName), 'utf8');
+    } catch {
+      reasons.push(`field-output-matrix.json coverage cannot be verified because ${fileName} is unreadable.`);
+      continue;
+    }
+    const nameParts = fileName.replace(/\.ya?ml$/i, '').split('.');
+    const entityType = configYamlScalar(text, 'entity_type') || nameParts[2] || '';
+    const bundleName = configYamlScalar(text, 'bundle') || nameParts[3] || '';
+    const machineName = configYamlScalar(text, 'field_name') || nameParts.slice(4).join('.') || '';
+    const label = configYamlScalar(text, 'label');
+    const required = /^required:\s*true\s*$/m.test(text);
+    const fieldId = `${entityType}.${bundleName}.${machineName}`;
+    const matrixField = bundles
+      .filter((bundle) => exactIdentityMatch(bundle?.entityType, entityType) && exactIdentityMatch(bundle?.bundle, bundleName))
+      .flatMap((bundle) => arrayOrEmpty(bundle?.fields))
+      .find((field) => exactIdentityMatch(field?.machineName, machineName));
+    if (!matrixField) {
+      const exclusion = exclusions.find((record) =>
+        exactIdentityMatch(record?.entityType, entityType) &&
+        exactIdentityMatch(record?.bundle, bundleName) &&
+        exactIdentityMatch(record?.machineName, machineName)
+      );
+      if (!exclusion || !String(exclusion.reason ?? '').trim() || !String(exclusion.acceptedBy ?? '').trim()) {
+        reasons.push(`field-output-matrix.json must cover tracked field config ${fieldId} or record a named acceptedBy/reason coverage exclusion.`);
+      }
+      continue;
+    }
+    if (String(matrixField.editorLabel ?? '').trim() !== label) {
+      reasons.push(`field-output-matrix.json editorLabel for ${fieldId} does not match the tracked config label ${JSON.stringify(label)}.`);
+    }
+    if (Boolean(matrixField.required) !== required) {
+      reasons.push(`field-output-matrix.json required flag for ${fieldId} does not match the tracked config value ${required}.`);
+    }
+  }
+  return reasons;
+}
+
 async function markdownCompletionReadiness(packetDir) {
   const reasons = [];
   const texts = Object.fromEntries(
@@ -2501,6 +2634,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   ) {
     reasons.push('field-output-matrix.json must contain checked, accepted bundle fields and at least one field proven to affect anonymous output.');
   }
+  reasons.push(...await fieldConfigCoverageReasons(packetDir, drupalReadback, fieldOutputMatrix));
 
   const parityRouteChecks = arrayOrEmpty(parityReport?.routeChecks);
   const parityContentChecks = substantiveObjects(parityReport?.contentChecks);
@@ -2711,6 +2845,80 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     !hasMeaningfulEntry(drupalReadback?.rolesAndPermissionsNotes)
   ) {
     reasons.push('drupal-readback.json must substantively identify the bootstrapped site, config, Drupal structures, public content, menus, and editor permissions with no blockers.');
+  }
+
+  const readbackMeasurements = substantiveObjects(drupalReadback?.measurements);
+  const measurementRecordsValid = readbackMeasurements.length > 0 &&
+    readbackMeasurements.every((measurement) =>
+      String(measurement.command ?? '').trim() &&
+      isoTimestamp(measurement.checkedAt) !== null &&
+      typeof measurement.outputExcerpt === 'string' &&
+      (measurement.required === false || measurement.ok === true)
+    );
+  const nodeCountsByBundle = isJsonObject(drupalContent.nodeCountsByBundle) ? drupalContent.nodeCountsByBundle : {};
+  const readbackDeltaRecords = substantiveObjects(drupalContent.publishedVersusRawDeltas);
+  const nodeTypesCounted = substantiveObjects(drupalContent.nodes).every((node) =>
+    Object.hasOwn(nodeCountsByBundle, String(node?.type || node?.bundle || '').trim())
+  );
+  const nodeCountEntriesValid = Object.values(nodeCountsByBundle).every((entry) =>
+    isJsonObject(entry) &&
+    finiteNumberValue(entry.published) &&
+    finiteNumberValue(entry.raw) &&
+    Number(entry.raw) >= Number(entry.published)
+  );
+  if (
+    !measurementRecordsValid ||
+    !String(drupalReadback?.drupal?.coreVersion ?? '').trim() ||
+    !drupalCommands.some((command) => /pm[:-]list/i.test(command)) ||
+    !drupalCommands.some((command) => /sql:query|sqlq/i.test(command)) ||
+    !nodeTypesCounted ||
+    !nodeCountEntriesValid
+  ) {
+    reasons.push('drupal-readback.json must carry kit-generated measurements with commands, per-measurement UTC timestamps, and raw output excerpts, plus the core version, module-list and sql:query count commands, and per-bundle node counts covering every listed node.');
+  }
+  const readbackDeltaExplained = (entityType, bundle, publishedCount, rawCount) =>
+    readbackDeltaRecords.some((record) =>
+      exactIdentityMatch(record.entityType, entityType) &&
+      exactIdentityMatch(record.bundle, bundle) &&
+      numericValue(record.publishedCount) === publishedCount &&
+      numericValue(record.rawCount) === rawCount &&
+      String(record.owner ?? '').trim() &&
+      String(record.explanation ?? '').trim()
+    );
+  for (const record of readbackDeltaRecords) {
+    if (
+      !String(record.entityType ?? '').trim() ||
+      !String(record.bundle ?? '').trim() ||
+      !finiteNumberValue(record.publishedCount) ||
+      !finiteNumberValue(record.rawCount) ||
+      !String(record.owner ?? '').trim() ||
+      !String(record.explanation ?? '').trim()
+    ) {
+      reasons.push('drupal-readback.json publishedVersusRawDeltas records need entityType, bundle, both counts, a named owner, and an explanation.');
+      break;
+    }
+  }
+  for (const [bundle, entry] of Object.entries(nodeCountsByBundle)) {
+    const publishedCount = numericValue(entry?.published);
+    const rawCount = numericValue(entry?.raw);
+    if (publishedCount === null || rawCount === null || rawCount <= publishedCount) {
+      continue;
+    }
+    if (!readbackDeltaExplained('node', bundle, publishedCount, rawCount)) {
+      reasons.push(`drupal-readback.json raw count for node.${bundle} exceeds the published count without an owner-named publishedVersusRawDeltas explanation.`);
+    }
+  }
+  const mediaPublishedCounts = isJsonObject(drupalReadback?.media?.countsByType) ? drupalReadback.media.countsByType : {};
+  const mediaRawCounts = isJsonObject(drupalReadback?.media?.rawCountsByType) ? drupalReadback.media.rawCountsByType : {};
+  for (const [bundle, rawValue] of Object.entries(mediaRawCounts)) {
+    const publishedCount = numericValue(mediaPublishedCounts[bundle]) ?? 0;
+    const rawCount = numericValue(rawValue);
+    if (rawCount === null || rawCount <= publishedCount) {
+      continue;
+    }
+    if (!readbackDeltaExplained('media', bundle, publishedCount, rawCount)) {
+      reasons.push(`drupal-readback.json raw count for media.${bundle} exceeds the published count without an owner-named publishedVersusRawDeltas explanation.`);
+    }
   }
 
   const completionTimestamps = [

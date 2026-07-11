@@ -25,7 +25,16 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+export const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+
+// Shared with the kit-owned readback generator so packet counts and live
+// recomputation always run the exact same queries.
+export const READBACK_COUNT_QUERIES = Object.freeze({
+  mediaPublished: 'SELECT bundle, COUNT(*) FROM media_field_data WHERE status = 1 GROUP BY bundle',
+  mediaRaw: 'SELECT bundle, COUNT(*) FROM media_field_data GROUP BY bundle',
+  nodePublished: 'SELECT type, COUNT(*) FROM node_field_data WHERE status = 1 GROUP BY type',
+  nodeRaw: 'SELECT type, COUNT(*) FROM node_field_data GROUP BY type'
+});
 
 class UsageError extends Error {}
 
@@ -354,7 +363,7 @@ function recursiveStringForKey(value, keys) {
   return '';
 }
 
-function ddevTargetUrl(cwd) {
+export function ddevTargetUrl(cwd) {
   try {
     const output = execFileSync('ddev', ['describe', '-j'], {
       cwd,
@@ -369,7 +378,7 @@ function ddevTargetUrl(cwd) {
   }
 }
 
-function findDrupalDdevRoot(cwd) {
+export function findDrupalDdevRoot(cwd) {
   let candidate = resolve(cwd);
   while (true) {
     const configPath = join(candidate, '.ddev', 'config.yaml');
@@ -391,7 +400,7 @@ function findDrupalDdevRoot(cwd) {
   }
 }
 
-function runDrushResult(projectRoot, environment, args) {
+export function runDrushResult(projectRoot, environment, args) {
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
   const commands = inContainer
     ? [
@@ -421,11 +430,11 @@ function runDrush(projectRoot, environment, args) {
   return runDrushResult(projectRoot, environment, args).output;
 }
 
-function cleanScalar(value) {
+export function cleanScalar(value) {
   return String(value ?? '').trim().replace(/^(?:['"])(.*)(?:['"])$/s, '$1').trim();
 }
 
-function sharedConfigSyncDirectory(value) {
+export function sharedConfigSyncDirectory(value) {
   const path = cleanScalar(value);
   if (!path || !/^[/\\]|^[a-z]:[/\\]/i.test(path)) {
     return path.replace(/^\.\.[/\\]/, '').replaceAll('\\', '/');
@@ -479,7 +488,7 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   return '';
 }
 
-function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
+export function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
     return { confirmed: false, directory: '', yamlFiles: [] };
@@ -502,7 +511,7 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   }
 }
 
-function configStatusIsClean(result) {
+export function configStatusIsClean(result) {
   if (!result.ok) {
     return false;
   }
@@ -519,6 +528,48 @@ function configStatusIsClean(result) {
   }
 }
 
+export function parseCountRows(output) {
+  const counts = {};
+  for (const line of String(output ?? '').split(/\r?\n/)) {
+    const match = line.trim().match(/^(\S[^\t]*?)[\t ]+(\d+)$/);
+    if (match) {
+      counts[match[1].trim()] = Number(match[2]);
+    }
+  }
+  return counts;
+}
+
+function bundleCounts(projectRoot, environment, publishedQuery, rawQuery) {
+  const published = runDrushResult(projectRoot, environment, ['sql:query', publishedQuery]);
+  const raw = runDrushResult(projectRoot, environment, ['sql:query', rawQuery]);
+  if (!published.ok || !raw.ok) {
+    return null;
+  }
+  const publishedCounts = parseCountRows(published.output);
+  const rawCounts = parseCountRows(raw.output);
+  const counts = {};
+  for (const bundle of new Set([...Object.keys(publishedCounts), ...Object.keys(rawCounts)])) {
+    counts[bundle] = {
+      published: publishedCounts[bundle] ?? 0,
+      raw: rawCounts[bundle] ?? 0
+    };
+  }
+  return counts;
+}
+
+function enabledModuleList(projectRoot, environment) {
+  const result = runDrushResult(projectRoot, environment, ['pm:list', '--status=enabled', '--type=module', '--format=json']);
+  if (!result.ok) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
 function inspectDrupalRuntime(cwd, environment) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
@@ -528,8 +579,12 @@ function inspectDrupalRuntime(cwd, environment) {
       configStatusClean: false,
       configSyncTracked: false,
       configSyncDirectory: '',
+      coreVersion: '',
+      enabledModules: null,
       frontPage: '',
+      mediaCountsByType: null,
       mode: 'unavailable',
+      nodeCountsByBundle: null,
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
       trackedConfigDirectory: '',
@@ -546,8 +601,22 @@ function inspectDrupalRuntime(cwd, environment) {
     runDrush(projectRoot, environment, ['status', '--field=config-sync'])
   );
   const drupalRoot = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=root']));
+  const coreVersion = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=drupal-version']));
   const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
+  const enabledModules = enabledModuleList(projectRoot, environment);
+  const nodeCountsByBundle = bundleCounts(
+    projectRoot,
+    environment,
+    READBACK_COUNT_QUERIES.nodePublished,
+    READBACK_COUNT_QUERIES.nodeRaw
+  );
+  const mediaCountsByType = bundleCounts(
+    projectRoot,
+    environment,
+    READBACK_COUNT_QUERIES.mediaPublished,
+    READBACK_COUNT_QUERIES.mediaRaw
+  );
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
@@ -557,9 +626,13 @@ function inspectDrupalRuntime(cwd, environment) {
     configStatusClean: configStatusIsClean(configStatus),
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
+    coreVersion,
     drupalRoot,
+    enabledModules,
     frontPage,
+    mediaCountsByType,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
+    nodeCountsByBundle,
     project: basename(projectRoot),
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
     siteUuid,
@@ -568,7 +641,7 @@ function inspectDrupalRuntime(cwd, environment) {
   };
 }
 
-function environmentTargetUrl(environment) {
+export function environmentTargetUrl(environment) {
   for (const key of ['DDEV_PRIMARY_URL', 'DDEV_PRIMARY_URLS']) {
     const value = String(environment[key] ?? '').trim();
     if (value) {
@@ -950,6 +1023,73 @@ async function verifyRoute(baseUrl, expected) {
   }
 }
 
+function plainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function normalizedModuleSet(value) {
+  return new Set(
+    (Array.isArray(value) ? value : [])
+      .map((name) => String(name ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+function moduleListsMatch(packetModules, runtimeModules) {
+  if (!Array.isArray(runtimeModules)) {
+    return false;
+  }
+  const packetSet = normalizedModuleSet(packetModules);
+  const runtimeSet = normalizedModuleSet(runtimeModules);
+  return packetSet.size > 0 &&
+    packetSet.size === runtimeSet.size &&
+    [...packetSet].every((name) => runtimeSet.has(name));
+}
+
+function bundleCountsMatch(packetValue, runtimeCounts) {
+  if (!runtimeCounts) {
+    return false;
+  }
+  const packetCounts = plainObject(packetValue);
+  const bundles = new Set([...Object.keys(packetCounts), ...Object.keys(runtimeCounts)]);
+  return [...bundles].every((bundle) => {
+    const packetEntry = plainObject(packetCounts[bundle]);
+    const runtimeEntry = runtimeCounts[bundle];
+    return Boolean(runtimeEntry) &&
+      Number(packetEntry.published) === runtimeEntry.published &&
+      Number(packetEntry.raw) === runtimeEntry.raw;
+  });
+}
+
+function flatCountsMatch(packetValue, runtimeCounts, key) {
+  const packetCounts = plainObject(packetValue);
+  const bundles = new Set([...Object.keys(packetCounts), ...Object.keys(runtimeCounts)]);
+  return [...bundles].every(
+    (bundle) => runtimeCounts[bundle] !== undefined && Number(packetCounts[bundle]) === runtimeCounts[bundle][key]
+  );
+}
+
+function unexplainedCountDeltaBundles(runtimeCounts, entityType, deltaRecords) {
+  const unexplained = [];
+  for (const [bundle, counts] of Object.entries(runtimeCounts ?? {})) {
+    if (counts.raw <= counts.published) {
+      continue;
+    }
+    const explained = deltaRecords.some((record) =>
+      String(record?.entityType ?? '').trim() === entityType &&
+      String(record?.bundle ?? '').trim() === bundle &&
+      Number(record?.publishedCount) === counts.published &&
+      Number(record?.rawCount) === counts.raw &&
+      Boolean(String(record?.owner ?? '').trim()) &&
+      Boolean(String(record?.explanation ?? '').trim())
+    );
+    if (!explained) {
+      unexplained.push(`${entityType}.${bundle}`);
+    }
+  }
+  return unexplained;
+}
+
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
@@ -1158,6 +1298,32 @@ export async function verifyLive({
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
     packetTrackedConfigYamlFiles.length > 0 &&
     packetTrackedConfigYamlFiles.every((path) => runtimeTrackedConfigSet.has(path));
+  const packetCoreVersion = cleanScalar(drupalReadback?.drupal?.coreVersion);
+  const drupalRuntimeCoreVersionMatches =
+    Boolean(packetCoreVersion) &&
+    packetCoreVersion === cleanScalar(inspectedDrupalRuntime.coreVersion);
+  const drupalRuntimeEnabledModulesMatch = moduleListsMatch(
+    drupalReadback?.drupal?.enabledModules,
+    inspectedDrupalRuntime.enabledModules
+  );
+  const runtimeNodeCounts = inspectedDrupalRuntime.nodeCountsByBundle ?? null;
+  const runtimeMediaCounts = inspectedDrupalRuntime.mediaCountsByType ?? null;
+  const packetMediaPublishedCounts = plainObject(drupalReadback?.media?.countsByType);
+  const packetMediaRawCounts = plainObject(drupalReadback?.media?.rawCountsByType);
+  const drupalRuntimeEntityCountsMatch =
+    bundleCountsMatch(drupalReadback?.content?.nodeCountsByBundle, runtimeNodeCounts) &&
+    (runtimeMediaCounts === null
+      ? Object.keys(packetMediaPublishedCounts).length === 0 && Object.keys(packetMediaRawCounts).length === 0
+      : flatCountsMatch(packetMediaPublishedCounts, runtimeMediaCounts, 'published') &&
+        flatCountsMatch(packetMediaRawCounts, runtimeMediaCounts, 'raw'));
+  const packetCountDeltaRecords = Array.isArray(drupalReadback?.content?.publishedVersusRawDeltas)
+    ? drupalReadback.content.publishedVersusRawDeltas
+    : [];
+  const unexplainedCountDeltas = [
+    ...unexplainedCountDeltaBundles(runtimeNodeCounts, 'node', packetCountDeltaRecords),
+    ...unexplainedCountDeltaBundles(runtimeMediaCounts, 'media', packetCountDeltaRecords)
+  ];
+  const drupalRuntimeCountDeltasExplained = unexplainedCountDeltas.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -1167,7 +1333,11 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
-    drupalRuntimeTrackedConfigReadbackMatches;
+    drupalRuntimeTrackedConfigReadbackMatches &&
+    drupalRuntimeCoreVersionMatches &&
+    drupalRuntimeEnabledModulesMatch &&
+    drupalRuntimeEntityCountsMatch &&
+    drupalRuntimeCountDeltasExplained;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
@@ -1209,6 +1379,20 @@ export async function verifyLive({
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
+  }
+  if (!drupalRuntimeCoreVersionMatches) {
+    completionBlockedReasons.push('Current Drupal core version does not match drupal-readback.json.');
+  }
+  if (!drupalRuntimeEnabledModulesMatch) {
+    completionBlockedReasons.push('Current enabled-module list does not match drupal-readback.json.');
+  }
+  if (!drupalRuntimeEntityCountsMatch) {
+    completionBlockedReasons.push('Current per-bundle node/media counts do not match drupal-readback.json or could not be recomputed.');
+  }
+  if (!drupalRuntimeCountDeltasExplained) {
+    completionBlockedReasons.push(
+      `Raw entity counts exceed published counts without an owner-named explanation record in drupal-readback.json: ${unexplainedCountDeltas.join(', ')}.`
+    );
   }
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
@@ -1263,7 +1447,11 @@ export async function verifyLive({
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
+      coreVersionMatchesPacket: drupalRuntimeCoreVersionMatches,
+      enabledModulesMatchPacket: drupalRuntimeEnabledModulesMatch,
+      entityCountsMatchPacket: drupalRuntimeEntityCountsMatch,
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
+      publishedVersusRawDeltasExplained: drupalRuntimeCountDeltasExplained,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
       targetOriginMatches: drupalRuntimeTargetMatches,
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,

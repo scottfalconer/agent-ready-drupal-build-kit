@@ -342,14 +342,14 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.doesNotMatch(agents, /\.\.\/.*(?:private\/)?tmp\/.*\.agents\/skills/);
   assert.doesNotMatch(agents, /\/Users\//);
 
-  for (const verifier of ['verify.mjs', 'verify-packet.mjs']) {
+  for (const verifier of ['verify.mjs', 'verify-packet.mjs', 'generate-readback.mjs']) {
     const verifierPath = join(installedSkill, 'scripts', verifier);
     assert.equal(existsSync(verifierPath), true, verifier);
     assert.notEqual(statSync(verifierPath).mode & 0o111, 0, `${verifier} should be executable`);
     const help = spawnSync(process.execPath, [verifierPath, '--help'], { cwd: root, encoding: 'utf8' });
     assert.equal(help.status, 0, help.stderr);
-    assert.match(help.stdout, /<path-to-skill>\/scripts\/verify/);
-    assert.doesNotMatch(help.stdout, /node bin\/verify/);
+    assert.match(help.stdout, new RegExp(`<path-to-skill>/scripts/${verifier.replace('.mjs', '')}`));
+    assert.doesNotMatch(help.stdout, /node bin\//);
   }
 
   const packetOnly = spawnSync(process.execPath, [
@@ -374,7 +374,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(27 files\)/);
+  assert.match(result.stdout, /is in sync \(28 files\)/);
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -411,7 +411,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(27 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(28 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

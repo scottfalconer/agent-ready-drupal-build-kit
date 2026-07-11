@@ -2,10 +2,24 @@
   "schemaVersion": "public-kit.drupal-readback.1",
   "site": "",
   "checkedAt": "",
+  "generator": {
+    "script": "",
+    "kitOwned": false
+  },
   "commands": [],
+  "measurements": [
+    {
+      "name": "",
+      "command": "",
+      "checkedAt": "",
+      "ok": false,
+      "outputExcerpt": ""
+    }
+  ],
   "drupal": {
     "status": {},
     "siteUuid": "",
+    "coreVersion": "",
     "enabledModules": [],
     "defaultTheme": "",
     "adminTheme": "",
@@ -21,6 +35,18 @@
   "content": {
     "nodes": [],
     "unpublishedNodes": [],
+    "nodeCountsByBundle": {},
+    "publishedVersusRawDeltas": [
+      {
+        "entityType": "",
+        "bundle": "",
+        "publishedCount": null,
+        "rawCount": null,
+        "reason": "trash_soft_delete | unpublished_draft | import_residue | other",
+        "explanation": "",
+        "owner": ""
+      }
+    ],
     "defaultOrDemoContent": [],
     "contentTypes": [],
     "fieldStorage": [],
@@ -38,6 +64,7 @@
   },
   "media": {
     "countsByType": {},
+    "rawCountsByType": {},
     "items": []
   },
   "views": [],

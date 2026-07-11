@@ -43,9 +43,10 @@
       "name",
       "method",
       "result=pass",
-      "observation"
+      "observation",
+      "command+outputExcerpt or httpStatusLine or evidencePath"
     ],
-    "notes": "Each passing completion claim must reference JSON evidence containing a matching claim entry. A claims array may cover multiple gates."
+    "notes": "Each passing completion claim must reference JSON evidence containing a matching claim entry. A claims array may cover multiple gates. Every check needs at least one raw observable (command with output excerpt, HTTP status line, or evidence file path), and its observation must not restate the claim text."
   },
   "completionClaims": [
     {
@@ -275,6 +276,28 @@
       "evidence": ""
     }
   ],
+  "absenceClaimChecks": [
+    {
+      "claim": "",
+      "scope": "orphan_rows | trash_rows | fixture_content | duplicate_aliases | other",
+      "queryOrCommand": "",
+      "coversSoftDeletedRows": false,
+      "rawResultExcerpt": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "qaTeardown": {
+    "fixtureContentCreated": false,
+    "teardownMethod": "trash_purge | ui_delete_plus_trash_purge | residue_inventory | not_applicable",
+    "residueInventory": [],
+    "postTeardownQuery": "",
+    "postTeardownQueryResultExcerpt": "",
+    "fixtureTitledRowsAbsent": false,
+    "status": "pass | fail | blocked",
+    "evidence": "",
+    "notes": ""
+  },
   "directDatabaseCleanupChecks": [
     {
       "operation": "direct_sql | table_purge | alias_reset | destructive_import_cleanup | other",

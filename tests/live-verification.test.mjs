@@ -552,6 +552,18 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     }
   ];
   independent.directDatabaseCleanupChecks = [];
+  independent.absenceClaimChecks = [];
+  independent.qaTeardown = {
+    fixtureContentCreated: false,
+    teardownMethod: 'not_applicable',
+    residueInventory: [],
+    postTeardownQuery: '',
+    postTeardownQueryResultExcerpt: '',
+    fixtureTitledRowsAbsent: false,
+    status: 'pass',
+    evidence: '',
+    notes: 'No QA fixture content was created during independent verification.'
+  };
   independent.packetFreshnessChecks = [
     'route-matrix.json',
     'browser-evidence.json',
@@ -611,7 +623,9 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
           name: `${claim.gate} falsification`,
           method: 'live target and packet inspection',
           result: 'pass',
-          observation: `The ${claim.gate} evidence matched the inspected target and packet.`
+          observation: `The ${claim.gate} evidence matched the inspected target and packet.`,
+          command: `curl -sS ${targetBaseUrl}/`,
+          outputExcerpt: 'HTTP/1.1 200 OK\n<h1>Target home</h1>'
         }
       ]
     }))
@@ -965,16 +979,27 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   const readback = JSON.parse(readFileSync(readbackPath, 'utf8'));
   readback.site = targetBaseUrl;
   readback.checkedAt = testCheckedAt;
+  readback.generator = { script: 'generate-readback.mjs', kitOwned: true };
   readback.commands = [
     'drush status',
     'drush config:get system.site --field=uuid',
     'drush config:get system.site --field=page.front',
     'drush php:eval config sync directory',
     'drush config:status',
+    'drush pm:list --status=enabled --type=module --format=json',
+    'drush sql:query SELECT type, COUNT(*) FROM node_field_data GROUP BY type',
     'git ls-files config/sync/*.yml'
   ];
+  readback.measurements = readback.commands.map((command) => ({
+    name: command.replace(/^drush |^git /, '').split(' ')[0],
+    command,
+    checkedAt: testCheckedAt,
+    ok: true,
+    outputExcerpt: `raw output for ${command}`
+  }));
   readback.drupal.status = { bootstrap: 'Successful', uri: targetBaseUrl };
   readback.drupal.siteUuid = testSiteUuid;
+  readback.drupal.coreVersion = '11.4.2';
   readback.drupal.enabledModules = ['node', 'media', 'views'];
   readback.drupal.defaultTheme = 'fixture_theme';
   readback.drupal.adminTheme = 'claro';
@@ -986,6 +1011,10 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.drupal.configStatus = 'No differences';
   readback.drupal.configStatusClean = true;
   readback.content.nodes = [{ id: 1, type: 'page', title: 'Target home', published: true }];
+  readback.content.nodeCountsByBundle = { page: { published: 1, raw: 1 } };
+  readback.content.publishedVersusRawDeltas = [];
+  readback.media.countsByType = {};
+  readback.media.rawCountsByType = {};
   readback.content.contentTypes = [{ machineName: 'page', label: 'Page' }];
   readback.content.fieldStorage = [{ field: 'body', type: 'text_long' }];
   readback.content.formDisplays = [{ bundle: 'page', mode: 'default' }];
@@ -996,6 +1025,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.readbackComplete = true;
   readback.blockers = [];
   writeJson(readbackPath, readback);
+
+  const trackedConfigDir = resolve(packetDir, '..', 'config', 'sync');
+  mkdirSync(trackedConfigDir, { recursive: true });
+  writeFileSync(join(trackedConfigDir, 'field.field.node.page.body.yml'), `langcode: en
+status: true
+id: node.page.body
+field_name: body
+entity_type: node
+bundle: page
+label: Introduction
+required: true
+field_type: text_long
+`);
 
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
@@ -1374,10 +1416,16 @@ const command = args.slice(1).join(' ');
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
   ['status --field=root', 'web'],
+  ['status --field=drupal-version', '11.4.2'],
   ['config:get system.site --field=uuid', '${testSiteUuid}'],
   ['config:get system.site page.front --format=string', '/'],
   ['status --field=config-sync', '../config/sync'],
-  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]']
+  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]'],
+  ['pm:list --status=enabled --type=module --format=json', '{"node":{},"media":{},"views":{}}'],
+  ['sql:query SELECT type, COUNT(*) FROM node_field_data WHERE status = 1 GROUP BY type', process.env.FAKE_DDEV_NODE_PUBLISHED ?? 'page\\t1'],
+  ['sql:query SELECT type, COUNT(*) FROM node_field_data GROUP BY type', process.env.FAKE_DDEV_NODE_RAW ?? 'page\\t1'],
+  ['sql:query SELECT bundle, COUNT(*) FROM media_field_data WHERE status = 1 GROUP BY bundle', ''],
+  ['sql:query SELECT bundle, COUNT(*) FROM media_field_data GROUP BY bundle', '']
 ]);
 if (!outputs.has(command)) {
   process.stderr.write('Unexpected fake Drush command: ' + command + '\\n');
@@ -1422,7 +1470,22 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
+      assert.equal(cleanReport.drupalRuntime.coreVersionMatchesPacket, true);
+      assert.equal(cleanReport.drupalRuntime.enabledModulesMatchPacket, true);
+      assert.equal(cleanReport.drupalRuntime.entityCountsMatchPacket, true);
+      assert.equal(cleanReport.drupalRuntime.publishedVersusRawDeltasExplained, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
+
+      const trashResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_NODE_RAW: 'page\t3' }
+      });
+      assert.equal(trashResult.status, 2, trashResult.stderr);
+      const trashReport = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
+      assert.equal(trashReport.drupalRuntime.entityCountsMatchPacket, false);
+      assert.equal(trashReport.drupalRuntime.publishedVersusRawDeltasExplained, false);
+      assert.equal(trashReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(trashReport.completionBlockedReasons.join('\n'), /node\/media counts do not match/i);
+      assert.match(trashReport.completionBlockedReasons.join('\n'), /owner-named explanation record.*node\.page/i);
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
@@ -2759,4 +2822,406 @@ test('blind completion evidence rejects a text file named like a screenshot', as
   assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
   assert.match(report.errors.join('\n'), /checks\.actualRequestedOutcome must be pass/);
   assert.match(report.errors.join('\n'), /must be a credible packet-local PNG, JPEG, WebP, or GIF capture/);
+});
+
+function isolatedQualifyingPacket(temp, name, targetBaseUrl = 'https://target.example') {
+  const packetDir = join(temp, name, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(targetBaseUrl));
+  addQualifyingReviewEvidence(packetDir, targetBaseUrl);
+  return packetDir;
+}
+
+test('field-output matrix must cover tracked field config with exact labels, required flags, or named exclusions', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'field-config-coverage-'));
+
+  const baseline = isolatedQualifyingPacket(temp, 'baseline');
+  const baselineReport = await validatePacket({ packetDir: baseline });
+  assert.equal(
+    baselineReport.completionEvidence.packetSupportsCompletion,
+    true,
+    baselineReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const summaryFieldYaml = `langcode: en
+status: true
+id: node.page.field_summary
+field_name: field_summary
+entity_type: node
+bundle: page
+label: Summary
+required: false
+field_type: string
+`;
+  const cases = [
+    {
+      name: 'uncovered-field',
+      expected: /must cover tracked field config node\.page\.field_summary/i,
+      mutate: (packetDir) => {
+        writeFileSync(join(packetDir, '..', 'config', 'sync', 'field.field.node.page.field_summary.yml'), summaryFieldYaml);
+      }
+    },
+    {
+      name: 'exclusion-without-owner',
+      expected: /named acceptedBy\/reason coverage exclusion/i,
+      mutate: (packetDir) => {
+        writeFileSync(join(packetDir, '..', 'config', 'sync', 'field.field.node.page.field_summary.yml'), summaryFieldYaml);
+        mutateJson(join(packetDir, 'field-output-matrix.json'), (value) => {
+          value.coverageExclusions = [{
+            entityType: 'node',
+            bundle: 'page',
+            machineName: 'field_summary',
+            reason: 'Editor-only summary is out of rebuild scope.',
+            acceptedBy: ''
+          }];
+        });
+      }
+    },
+    {
+      name: 'label-drift',
+      expected: /editorLabel for node\.page\.body does not match the tracked config label "Summary"/i,
+      mutate: (packetDir) => {
+        const bodyPath = join(packetDir, '..', 'config', 'sync', 'field.field.node.page.body.yml');
+        writeFileSync(bodyPath, readFileSync(bodyPath, 'utf8').replace('label: Introduction', 'label: Summary'));
+      }
+    },
+    {
+      name: 'required-drift',
+      expected: /required flag for node\.page\.body does not match the tracked config value false/i,
+      mutate: (packetDir) => {
+        const bodyPath = join(packetDir, '..', 'config', 'sync', 'field.field.node.page.body.yml');
+        writeFileSync(bodyPath, readFileSync(bodyPath, 'utf8').replace('required: true', 'required: false'));
+      }
+    }
+  ];
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = isolatedQualifyingPacket(temp, name);
+    mutate(packetDir);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const excluded = isolatedQualifyingPacket(temp, 'named-exclusion');
+  writeFileSync(join(excluded, '..', 'config', 'sync', 'field.field.node.page.field_summary.yml'), summaryFieldYaml);
+  mutateJson(join(excluded, 'field-output-matrix.json'), (value) => {
+    value.coverageExclusions = [{
+      entityType: 'node',
+      bundle: 'page',
+      machineName: 'field_summary',
+      reason: 'Editor-only summary is out of rebuild scope.',
+      acceptedBy: 'Fixture Maintainer'
+    }];
+  });
+  const excludedReport = await validatePacket({ packetDir: excluded });
+  assert.equal(
+    excludedReport.completionEvidence.packetSupportsCompletion,
+    true,
+    excludedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('drupal-readback substance requires kit measurements, counts, and owner-explained raw-count deltas', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'readback-substance-'));
+
+  const cases = [
+    {
+      name: 'no-measurements',
+      expected: /kit-generated measurements/i,
+      mutate: (value) => { value.measurements = []; }
+    },
+    {
+      name: 'failed-required-measurement',
+      expected: /kit-generated measurements/i,
+      mutate: (value) => { value.measurements[0].ok = false; }
+    },
+    {
+      name: 'missing-core-version',
+      expected: /kit-generated measurements/i,
+      mutate: (value) => { value.drupal.coreVersion = ''; }
+    },
+    {
+      name: 'unexplained-trash-delta',
+      expected: /raw count for node\.page exceeds the published count without an owner-named publishedVersusRawDeltas explanation/i,
+      mutate: (value) => { value.content.nodeCountsByBundle = { page: { published: 1, raw: 7 } }; }
+    },
+    {
+      name: 'delta-record-without-owner',
+      expected: /publishedVersusRawDeltas records need entityType, bundle, both counts, a named owner, and an explanation/i,
+      mutate: (value) => {
+        value.content.nodeCountsByBundle = { page: { published: 1, raw: 7 } };
+        value.content.publishedVersusRawDeltas = [{
+          entityType: 'node',
+          bundle: 'page',
+          publishedCount: 1,
+          rawCount: 7,
+          reason: 'trash_soft_delete',
+          explanation: 'Six QA probe nodes remain soft-deleted in trash.',
+          owner: ''
+        }];
+      }
+    },
+    {
+      name: 'unexplained-media-delta',
+      expected: /raw count for media\.image exceeds the published count/i,
+      mutate: (value) => {
+        value.media.countsByType = { image: 2 };
+        value.media.rawCountsByType = { image: 4 };
+      }
+    }
+  ];
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = isolatedQualifyingPacket(temp, name);
+    mutateJson(join(packetDir, 'drupal-readback.json'), mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const explained = isolatedQualifyingPacket(temp, 'explained-delta');
+  mutateJson(join(explained, 'drupal-readback.json'), (value) => {
+    value.content.nodeCountsByBundle = { page: { published: 1, raw: 7 } };
+    value.content.publishedVersusRawDeltas = [{
+      entityType: 'node',
+      bundle: 'page',
+      publishedCount: 1,
+      rawCount: 7,
+      reason: 'trash_soft_delete',
+      explanation: 'Six QA probe nodes remain soft-deleted in trash pending purge.',
+      owner: 'Fixture Maintainer'
+    }];
+  });
+  const explainedReport = await validatePacket({ packetDir: explained });
+  assert.equal(
+    explainedReport.completionEvidence.packetSupportsCompletion,
+    true,
+    explainedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('absence claims and QA fixture teardown require mechanical soft-delete-covering readback', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'absence-teardown-'));
+  const passingAbsenceCheck = {
+    claim: 'No orphan or trash rows remain after import cleanup.',
+    scope: 'trash_rows',
+    queryOrCommand: "SELECT nid, title, status FROM node_field_data WHERE title LIKE 'QA %'",
+    coversSoftDeletedRows: true,
+    rawResultExcerpt: '(no rows returned)',
+    status: 'pass',
+    evidence: 'claim-evidence.json'
+  };
+
+  const cases = [
+    {
+      name: 'absence-claim-without-query',
+      expected: /absence claims \(no orphan\/trash\/soft-deleted rows\) require a passing absenceClaimChecks row/i,
+      mutate: (value) => {
+        value.completionClaims[0].claim = 'No orphan or trash rows remain after import cleanup.';
+      }
+    },
+    {
+      name: 'absence-check-not-trash-aware',
+      expected: /soft-delete-covering query, a raw result excerpt distinct from the claim/i,
+      mutate: (value) => {
+        value.absenceClaimChecks = [{ ...passingAbsenceCheck, coversSoftDeletedRows: false }];
+      }
+    },
+    {
+      name: 'absence-observation-restates-claim',
+      expected: /soft-delete-covering query, a raw result excerpt distinct from the claim/i,
+      mutate: (value) => {
+        value.absenceClaimChecks = [{ ...passingAbsenceCheck, rawResultExcerpt: passingAbsenceCheck.claim }];
+      }
+    },
+    {
+      name: 'fixture-content-without-teardown',
+      expected: /QA teardown must purge trash with a post-teardown query|residue inventory/i,
+      mutate: (value) => {
+        value.qaTeardown = { ...value.qaTeardown, fixtureContentCreated: true, teardownMethod: 'not_applicable' };
+      }
+    },
+    {
+      name: 'teardown-not-reviewed',
+      expected: /qaTeardown must record a trash-aware teardown/i,
+      mutate: (value) => {
+        value.qaTeardown.notes = '';
+      }
+    }
+  ];
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = isolatedQualifyingPacket(temp, name);
+    mutateJson(join(packetDir, 'independent-verification.json'), mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const reconciled = isolatedQualifyingPacket(temp, 'reconciled');
+  mutateJson(join(reconciled, 'independent-verification.json'), (value) => {
+    value.completionClaims[0].claim = 'No orphan or trash rows remain after import cleanup.';
+    value.absenceClaimChecks = [passingAbsenceCheck];
+    value.qaTeardown = {
+      fixtureContentCreated: true,
+      teardownMethod: 'trash_purge',
+      residueInventory: [],
+      postTeardownQuery: "SELECT COUNT(*) FROM node_field_data WHERE title LIKE 'QA probe%'",
+      postTeardownQueryResultExcerpt: '0',
+      fixtureTitledRowsAbsent: true,
+      status: 'pass',
+      evidence: 'claim-evidence.json',
+      notes: 'QA probe nodes were purged from trash after verification.'
+    };
+  });
+  const reconciledReport = await validatePacket({ packetDir: reconciled });
+  assert.equal(
+    reconciledReport.completionEvidence.packetSupportsCompletion,
+    true,
+    reconciledReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('independent claim checks need raw observables and observations that do not restate the claim', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'raw-observable-claims-'));
+
+  const missingObservable = isolatedQualifyingPacket(temp, 'missing-observable');
+  mutateJson(join(missingObservable, 'evidence', 'independent-verification', 'claim-evidence.json'), (value) => {
+    for (const claim of value.claims) {
+      for (const check of claim.checks) {
+        delete check.command;
+        delete check.outputExcerpt;
+      }
+    }
+  });
+  const missingReport = await validatePacket({ packetDir: missingObservable });
+  assert.equal(missingReport.valid, false);
+  assert.equal(missingReport.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(missingReport.errors.join('\n'), /carrying a raw observable/);
+
+  const restated = isolatedQualifyingPacket(temp, 'restated-observation');
+  mutateJson(join(restated, 'evidence', 'independent-verification', 'claim-evidence.json'), (value) => {
+    for (const claim of value.claims) {
+      for (const check of claim.checks) {
+        check.observation = `The ${claim.gate} completion evidence was independently checked.`;
+      }
+    }
+  });
+  const restatedReport = await validatePacket({ packetDir: restated });
+  assert.equal(restatedReport.valid, false);
+  assert.equal(restatedReport.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(restatedReport.errors.join('\n'), /observation does not restate the claim/);
+});
+
+test('local completion evidence cannot assert WCAG conformance', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'local-wcag-claim-'));
+  const packetDir = isolatedQualifyingPacket(temp, 'wcag');
+  mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+    value.summary.notes = 'Automated scan passed WCAG AA on every route.';
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must not assert WCAG conformance in local completion evidence/i
+  );
+});
+
+test('kit readback generator executes declared commands and fails closed on failed measurements', async () => {
+  const targetRoot = mkdtempSync(join(tmpdir(), 'readback-generator-'));
+  mkdirSync(join(targetRoot, '.ddev'), { recursive: true });
+  mkdirSync(join(targetRoot, 'web'), { recursive: true });
+  mkdirSync(join(targetRoot, 'config', 'sync'), { recursive: true });
+  writeFileSync(join(targetRoot, '.ddev', 'config.yaml'), 'name: readback-fixture\ntype: drupal11\ndocroot: web\n');
+  writeFileSync(join(targetRoot, 'config', 'sync', 'system.site.yml'), `uuid: ${testSiteUuid}\n`);
+  mkdirSync(join(targetRoot, 'review-packet'), { recursive: true });
+
+  const fakeBin = join(targetRoot, 'fake-bin');
+  mkdirSync(fakeBin);
+  const fakeDdev = join(fakeBin, 'ddev');
+  writeFileSync(fakeDdev, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'describe' && args[1] === '-j') {
+  process.stdout.write(JSON.stringify({ raw: { primary_url: 'https://readback-fixture.ddev.site' } }) + '\\n');
+  process.exit(0);
+}
+if (args[0] !== 'drush') {
+  process.exit(1);
+}
+const command = args.slice(1).join(' ');
+if (process.env.FAKE_DDEV_FAIL_SQL === '1' && command.startsWith('sql:query')) {
+  process.exit(1);
+}
+const statusJson = JSON.stringify({
+  'drupal-version': '11.4.2',
+  uri: 'https://readback-fixture.ddev.site',
+  bootstrap: 'Successful',
+  theme: 'fixture_theme',
+  'admin-theme': 'claro',
+  root: '/var/www/html/web',
+  'config-sync': '../config/sync'
+});
+const outputs = new Map([
+  ['status --format=json', statusJson],
+  ['config:get system.site --field=uuid', '${testSiteUuid}'],
+  ['config:get system.site page.front --format=string', '/'],
+  ['config:status --format=json', '[]'],
+  ['pm:list --status=enabled --type=module --format=json', '{"node":{},"views":{}}'],
+  ['sql:query SELECT type, COUNT(*) FROM node_field_data WHERE status = 1 GROUP BY type', 'page\\t1'],
+  ['sql:query SELECT type, COUNT(*) FROM node_field_data GROUP BY type', 'page\\t3'],
+  ['sql:query SELECT nid, type, title, status FROM node_field_data ORDER BY nid', '1\\tpage\\tTarget home\\t1\\n2\\tpage\\tQA probe\\t0\\n3\\tpage\\tQA probe 2\\t0']
+]);
+if (!outputs.has(command)) {
+  process.exit(1);
+}
+process.stdout.write(outputs.get(command) + '\\n');
+`);
+  chmodSync(fakeDdev, 0o755);
+  execFileSync('git', ['init', '-q'], { cwd: targetRoot });
+  execFileSync('git', ['add', 'config/sync/system.site.yml'], { cwd: targetRoot });
+
+  const generatorArgs = [join(repoRoot, 'bin', 'generate-readback.mjs'), '--packet', 'review-packet'];
+  const environment = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+
+  const result = await runProcess(process.execPath, generatorArgs, targetRoot, { env: environment });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Drupal readback generated from the live runtime/);
+
+  const readback = JSON.parse(readFileSync(join(targetRoot, 'review-packet', 'drupal-readback.json'), 'utf8'));
+  assert.equal(readback.generator.script, 'generate-readback.mjs');
+  assert.equal(readback.generator.kitOwned, true);
+  assert.equal(readback.readbackComplete, true, readback.blockers.join('\n'));
+  assert.ok(readback.measurements.length >= 12, `expected measurements, saw ${readback.measurements.length}`);
+  for (const measurement of readback.measurements) {
+    assert.match(measurement.checkedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, measurement.name);
+    assert.match(measurement.command, /^(?:drush|git) /, measurement.name);
+    assert.equal(typeof measurement.outputExcerpt, 'string', measurement.name);
+  }
+  assert.equal(readback.drupal.siteUuid, testSiteUuid);
+  assert.equal(readback.drupal.coreVersion, '11.4.2');
+  assert.deepEqual(readback.drupal.enabledModules, ['node', 'views']);
+  assert.deepEqual(readback.drupal.trackedConfigYamlFiles, ['config/sync/system.site.yml']);
+  assert.deepEqual(readback.content.nodeCountsByBundle, { page: { published: 1, raw: 3 } });
+  assert.equal(readback.content.nodes.length, 3);
+  assert.equal(readback.content.unpublishedNodes.length, 2);
+  assert.deepEqual(readback.content.publishedVersusRawDeltas, [{
+    entityType: 'node',
+    bundle: 'page',
+    publishedCount: 1,
+    rawCount: 3,
+    reason: '',
+    explanation: '',
+    owner: ''
+  }]);
+  assert.deepEqual(readback.media.countsByType, {});
+
+  const failed = await runProcess(process.execPath, generatorArgs, targetRoot, {
+    env: { ...environment, FAKE_DDEV_FAIL_SQL: '1' }
+  });
+  assert.equal(failed.status, 1, failed.stdout);
+  assert.match(failed.stderr, /Drupal readback incomplete/);
+  assert.match(failed.stderr, /Readback measurement failed: drush sql:query/);
+  const failedReadback = JSON.parse(readFileSync(join(targetRoot, 'review-packet', 'drupal-readback.json'), 'utf8'));
+  assert.equal(failedReadback.readbackComplete, false);
+  assert.ok(failedReadback.blockers.length > 0);
 });

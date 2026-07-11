@@ -85,6 +85,11 @@ function copyPlan(assetsOnly) {
         source: join(repoRoot, 'bin', 'verify-packet.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-packet.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'generate-readback.mjs'),
+        destination: join(skillRoot, 'scripts', 'generate-readback.mjs'),
+        executable: true
       }
     );
   }

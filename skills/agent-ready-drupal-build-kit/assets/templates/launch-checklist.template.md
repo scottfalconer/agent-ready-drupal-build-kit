@@ -12,6 +12,6 @@ Launch readiness requires accepted evidence for every launch-blocking gate in `g
 - [ ] `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: intent, field output, rendered SEO, and off-road evidence accepted.
 - [ ] `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: independent, live-target, and blind adversarial review evidence accepted.
 - [ ] `G-HANDOFF-01` and `G-MAINTAINER-01`: human decisions and named maintainer verdict accepted.
-- [ ] `G-LAUNCH-01`: accessibility, performance, security/privacy, final QA, deployment, accepted exceptions, and rollback plan accepted.
+- [ ] `G-LAUNCH-01`: accessibility (a named mainstream tool — axe-core, pa11y, or Lighthouse — with stored per-URL raw output; never claim `WCAG AA pass` while the tool's `notChecked` list is non-empty), performance, security/privacy, final QA, deployment, accepted exceptions, and rollback plan accepted.
 
 Link accepted evidence beside each cleared item. If this checklist conflicts with `gates.json`, update the checklist from `gates.json` before making a launch claim.
