@@ -2245,6 +2245,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   if (
     routeRows.length === 0 ||
     routeRows.some((route) => {
+      const sourcePath = normalizeRouteKey(route?.sourcePath);
       const targetPath = normalizeRouteKey(route?.targetPath);
       const targetFinalPath = normalizeRouteKey(route?.targetFinalPath);
       const declaredServerError = numericValue(route?.sourceStatus) >= 500 || numericValue(route?.targetStatus) >= 500;
@@ -2255,10 +2256,17 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       const directContractValid = route?.expectedRedirect === false &&
         successfulStatus(route?.targetStatus) &&
         targetFinalPath === targetPath;
-      return route?.accepted !== true || declaredServerError || (!redirectContractValid && !directContractValid);
+      // Blank source/target paths must never pass: an empty targetPath would
+      // silently drop the row out of the live verifier's route-sample
+      // population and redirect-materialization checks.
+      return route?.accepted !== true ||
+        !sourcePath ||
+        !targetPath ||
+        declaredServerError ||
+        (!redirectContractValid && !directContractValid);
     })
   ) {
-    reasons.push('route-matrix.json route rows must be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+    reasons.push('route-matrix.json route rows must be accepted, declare non-empty source and target paths, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
   }
   if (
     arrayOrEmpty(routeMatrix?.blockedRoutes).length > 0 ||
@@ -2272,21 +2280,29 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     record?.disposition === 'owner_accepted_broken' &&
     String(record?.acceptedBy ?? '').trim() &&
     String(record?.rationale ?? '').trim();
+  const externalLinkRecordValid = (record) =>
+    record?.disposition === 'external' &&
+    /^https?:\/\//i.test(String(record?.href ?? '').trim());
   for (const field of ['menuAndFooterLinksChecked', 'renderedLinksChecked']) {
     const entries = arrayOrEmpty(routeMatrix?.[field]);
     const labelOnlyEntries = entries.filter((entry) => !isJsonObject(entry));
     const linkRecords = substantiveObjects(entries);
     if (
       labelOnlyEntries.length > 0 ||
-      linkRecords.some((record) =>
-        !normalizeRouteKey(record.href) ||
-        !finiteNumberValue(record.status) ||
-        !normalizeRouteKey(record.finalPath) ||
-        numericValue(record.status) >= 500 ||
-        (numericValue(record.status) >= 400 && !brokenLinkDispositionAccepted(record))
-      )
+      linkRecords.some((record) => {
+        if (record?.disposition === 'external') {
+          // Cross-origin links are recorded with their absolute href; the
+          // live verifier confirms they really resolve off-origin.
+          return !externalLinkRecordValid(record);
+        }
+        return !normalizeRouteKey(record.href) ||
+          !finiteNumberValue(record.status) ||
+          !normalizeRouteKey(record.finalPath) ||
+          numericValue(record.status) >= 500 ||
+          (numericValue(record.status) >= 400 && !brokenLinkDispositionAccepted(record));
+      })
     ) {
-      reasons.push(`route-matrix.json ${field} must contain re-fetchable per-link records with href, observed status, and finalPath; bare text labels, declared 5xx links, and broken links without an owner_accepted_broken disposition cannot complete.`);
+      reasons.push(`route-matrix.json ${field} must contain re-fetchable per-link records with href, observed status, and finalPath (or an external disposition with the absolute off-origin href); bare text labels, declared 5xx links, and broken links without an owner_accepted_broken disposition cannot complete.`);
     }
   }
   if (substantiveObjects(routeMatrix?.menuAndFooterLinksChecked).length === 0) {

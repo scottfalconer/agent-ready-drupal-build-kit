@@ -314,7 +314,7 @@ function requestOnce(url) {
   });
 }
 
-async function requestFollowingRedirects(startUrl) {
+async function requestFollowingRedirects(startUrl, { allowCrossOriginRedirect = false } = {}) {
   let current = new URL(startUrl);
   const allowedOrigin = current.origin;
   const redirects = [];
@@ -330,6 +330,18 @@ async function requestFollowingRedirects(startUrl) {
       }
       const next = new URL(location, current);
       if (next.origin !== allowedOrigin) {
+        if (allowCrossOriginRedirect) {
+          // Stop at the boundary: report the redirect response itself and the
+          // off-origin destination without fetching the other origin.
+          return {
+            ...response,
+            crossOriginLocation: next.href,
+            finalUrl: current.href,
+            initialStatus: redirects[0]?.status ?? response.status,
+            localTlsVerificationBypassed,
+            redirects
+          };
+        }
         throw new Error(`Refusing cross-origin redirect from ${current.origin} to ${next.origin}.`);
       }
       redirects.push({ from: current.href, status: response.status, to: next.href });
@@ -705,6 +717,22 @@ function requestUrlForPath(baseUrl, path) {
   return new URL(String(path ?? '').replace(/^\//, ''), new URL('/', baseUrl));
 }
 
+// Like normalizePath but preserves the query string, so query-differentiated
+// legacy routes (`/CivicAlerts.aspx?AID=1` vs `?AID=2`) stay distinct.
+function pathWithQuery(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  let url;
+  try {
+    url = new URL(text, 'https://relative-path.invalid');
+  } catch {
+    return '';
+  }
+  return `${normalizePath(url.pathname)}${url.search}`;
+}
+
 function seededRandom(seed) {
   let state = Number.parseInt(sha256(String(seed)).slice(0, 8), 16) >>> 0;
   return () => {
@@ -783,7 +811,7 @@ function sameOriginLinkPath(href, pageUrl, targetOrigin) {
   ) {
     return '';
   }
-  return `${url.pathname}${url.search}`;
+  return `${normalizePath(url.pathname)}${url.search}`;
 }
 
 function acceptedBrokenLinkDisposition(record) {
@@ -797,7 +825,9 @@ function acceptedBrokenLinkDispositions(routeMatrix) {
   for (const field of PER_LINK_RECORD_FIELDS) {
     for (const record of arrayOrEmpty(routeMatrix?.[field])) {
       if (record && typeof record === 'object' && !Array.isArray(record) && acceptedBrokenLinkDisposition(record)) {
-        const path = normalizePath(record.href);
+        // Key by path plus query string so a disposition excuses exactly one
+        // link, not every query variant of the same path.
+        const path = pathWithQuery(record.href);
         if (path) {
           dispositions.set(path, {
             acceptedBy: String(record.acceptedBy).trim(),
@@ -841,6 +871,23 @@ async function verifyDeclaredLink(baseUrl, field, record) {
   }
   const errors = [];
   const href = String(record.href ?? '').trim();
+  if (record.disposition === 'external') {
+    // Cross-origin links are recorded, not fetched: the live verifier never
+    // leaves the target origin, so it only validates that the record names an
+    // absolute off-origin destination.
+    let externalUrl = null;
+    try {
+      externalUrl = new URL(href);
+    } catch {
+      externalUrl = null;
+    }
+    if (!externalUrl || !['http:', 'https:'].includes(externalUrl.protocol)) {
+      errors.push(`${label} external link record ${JSON.stringify(href || record)} must record the absolute http(s) URL of the external destination.`);
+    } else if (externalUrl.origin === baseUrl.origin) {
+      errors.push(`${label} href ${JSON.stringify(href)} resolves to the live target origin; record it with observed status and finalPath instead of an external disposition.`);
+    }
+    return { disposition: 'external', errors, field, href, passed: errors.length === 0 };
+  }
   const declaredStatus = record.status === null || record.status === '' ? Number.NaN : Number(record.status);
   const declaredFinalPath = normalizePath(record.finalPath);
   let requestPath = '';
@@ -857,7 +904,7 @@ async function verifyDeclaredLink(baseUrl, field, record) {
   if (!href || !Number.isFinite(declaredStatus) || !declaredFinalPath) {
     errors.push(`${label} entry ${JSON.stringify(href || record)} must declare href, the observed HTTP status, and finalPath.`);
   } else if (!requestPath) {
-    errors.push(`${label} href ${JSON.stringify(href)} does not resolve to a fetchable same-origin route on the live target.`);
+    errors.push(`${label} href ${JSON.stringify(href)} does not resolve to a fetchable same-origin route on the live target; record off-origin links with disposition "external" and the absolute href.`);
   }
   if (Number.isFinite(declaredStatus) && declaredStatus >= 400 && !acceptedBrokenLinkDisposition(record)) {
     errors.push(`${label} href ${JSON.stringify(href)} declares HTTP ${declaredStatus} without an owner_accepted_broken disposition naming acceptedBy and a rationale.`);
@@ -866,12 +913,20 @@ async function verifyDeclaredLink(baseUrl, field, record) {
     return { errors, field, href, passed: false };
   }
   try {
-    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, requestPath));
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, requestPath), {
+      allowCrossOriginRedirect: true
+    });
     const actualStatus = REDIRECT_STATUSES.has(declaredStatus) ? response.initialStatus : response.status;
     if (actualStatus !== declaredStatus) {
       errors.push(`${label} href ${JSON.stringify(href)} returned status ${actualStatus}; the packet record declares ${declaredStatus}.`);
     }
-    if (normalizePath(response.finalUrl) !== declaredFinalPath) {
+    if (response.crossOriginLocation) {
+      // A same-origin link that redirects off-origin (vanity /go/* links) must
+      // declare the absolute external destination as finalPath.
+      if (String(record.finalPath ?? '').trim() !== response.crossOriginLocation) {
+        errors.push(`${label} href ${JSON.stringify(href)} redirects off-origin to ${response.crossOriginLocation}; the packet record must declare that absolute URL as finalPath.`);
+      }
+    } else if (normalizePath(response.finalUrl) !== declaredFinalPath) {
       errors.push(`${label} href ${JSON.stringify(href)} resolved to ${normalizePath(response.finalUrl)}; the packet record declares ${declaredFinalPath}.`);
     }
     return { actualStatus, errors, field, finalUrl: response.finalUrl, href, passed: errors.length === 0 };
@@ -894,7 +949,7 @@ async function fetchCrawlPage(baseUrl, path) {
 
 async function verifyCrawledLink(baseUrl, link, dispositions) {
   const errors = [];
-  const disposition = dispositions.get(normalizePath(link.path)) ?? null;
+  const disposition = dispositions.get(link.path) ?? null;
   const foundOn = [...link.foundOn].sort();
   const record = {
     dispositionAccepted: Boolean(disposition),
@@ -903,7 +958,21 @@ async function verifyCrawledLink(baseUrl, link, dispositions) {
     path: link.path
   };
   try {
-    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, link.path));
+    const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, link.path), {
+      allowCrossOriginRedirect: true
+    });
+    if (response.crossOriginLocation) {
+      // A same-origin link that intentionally redirects off-origin (vanity
+      // /go/* links) is not a broken route; record where it went and move on.
+      return {
+        ...record,
+        crossOriginLocation: response.crossOriginLocation,
+        errors,
+        finalPath: '',
+        passed: true,
+        status: response.status
+      };
+    }
     if ((response.status < 200 || response.status >= 400) && !disposition) {
       errors.push(`Rendered link ${link.path} (found on ${foundOn.join(', ')}) returned HTTP ${response.status}; rewrite the link or record an owner_accepted_broken disposition in route-matrix.json.`);
     }
@@ -917,18 +986,33 @@ async function verifyCrawledLink(baseUrl, link, dispositions) {
 }
 
 function redirectMaterializationExpectations(routeMatrix) {
+  // Source paths keep their query strings: `/CivicAlerts.aspx?AID=1` and
+  // `?AID=2` are distinct mappings that are each verified, and two rows that
+  // declare the same source path with different targets conflict loudly
+  // instead of silently collapsing to whichever row happens to come first.
+  const conflicts = [];
   const expectations = new Map();
+  const addExpectation = (candidate) => {
+    const existing = expectations.get(candidate.sourcePath);
+    if (existing) {
+      if (existing.expectedFinalPath !== candidate.expectedFinalPath) {
+        conflicts.push(`route-matrix.json maps ${candidate.sourcePath} to both ${existing.expectedFinalPath} (${existing.declaredIn}) and ${candidate.expectedFinalPath} (${candidate.declaredIn}); reconcile the duplicate mapping before verification.`);
+      }
+      return;
+    }
+    expectations.set(candidate.sourcePath, candidate);
+  };
   for (const row of arrayOrEmpty(routeMatrix?.routes)) {
-    const sourcePath = normalizePath(row?.sourcePath);
+    const sourcePath = pathWithQuery(row?.sourcePath);
     const targetPath = normalizePath(row?.targetPath);
-    if (!sourcePath || !targetPath || sourcePath === targetPath) {
+    if (!sourcePath || !targetPath || sourcePath === pathWithQuery(row?.targetPath)) {
       continue;
     }
     const disposition = row?.noRedirectDisposition;
     const dispositionAccepted =
       Boolean(String(disposition?.acceptedBy ?? '').trim()) &&
       Boolean(String(disposition?.rationale ?? '').trim());
-    expectations.set(sourcePath, {
+    addExpectation({
       declaredIn: 'routes',
       expectedFinalPath: normalizePath(row?.targetFinalPath || row?.targetPath),
       noRedirectDisposition: dispositionAccepted
@@ -938,25 +1022,24 @@ function redirectMaterializationExpectations(routeMatrix) {
     });
   }
   for (const record of arrayOrEmpty(routeMatrix?.sourceRouteDriftClassification)) {
-    const sourcePath = normalizePath(record?.sourcePath);
+    const sourcePath = pathWithQuery(record?.sourcePath);
     const targetPath = normalizePath(record?.targetPath);
     if (
       record?.targetDisposition !== 'redirect' ||
       !sourcePath ||
       !targetPath ||
-      sourcePath === targetPath ||
-      expectations.has(sourcePath)
+      sourcePath === pathWithQuery(record?.targetPath)
     ) {
       continue;
     }
-    expectations.set(sourcePath, {
+    addExpectation({
       declaredIn: 'sourceRouteDriftClassification',
       expectedFinalPath: targetPath,
       noRedirectDisposition: null,
       sourcePath
     });
   }
-  return [...expectations.values()];
+  return { conflicts, expectations: [...expectations.values()] };
 }
 
 async function verifyRedirectMaterialization(baseUrl, expectation) {
@@ -966,8 +1049,8 @@ async function verifyRedirectMaterialization(baseUrl, expectation) {
   const errors = [];
   try {
     const response = await requestFollowingRedirects(requestUrlForPath(baseUrl, expectation.sourcePath));
-    if (response.initialStatus !== 301) {
-      errors.push(`${expectation.sourcePath} is mapped to ${expectation.expectedFinalPath} in ${expectation.declaredIn} but returned initial status ${response.initialStatus} on the target; materialize an HTTP 301 redirect or record a noRedirectDisposition with acceptedBy and a rationale.`);
+    if (response.initialStatus !== 301 && response.initialStatus !== 308) {
+      errors.push(`${expectation.sourcePath} is mapped to ${expectation.expectedFinalPath} in ${expectation.declaredIn} but returned initial status ${response.initialStatus} on the target; materialize a permanent HTTP 301 (or 308) redirect or record a noRedirectDisposition with acceptedBy and a rationale.`);
     }
     if (normalizePath(response.finalUrl) !== expectation.expectedFinalPath) {
       errors.push(`${expectation.sourcePath} resolved to ${normalizePath(response.finalUrl)}; the declared mapping expects ${expectation.expectedFinalPath}.`);
@@ -1408,7 +1491,15 @@ export async function verifyLive({
   const samplePopulationPaths = new Set();
   for (const row of routeRows) {
     const rowTargetPath = normalizePath(row?.targetPath);
-    if (!rowTargetPath || verifiedTargetPaths.has(rowTargetPath) || samplePopulationPaths.has(rowTargetPath)) {
+    if (!rowTargetPath) {
+      // A blank targetPath would silently shrink the sample population and
+      // skip redirect materialization, so it is a hard live failure, not a
+      // skip: the packet verifier rejects the same shape.
+      const rowLabel = normalizePath(row?.sourcePath) || JSON.stringify(row?.sourcePath ?? row ?? null);
+      liveErrors.push(`route-matrix.json routes row for ${rowLabel} has no targetPath; every route row must declare a non-empty target path so it stays in the verifiable sample population.`);
+      continue;
+    }
+    if (verifiedTargetPaths.has(rowTargetPath) || samplePopulationPaths.has(rowTargetPath)) {
       continue;
     }
     samplePopulationPaths.add(rowTargetPath);
@@ -1462,8 +1553,10 @@ export async function verifyLive({
       }
     }
     renderedLinkCrawl.discoveredSameOriginLinkCount = discoveredLinks.size;
+    // Match on the full path including any query string: `/foo?page=2` must
+    // still be fetched even when `/foo` was already verified as a route.
     const crawlTargets = [...discoveredLinks.values()].filter(
-      (link) => !verifiedTargetPaths.has(normalizePath(link.path))
+      (link) => !verifiedTargetPaths.has(link.path)
     );
     renderedLinkCrawl.checks = await mapWithConcurrency(crawlTargets, LIVE_FETCH_CONCURRENCY, (link) =>
       verifyCrawledLink(target.url, link, brokenLinkDispositions));
@@ -1480,9 +1573,11 @@ export async function verifyLive({
     liveErrors.push(...check.errors);
   }
 
+  const redirectMaterialization = redirectMaterializationExpectations(routeMatrix);
+  liveErrors.push(...redirectMaterialization.conflicts);
   const redirectMaterializationChecks = fetchChecksEnabled
     ? await mapWithConcurrency(
-        redirectMaterializationExpectations(routeMatrix),
+        redirectMaterialization.expectations,
         LIVE_FETCH_CONCURRENCY,
         (expectation) => verifyRedirectMaterialization(target.url, expectation)
       )
@@ -1658,6 +1753,10 @@ export async function verifyLive({
       seed: sampleSeed,
       sampleRate: ROUTE_SAMPLE_RATE,
       minimumSampleSize: ROUTE_SAMPLE_MIN,
+      // Reviewers can spot population shrinkage (rows blanked or moved into
+      // drift classification) by comparing these counts against the packet.
+      routeRowCount: routeRows.length,
+      driftClassifiedRouteCount: arrayOrEmpty(routeMatrix.sourceRouteDriftClassification).length,
       populationSize: samplePopulation.length,
       sampleSize: sampledRows.length,
       sampledTargetPaths,
@@ -1665,6 +1764,7 @@ export async function verifyLive({
     },
     renderedLinkCrawl,
     declaredLinkChecks,
+    redirectMappingConflicts: redirectMaterialization.conflicts,
     redirectMaterializationChecks,
     liveTargetValid,
     drupalRuntime: {

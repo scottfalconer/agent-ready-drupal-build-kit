@@ -1420,6 +1420,30 @@ test('live verifier samples the full route matrix with a reproducible recorded s
       assert.equal(brokenReport.valid, false);
       assert.equal(brokenReport.liveTargetValid, false);
       assert.match(brokenReport.errors.join('\n'), /\/section-\d+ returned status 404; expected 200/);
+
+      brokenSections = false;
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.routes.push({
+          sourcePath: '/evaded',
+          targetPath: '',
+          targetStatus: 200,
+          targetFinalPath: '',
+          targetTitle: '',
+          targetH1: '',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      });
+      const blankTargetReport = await run();
+      assert.equal(blankTargetReport.valid, false);
+      assert.match(
+        blankTargetReport.errors.join('\n'),
+        /routes row for \/evaded has no targetPath/,
+        'a blank targetPath must be a live failure, never a silent skip out of the sample population'
+      );
+      assert.equal(blankTargetReport.routeSample.routeRowCount, 12);
+      assert.equal(blankTargetReport.routeSample.driftClassifiedRouteCount, 0);
     }
   );
 });
@@ -1433,8 +1457,13 @@ test('rendered-link crawl fails on broken same-origin links unless a named owner
         response.end('<!doctype html><html><head><title>Not found</title></head><body><h1>Not found</h1></body></html>');
         return;
       }
+      if (path === '/go/partner') {
+        response.writeHead(301, { location: 'https://partner.example/welcome' });
+        response.end();
+        return;
+      }
       const nav = path === '/'
-        ? '<nav><a href="/about">About</a><a href="/broken.aspx?AID=1">Old alerts</a><a href="https://elsewhere.example/off-site">Off-site</a></nav>'
+        ? '<nav><a href="/about">About</a><a href="/broken.aspx?AID=1">Old alerts</a><a href="/broken.aspx?AID=99">Older alerts</a><a href="/?page=2">Page two</a><a href="/go/partner">Partner</a><a href="https://elsewhere.example/off-site">Off-site</a></nav>'
         : '';
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html><head><title>Target site</title></head><body>${nav}<h1>Target home</h1></body></html>`);
@@ -1459,7 +1488,13 @@ test('rendered-link crawl fails on broken same-origin links unless a named owner
         brokenReport.errors.join('\n'),
         /Rendered link \/broken\.aspx\?AID=1 \(found on \/\) returned HTTP 404/
       );
-      assert.equal(brokenReport.renderedLinkCrawl.discoveredSameOriginLinkCount, 2, 'cross-origin links stay out of the crawl');
+      assert.equal(brokenReport.renderedLinkCrawl.discoveredSameOriginLinkCount, 5, 'cross-origin links stay out of the crawl');
+      const queryVariantCheck = brokenReport.renderedLinkCrawl.checks.find((check) => check.path === '/?page=2');
+      assert.ok(queryVariantCheck, 'a query variant of an already-verified path must still be fetched');
+      assert.equal(queryVariantCheck.passed, true);
+      const vanityCheck = brokenReport.renderedLinkCrawl.checks.find((check) => check.path === '/go/partner');
+      assert.equal(vanityCheck.passed, true, 'an intentional off-origin redirect is recorded, not failed');
+      assert.equal(vanityCheck.crossOriginLocation, 'https://partner.example/welcome');
 
       mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
         routeMatrix.renderedLinksChecked = [{
@@ -1470,6 +1505,31 @@ test('rendered-link crawl fails on broken same-origin links unless a named owner
           acceptedBy: 'Example Owner',
           rationale: 'The legacy platform alert surface is intentionally retired.'
         }];
+      });
+      const partiallyDispositionedReport = await run();
+      assert.equal(
+        partiallyDispositionedReport.valid,
+        false,
+        'a disposition excuses exactly one path-plus-query, not every query variant'
+      );
+      assert.match(
+        partiallyDispositionedReport.errors.join('\n'),
+        /Rendered link \/broken\.aspx\?AID=99 \(found on \/\) returned HTTP 404/
+      );
+      assert.doesNotMatch(
+        partiallyDispositionedReport.errors.join('\n'),
+        /Rendered link \/broken\.aspx\?AID=1 /
+      );
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.renderedLinksChecked.push({
+          href: '/broken.aspx?AID=99',
+          status: 404,
+          finalPath: '/broken.aspx',
+          disposition: 'owner_accepted_broken',
+          acceptedBy: 'Example Owner',
+          rationale: 'The older legacy alert surface is intentionally retired.'
+        });
       });
       const dispositionedReport = await run();
       assert.equal(dispositionedReport.valid, true, dispositionedReport.errors.join('\n'));
@@ -1509,6 +1569,8 @@ test('declared source-to-target mappings must materialize as 301 redirects or ca
       if (path === '/legacy-news.aspx' || path === '/old-calendar.aspx') {
         if (legacyBehavior === 'permanent') {
           response.writeHead(301, { location: '/news' });
+        } else if (legacyBehavior === 'permanent-308') {
+          response.writeHead(308, { location: '/news' });
         } else if (legacyBehavior === 'temporary') {
           response.writeHead(302, { location: '/news' });
         } else {
@@ -1566,6 +1628,11 @@ test('declared source-to-target mappings must materialize as 301 redirects or ca
       assert.equal(permanentReport.valid, true, permanentReport.errors.join('\n'));
       assert.equal(permanentReport.redirectMaterializationChecks[0].passed, true);
 
+      legacyBehavior = 'permanent-308';
+      const permanent308Report = await run();
+      assert.equal(permanent308Report.valid, true, permanent308Report.errors.join('\n'));
+      assert.equal(permanent308Report.redirectMaterializationChecks[0].initialStatus, 308);
+
       legacyBehavior = 'missing';
       mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
         value.routes[1].noRedirectDisposition = {
@@ -1602,6 +1669,197 @@ test('declared source-to-target mappings must materialize as 301 redirects or ca
   );
 });
 
+test('query-differentiated legacy mappings are each verified and duplicate source paths conflict loudly', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/CivicAlerts.aspx?AID=1') {
+        response.writeHead(301, { location: '/news' });
+        response.end();
+        return;
+      }
+      if (request.url === '/CivicAlerts.aspx?AID=2') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><head><title>Not found</title></head><body><h1>Not found</h1></body></html>');
+        return;
+      }
+      const path = request.url.split('?')[0];
+      const label = path === '/news' ? 'News' : path === '/events' ? 'Events' : null;
+      const title = label ?? 'Target site';
+      const h1 = label ?? 'Target home';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>${title}</title></head><body><h1>${h1}</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-query-mappings-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/CivicAlerts.aspx?AID=1',
+          targetPath: '/news',
+          targetStatus: 200,
+          targetFinalPath: '/news',
+          targetTitle: 'News',
+          targetH1: 'News',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        },
+        {
+          sourcePath: '/CivicAlerts.aspx?AID=2',
+          targetPath: '/events',
+          targetStatus: 200,
+          targetFinalPath: '/events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const run = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        routeSampleSeed: 'fixture-seed'
+      });
+
+      const report = await run();
+      assert.equal(report.valid, false);
+      assert.equal(
+        report.redirectMaterializationChecks.length,
+        2,
+        'query variants of the same source path are distinct mappings, not one collapsed check'
+      );
+      const materializedCheck = report.redirectMaterializationChecks.find(
+        (check) => check.sourcePath === '/CivicAlerts.aspx?AID=1'
+      );
+      assert.equal(materializedCheck.passed, true, materializedCheck.errors.join('\n'));
+      assert.match(
+        report.errors.join('\n'),
+        /\/CivicAlerts\.aspx\?AID=2 is mapped to \/events in routes but returned initial status 404/
+      );
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.routes.push({
+          sourcePath: '/CivicAlerts.aspx?AID=1',
+          targetPath: '/events',
+          targetStatus: 200,
+          targetFinalPath: '/events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      });
+      const conflictedReport = await run();
+      assert.equal(conflictedReport.valid, false);
+      assert.match(
+        conflictedReport.errors.join('\n'),
+        /maps \/CivicAlerts\.aspx\?AID=1 to both \/news \(routes\) and \/events \(routes\); reconcile the duplicate mapping/
+      );
+    }
+  );
+});
+
+test('per-link records support external dispositions without weakening same-origin requirements', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const path = request.url.split('?')[0];
+      if (path === '/go/partner') {
+        response.writeHead(301, { location: 'https://partner.example/welcome' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      const title = path === '/' ? 'Target site' : 'Section';
+      const h1 = path === '/' ? 'Target home' : 'Section';
+      response.end(`<!doctype html><html><head><title>${title}</title></head><body><h1>${h1}</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-external-links-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.menuAndFooterLinksChecked.push({
+        href: 'https://state.example/portal',
+        status: null,
+        finalPath: '',
+        disposition: 'external',
+        acceptedBy: '',
+        rationale: ''
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const run = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        routeSampleSeed: 'fixture-seed'
+      });
+
+      const externalReport = await run();
+      assert.equal(externalReport.valid, true, externalReport.errors.join('\n'));
+      const externalCheck = externalReport.declaredLinkChecks.find(
+        (check) => check.href === 'https://state.example/portal'
+      );
+      assert.equal(externalCheck.passed, true);
+      assert.equal(externalCheck.disposition, 'external');
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.menuAndFooterLinksChecked[1].href = `${baseUrl}/hidden`;
+      });
+      const sameOriginEvasionReport = await run();
+      assert.equal(sameOriginEvasionReport.valid, false);
+      assert.match(
+        sameOriginEvasionReport.errors.join('\n'),
+        /resolves to the live target origin; record it with observed status and finalPath/
+      );
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.menuAndFooterLinksChecked[1].href = '/relative-path';
+      });
+      const relativeExternalReport = await run();
+      assert.equal(relativeExternalReport.valid, false);
+      assert.match(
+        relativeExternalReport.errors.join('\n'),
+        /external link record .* must record the absolute http\(s\) URL/
+      );
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.menuAndFooterLinksChecked[1] = {
+          href: '/go/partner',
+          status: 301,
+          finalPath: 'https://partner.example/welcome',
+          disposition: '',
+          acceptedBy: '',
+          rationale: ''
+        };
+      });
+      const vanityReport = await run();
+      assert.equal(vanityReport.valid, true, vanityReport.errors.join('\n'));
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        value.menuAndFooterLinksChecked[1].finalPath = '/welcome';
+      });
+      const wrongVanityReport = await run();
+      assert.equal(wrongVanityReport.valid, false);
+      assert.match(
+        wrongVanityReport.errors.join('\n'),
+        /redirects off-origin to https:\/\/partner\.example\/welcome; the packet record must declare that absolute URL as finalPath/
+      );
+    }
+  );
+});
+
 test('packet verification hard-fails labels-only link arrays and missing per-link menu records', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'per-link-record-regressions-'));
   const canonicalPacket = join(temp, 'canonical');
@@ -1616,7 +1874,63 @@ test('packet verification hard-fails labels-only link arrays and missing per-lin
     canonicalReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
+  const externalRecordPacket = join(temp, 'external-record');
+  cpSync(canonicalPacket, externalRecordPacket, { recursive: true });
+  mutateJson(join(externalRecordPacket, 'route-matrix.json'), (value) => {
+    value.menuAndFooterLinksChecked.push({
+      href: 'https://state.example/portal',
+      status: null,
+      finalPath: '',
+      disposition: 'external',
+      acceptedBy: '',
+      rationale: ''
+    });
+  });
+  const externalRecordReport = await validatePacket({ packetDir: externalRecordPacket });
+  assert.equal(
+    externalRecordReport.completionEvidence.packetSupportsCompletion,
+    true,
+    externalRecordReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
   const cases = [
+    {
+      name: 'blank-target-path-route-row',
+      expected: /declare non-empty source and target paths/i,
+      mutate: (value) => {
+        value.routes.push({
+          sourcePath: '/evaded',
+          targetPath: '',
+          targetStatus: 200,
+          targetFinalPath: '',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      }
+    },
+    {
+      name: 'blank-source-path-route-row',
+      expected: /declare non-empty source and target paths/i,
+      mutate: (value) => {
+        value.routes.push({
+          sourcePath: '',
+          targetPath: '/orphaned',
+          targetStatus: 200,
+          targetFinalPath: '/orphaned',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      }
+    },
+    {
+      name: 'relative-external-link-record',
+      expected: /external disposition with the absolute off-origin href/i,
+      mutate: (value) => {
+        value.menuAndFooterLinksChecked.push({ href: '/not-external', disposition: 'external' });
+      }
+    },
     {
       name: 'labels-only-menu-links',
       expected: /menuAndFooterLinksChecked must contain re-fetchable per-link records/i,
