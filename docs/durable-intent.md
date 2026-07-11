@@ -39,6 +39,20 @@ If the intent record describes a behavior or external decision with no Drupal co
 
 Builders compute hashes after config export. Verifiers recompute them before trusting intent. A solo-agent run can move a record to `hash-valid` when the hash matches exported config. Only human maintainer review should move `draft` or `hash-valid` to `accepted`.
 
+## Empty Intent Rule
+
+An empty `intent_records: []` list is honest only when there was nothing load-bearing to record. The packet verifier accepts it only when `pattern-map.json` declares no content types or Views and no off-road exceptions are recorded, or when the file carries a structured disposition:
+
+```yaml
+intent_records: []
+empty_justification:
+  rationale: "Why no intent records apply to this run."
+  asserted_by: "Named owner"
+  last_reviewed: "2026-07-01"
+```
+
+While the pattern map declares content types or Views, an empty intent file also vetoes the maintainer-review "load-bearing decisions captured" checkbox: record real intent before claiming the decisions are captured.
+
 ## Stale Intent Rule
 
 If durable intent is missing, stale, mismatched, or unreviewed, treat it as no intent. Do not let stale intent guide an import, launch decision, or maintainer review.

@@ -1,5 +1,19 @@
 # Production Target Record
 
+## Run Identity
+
+- Site:
+- Target workspace:
+- Date:
+- Declared by:
+
+## Local Claim Scope
+
+Check exactly one. A complete-local-rebuild claim never certifies this record, but the record must still identify its run instead of shipping as an untouched template copy.
+
+- [ ] Production target not selected: this record is not applicable to the local completion claim.
+- [ ] Production target selected: launch evidence is tracked here and stays outside the local completion claim.
+
 ## Target
 
 - URL:

@@ -2,6 +2,22 @@
 
 Launch readiness requires accepted evidence for every launch-blocking gate in `gates.json`. Use this checklist as a human tracker, not as a second source of truth.
 
+## Run Identity
+
+- Site:
+- Target workspace:
+- Date:
+- Declared by:
+
+## Local Claim Scope
+
+Check exactly one. A complete-local-rebuild claim never certifies launch readiness, but this checklist must still identify its run instead of shipping as an untouched template copy.
+
+- [ ] Launch not attempted: this checklist is not applicable to the local completion claim.
+- [ ] Launch evidence in progress: cleared items link accepted evidence and stay outside the local completion claim.
+
+## Launch-Blocking Gates
+
 - [ ] `G-OPERATOR-01`: independent operator run accepted.
 - [ ] `G-TARGET-01`: production-equivalent Drupal target verified.
 - [ ] `G-ROUTE-01` through `G-ROUTE-06`: route boundary, drift, repeated-item counts, target-required routes, and front-page behavior accepted.

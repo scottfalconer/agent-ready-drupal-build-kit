@@ -41,7 +41,6 @@ const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 const MAX_SCREENSHOT_DIMENSION = 12_000;
 const MAX_SCREENSHOT_PIXELS = 50_000_000;
 const MAX_PNG_INFLATED_BYTES = 200 * 1024 * 1024;
-const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set(['launch-checklist.md', 'production-target.md']);
 const COMPLETION_CLAIM_GATES = new Set([
   'content',
   'media',
@@ -1993,7 +1992,7 @@ function unresolvedMarkdownUnknown(text) {
   return /:\s*`?UNKNOWN`?\s*$/im.test(text) || /\|\s*UNKNOWN\s*\|/i.test(text);
 }
 
-async function markdownCompletionReadiness(packetDir) {
+async function markdownCompletionReadiness(packetDir, patternMap) {
   const reasons = [];
   const texts = Object.fromEntries(
     await Promise.all(
@@ -2004,6 +2003,8 @@ async function markdownCompletionReadiness(packetDir) {
         'scoped-gap-list.md',
         'open-decisions.md',
         'off-road-inventory.md',
+        'production-target.md',
+        'launch-checklist.md',
         'durable-intent.yml'
       ].map(async (file) => [file, existsSync(join(packetDir, file)) ? await readFile(join(packetDir, file), 'utf8') : ''])
     )
@@ -2111,6 +2112,34 @@ async function markdownCompletionReadiness(packetDir) {
     reasons.push('off-road-inventory.md must contain a named accepted review and disposition every paved-path exception without UNKNOWN or blocked rows.');
   }
 
+  const localClaimBoundaryFiles = [
+    {
+      file: 'production-target.md',
+      scopeStatements: [
+        'Production target not selected: this record is not applicable to the local completion claim.',
+        'Production target selected: launch evidence is tracked here and stays outside the local completion claim.'
+      ]
+    },
+    {
+      file: 'launch-checklist.md',
+      scopeStatements: [
+        'Launch not attempted: this checklist is not applicable to the local completion claim.',
+        'Launch evidence in progress: cleared items link accepted evidence and stay outside the local completion claim.'
+      ]
+    }
+  ];
+  for (const { file, scopeStatements } of localClaimBoundaryFiles) {
+    const text = texts[file];
+    const checkedScopeStatements = scopeStatements.filter((statement) => checkedStatement(text, statement));
+    if (
+      ['Site', 'Target workspace', 'Date', 'Declared by'].some((field) => !markdownField(text, field)) ||
+      checkedScopeStatements.length !== 1 ||
+      !scopeStatements.some((statement) => uncheckedStatement(text, statement))
+    ) {
+      reasons.push(`${file} must carry run identity and exactly one explicit local-claim scope declaration instead of an untouched template copy.`);
+    }
+  }
+
   const durableIntent = texts['durable-intent.yml'];
   const explicitEmptyIntent = /^\s*intent_records:\s*\[\s*\]\s*$/m.test(durableIntent);
   const intentBlocks = [...durableIntent.matchAll(/^\s*-\s+id:\s*["']?([^"'\n]*)["']?\s*$([\s\S]*?)(?=^\s*-\s+id:|(?![\s\S]))/gm)];
@@ -2137,6 +2166,29 @@ async function markdownCompletionReadiness(packetDir) {
     reasons.push('durable-intent.yml must name the site and contain current accepted/hash-valid intent or an explicit empty intent record list.');
   }
 
+  const declaredLoadBearingConfig =
+    hasMeaningfulEntry(patternMap?.contentTypes) || hasMeaningfulEntry(patternMap?.views);
+  const offRoadExceptionsRecorded =
+    /^\|\s*OR-[^\n]+\|\s*$/im.test(offRoad) || !/no off-road moves/i.test(offRoad);
+  const emptyJustificationBlock = durableIntent.match(/^empty_justification:[ \t]*\n((?:[ \t]+[^\n]*\n?)+)/m)?.[1] ?? '';
+  const emptyJustificationAccepted = ['rationale', 'asserted_by', 'last_reviewed'].every((field) =>
+    new RegExp(`^\\s*${field}:\\s*["']?\\S.+?["']?\\s*$`, 'm').test(emptyJustificationBlock)
+  );
+  if (
+    explicitEmptyIntent &&
+    (declaredLoadBearingConfig || offRoadExceptionsRecorded) &&
+    !emptyJustificationAccepted
+  ) {
+    reasons.push('durable-intent.yml cannot leave intent_records empty while pattern-map.json declares content types or Views or off-road exceptions are recorded; add intent records or an empty_justification block with rationale, asserted_by, and last_reviewed.');
+  }
+  if (
+    explicitEmptyIntent &&
+    declaredLoadBearingConfig &&
+    checkedStatement(maintainer, 'Are the load-bearing decisions captured and usable by later agents?')
+  ) {
+    reasons.push('maintainer-review.md cannot claim load-bearing decisions are captured while durable-intent.yml records no intent for the content types or Views declared in pattern-map.json.');
+  }
+
   return reasons;
 }
 
@@ -2149,7 +2201,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   for (const packetFile of arrayOrEmpty(gates.reviewPacketFiles)) {
     const packetPath = join(packetDir, packetFile);
     const templatePath = installedTemplatePath(packetFile);
-    if (templatePath && existsSync(packetPath) && !LOCAL_COMPLETION_NON_AUTHORITY_FILES.has(packetFile)) {
+    if (templatePath && existsSync(packetPath)) {
       const [packetBytes, templateBytes] = await Promise.all([readFile(packetPath), readFile(templatePath)]);
       if (packetBytes.equals(templateBytes)) {
         reasons.push(`${packetFile} is unchanged from the shipped template.`);
@@ -2174,7 +2226,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
 
-  reasons.push(...await markdownCompletionReadiness(packetDir));
+  reasons.push(...await markdownCompletionReadiness(packetDir, records.patternMap));
 
   const {
     blindAdversarialReview,

@@ -1,5 +1,12 @@
 schema_version: public-kit.1
 site: ""
+# Leave `intent_records: []` only when pattern-map.json declares no content types
+# or Views and no off-road exceptions are recorded. Otherwise either append intent
+# records or add a structured empty-intent disposition:
+# empty_justification:
+#   rationale: ""
+#   asserted_by: ""
+#   last_reviewed: ""
 intent_records:
   - id: ""
     target_config: ""

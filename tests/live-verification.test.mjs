@@ -422,10 +422,51 @@ No human-only decisions remain for the complete local rebuild.
 No off-road moves were used in this fixture.
 `);
 
+  writeFileSync(join(packetDir, 'production-target.md'), `# Production Target Record
+
+## Run Identity
+
+- Site: Fixture rebuild
+- Target workspace: DDEV fixture
+- Date: 2026-07-09
+- Declared by: Fixture Maintainer
+
+## Local Claim Scope
+
+- [x] Production target not selected: this record is not applicable to the local completion claim.
+- [ ] Production target selected: launch evidence is tracked here and stays outside the local completion claim.
+`);
+
+  writeFileSync(join(packetDir, 'launch-checklist.md'), `# Launch Checklist
+
+## Run Identity
+
+- Site: Fixture rebuild
+- Target workspace: DDEV fixture
+- Date: 2026-07-09
+- Declared by: Fixture Maintainer
+
+## Local Claim Scope
+
+- [x] Launch not attempted: this checklist is not applicable to the local completion claim.
+- [ ] Launch evidence in progress: cleared items link accepted evidence and stay outside the local completion claim.
+`);
+
   writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1
 site: "${targetBaseUrl}"
-intent_records: []
-evidence_scope: "No durable intent records apply to this fixture."
+intent_records:
+  - id: "intent-page-content-type"
+    target_config: "node.type.page"
+    purpose: "Keep the structured homepage owned by the Page content type."
+    source_evidence:
+      - "pattern-map.json"
+    rationale: "The declared page bundle is load-bearing for the rebuilt homepage."
+    asserted_by: "Fixture Maintainer"
+    last_reviewed: "2026-07-09"
+    config_hash: "sha256:${'b'.repeat(64)}"
+    status: "hash-valid"
+    stale_behavior: "treat_as_no_intent"
+evidence_scope: "Durable intent records the fixture's load-bearing decisions."
 `);
 }
 
@@ -2043,6 +2084,100 @@ intent_records:
   assert.equal(staleReport.valid, true, staleReport.errors.join('\n'));
   assert.equal(staleReport.completionEvidence.packetSupportsCompletion, false);
   assert.match(staleReport.completionEvidence.packetCompletionBlockedReasons.join('\n'), /durable-intent\.yml/);
+});
+
+test('empty durable intent fails closed against declared load-bearing config and vetoes the maintainer capture claim', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'empty-durable-intent-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const emptyIntent = `schema_version: public-kit.1
+site: "https://target.example"
+intent_records: []
+`;
+  writeFileSync(join(packetDir, 'durable-intent.yml'), emptyIntent);
+  const emptyReport = await validatePacket({ packetDir });
+  assert.equal(emptyReport.valid, true, emptyReport.errors.join('\n'));
+  assert.equal(emptyReport.completionEvidence.packetSupportsCompletion, false);
+  const emptyReasons = emptyReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.match(emptyReasons, /durable-intent\.yml cannot leave intent_records empty/);
+  assert.match(emptyReasons, /maintainer-review\.md cannot claim load-bearing decisions are captured/);
+
+  writeFileSync(join(packetDir, 'durable-intent.yml'), `${emptyIntent}empty_justification:
+  rationale: "The declared Page bundle ships unmodified from the installed Starter."
+  asserted_by: "Fixture Maintainer"
+  last_reviewed: "2026-07-09"
+`);
+  const justifiedReport = await validatePacket({ packetDir });
+  const justifiedReasons = justifiedReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.doesNotMatch(justifiedReasons, /cannot leave intent_records empty/);
+  assert.match(justifiedReasons, /maintainer-review\.md cannot claim load-bearing decisions are captured/);
+  assert.equal(justifiedReport.completionEvidence.packetSupportsCompletion, false);
+
+  writeFileSync(join(packetDir, 'durable-intent.yml'), emptyIntent);
+  mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+    value.contentTypes = [];
+    value.views = [];
+  });
+  const undeclaredReport = await validatePacket({ packetDir });
+  const undeclaredReasons = undeclaredReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.doesNotMatch(undeclaredReasons, /cannot leave intent_records empty/);
+  assert.doesNotMatch(undeclaredReasons, /maintainer-review\.md cannot claim load-bearing decisions/);
+});
+
+test('launch boundary records fail closed without run identity and one local-claim scope declaration', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'local-claim-boundary-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  for (const file of ['production-target.md', 'launch-checklist.md']) {
+    cpSync(join(templatesDir, templateName(file)), join(packetDir, file));
+  }
+  const stubReport = await validatePacket({ packetDir });
+  assert.equal(stubReport.valid, true, stubReport.errors.join('\n'));
+  assert.equal(stubReport.completionEvidence.packetSupportsCompletion, false);
+  const stubReasons = stubReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.match(stubReasons, /production-target\.md is unchanged from the shipped template\./);
+  assert.match(stubReasons, /launch-checklist\.md is unchanged from the shipped template\./);
+  assert.match(stubReasons, /production-target\.md must carry run identity and exactly one explicit local-claim scope declaration/);
+  assert.match(stubReasons, /launch-checklist\.md must carry run identity and exactly one explicit local-claim scope declaration/);
+
+  writeFileSync(join(packetDir, 'production-target.md'), `# Production Target Record
+
+## Run Identity
+
+- Site: Fixture rebuild
+- Target workspace: DDEV fixture
+- Date: 2026-07-09
+- Declared by: Fixture Maintainer
+
+## Local Claim Scope
+
+- [x] Production target not selected: this record is not applicable to the local completion claim.
+- [ ] Production target selected: launch evidence is tracked here and stays outside the local completion claim.
+`);
+  writeFileSync(join(packetDir, 'launch-checklist.md'), `# Launch Checklist
+
+## Run Identity
+
+- Site: Fixture rebuild
+- Target workspace: DDEV fixture
+- Date: 2026-07-09
+- Declared by: Fixture Maintainer
+
+## Local Claim Scope
+
+- [x] Launch not attempted: this checklist is not applicable to the local completion claim.
+- [x] Launch evidence in progress: cleared items link accepted evidence and stay outside the local completion claim.
+`);
+  const bothCheckedReport = await validatePacket({ packetDir });
+  const bothCheckedReasons = bothCheckedReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.doesNotMatch(bothCheckedReasons, /production-target\.md must carry run identity/);
+  assert.match(bothCheckedReasons, /launch-checklist\.md must carry run identity and exactly one explicit local-claim scope declaration/);
 });
 
 test('independent completion claims require target-bound concrete check evidence', async () => {
