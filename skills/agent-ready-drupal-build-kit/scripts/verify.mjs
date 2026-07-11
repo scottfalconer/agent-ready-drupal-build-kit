@@ -527,16 +527,70 @@ function drushRolePermissions(projectRoot, environment) {
   }
 }
 
-function scanTrackedEditorCapabilityConfig(projectRoot, yamlFiles) {
+function moderatedNodeBundles(text) {
+  const bundles = [];
+  const lines = text.split(/\r?\n/);
+  const entityTypesIndex = lines.findIndex((line) => /^[ \t]*entity_types:[ \t]*$/.test(line));
+  if (entityTypesIndex === -1) {
+    return bundles;
+  }
+  const entityTypesIndent = lines[entityTypesIndex].match(/^[ \t]*/)[0].length;
+  let inNodeList = false;
+  let nodeKeyIndent = -1;
+  for (let index = entityTypesIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) {
+      continue;
+    }
+    const indent = line.match(/^[ \t]*/)[0].length;
+    if (indent <= entityTypesIndent) {
+      break;
+    }
+    const keyMatch = line.match(/^[ \t]*([A-Za-z0-9_]+):[ \t]*$/);
+    if (keyMatch) {
+      inNodeList = keyMatch[1] === 'node';
+      nodeKeyIndent = indent;
+      continue;
+    }
+    if (inNodeList && indent > nodeKeyIndent) {
+      const item = line.match(/^[ \t]*-[ \t]+(\S+)/);
+      if (item) {
+        bundles.push(cleanScalar(item[1]));
+      }
+    } else {
+      inNodeList = false;
+    }
+  }
+  return bundles;
+}
+
+const AUTHORING_SYSTEM_CONFIG_PREFIXES = new Map([
+  ['canvas', /^canvas\./],
+  ['experience_builder', /^experience_builder\./]
+]);
+
+export function scanTrackedEditorCapabilityConfig(projectRoot, yamlFiles) {
   const moderatedBundles = [];
   const schedulerEnabledBundles = [];
   const webformConfigs = [];
+  const blockContentPlacements = [];
+  const authoringSystemsInConfig = new Set();
+  let activeTheme = '';
+  let coreExtensionModules = null;
   for (const path of yamlFiles) {
     const name = basename(path);
+    for (const [system, prefix] of AUTHORING_SYSTEM_CONFIG_PREFIXES) {
+      if (prefix.test(name)) {
+        authoringSystemsInConfig.add(system);
+      }
+    }
     const webformMatch = name.match(/^webform\.webform\.([^.]+)\.yml$/);
     const nodeTypeMatch = name.match(/^node\.type\.([^.]+)\.yml$/);
     const workflowMatch = /^workflows\.workflow\.[^.]+\.yml$/.test(name);
-    if (!webformMatch && !nodeTypeMatch && !workflowMatch) {
+    const blockMatch = name.match(/^block\.block\.([^\s]+)\.yml$/);
+    const themeMatch = name === 'system.theme.yml';
+    const coreExtensionMatch = name === 'core.extension.yml';
+    if (!webformMatch && !nodeTypeMatch && !workflowMatch && !blockMatch && !themeMatch && !coreExtensionMatch) {
       continue;
     }
     let text;
@@ -561,13 +615,37 @@ function scanTrackedEditorCapabilityConfig(projectRoot, yamlFiles) {
         schedulerEnabledBundles.push(nodeTypeMatch[1]);
       }
     } else if (workflowMatch) {
-      const nodeBundles = text.match(/entity_types:\s*\n[ \t]+node:\s*\n((?:[ \t]+-[ \t]+\S+[ \t]*\n?)+)/);
-      for (const bundle of nodeBundles?.[1]?.matchAll(/-[ \t]+(\S+)/g) ?? []) {
-        moderatedBundles.push(cleanScalar(bundle[1]));
+      moderatedBundles.push(...moderatedNodeBundles(text));
+    } else if (blockMatch) {
+      const plugin = cleanScalar(text.match(/^plugin:[ \t]*(.+)$/m)?.[1] ?? '');
+      if (!/^block_content:/.test(plugin)) {
+        continue;
       }
+      blockContentPlacements.push({
+        enabled: cleanScalar(text.match(/^status:[ \t]*(\S+)/m)?.[1] ?? 'true') !== 'false',
+        file: path,
+        id: cleanScalar(text.match(/^id:[ \t]*(\S+)/m)?.[1] ?? blockMatch[1]),
+        plugin,
+        region: cleanScalar(text.match(/^region:[ \t]*(\S+)/m)?.[1] ?? ''),
+        theme: cleanScalar(text.match(/^theme:[ \t]*(\S+)/m)?.[1] ?? '')
+      });
+    } else if (themeMatch) {
+      activeTheme = cleanScalar(text.match(/^default:[ \t]*(\S+)/m)?.[1] ?? '');
+    } else if (coreExtensionMatch) {
+      const moduleBlock = text.match(/^module:\s*\n((?:[ \t]+\S.*\n?)+)/m);
+      coreExtensionModules = [...(moduleBlock?.[1] ?? '').matchAll(/^[ \t]+([A-Za-z0-9_]+):/gm)]
+        .map((match) => match[1]);
     }
   }
-  return { moderatedBundles, schedulerEnabledBundles, webformConfigs };
+  return {
+    activeTheme,
+    authoringSystemsInConfig: [...authoringSystemsInConfig],
+    blockContentPlacements,
+    coreExtensionModules,
+    moderatedBundles,
+    schedulerEnabledBundles,
+    webformConfigs
+  };
 }
 
 function configStatusIsClean(result) {
@@ -591,11 +669,15 @@ function inspectDrupalRuntime(cwd, environment) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
+      activeTheme: '',
+      authoringSystemsInConfig: null,
       baseUrl: '',
+      blockContentPlacements: null,
       confirmed: false,
       configStatusClean: false,
       configSyncTracked: false,
       configSyncDirectory: '',
+      coreExtensionModules: null,
       frontPage: '',
       moderatedBundles: null,
       mode: 'unavailable',
@@ -625,11 +707,15 @@ function inspectDrupalRuntime(cwd, environment) {
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
   return {
+    activeTheme: capabilityConfig.activeTheme,
+    authoringSystemsInConfig: capabilityConfig.authoringSystemsInConfig,
     baseUrl,
+    blockContentPlacements: capabilityConfig.blockContentPlacements,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
+    coreExtensionModules: capabilityConfig.coreExtensionModules,
     drupalRoot,
     frontPage,
     moderatedBundles: capabilityConfig.moderatedBundles,
@@ -1029,8 +1115,8 @@ async function verifyRoute(baseUrl, expected) {
 
 const SPAM_PROTECTION_MARKUP_SIGNALS = new Map([
   ['honeypot', {
-    description: 'a hidden honeypot element and honeypot_time timestamp field',
-    patterns: [/name\s*=\s*["'][^"']*honeypot_time/i, /display\s*:\s*none/i]
+    description: 'a hidden honeypot input element and honeypot_time timestamp field',
+    patterns: [/name\s*=\s*["'][^"']*honeypot_time/i, /display\s*:\s*none[^>]{0,160}>[\s\S]{0,240}?<input/i]
   }],
   ['captcha', {
     description: 'a rendered captcha wrapper element',
@@ -1042,9 +1128,13 @@ const SPAM_PROTECTION_MARKUP_SIGNALS = new Map([
   }]
 ]);
 
+function normalizedWebformStatus(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
 function declaredRenderedWebformProtections(drupalReadback) {
   return (Array.isArray(drupalReadback?.webforms) ? drupalReadback.webforms : []).filter((webform) =>
-    webform?.status === 'open' &&
+    normalizedWebformStatus(webform?.status) !== 'closed' &&
     webform?.spamProtection?.rendersInAnonymousHtml === true &&
     SPAM_PROTECTION_MARKUP_SIGNALS.has(webform?.spamProtection?.protector) &&
     Array.isArray(webform?.publicRoutes) &&
@@ -1108,20 +1198,80 @@ function webformConfigCompletionIssues(drupalReadback, webformConfigs) {
   }
   const declaredWebforms = Array.isArray(drupalReadback?.webforms) ? drupalReadback.webforms : [];
   const issues = [];
-  for (const config of webformConfigs.filter((candidate) => candidate.status !== 'closed')) {
+  for (const config of webformConfigs) {
+    const declared = declaredWebforms.find(
+      (webform) => identityKey(webform?.webform || webform?.id) === identityKey(config.id)
+    );
+    if (declared && normalizedWebformStatus(declared.status) !== normalizedWebformStatus(config.status)) {
+      issues.push(`drupal-readback.json webform ${config.id} status '${declared.status ?? ''}' does not match tracked config ${config.file} status '${config.status}'.`);
+    }
+    if (normalizedWebformStatus(config.status) === 'closed') {
+      continue;
+    }
     if (config.handlersEmpty) {
       issues.push(`Tracked config ${config.file} declares open webform ${config.id} with no submission handlers.`);
     }
-    if (!declaredWebforms.some((webform) => identityKey(webform?.webform || webform?.id) === identityKey(config.id))) {
+    if (!declared) {
       issues.push(`Open webform ${config.id} in tracked config has no drupal-readback.json webform disposition record.`);
     }
   }
   return issues;
 }
 
+function placedBlockConfigCompletionIssues(drupalReadback, runtime) {
+  if (!Array.isArray(runtime.blockContentPlacements)) {
+    return [];
+  }
+  const activeTheme = identityKey(runtime.activeTheme || drupalReadback?.drupal?.defaultTheme);
+  const declaredBlocks = Array.isArray(drupalReadback?.content?.placedContentBlocks)
+    ? drupalReadback.content.placedContentBlocks
+    : [];
+  const issues = [];
+  for (const placement of runtime.blockContentPlacements) {
+    if (placement.enabled === false) {
+      continue;
+    }
+    if (activeTheme && identityKey(placement.theme) !== activeTheme) {
+      continue;
+    }
+    const declared = declaredBlocks.some((block) =>
+      [block?.id, block?.block, block?.bundle].some(
+        (candidate) => identityKey(candidate) && identityKey(candidate) === identityKey(placement.id)
+      )
+    );
+    if (!declared) {
+      issues.push(`Tracked config ${placement.file} places content block ${placement.id} in the active theme but drupal-readback.json content.placedContentBlocks has no record for it.`);
+    }
+  }
+  return issues;
+}
+
+const WATCHED_CAPABILITY_AND_AUTHORING_MODULES = ['scheduler', 'content_moderation', 'canvas', 'experience_builder'];
+
+function enabledModuleDeclarationIssues(drupalReadback, runtime) {
+  const declaredModules = new Set(
+    (Array.isArray(drupalReadback?.drupal?.enabledModules) ? drupalReadback.drupal.enabledModules : [])
+      .map(identityKey)
+  );
+  const issues = [];
+  if (Array.isArray(runtime.coreExtensionModules)) {
+    for (const module of WATCHED_CAPABILITY_AND_AUTHORING_MODULES) {
+      if (runtime.coreExtensionModules.includes(module) && !declaredModules.has(identityKey(module))) {
+        issues.push(`Tracked core.extension.yml enables ${module} but drupal-readback.json drupal.enabledModules does not declare it.`);
+      }
+    }
+  }
+  for (const system of Array.isArray(runtime.authoringSystemsInConfig) ? runtime.authoringSystemsInConfig : []) {
+    if (!declaredModules.has(identityKey(system))) {
+      issues.push(`Tracked config contains ${system} configuration but drupal-readback.json drupal.enabledModules does not declare ${system}.`);
+    }
+  }
+  return issues;
+}
+
 function capabilityCoverageCompletionIssues(drupalReadback, runtime) {
-  const enabledClaims = (Array.isArray(drupalReadback?.capabilityCoverage) ? drupalReadback.capabilityCoverage : [])
-    .filter((row) => row?.enabledForBundle === true);
+  const coverageRows = Array.isArray(drupalReadback?.capabilityCoverage) ? drupalReadback.capabilityCoverage : [];
+  const enabledClaims = coverageRows.filter((row) => row?.enabledForBundle === true);
   const issues = [];
   for (const row of enabledClaims) {
     const bundle = String(row.bundle ?? '').trim();
@@ -1137,6 +1287,18 @@ function capabilityCoverageCompletionIssues(drupalReadback, runtime) {
       issues.push(`Live ${row.capabilityModule} coverage could not be read from tracked config to confirm node.${bundle}.`);
     } else if (!runtimeBundles.some((candidate) => identityKey(candidate) === identityKey(bundle))) {
       issues.push(`drupal-readback.json claims ${row.capabilityModule} is enabled for node.${bundle} but tracked config does not enable it.`);
+    }
+  }
+  for (const [capabilityModule, runtimeBundles] of [
+    ['scheduler', runtime.schedulerEnabledBundles],
+    ['content_moderation', runtime.moderatedBundles]
+  ]) {
+    for (const bundle of Array.isArray(runtimeBundles) ? runtimeBundles : []) {
+      if (!coverageRows.some((row) =>
+        row?.capabilityModule === capabilityModule && identityKey(row?.bundle) === identityKey(bundle)
+      )) {
+        issues.push(`Tracked config enables ${capabilityModule} for node.${bundle} but drupal-readback.json capabilityCoverage has no ${capabilityModule} row for it.`);
+      }
     }
   }
   return issues;
@@ -1363,6 +1525,8 @@ export async function verifyLive({
   const editorCapabilityIssues = [
     ...editorPermissionCompletionIssues(drupalReadback, inspectedDrupalRuntime.rolePermissions),
     ...webformConfigCompletionIssues(drupalReadback, inspectedDrupalRuntime.webformConfigs),
+    ...placedBlockConfigCompletionIssues(drupalReadback, inspectedDrupalRuntime),
+    ...enabledModuleDeclarationIssues(drupalReadback, inspectedDrupalRuntime),
     ...capabilityCoverageCompletionIssues(drupalReadback, inspectedDrupalRuntime)
   ];
   const drupalRuntimeEditorCapabilitiesMatch = editorCapabilityIssues.length === 0;

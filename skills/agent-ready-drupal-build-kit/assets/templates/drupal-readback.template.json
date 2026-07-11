@@ -27,7 +27,15 @@
     "formDisplays": [],
     "viewDisplays": [],
     "canvasPages": [],
-    "placedContentBlocks": []
+    "placedContentBlocks": [
+      {
+        "id": "",
+        "bundle": "",
+        "label": "",
+        "region": "",
+        "theme": ""
+      }
+    ]
   },
   "routing": {
     "aliases": [],

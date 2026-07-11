@@ -200,6 +200,8 @@ Public webforms need a declared submission destination and a named non-admin rol
 
 Include one save with all form defaults in the editor probe and record whether the result is anonymously visible; if it is not, document the exact publish step. When scheduler or moderation modules are enabled, assert per-bundle enablement from exported `node.type` and workflow config or record a named gap acceptance. When the composition decision rejects an authoring tool such as Canvas, remove or hide its editor-facing affordances (uninstall, or strip permissions, menu links, and dashboard entry points) and record the evidence — an enabled authoring system with zero editor-reachable content is a failed editor surface.
 
+Declarations are crosschecked against tracked config, so omission is not an escape hatch: every enabled `block.block.*.yml` placement of a `block_content` block in the active theme must have a `placedContentBlocks` record; each declared webform status must match the exported `webform.webform.*.yml` status; scheduler or moderation wiring found in exported config requires a matching `capabilityCoverage` row; and capability or authoring modules present in tracked `core.extension.yml` (scheduler, content_moderation, canvas, experience_builder) must appear in the declared `enabledModules`.
+
 ## Drupal Build Primitives
 
 Name the expected primitives in the build brief and align them to the encoded Drupal CMS baseline. A Drupal CMS rebuild should use Drupal to hold the site architecture:

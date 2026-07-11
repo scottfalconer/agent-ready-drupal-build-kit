@@ -1263,7 +1263,9 @@ async function independentStructuredGateReasons({
   }
 
   const declaredWebforms = substantiveObjects(drupalReadback?.webforms);
-  const openWebforms = declaredWebforms.filter((webform) => webform.status !== 'closed');
+  const openWebforms = declaredWebforms.filter(
+    (webform) => String(webform.status ?? '').trim().toLowerCase() !== 'closed'
+  );
   const editorSurfaceChecks = substantiveObjects(independentVerification?.editorSurfaceChecks);
   const contentBearingSurfaces = [
     ...substantiveObjects(drupalReadback?.content?.placedContentBlocks).map((block) => ({

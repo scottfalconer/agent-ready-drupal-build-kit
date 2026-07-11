@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { verifyLive } from '../bin/verify.mjs';
+import { scanTrackedEditorCapabilityConfig, verifyLive } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -259,11 +259,15 @@ function liveRouteMatrix(baseUrl) {
 
 function injectedDrupalRuntime(baseUrl, overrides = {}) {
   return {
+    activeTheme: 'fixture_theme',
+    authoringSystemsInConfig: [],
     baseUrl,
+    blockContentPlacements: [],
     confirmed: true,
     configStatusClean: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
+    coreExtensionModules: null,
     frontPage: '/',
     moderatedBundles: [],
     mode: 'test-injected',
@@ -1416,6 +1420,212 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
   );
 });
 
+test('tracked-config capability scan reads block placements, module lists, and multi-entity workflows', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'capability-scan-'));
+  const syncDir = join(projectRoot, 'config', 'sync');
+  mkdirSync(syncDir, { recursive: true });
+  const files = {
+    'block.block.fixture_theme_alert_banner.yml': [
+      'id: fixture_theme_alert_banner',
+      'theme: fixture_theme',
+      'region: header',
+      'plugin: \'block_content:0aa11a1a-1111-4111-8111-111111111111\'',
+      'status: true',
+      ''
+    ].join('\n'),
+    'block.block.fixture_theme_search.yml': [
+      'id: fixture_theme_search',
+      'theme: fixture_theme',
+      'region: header',
+      'plugin: search_form_block',
+      'status: true',
+      ''
+    ].join('\n'),
+    'block.block.other_theme_banner.yml': [
+      'id: other_theme_banner',
+      'theme: other_theme',
+      'region: header',
+      'plugin: \'block_content:0bb22b2b-2222-4222-8222-222222222222\'',
+      'status: true',
+      ''
+    ].join('\n'),
+    'canvas.settings.yml': 'placeholder: true\n',
+    'core.extension.yml': [
+      'module:',
+      '  canvas: 0',
+      '  content_moderation: 0',
+      '  node: 0',
+      '  scheduler: 0',
+      'theme:',
+      '  fixture_theme: 0',
+      'profile: standard',
+      ''
+    ].join('\n'),
+    'node.type.page.yml': [
+      'name: Page',
+      'type: page',
+      'third_party_settings:',
+      '  scheduler:',
+      '    publish_enable: true',
+      ''
+    ].join('\n'),
+    'system.theme.yml': 'admin: claro\ndefault: fixture_theme\n',
+    'webform.webform.contact.yml': [
+      'id: contact',
+      'status: scheduled',
+      'handlers:',
+      '  email_confirmation:',
+      '    id: email',
+      ''
+    ].join('\n'),
+    // Drupal exports entity_types keys sorted, so block_content precedes node.
+    'workflows.workflow.editorial.yml': [
+      'id: editorial',
+      'type_settings:',
+      '  entity_types:',
+      '    block_content:',
+      '      - basic',
+      '    node:',
+      '      - page',
+      '      - article',
+      '  default_moderation_state: draft',
+      ''
+    ].join('\n')
+  };
+  for (const [name, text] of Object.entries(files)) {
+    writeFileSync(join(syncDir, name), text);
+  }
+  const scan = scanTrackedEditorCapabilityConfig(
+    projectRoot,
+    Object.keys(files).map((name) => `config/sync/${name}`)
+  );
+  assert.equal(scan.activeTheme, 'fixture_theme');
+  assert.deepEqual(scan.authoringSystemsInConfig, ['canvas']);
+  assert.deepEqual(scan.moderatedBundles, ['page', 'article'], 'node bundles must be found even when another entity type sorts first');
+  assert.deepEqual(scan.schedulerEnabledBundles, ['page']);
+  assert.deepEqual(scan.coreExtensionModules, ['canvas', 'content_moderation', 'node', 'scheduler']);
+  assert.deepEqual(scan.webformConfigs, [{
+    file: 'config/sync/webform.webform.contact.yml',
+    handlersEmpty: false,
+    id: 'contact',
+    status: 'scheduled'
+  }]);
+  assert.deepEqual(scan.blockContentPlacements, [
+    {
+      enabled: true,
+      file: 'config/sync/block.block.fixture_theme_alert_banner.yml',
+      id: 'fixture_theme_alert_banner',
+      plugin: 'block_content:0aa11a1a-1111-4111-8111-111111111111',
+      region: 'header',
+      theme: 'fixture_theme'
+    },
+    {
+      enabled: true,
+      file: 'config/sync/block.block.other_theme_banner.yml',
+      id: 'other_theme_banner',
+      plugin: 'block_content:0bb22b2b-2222-4222-8222-222222222222',
+      region: 'header',
+      theme: 'other_theme'
+    }
+  ]);
+});
+
+test('completion fails closed when packet declarations omit or contradict tracked config surfaces', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-omission-gaming-'));
+      const canonicalPacket = join(temp, 'canonical');
+      copyTemplatePacket(canonicalPacket);
+      writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(canonicalPacket, baseUrl);
+
+      const cases = [
+        {
+          name: 'placed-block-omitted-from-readback',
+          expected: /places content block fixture_theme_alert_banner in the active theme but drupal-readback\.json content\.placedContentBlocks has no record/,
+          runtimeOverrides: {
+            blockContentPlacements: [{
+              enabled: true,
+              file: 'config/sync/block.block.fixture_theme_alert_banner.yml',
+              id: 'fixture_theme_alert_banner',
+              plugin: 'block_content:0aa11a1a-1111-4111-8111-111111111111',
+              region: 'header',
+              theme: 'fixture_theme'
+            }]
+          }
+        },
+        {
+          name: 'webform-declared-closed-while-config-open',
+          expected: /webform contact status 'closed' does not match tracked config config\/sync\/webform\.webform\.contact\.yml status 'open'/,
+          runtimeOverrides: {
+            webformConfigs: [
+              { file: 'config/sync/webform.webform.contact.yml', handlersEmpty: false, id: 'contact', status: 'open' }
+            ]
+          },
+          mutatePacket: (packetDir) => {
+            mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+              value.webforms = [{
+                webform: 'contact',
+                status: 'closed',
+                publicRoutes: [],
+                handlerIds: [],
+                submissionViewRole: '',
+                spamProtection: {
+                  protector: 'none',
+                  rendersInAnonymousHtml: false,
+                  renderedMarkupSignal: '',
+                  jsOnlyAcceptedBy: '',
+                  jsOnlyRationale: ''
+                }
+              }];
+            });
+          }
+        },
+        {
+          name: 'scheduler-wired-in-config-without-coverage-row',
+          expected: /Tracked config enables scheduler for node\.page but drupal-readback\.json capabilityCoverage has no scheduler row/,
+          runtimeOverrides: { schedulerEnabledBundles: ['page'] }
+        },
+        {
+          name: 'moderation-wired-in-config-without-coverage-row',
+          expected: /Tracked config enables content_moderation for node\.page but drupal-readback\.json capabilityCoverage has no content_moderation row/,
+          runtimeOverrides: { moderatedBundles: ['page'] }
+        },
+        {
+          name: 'core-extension-canvas-missing-from-declared-modules',
+          expected: /Tracked core\.extension\.yml enables canvas but drupal-readback\.json drupal\.enabledModules does not declare it/,
+          runtimeOverrides: { coreExtensionModules: ['canvas', 'node', 'views'] }
+        },
+        {
+          name: 'canvas-config-present-without-declared-module',
+          expected: /Tracked config contains canvas configuration but drupal-readback\.json drupal\.enabledModules does not declare canvas/,
+          runtimeOverrides: { authoringSystemsInConfig: ['canvas'] }
+        }
+      ];
+
+      for (const { name, expected, runtimeOverrides, mutatePacket } of cases) {
+        const packetDir = join(temp, name);
+        cpSync(canonicalPacket, packetDir, { recursive: true });
+        mutatePacket?.(packetDir);
+        const report = await verifyLive({
+          packetDir,
+          targetUrl: baseUrl,
+          cwd: repoRoot,
+          environment: {},
+          drupalRuntime: injectedDrupalRuntime(baseUrl, runtimeOverrides)
+        });
+        assert.equal(report.completeLocalRebuildClaimAllowed, false, name);
+        assert.equal(report.drupalRuntime.editorCapabilitiesMatchPacket, false, name);
+        assert.match(report.completionBlockedReasons.join('\n'), expected, name);
+      }
+    }
+  );
+});
+
 test('live verifier checks rendered webform spam protection and runtime editor capability claims', async () => {
   let honeypotRenders = true;
   await withHttpServer(
@@ -1475,6 +1685,23 @@ test('live verifier checks rendered webform spam protection and runtime editor c
       assert.equal(strippedReport.completeLocalRebuildClaimAllowed, false);
       assert.match(
         strippedReport.errors.join('\n'),
+        /webform contact declares honeypot protection but .* does not render in the fetched anonymous HTML at \/contact/
+      );
+
+      const casedStatusPacket = join(temp, 'cased-status');
+      cpSync(canonicalPacket, casedStatusPacket, { recursive: true });
+      mutateJson(join(casedStatusPacket, 'drupal-readback.json'), (value) => {
+        value.webforms[0].status = 'Open';
+      });
+      const casedStatusReport = await runVerify(injectedDrupalRuntime(baseUrl), casedStatusPacket);
+      assert.equal(
+        casedStatusReport.webformSpamProtectionChecks.length,
+        1,
+        'a non-lowercase status token must not skip the anonymous-HTML spam-protection fetch'
+      );
+      assert.equal(casedStatusReport.valid, false);
+      assert.match(
+        casedStatusReport.errors.join('\n'),
         /webform contact declares honeypot protection but .* does not render in the fetched anonymous HTML at \/contact/
       );
       honeypotRenders = true;
@@ -1543,7 +1770,9 @@ test('CLI discovers the DDEV Drupal runtime and requires clean status plus real 
         <title>Target site</title>
         <link rel="canonical" href="${liveBaseUrl}/">
         <meta name="description" content="Fixture homepage description.">
-      </head><body><h1>Target home</h1></body></html>`);
+      </head><body><h1>Target home</h1>
+      <form><div style="display: none !important;"><input name="url" value=""></div>
+      <input type="hidden" name="honeypot_time" value="fixture"></form></body></html>`);
     },
     async (baseUrl) => {
       liveBaseUrl = baseUrl;
@@ -1563,6 +1792,52 @@ handlers:
   email_confirmation:
     id: email
     label: Email confirmation
+`
+      );
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'webform.webform.feedback.yml'),
+        `status: open
+id: feedback
+title: Feedback
+handlers:
+  email_notification:
+    id: email
+    label: Email notification
+`
+      );
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'core.extension.yml'),
+        `module:
+  content_moderation: 0
+  media: 0
+  node: 0
+  views: 0
+  webform: 0
+theme:
+  fixture_theme: 0
+profile: standard
+`
+      );
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'block.block.fixture_theme_alert_banner.yml'),
+        `id: fixture_theme_alert_banner
+theme: fixture_theme
+region: header
+plugin: 'block_content:0aa11a1a-1111-4111-8111-111111111111'
+status: true
+`
+      );
+      // Drupal exports entity_types keys sorted: block_content precedes node.
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'workflows.workflow.editorial.yml'),
+        `id: editorial
+type_settings:
+  entity_types:
+    block_content:
+      - alert_banner
+    node:
+      - page
+  default_moderation_state: draft
 `
       );
 
@@ -1590,7 +1865,13 @@ const outputs = new Map([
   ['role:list --format=json', JSON.stringify({
     content_editor: {
       label: 'Content Editor',
-      perms: ['create page content', 'edit any page content', 'administer main menu items', 'edit any webform']
+      perms: [
+        'create page content',
+        'edit any page content',
+        'administer main menu items',
+        'edit any webform',
+        'edit any basic block content'
+      ]
     }
   })]
 ]);
@@ -1607,65 +1888,182 @@ process.stdout.write(outputs.get(command) + '\\n');
       writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
       addQualifyingReviewEvidence(packetDir, baseUrl);
       mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
-        readback.drupal.trackedConfigYamlFiles.push('config/sync/webform.webform.contact.yml');
-        readback.webforms = [{
-          webform: 'contact',
-          status: 'open',
-          publicRoutes: ['/'],
-          handlerIds: ['email_confirmation'],
-          submissionViewRole: 'content editor',
-          spamProtection: {
-            protector: 'js_only',
-            rendersInAnonymousHtml: false,
-            renderedMarkupSignal: '',
-            jsOnlyAcceptedBy: 'Fixture Owner',
-            jsOnlyRationale: 'The fixture protector renders only through JavaScript.'
-          }
+        readback.drupal.trackedConfigYamlFiles.push(
+          'config/sync/block.block.fixture_theme_alert_banner.yml',
+          'config/sync/core.extension.yml',
+          'config/sync/webform.webform.contact.yml',
+          'config/sync/webform.webform.feedback.yml',
+          'config/sync/workflows.workflow.editorial.yml'
+        );
+        readback.drupal.enabledModules.push('content_moderation', 'webform');
+        readback.content.placedContentBlocks = [{
+          id: 'fixture_theme_alert_banner',
+          bundle: 'alert_banner',
+          label: 'Alert banner',
+          region: 'header',
+          theme: 'fixture_theme'
         }];
-        readback.rolesAndPermissionsNotes.push({
-          surface: 'webform.contact',
-          surfaceType: 'webform',
-          renderedOnPublicRoutes: ['/'],
-          editorRole: 'content editor',
-          grantingPermissions: ['edit any webform'],
-          capabilities: { create: true, editAny: true, delete: false, publish: false },
-          disposition: 'editor_editable',
-          adminOnlyAcceptedBy: '',
-          adminOnlyRationale: '',
-          generatedFrom: 'drush role:list and exported user.role config'
-        });
+        readback.webforms = [
+          {
+            webform: 'contact',
+            status: 'open',
+            publicRoutes: ['/'],
+            handlerIds: ['email_confirmation'],
+            submissionViewRole: 'content editor',
+            spamProtection: {
+              protector: 'honeypot',
+              rendersInAnonymousHtml: true,
+              renderedMarkupSignal: 'hidden honeypot input and honeypot_time field',
+              jsOnlyAcceptedBy: '',
+              jsOnlyRationale: ''
+            }
+          },
+          {
+            webform: 'feedback',
+            status: 'open',
+            publicRoutes: ['/'],
+            handlerIds: ['email_notification'],
+            submissionViewRole: 'content editor',
+            spamProtection: {
+              protector: 'js_only',
+              rendersInAnonymousHtml: false,
+              renderedMarkupSignal: '',
+              jsOnlyAcceptedBy: 'Fixture Owner',
+              jsOnlyRationale: 'The fixture protector renders only through JavaScript.'
+            }
+          }
+        ];
+        readback.capabilityCoverage = [{
+          capabilityModule: 'content_moderation',
+          entityType: 'node',
+          bundle: 'page',
+          enabledForBundle: true,
+          configSource: 'config/sync/workflows.workflow.editorial.yml',
+          gapAcceptedBy: '',
+          gapRationale: ''
+        }];
+        readback.rolesAndPermissionsNotes.push(
+          {
+            surface: 'webform.contact',
+            surfaceType: 'webform',
+            renderedOnPublicRoutes: ['/'],
+            editorRole: 'content editor',
+            grantingPermissions: ['edit any webform'],
+            capabilities: { create: true, editAny: true, delete: false, publish: false },
+            disposition: 'editor_editable',
+            adminOnlyAcceptedBy: '',
+            adminOnlyRationale: '',
+            generatedFrom: 'drush role:list and exported user.role config'
+          },
+          {
+            surface: 'webform.feedback',
+            surfaceType: 'webform',
+            renderedOnPublicRoutes: ['/'],
+            editorRole: 'content editor',
+            grantingPermissions: ['edit any webform'],
+            capabilities: { create: true, editAny: true, delete: false, publish: false },
+            disposition: 'editor_editable',
+            adminOnlyAcceptedBy: '',
+            adminOnlyRationale: '',
+            generatedFrom: 'drush role:list and exported user.role config'
+          },
+          {
+            surface: 'block_content.alert_banner',
+            surfaceType: 'block_content',
+            renderedOnPublicRoutes: ['/'],
+            editorRole: 'content editor',
+            grantingPermissions: ['edit any basic block content'],
+            capabilities: { create: false, editAny: true, delete: false, publish: false },
+            disposition: 'editor_editable',
+            adminOnlyAcceptedBy: '',
+            adminOnlyRationale: '',
+            generatedFrom: 'drush role:list and exported user.role config'
+          }
+        );
       });
       mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
-        browser.editorWorkflowChecks.push({
-          ...browser.editorWorkflowChecks[0],
-          workflow: 'other',
-          entityType: 'webform',
-          bundle: 'contact',
-          drupalRoute: '/admin/structure/webform/manage/contact',
-          taskPerformed: 'Edited the contact webform as the non-admin editor.'
-        });
+        browser.editorWorkflowChecks.push(
+          {
+            ...browser.editorWorkflowChecks[0],
+            workflow: 'other',
+            entityType: 'webform',
+            bundle: 'contact',
+            drupalRoute: '/admin/structure/webform/manage/contact',
+            taskPerformed: 'Edited the contact webform as the non-admin editor.'
+          },
+          {
+            ...browser.editorWorkflowChecks[0],
+            workflow: 'other',
+            entityType: 'webform',
+            bundle: 'feedback',
+            drupalRoute: '/admin/structure/webform/manage/feedback',
+            taskPerformed: 'Edited the feedback webform as the non-admin editor.'
+          },
+          {
+            ...browser.editorWorkflowChecks[0],
+            workflow: 'edit',
+            entityType: 'block_content',
+            bundle: 'alert_banner',
+            drupalRoute: '/admin/content/block',
+            taskPerformed: 'Edited the alert banner block as the non-admin editor.'
+          }
+        );
       });
       mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
-        independent.editorSurfaceChecks.push({
-          surface: 'webform.contact',
-          surfaceType: 'webform',
-          editorUser: 'editor',
-          editorRole: 'content editor',
-          editFormRoute: '/admin/structure/webform/manage/contact',
-          editFormReached: true,
-          status: 'pass',
-          evidence: 'claim-evidence.json'
-        });
-        independent.publicWebformChecks = [{
-          webform: 'contact',
-          route: '/',
-          submissionDestination: 'email handler email_confirmation',
-          submissionViewRole: 'content editor',
-          submissionViewRoleVerified: true,
-          spamProtectionRenderedSignal: '',
-          status: 'pass',
-          evidence: 'claim-evidence.json'
-        }];
+        independent.editorSurfaceChecks.push(
+          {
+            surface: 'webform.contact',
+            surfaceType: 'webform',
+            editorUser: 'editor',
+            editorRole: 'content editor',
+            editFormRoute: '/admin/structure/webform/manage/contact',
+            editFormReached: true,
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          },
+          {
+            surface: 'webform.feedback',
+            surfaceType: 'webform',
+            editorUser: 'editor',
+            editorRole: 'content editor',
+            editFormRoute: '/admin/structure/webform/manage/feedback',
+            editFormReached: true,
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          },
+          {
+            surface: 'block_content.alert_banner',
+            surfaceType: 'block_content',
+            editorUser: 'editor',
+            editorRole: 'content editor',
+            editFormRoute: '/admin/content/block',
+            editFormReached: true,
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          }
+        );
+        independent.publicWebformChecks = [
+          {
+            webform: 'contact',
+            route: '/',
+            submissionDestination: 'email handler email_confirmation',
+            submissionViewRole: 'content editor',
+            submissionViewRoleVerified: true,
+            spamProtectionRenderedSignal: 'hidden honeypot input and honeypot_time field in anonymous HTML',
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          },
+          {
+            webform: 'feedback',
+            route: '/',
+            submissionDestination: 'email handler email_notification',
+            submissionViewRole: 'content editor',
+            submissionViewRoleVerified: true,
+            spamProtectionRenderedSignal: '',
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          }
+        ];
       });
 
       const verifierArgs = [join(repoRoot, 'bin', 'verify.mjs'), '--packet', 'review-packet'];
@@ -1688,9 +2086,13 @@ process.stdout.write(outputs.get(command) + '\\n');
       execFileSync('git', ['init', '-q'], { cwd: targetRoot });
       execFileSync('git', [
         'add',
+        'config/sync/block.block.fixture_theme_alert_banner.yml',
+        'config/sync/core.extension.yml',
         'config/sync/system.site.yml',
         'config/sync/system.theme.yml',
-        'config/sync/webform.webform.contact.yml'
+        'config/sync/webform.webform.contact.yml',
+        'config/sync/webform.webform.feedback.yml',
+        'config/sync/workflows.workflow.editorial.yml'
       ], { cwd: targetRoot });
 
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
@@ -1703,6 +2105,18 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
+      assert.equal(cleanReport.drupalRuntime.activeTheme, 'fixture_theme');
+      assert.deepEqual(cleanReport.drupalRuntime.moderatedBundles, ['page']);
+      assert.equal(
+        cleanReport.webformSpamProtectionChecks.length,
+        1,
+        'the rendered honeypot declaration must trigger a live anonymous-HTML check'
+      );
+      assert.equal(
+        cleanReport.webformSpamProtectionChecks[0].passed,
+        true,
+        cleanReport.webformSpamProtectionChecks[0].errors.join('\n')
+      );
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
