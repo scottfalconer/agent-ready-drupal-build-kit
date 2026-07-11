@@ -172,6 +172,22 @@
     "disconnectedCanvasStarterPages": [],
     "status": "pass | fail | blocked"
   },
+  "starterConfigEntitySweep": {
+    "webformsReviewed": false,
+    "viewsPagesReviewed": false,
+    "canvasTemplatesReviewed": false,
+    "openUnreferencedEntities": [
+      {
+        "configName": "",
+        "kind": "webform | view_page | canvas_content_template | canvas_page_template | other",
+        "referencedBy": [],
+        "disposition": "keep | close | delete",
+        "dispositionOwner": "",
+        "rationale": ""
+      }
+    ],
+    "status": "pass | fail | blocked"
+  },
   "canvasPlaceholderChecks": {
     "canvasEnabled": false,
     "starterCanvasPagesChecked": [],

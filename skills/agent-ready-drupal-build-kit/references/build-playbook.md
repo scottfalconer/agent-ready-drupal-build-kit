@@ -83,6 +83,9 @@ The verifier must emit `review-packet/independent-verification.json`. At minimum
 - raw embed and source-markup scans for `<iframe>`, `<script>`, inline handlers, `javascript:` URLs, style attributes, and raw source HTML in editorial fields;
 - footer, menu, legal, privacy, search, contact, target-required route, and source-intent link resolution;
 - placeholder text, starter content, live test pages, default Drupal CMS content, disconnected Canvas starter pages, public Canvas placeholder copy, and stale screenshots or route evidence;
+- config-vs-reality falsification: an enabled Canvas content/page template in the tracked config sync directory contradicts any "Canvas unused" claim, and every open-but-unreferenced starter config entity (webform, Views page, Canvas content/page template) carries a keep/close/delete disposition with a named owner and rationale;
+- dead theme templates: each custom theme template leaves a distinctive marker (class, wrapper, or attribute) observable in captured live HTML on at least one route, or the packet records a documented exception naming the template and why it ships;
+- page templates render the content region, where status messages, the page title, and local tasks land, or the packet records a documented exception;
 - wrong front page, duplicate aliases, route drift disposition gaps, raw `/node/*` leaks, unexpected public 200 routes, and missing redirects;
 - first-fold brand-defining assets on primary routes, including hero artwork, logo/lockup, signature graphics, and primary CTA treatment;
 - non-admin editor add-a-row or add-a-node tasks for every custom public bundle, every repeating public bundle, and every declared collection, proving that new content appears in the expected View, listing, detail route, menu, or Canvas composition without code changes;
@@ -140,7 +143,9 @@ For each leftover route, either:
 - redirect it deliberately;
 - record it as a blocked legal/privacy/footer decision.
 
-The packet should prove cleanup, because stale starter routes can make a Drupal build look more complete than it is.
+Starter leftovers are not only routes. Sweep starter config entities the same way: a webform that is open but referenced by no block, menu, or link; a Views page nothing links to; or an enabled Canvas content/page template in a build that claims Canvas is unused. Each open-but-unreferenced starter config entity needs a keep, close, or delete disposition with a named owner and rationale in `independent-verification.json` `starterConfigEntitySweep`.
+
+The packet should prove cleanup, because stale starter routes and live starter config can make a Drupal build look more complete than it is.
 
 Also check target-required routes introduced by the Drupal build even if the source did not expose them clearly: privacy/legal/footer links, sitemap and robots behavior when enabled, login/admin access expectations, canonical front page behavior, and locally introduced menu or footer links. A broken target-owned footer link fails even when the source route inventory did not include that path.
 
@@ -346,6 +351,8 @@ Use another Drupal-native owner when it fits the route:
 Bad Canvas use: building repeatable structured content as hand-assembled pages. Bad node use: building a one-off landing page as a tortured content type with fields for every section, button color, logo row, promo card, and layout variant. A build that does either, or hand-codes homepage or landing-page content in Twig, a Views text area, a custom controller, or generic custom markup without this ownership decision, should return to the review loop.
 
 Declare the build type so reviewers know what to expect: structured Drupal-native rebuild with Canvas intentionally unused; hybrid structured content plus Canvas composition; Canvas-heavy rebuild with Drupal-owned structured data embedded; or constrained fallback because Canvas was unavailable or blocked. This is not a marketing label. It must match the source shape, Canvas availability, and editor ownership evidence.
+
+The declaration must also match tracked config. An enabled Canvas content template (`canvas.content_template.<entity>.<bundle>.<view_mode>`) supersedes the theme's `node--*.html.twig` for that bundle and view mode, so the theme template, its preprocess code, and its CSS can be dead code while every page silently renders through Canvas. Drupal CMS ships such templates enabled by default. A build declared "Canvas intentionally unused" must disable or delete them in the tracked config sync directory, or change the declaration and make Canvas the documented composition owner. The verifiers hard-fail a Canvas-unused claim while an enabled Canvas content/page template config targets a rebuild bundle.
 
 ## Composition Modeling Before Build
 

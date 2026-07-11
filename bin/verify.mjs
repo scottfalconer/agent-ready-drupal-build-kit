@@ -8,7 +8,12 @@ import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePacket } from './verify-packet.mjs';
+import {
+  CANVAS_TEMPLATE_CONFIG_RE,
+  canvasNonUseClaimed,
+  canvasTemplateConfigTargetsRebuildBundle,
+  validatePacket
+} from './verify-packet.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
@@ -482,7 +487,7 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
 function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
-    return { confirmed: false, directory: '', yamlFiles: [] };
+    return { activeCanvasTemplateConfigs: [], confirmed: false, directory: '', yamlFiles: [] };
   }
   const directory = relative(projectRoot, hostPath).split(sep).join('/');
   try {
@@ -496,9 +501,18 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    return { confirmed: yamlFiles.length > 0, directory, yamlFiles };
+    const activeCanvasTemplateConfigs = yamlFiles
+      .filter((path) => CANVAS_TEMPLATE_CONFIG_RE.test(path))
+      .filter((path) => {
+        try {
+          return !/^status:\s*false\b/m.test(readFileSync(join(projectRoot, path), 'utf8'));
+        } catch {
+          return true;
+        }
+      });
+    return { activeCanvasTemplateConfigs, confirmed: yamlFiles.length > 0, directory, yamlFiles };
   } catch {
-    return { confirmed: false, directory, yamlFiles: [] };
+    return { activeCanvasTemplateConfigs: [], confirmed: false, directory, yamlFiles: [] };
   }
 }
 
@@ -523,6 +537,7 @@ function inspectDrupalRuntime(cwd, environment) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
+      activeCanvasTemplateConfigs: [],
       baseUrl: '',
       confirmed: false,
       configStatusClean: false,
@@ -552,6 +567,7 @@ function inspectDrupalRuntime(cwd, environment) {
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
   return {
+    activeCanvasTemplateConfigs: trackedConfig.activeCanvasTemplateConfigs,
     baseUrl,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
@@ -1118,6 +1134,21 @@ export async function verifyLive({
     }
   }
 
+  const runtimeActiveCanvasTemplateConfigs = (Array.isArray(inspectedDrupalRuntime.activeCanvasTemplateConfigs)
+    ? inspectedDrupalRuntime.activeCanvasTemplateConfigs
+    : [])
+    .map((path) => String(path).trim().replaceAll('\\', '/'))
+    .filter(Boolean);
+  const contradictoryCanvasTemplateConfigs = canvasNonUseClaimed(patternMap, independentVerification)
+    ? runtimeActiveCanvasTemplateConfigs.filter((path) =>
+        canvasTemplateConfigTargetsRebuildBundle(path, patternMap, drupalReadback))
+    : [];
+  if (contradictoryCanvasTemplateConfigs.length > 0) {
+    liveErrors.push(
+      `Enabled Canvas template config contradicts the packet's Canvas-unused claim: ${contradictoryCanvasTemplateConfigs.join(', ')}. Disable or delete the template or declare Canvas the composition owner.`
+    );
+  }
+
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
@@ -1258,7 +1289,9 @@ export async function verifyLive({
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
+      activeCanvasTemplateConfigs: runtimeActiveCanvasTemplateConfigs,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
+      canvasUnusedClaimContradictions: contradictoryCanvasTemplateConfigs,
       configStatusClean: drupalRuntimeConfigStatusClean,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),

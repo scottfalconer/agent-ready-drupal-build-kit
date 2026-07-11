@@ -259,6 +259,7 @@ function liveRouteMatrix(baseUrl) {
 
 function injectedDrupalRuntime(baseUrl, overrides = {}) {
   return {
+    activeCanvasTemplateConfigs: [],
     baseUrl,
     confirmed: true,
     configStatusClean: true,
@@ -497,6 +498,13 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     publicCanvasPlaceholderFindings: [],
     disconnectedCanvasEditorRoutes: [],
     canvasIntentionallyUnusedAndDocumented: true,
+    status: 'pass'
+  };
+  independent.starterConfigEntitySweep = {
+    webformsReviewed: true,
+    viewsPagesReviewed: true,
+    canvasTemplatesReviewed: true,
+    openUnreferencedEntities: [],
     status: 'pass'
   };
   independent.firstFoldBrandAssetChecks = ['desktop', 'mobile'].map((viewport) => ({
@@ -1522,6 +1530,27 @@ test('completion fails closed when structured gate evidence or applicability dis
       mutate: (value) => { value.contentChecks = []; }
     },
     {
+      name: 'starter-config-entity-sweep-missing',
+      file: 'independent-verification.json',
+      expected: /review starter config entities/i,
+      mutate: (value) => { delete value.starterConfigEntitySweep; }
+    },
+    {
+      name: 'starter-config-entity-disposition-without-owner',
+      file: 'independent-verification.json',
+      expected: /keep, close, or delete disposition with a named owner/i,
+      mutate: (value) => {
+        value.starterConfigEntitySweep.openUnreferencedEntities = [{
+          configName: 'webform.webform.contact',
+          kind: 'webform',
+          referencedBy: [],
+          disposition: 'keep',
+          dispositionOwner: '',
+          rationale: ''
+        }];
+      }
+    },
+    {
       name: 'packet-freshness',
       file: 'independent-verification.json',
       expected: /packet freshness checks must pass pattern-map\.json/i,
@@ -1704,6 +1733,115 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       assert.match(blockedReasons, expectedReason, name);
     }
   }
+});
+
+test('an enabled Canvas content template falsifies a Canvas-unused claim', async () => {
+  const canvasTemplatePath = 'config/sync/canvas.content_template.node.page.full.yml';
+  const canvasTemplateYaml = (status) => [
+    'uuid: 2a7f2b1c-0000-4000-8000-000000000000',
+    'langcode: en',
+    `status: ${status}`,
+    'id: node.page.full',
+    'content_entity_type_id: node',
+    'content_entity_type_bundle: page',
+    'content_entity_type_view_mode: full',
+    ''
+  ].join('\n');
+  const cases = [
+    {
+      name: 'enabled-template-contradicts-claim',
+      yaml: canvasTemplateYaml('true'),
+      trackedPath: canvasTemplatePath,
+      completionSupported: false,
+      expected: /canvas\.content_template\.node\.page\.full\.yml.*Canvas is unused/i
+    },
+    {
+      name: 'disabled-template-clears-contradiction',
+      yaml: canvasTemplateYaml('false'),
+      trackedPath: canvasTemplatePath,
+      completionSupported: true
+    },
+    {
+      name: 'unreadable-template-fails-closed',
+      yaml: null,
+      trackedPath: canvasTemplatePath,
+      completionSupported: false,
+      expected: /canvas\.content_template\.node\.page\.full\.yml.*not confirmed disabled/i
+    },
+    {
+      name: 'template-outside-rebuild-bundles-is-not-a-contradiction',
+      yaml: canvasTemplateYaml('true'),
+      trackedPath: 'config/sync/canvas.content_template.node.starter_demo.full.yml',
+      completionSupported: true
+    }
+  ];
+
+  for (const testCase of cases) {
+    const temp = mkdtempSync(join(tmpdir(), `canvas-config-claim-${testCase.name}-`));
+    const packetDir = join(temp, 'review-packet');
+    copyTemplatePacket(packetDir);
+    writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+    addQualifyingReviewEvidence(packetDir, 'https://target.example');
+    if (testCase.yaml !== null) {
+      mkdirSync(dirname(join(temp, testCase.trackedPath)), { recursive: true });
+      writeFileSync(join(temp, testCase.trackedPath), testCase.yaml);
+    }
+    mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+      value.drupal.trackedConfigYamlFiles.push(testCase.trackedPath);
+    });
+
+    const report = await validatePacket({ packetDir });
+
+    assert.equal(
+      report.completionEvidence.packetSupportsCompletion,
+      testCase.completionSupported,
+      `${testCase.name}: ${report.completionEvidence.packetCompletionBlockedReasons.join('\n')}`
+    );
+    if (testCase.expected) {
+      assert.match(
+        report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        testCase.expected,
+        testCase.name
+      );
+    }
+  }
+});
+
+test('live verification rejects an enabled Canvas template config in the runtime sync directory when the packet claims Canvas is unused', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-canvas-config-claim-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          activeCanvasTemplateConfigs: ['config/sync/canvas.content_template.node.page.full.yml']
+        })
+      });
+
+      assert.equal(report.valid, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.deepEqual(
+        report.drupalRuntime.canvasUnusedClaimContradictions,
+        ['config/sync/canvas.content_template.node.page.full.yml']
+      );
+      assert.match(
+        report.errors.join('\n'),
+        /canvas\.content_template\.node\.page\.full\.yml.*Canvas-unused claim|Canvas-unused claim.*canvas\.content_template\.node\.page\.full\.yml/i
+      );
+    }
+  );
 });
 
 test('self-authored count and exclusion dispositions cannot hide collection shortfalls', async () => {

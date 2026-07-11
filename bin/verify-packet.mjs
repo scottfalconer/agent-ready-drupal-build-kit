@@ -15,6 +15,14 @@ const GATE_CHECKED_BY = new Set(['human', 'verify-script', 'verifier', 'blind-ve
 const GATE_BLOCKING = new Set(['handoff', 'launch']);
 const BLIND_DEFECT_SEVERITIES = new Set(['blocker', 'critical', 'high', 'medium', 'low']);
 const BLIND_DEFECT_STATUSES = new Set(['open', 'fixed', 'accepted_out_of_scope', 'external_blocker']);
+const STARTER_CONFIG_ENTITY_KINDS = new Set([
+  'webform',
+  'view_page',
+  'canvas_content_template',
+  'canvas_page_template',
+  'other'
+]);
+const STARTER_CONFIG_ENTITY_DISPOSITIONS = new Set(['keep', 'close', 'delete']);
 const BLIND_ROUTE_CHECKS = [
   'actualRequestedOutcome',
   'firstFoldVisualParity',
@@ -710,6 +718,47 @@ function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
   return ledgerRows.filter((candidate) => normalizeRouteKey(candidate?.sourceRoute) === source).length === 1;
 }
 
+// Drupal Canvas / Experience Builder template config entities silently supersede theme
+// node--*.html.twig output for their bundle/view-mode, so an enabled one falsifies any
+// "Canvas intentionally unused" declaration.
+export const CANVAS_TEMPLATE_CONFIG_RE =
+  /(?:^|[\\/])(?:canvas|experience_builder)\.(?:content_template|page_template)\.[^\\/]*\.ya?ml$/i;
+
+export function canvasNonUseClaimed(patternMap, independentVerification) {
+  return /canvas_unused/.test(String(patternMap?.buildTypeDeclaration?.type ?? '')) ||
+    independentVerification?.canvasPlaceholderChecks?.canvasIntentionallyUnusedAndDocumented === true;
+}
+
+export function canvasTemplateConfigTargetsRebuildBundle(configPath, patternMap, drupalReadback) {
+  const configName = basename(String(configPath ?? '').trim()).replace(/\.ya?ml$/i, '');
+  const [, templateKind, entityType = '', bundle = ''] = configName.split('.');
+  if (templateKind !== 'content_template') {
+    return true;
+  }
+  if (entityType !== 'node' || !bundle) {
+    return true;
+  }
+  const rebuildNodeBundles = new Set([
+    ...substantiveObjects(patternMap?.contentTypes)
+      .map((record) => String(record?.machineName || record?.bundle || '').trim()),
+    ...substantiveObjects(drupalReadback?.content?.nodes)
+      .map((record) => String(record?.type || record?.bundle || '').trim())
+  ].filter(Boolean));
+  return rebuildNodeBundles.has(bundle);
+}
+
+async function trackedConfigEntityConfirmedDisabled(projectRoot, configPath) {
+  const candidate = resolve(projectRoot, configPath);
+  if (isAbsolute(configPath) || relative(projectRoot, candidate).startsWith('..')) {
+    return false;
+  }
+  try {
+    return /^status:\s*false\b/m.test(await readFile(candidate, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
 function editorWorkflowMatchesBundle(check, bundle) {
   if (privilegedEditorIdentity(check?.editorUser) || privilegedEditorIdentity(check?.editorRole)) {
     return false;
@@ -1059,6 +1108,37 @@ async function independentStructuredGateReasons({
     (!canvasEvidenceRequired && canvasPlaceholderChecks.canvasIntentionallyUnusedAndDocumented !== true)
   ) {
     reasons.push('independent-verification.json Canvas placeholder checks must pass and explicitly document intentional non-use when Canvas is not part of the build.');
+  }
+
+  if (canvasNonUseClaimed(patternMap, independentVerification)) {
+    const projectRoot = dirname(resolve(packetDir));
+    const trackedCanvasTemplateConfigs = arrayOrEmpty(drupalReadback?.drupal?.trackedConfigYamlFiles)
+      .map((path) => String(path ?? '').trim().replaceAll('\\', '/'))
+      .filter((path) => CANVAS_TEMPLATE_CONFIG_RE.test(path))
+      .filter((path) => canvasTemplateConfigTargetsRebuildBundle(path, patternMap, drupalReadback));
+    for (const configPath of trackedCanvasTemplateConfigs) {
+      if (!await trackedConfigEntityConfirmedDisabled(projectRoot, configPath)) {
+        reasons.push(`Tracked Canvas template config ${configPath} is not confirmed disabled while the packet claims Canvas is unused; disable or delete the template or declare Canvas the composition owner.`);
+      }
+    }
+  }
+
+  const starterConfigSweep = independentVerification?.starterConfigEntitySweep ?? {};
+  const starterConfigDispositions = substantiveObjects(starterConfigSweep.openUnreferencedEntities);
+  if (
+    starterConfigSweep.status !== 'pass' ||
+    starterConfigSweep.webformsReviewed !== true ||
+    starterConfigSweep.viewsPagesReviewed !== true ||
+    starterConfigSweep.canvasTemplatesReviewed !== true ||
+    starterConfigDispositions.some((record) =>
+      !String(record.configName ?? '').trim() ||
+      !STARTER_CONFIG_ENTITY_KINDS.has(record.kind) ||
+      !STARTER_CONFIG_ENTITY_DISPOSITIONS.has(record.disposition) ||
+      !String(record.dispositionOwner ?? '').trim() ||
+      !String(record.rationale ?? '').trim()
+    )
+  ) {
+    reasons.push('independent-verification.json must review starter config entities (webforms, Views pages, Canvas templates) and record a keep, close, or delete disposition with a named owner and rationale for every open-but-unreferenced entity.');
   }
 
   const firstFoldChecks = substantiveObjects(independentVerification?.firstFoldBrandAssetChecks);

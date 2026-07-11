@@ -147,7 +147,7 @@
     },
     {
       "id": "G-CANVAS-01",
-      "title": "Canvas component model fidelity checked when Canvas is used",
+      "title": "Canvas component model fidelity checked when Canvas is used; Canvas non-use claims falsified against enabled Canvas template config",
       "phase": 6,
       "evidenceFile": "independent-verification.json",
       "checkedBy": "verifier",
