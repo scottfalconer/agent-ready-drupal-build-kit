@@ -75,6 +75,7 @@ drupal-project/
       blind-adversarial-review.json
       drupal-readback.json
       field-output-matrix.json
+      negative-route-consent.json
       launch-checklist.md
       evidence/
         independent-verification/
@@ -111,6 +112,7 @@ Before calling the local build successful, the agent must record:
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
 - composition evidence showing the target's actual route owner matches the declared owner, or a target-bound accepted deviation names the fallback, rationale, accepter, and evidence;
 - rendered SEO evidence for every primary route, including one usable canonical, a non-empty meta description, and `og:image` where applicable; each `not_applicable` disposition needs reviewed rationale and evidence;
+- negative-route and consent evidence: a generated 404 with title/H1, noindex policy, and absent-or-self canonical; access-wall canonical checks; all rendered internal legal/privacy links; active consent managers/applications and controlled resources; and fresh before-consent browser evidence for every primary route with consent storage cleared;
 - anonymous public route checks;
 - functional checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
@@ -118,7 +120,7 @@ Before calling the local build successful, the agent must record:
 - a scoped gap list for operator, maintainer, content/business review, legal/privacy, integration, accessibility, performance, security, SEO, and launch evidence;
 - an open decisions handoff that lists only human-owned decisions with current evidence, options, owner role, impact, and affected gate.
 
-The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output on primary routes, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
+The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output, probes negative/access-wall routes, resolves rendered legal/privacy links, reconciles active consent config and pre-consent resource behavior, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
 
 ## Fallback
 

@@ -36,6 +36,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.deepEqual(Object.keys(MACHINE_GATE_EVALUATORS).sort(), expected);
   assert.deepEqual([...new Set(gates.gates.map((gate) => gate.blocking))].sort(), ['handoff', 'launch']);
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
+  assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
 });
 
 function writeJson(path, value) {
@@ -102,8 +103,20 @@ function resolveEnumSentinels(value) {
   return value;
 }
 
-async function withHttpServer(handler, callback) {
-  const server = createServer(handler);
+async function withHttpServer(handler, callback, { defaultVerificationRoutes = true } = {}) {
+  const server = createServer((request, response) => {
+    if (defaultVerificationRoutes && request.url?.startsWith('/.well-known/agent-ready-missing-')) {
+      response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Page not found</title><meta name="robots" content="noindex"></head><body><h1>Page not found</h1></body></html>');
+      return;
+    }
+    if (defaultVerificationRoutes && request.url === '/user/login') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Log in</title></head><body><h1>Log in</h1></body></html>');
+      return;
+    }
+    handler(request, response);
+  });
   await new Promise((resolveListen, rejectListen) => {
     server.once('error', rejectListen);
     server.listen(0, '127.0.0.1', resolveListen);
@@ -264,6 +277,14 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     configStatusClean: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
+    consentInventory: {
+      applications: [],
+      configNames: [],
+      confirmed: true,
+      detected: false,
+      managerModules: [],
+      reason: ''
+    },
     frontPage: '/',
     mode: 'test-injected',
     project: 'fixture',
@@ -272,6 +293,42 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     trackedConfigDirectory: 'config/sync',
     trackedConfigYamlFiles: ['config/sync/system.site.yml', 'config/sync/system.theme.yml'],
     ...overrides
+  };
+}
+
+function negativeRouteConsentRecord(targetBaseUrl) {
+  return {
+    schemaVersion: 'public-kit.negative-route-consent.1',
+    site: targetBaseUrl,
+    checkedAt: testCheckedAt,
+    toolOrMethod: 'Live HTTP checks and active Drupal config inspection',
+    missingRoute: {
+      noindexPolicy: 'required',
+      canonicalPolicy: 'absent_or_self',
+      statusOnlyDisposition: { acceptedBy: '', rationale: '', evidence: [] }
+    },
+    accessWallRoutes: [
+      {
+        path: '/user/login',
+        expectedBehavior: 'available',
+        canonicalPolicy: 'absent_or_self',
+        externalAuthDisposition: { expectedOrigin: '', acceptedBy: '', rationale: '', evidence: [] }
+      }
+    ],
+    legalPrivacyScope: {
+      reviewed: true,
+      requirements: [],
+      noRoutesReason: 'The fixture renders no legal or privacy links.'
+    },
+    consent: {
+      discoveryStatus: 'not_installed',
+      notInstalledReason: 'Active Drupal config contains no consent manager.',
+      managers: [],
+      applications: [],
+      beforeConsentChecks: []
+    },
+    runSpecificEvidenceRecorded: true,
+    notes: ''
   };
 }
 
@@ -557,6 +614,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     'browser-evidence.json',
     'drupal-readback.json',
     'field-output-matrix.json',
+    'negative-route-consent.json',
     'parity-report.json',
     'pattern-map.json'
   ].map((artifact) => ({
@@ -997,6 +1055,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.blockers = [];
   writeJson(readbackPath, readback);
 
+  writeJson(join(packetDir, 'negative-route-consent.json'), negativeRouteConsentRecord(targetBaseUrl));
+
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
@@ -1371,6 +1431,10 @@ if (args[0] !== 'drush') {
   process.exit(1);
 }
 const command = args.slice(1).join(' ');
+if (args[1] === 'php:eval') {
+  process.stdout.write(JSON.stringify({ schemaVersion: 'public-kit.consent-runtime.1', confirmed: true, detected: false, managerModules: [], configNames: [], applications: [] }) + '\\n');
+  process.exit(0);
+}
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
   ['status --field=root', 'web'],
@@ -1913,7 +1977,8 @@ test('a coherent but stale packet cannot authorize current local completion', as
     'independent-verification.json',
     'blind-adversarial-review.json',
     'drupal-readback.json',
-    'field-output-matrix.json'
+    'field-output-matrix.json',
+    'negative-route-consent.json'
   ]) {
     mutateJson(join(packetDir, file), (value) => { value.checkedAt = staleCheckedAt; });
   }
@@ -2759,4 +2824,299 @@ test('blind completion evidence rejects a text file named like a screenshot', as
   assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
   assert.match(report.errors.join('\n'), /checks\.actualRequestedOutcome must be pass/);
   assert.match(report.errors.join('\n'), /must be a credible packet-local PNG, JPEG, WebP, or GIF capture/);
+});
+
+test('generated missing-route verification rejects soft 404s, unrelated canonicals, and missing noindex', async () => {
+  const cases = [
+    {
+      name: 'soft-404',
+      status: 200,
+      head: '<title>Page not found</title><meta name="robots" content="noindex">',
+      expected: /must return exactly 404/i
+    },
+    {
+      name: 'unrelated-canonical',
+      status: 404,
+      head: '<title>Page not found</title><meta name="robots" content="noindex"><link rel="canonical" href="/">',
+      expected: /rendered canonical.*instead of itself/i
+    },
+    {
+      name: 'missing-noindex',
+      status: 404,
+      head: '<title>Page not found</title>',
+      expected: /required noindex/i
+    }
+  ];
+
+  for (const fixture of cases) {
+    await withHttpServer(
+      (request, response) => {
+        if (request.url?.startsWith('/.well-known/agent-ready-missing-')) {
+          response.writeHead(fixture.status, { 'content-type': 'text/html' });
+          response.end(`<html><head>${fixture.head}</head><body><h1>Page not found</h1></body></html>`);
+          return;
+        }
+        if (request.url === '/user/login') {
+          response.writeHead(200, { 'content-type': 'text/html' });
+          response.end('<title>Log in</title><h1>Log in</h1>');
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end('<title>Target site</title><h1>Target home</h1>');
+      },
+      async (baseUrl) => {
+        const temp = mkdtempSync(join(tmpdir(), `negative-${fixture.name}-`));
+        const packetDir = join(temp, 'review-packet');
+        copyTemplatePacket(packetDir);
+        writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+        writeJson(join(packetDir, 'negative-route-consent.json'), negativeRouteConsentRecord(baseUrl));
+
+        const report = await verifyLive({ packetDir, targetUrl: baseUrl, drupalRuntime: injectedDrupalRuntime(baseUrl) });
+        assert.equal(report.liveTargetValid, false, fixture.name);
+        assert.match(report.errors.join('\n'), fixture.expected, fixture.name);
+      },
+      { defaultVerificationRoutes: false }
+    );
+  }
+});
+
+test('access-wall verification rejects a login page canonicalized to public content', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const origin = `http://${request.headers.host}`;
+      if (request.url?.startsWith('/.well-known/agent-ready-missing-')) {
+        response.writeHead(404, { 'content-type': 'text/html' });
+        response.end('<title>Page not found</title><meta name="robots" content="noindex"><h1>Page not found</h1>');
+        return;
+      }
+      if (request.url === '/user/login') {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.end(`<title>Log in</title><link rel="canonical" href="${origin}/canvas"><h1>Log in</h1>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<title>Target site</title><h1>Target home</h1>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'access-wall-canonical-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      writeJson(join(packetDir, 'negative-route-consent.json'), negativeRouteConsentRecord(baseUrl));
+
+      const report = await verifyLive({ packetDir, targetUrl: baseUrl, drupalRuntime: injectedDrupalRuntime(baseUrl) });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /user\/login.*unrelated canonical/i);
+    },
+    { defaultVerificationRoutes: false }
+  );
+});
+
+test('rendered internal legal and privacy links must resolve even when no legal route was declared', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/privacy') {
+        response.writeHead(404, { 'content-type': 'text/html' });
+        response.end('<title>Page not found</title><h1>Page not found</h1>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<title>Target site</title><h1>Target home</h1><footer><a href="/privacy">Privacy policy</a></footer>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'broken-privacy-link-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      writeJson(join(packetDir, 'negative-route-consent.json'), negativeRouteConsentRecord(baseUrl));
+
+      const report = await verifyLive({ packetDir, targetUrl: baseUrl, drupalRuntime: injectedDrupalRuntime(baseUrl) });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /legal\/privacy link.*HTTP 404.*cannot be treated as not applicable/i);
+    }
+  );
+});
+
+test('consent reconciliation rejects disabled or contradictory resource loads and accepts blocked optional resources', async () => {
+  let renderMap = true;
+  await withHttpServer(
+    (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<title>Target site</title><h1>Target home</h1>${renderMap ? '<iframe src="https://maps.google.com/embed/test"></iframe>' : ''}`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'consent-reconciliation-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const evidence = negativeRouteConsentRecord(baseUrl);
+      evidence.consent = {
+        discoveryStatus: 'installed',
+        notInstalledReason: '',
+        managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.google_maps'] }],
+        applications: [{
+          id: 'google_maps',
+          managerId: 'klaro',
+          configName: 'klaro.application.google_maps',
+          enabled: false,
+          required: false,
+          controlledResources: [{ kind: 'iframe', pattern: 'maps.google.com' }],
+          resourceDiscoveryDisposition: { acceptedBy: '', rationale: '', evidence: [] }
+        }],
+        beforeConsentChecks: [{
+          route: '/',
+          browserContextFresh: true,
+          consentStorageCleared: true,
+          observedResourceUrls: ['https://maps.google.com/embed/test'],
+          blockedApplicationIds: [],
+          status: 'pass',
+          evidence: 'before-consent.json'
+        }]
+      };
+      writeJson(join(packetDir, 'negative-route-consent.json'), evidence);
+      const runtimeInventory = {
+        applications: [{
+          configName: 'klaro.application.google_maps',
+          id: 'google_maps',
+          enabled: false,
+          required: false,
+          resources: [{ kind: 'iframe', pattern: 'maps.google.com' }]
+        }],
+        configNames: ['klaro.application.google_maps'],
+        confirmed: true,
+        detected: true,
+        managerModules: ['klaro'],
+        reason: ''
+      };
+
+      let report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, { consentInventory: runtimeInventory })
+      });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /loaded while its consent application is disabled/i);
+
+      renderMap = false;
+      evidence.consent.applications[0].enabled = true;
+      evidence.consent.beforeConsentChecks[0].observedResourceUrls = [];
+      evidence.consent.beforeConsentChecks[0].blockedApplicationIds = ['google_maps'];
+      runtimeInventory.applications[0].enabled = true;
+      writeJson(join(packetDir, 'negative-route-consent.json'), evidence);
+      report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, { consentInventory: runtimeInventory })
+      });
+      assert.equal(report.liveTargetValid, true, report.errors.join('\n'));
+
+      runtimeInventory.applications[0].enabled = false;
+      report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, { consentInventory: runtimeInventory })
+      });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /state contradicts active Drupal config/i);
+    }
+  );
+});
+
+test('negative-route and consent dispositions fail closed without named packet-local evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'negative-consent-dispositions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'status-only-404',
+      expected: /status-only.*named, evidenced disposition/i,
+      mutate(record) {
+        record.missingRoute.noindexPolicy = 'status_only_with_disposition';
+      }
+    },
+    {
+      name: 'production-only-legal',
+      expected: /production-only.*named, evidenced disposition/i,
+      mutate(record) {
+        record.legalPrivacyScope.requirements = [{
+          path: '/privacy', status: 'production_only', acceptedBy: '', rationale: '', evidence: []
+        }];
+      }
+    },
+    {
+      name: 'missing-before-consent-evidence',
+      expected: /before-consent check.*packet-local evidence/i,
+      mutate(record) {
+        record.consent = {
+          discoveryStatus: 'installed',
+          notInstalledReason: '',
+          managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
+          applications: [{
+            id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: false,
+            controlledResources: [{ kind: 'iframe', pattern: 'maps.example' }],
+            resourceDiscoveryDisposition: { acceptedBy: '', rationale: '', evidence: [] }
+          }],
+          beforeConsentChecks: [{
+            route: '/', browserContextFresh: true, consentStorageCleared: true,
+            observedResourceUrls: [], blockedApplicationIds: ['maps'], status: 'pass', evidence: 'missing.json'
+          }]
+        };
+      }
+    }
+  ];
+
+  for (const fixture of cases) {
+    const packetDir = join(temp, fixture.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'negative-route-consent.json'), fixture.mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetCompletionReady, false, fixture.name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), fixture.expected, fixture.name);
+  }
+
+  const evidencedPacket = join(temp, 'evidenced-dispositions');
+  cpSync(canonicalPacket, evidencedPacket, { recursive: true });
+  writeFileSync(join(evidencedPacket, 'evidence', 'legal-disposition.txt'), 'Named owner accepted production-only legal copy.\n');
+  writeJson(join(evidencedPacket, 'evidence', 'before-consent.json'), {
+    schemaVersion: 'public-kit.before-consent-evidence.1',
+    targetBaseUrl: 'https://target.example',
+    checkedAt: testCheckedAt,
+    route: '/',
+    browserContextFresh: true,
+    consentStorageCleared: true,
+    observedResourceUrls: [],
+    blockedApplicationIds: ['maps']
+  });
+  mutateJson(join(evidencedPacket, 'negative-route-consent.json'), (record) => {
+    record.legalPrivacyScope.requirements = [{
+      path: '/privacy',
+      status: 'production_only',
+      acceptedBy: 'Site owner',
+      rationale: 'Final policy copy is approved only in production.',
+      evidence: ['legal-disposition.txt']
+    }];
+    record.consent = {
+      discoveryStatus: 'installed',
+      notInstalledReason: '',
+      managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
+      applications: [{
+        id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: false,
+        controlledResources: [{ kind: 'iframe', pattern: 'maps.example' }],
+        resourceDiscoveryDisposition: { acceptedBy: '', rationale: '', evidence: [] }
+      }],
+      beforeConsentChecks: [{
+        route: '/', browserContextFresh: true, consentStorageCleared: true,
+        observedResourceUrls: [], blockedApplicationIds: ['maps'], status: 'pass', evidence: 'before-consent.json'
+      }]
+    };
+  });
+  const evidencedReport = await validatePacket({ packetDir: evidencedPacket });
+  assert.equal(
+    evidencedReport.completionEvidence.packetCompletionReady,
+    true,
+    evidencedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
 });

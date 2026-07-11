@@ -28,6 +28,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
+- `negative-route-consent.json`
 - `launch-checklist.md`
 
 ## Generated Verifier Evidence
@@ -50,15 +51,18 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
+- `G-PRIVACY-01`: independently probe a guaranteed-missing route, access-wall canonicals, rendered internal legal/privacy links, and active Drupal consent config. Consent-controlled resources that are disabled or still awaiting consent must not appear in server-rendered or fresh before-consent browser evidence.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
 - `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
 
-The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
+The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; generates a random missing route; checks access-wall canonicals and rendered internal legal/privacy links; reconciles consent managers, applications, state, and controlled resources against active Drupal config and before-consent evidence; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
 
 Completion readiness also fails closed when a required packet file is still byte-identical to its template, JSON contains unresolved enum sentinels, critical parity/browser/readback/route acceptance markers are open, passing completion claims lack non-empty packet-local verifier evidence, a blind `accepted_out_of_scope` record lacks named acceptance/reason/evidence, or an external blocker remains. An external blocker cannot stand in for primary-route coverage.
+
+Before-consent browser evidence uses `schemaVersion: public-kit.before-consent-evidence.1`, names the target and route, records a fresh browser context with consent storage cleared, and lists observed resource URLs and blocked application IDs. A production-only legal requirement needs a named, reasoned, packet-local disposition. An actively rendered broken legal/privacy link is agent-resolvable and can never be waived as production-only.
 
 Independent claim evidence must be JSON with `schemaVersion: public-kit.independent-claim-evidence.1`. Each claim entry binds `claimId`, `gate`, `targetBaseUrl`, and `checkedAt` to concrete checks containing `name`, `method`, `result: pass`, and `observation`. A single evidence manifest may cover multiple claims through a `claims` array; a generic status-only file cannot clear them.
 
