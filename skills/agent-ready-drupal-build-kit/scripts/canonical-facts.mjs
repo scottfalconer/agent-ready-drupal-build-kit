@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
 const FACTS_SCHEMA = 'public-kit.canonical-facts.1';
 const PROVENANCE_SCHEMA = 'public-kit.fact-provenance.1';
 const CLAIMS_SCHEMA = 'public-kit.fact-claims.1';
@@ -30,6 +31,11 @@ const GENERATED_FILES = Object.freeze({
   summary: 'summary.md',
   manifest: 'manifest.json'
 });
+const CANONICAL_GATE_IDS = new Set(
+  arrayOrEmpty(JSON.parse(readFileSync(join(KIT_ROOT, 'gates.json'), 'utf8'))?.gates)
+    .map((gate) => String(gate?.id ?? '').trim())
+    .filter(Boolean)
+);
 
 class UsageError extends Error {}
 
@@ -83,33 +89,38 @@ function assertDirectory(path, label) {
 }
 
 function ensureDirectory(path, root, label) {
-  mkdirSync(path, { recursive: true });
-  const realRoot = realpathSync(root);
-  let current = resolve(path);
-  while (current !== resolve(root)) {
-    if (!existsSync(current) || !statSync(current).isDirectory() || lstatSync(current).isSymbolicLink()) {
-      throw new Error(`${label} must contain only real directories inside the packet.`);
+  const requestedRoot = resolve(root);
+  const requestedPath = resolve(path);
+  assertDirectory(requestedRoot, `${label} root`);
+  if (!isInside(requestedRoot, requestedPath)) throw new Error(`${label} escaped the packet.`);
+  const inspectAncestors = () => {
+    const realRoot = realpathSync(requestedRoot);
+    let current = requestedRoot;
+    for (const segment of relative(requestedRoot, requestedPath).split(sep).filter(Boolean)) {
+      current = join(current, segment);
+      if (!existsSync(current)) continue;
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory() || !isInside(realRoot, realpathSync(current))) {
+        throw new Error(`${label} must contain only real packet-local directories; unsafe ancestor: ${current}`);
+      }
     }
-    const parent = dirname(current);
-    if (!isInside(resolve(root), parent)) {
-      throw new Error(`${label} escaped the packet.`);
-    }
-    current = parent;
-  }
-  if (!isInside(realRoot, realpathSync(path))) {
-    throw new Error(`${label} escaped the packet.`);
-  }
+  };
+  // Preflight before mkdir: otherwise a symlinked evidence ancestor can cause
+  // recursive creation outside the packet before the verifier rejects it.
+  inspectAncestors();
+  mkdirSync(requestedPath, { recursive: true });
+  inspectAncestors();
 }
 
 function normalizeRoute(value) {
   const text = String(value ?? '').trim();
   if (!text) return '';
   try {
-    const url = new URL(text);
-    return url.pathname || '/';
+    const url = new URL(text, 'https://canonical-route.invalid');
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    return `${url.pathname || '/'}${url.search}`;
   } catch {
-    const path = text.split(/[?#]/)[0] || '/';
-    return path.startsWith('/') ? path : `/${path}`;
+    return '';
   }
 }
 
@@ -404,12 +415,14 @@ function loadProvenance(packetDir) {
     const factKeys = [...new Set(arrayOrEmpty(claim.factKeys).map((value) => String(value).trim()).filter(Boolean))].sort(comparePortable);
     const evidence = [...new Set(arrayOrEmpty(claim.evidence).map((value) => String(value).trim()).filter(Boolean))].sort(comparePortable);
     const status = String(claim.status ?? '').trim();
+    const gate = String(claim.gate ?? '').trim();
     if (claim.authority !== 'evidence_observation') throw new Error(`Fact claim ${claimId} authority must be evidence_observation.`);
     if (!CLAIM_STATUSES.has(status)) throw new Error(`Fact claim ${claimId} status must be observed, falsified, or blocked.`);
+    if (!CANONICAL_GATE_IDS.has(gate)) throw new Error(`Fact claim ${claimId} gate must name a canonical gates.json ID.`);
     if (factKeys.length === 0 || evidence.length === 0) throw new Error(`Fact claim ${claimId} requires factKeys and evidence.`);
     return {
       claimId,
-      gate: String(claim.gate ?? '').trim(),
+      gate,
       authority: 'evidence_observation',
       status,
       checkedAt: isoTimestamp(claim.checkedAt, `Fact claim ${claimId} checkedAt`),

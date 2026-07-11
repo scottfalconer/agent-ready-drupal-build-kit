@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import {
   CanonicalFactContradictionError,
   collectCanonicalFacts,
   generateCanonicalFactStore,
+  storeEvidenceObject,
   verifyCanonicalFactStore
 } from '../bin/canonical-facts.mjs';
 
@@ -205,6 +206,11 @@ test('invalid provenance and stale or tampered generated output fail closed', ()
   assert.throws(() => generateCanonicalFactStore({ packetDir }), /must not record human-gate acceptance/i);
 
   provenance.humanGateAcceptanceRecordedHere = false;
+  provenance.claims[0].gate = 'NOT-A-CANONICAL-GATE';
+  writeJson(provenancePath, provenance);
+  assert.throws(() => generateCanonicalFactStore({ packetDir }), /canonical gates\.json ID/i);
+
+  provenance.claims[0].gate = 'G-ROUTE-01';
   writeJson(provenancePath, provenance);
   generateCanonicalFactStore({ packetDir });
   writeFileSync(join(packetDir, 'evidence', 'facts', 'summary.md'), '# Edited summary\n');
@@ -218,6 +224,36 @@ test('invalid provenance and stale or tampered generated output fail closed', ()
   const tampered = verifyCanonicalFactStore({ packetDir });
   assert.equal(tampered.ready, false);
   assert.match(tampered.reasons.join('\n'), /Evidence object bytes do not match/i);
+});
+
+test('query-aware routes remain distinct canonical facts', () => {
+  const { packetDir } = factFixture();
+  const routePath = join(packetDir, 'route-matrix.json');
+  const routeMatrix = JSON.parse(readFileSync(routePath, 'utf8'));
+  routeMatrix.routes.push(
+    { sourcePath: '/search?q=alpha', targetPath: '/search?q=alpha', targetStatus: 200, targetFinalPath: '/search?q=alpha', accepted: true },
+    { sourcePath: '/search?q=beta', targetPath: '/search?q=beta', targetStatus: 200, targetFinalPath: '/search?q=beta', accepted: true }
+  );
+  writeJson(routePath, routeMatrix);
+
+  const facts = collectCanonicalFacts({ packetDir }).facts.map((fact) => fact.key);
+  assert.ok(facts.includes('route:/search?q=alpha:status'));
+  assert.ok(facts.includes('route:/search?q=beta:status'));
+});
+
+test('evidence-object storage rejects symlink ancestors before creating outside directories', () => {
+  const root = mkdtempSync(join(tmpdir(), 'canonical-facts-symlink-'));
+  const packetDir = join(root, 'review-packet');
+  const outside = join(root, 'outside');
+  mkdirSync(packetDir, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, join(packetDir, 'evidence'));
+
+  assert.throws(
+    () => storeEvidenceObject({ packetDir, bytes: Buffer.from('proof') }),
+    /unsafe ancestor|symbolic link/i
+  );
+  assert.equal(existsSync(join(outside, 'objects')), false);
 });
 
 test('contradictory duplicated site, route, config, ownership, and completion facts fail closed', () => {
