@@ -27,6 +27,12 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 export const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
+// Shared with the kit-owned readback generator so both scripts always run the
+// byte-identical Drush command. If a Drush release changes this syntax (for
+// example the `config:get --field` form), fix it here once plus any test fakes
+// rather than patching each script separately.
+export const DRUSH_SITE_UUID_ARGS = Object.freeze(['config:get', 'system.site', '--field=uuid']);
+
 // Shared with the kit-owned readback generator so packet counts and live
 // recomputation always run the exact same queries.
 export const READBACK_COUNT_QUERIES = Object.freeze({
@@ -593,7 +599,7 @@ function inspectDrupalRuntime(cwd, environment) {
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
   const bootstrap = runDrush(projectRoot, environment, ['status', '--field=bootstrap']);
-  const uuidOutput = runDrush(projectRoot, environment, ['config:get', 'system.site', '--field=uuid']);
+  const uuidOutput = runDrush(projectRoot, environment, [...DRUSH_SITE_UUID_ARGS]);
   const frontPage = cleanScalar(
     runDrush(projectRoot, environment, ['config:get', 'system.site', 'page.front', '--format=string'])
   );
@@ -1064,9 +1070,17 @@ function bundleCountsMatch(packetValue, runtimeCounts) {
 function flatCountsMatch(packetValue, runtimeCounts, key) {
   const packetCounts = plainObject(packetValue);
   const bundles = new Set([...Object.keys(packetCounts), ...Object.keys(runtimeCounts)]);
-  return [...bundles].every(
-    (bundle) => runtimeCounts[bundle] !== undefined && Number(packetCounts[bundle]) === runtimeCounts[bundle][key]
-  );
+  return [...bundles].every((bundle) => {
+    if (runtimeCounts[bundle] === undefined) {
+      return false;
+    }
+    // A bundle absent from the packet map is an explicit zero claim: legitimate
+    // packets omit bundles with zero published rows (for example unpublished or
+    // trashed media), and this stays safe because the live measurement must
+    // still actually be zero for the claim to match.
+    const packetCount = packetCounts[bundle] === undefined ? 0 : Number(packetCounts[bundle]);
+    return packetCount === runtimeCounts[bundle][key];
+  });
 }
 
 function unexplainedCountDeltaBundles(runtimeCounts, entityType, deltaRecords) {

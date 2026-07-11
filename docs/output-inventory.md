@@ -30,7 +30,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `field-output-matrix.json`
 - `launch-checklist.md`
 
-`drupal-readback.json` is kit-generated, never builder-authored: run the installed skill's `scripts/generate-readback.mjs`, which executes the declared readback commands (`drush status`, `config:status`, `pm:list`, `sql:query` entity counts, `git ls-files`) and embeds per-measurement UTC timestamps and raw output excerpts. Hand-written or hand-edited readback is invalid completion evidence; the live verifier recomputes the same values and fails on any mismatch.
+`drupal-readback.json` starts from the installed skill's `scripts/generate-readback.mjs`, which executes the declared readback commands (`drush status`, `config:status`, `pm:list`, `sql:query` entity counts, `git ls-files`) and embeds per-measurement UTC timestamps and raw output excerpts. The generator owns the measured sections — site identity, config state, core version, enabled modules, themes, node/media entity lists, per-bundle published/raw counts, and the measurement records — and hand-writing or hand-editing those values is invalid completion evidence; the live verifier recomputes the same values and fails on any mismatch. Builders still record the remaining inventory sections in the same file (content types, field storage, form/view displays, Views, menus and menu links, aliases including duplicates, Canvas pages when available, unexpected public routes, and roles/permissions notes) plus the owner and explanation fields on generator-emitted `publishedVersusRawDeltas` records, without altering generator-owned values.
 
 ## Generated Verifier Evidence
 

@@ -22,12 +22,14 @@
     "url": "git+https://github.com/scottfalconer/agent-ready-drupal-build-kit.git"
   },
   "scripts": {
+    "generate-readback": "node bin/generate-readback.mjs",
     "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
     "test": "node --test tests/*.test.mjs",
     "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs"
   },
   "bin": {
+    "agent-ready-drupal-generate-readback": "bin/generate-readback.mjs",
     "agent-ready-drupal-verify": "bin/verify.mjs",
     "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs"
   },

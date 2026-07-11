@@ -5,6 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DRUSH_SITE_UUID_ARGS,
   READBACK_COUNT_QUERIES,
   UUID_RE,
   cleanScalar,
@@ -186,7 +187,7 @@ export function generateReadback({
   };
 
   const status = measure('status', ['status', '--format=json']);
-  const uuid = measure('site-uuid', ['config:get', 'system.site', '--field=uuid']);
+  const uuid = measure('site-uuid', [...DRUSH_SITE_UUID_ARGS]);
   const frontPage = measure('front-page', ['config:get', 'system.site', 'page.front', '--format=string']);
   const configStatus = measure('config-status', ['config:status', '--format=json']);
   const enabledModules = measure('enabled-modules', ['pm:list', '--status=enabled', '--type=module', '--format=json']);
@@ -215,8 +216,17 @@ export function generateReadback({
   const enabledModuleRecord = parseJsonObject(enabledModules.output) ?? {};
   const nodeCountsByBundle = mergedBundleCounts(parseCountRows(nodePublished.output), parseCountRows(nodeRaw.output));
   const mediaCountsAvailable = mediaPublished.ok && mediaRaw.ok;
-  const mediaCountsByType = mediaCountsAvailable ? parseCountRows(mediaPublished.output) : {};
-  const mediaRawCountsByType = mediaCountsAvailable ? parseCountRows(mediaRaw.output) : {};
+  const mediaPublishedRows = mediaCountsAvailable ? parseCountRows(mediaPublished.output) : {};
+  const mediaRawRows = mediaCountsAvailable ? parseCountRows(mediaRaw.output) : {};
+  // Emit an explicit count for every bundle seen by either query so a bundle
+  // with zero published rows (unpublished or trashed media) still appears as
+  // an explicit zero claim instead of a missing key the verifier cannot match.
+  const mediaCountsByType = {};
+  const mediaRawCountsByType = {};
+  for (const bundle of new Set([...Object.keys(mediaPublishedRows), ...Object.keys(mediaRawRows)])) {
+    mediaCountsByType[bundle] = mediaPublishedRows[bundle] ?? 0;
+    mediaRawCountsByType[bundle] = mediaRawRows[bundle] ?? 0;
+  }
   const nodes = parseEntityRows(nodeList.output, 'id', 'type');
   const mediaItems = mediaList.ok ? parseEntityRows(mediaList.output, 'id', 'bundle') : [];
 

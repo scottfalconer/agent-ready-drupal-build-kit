@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -276,12 +276,25 @@ function collapsedText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function checkCarriesRawObservable(check) {
-  return Boolean(
-    (String(check.command ?? '').trim() && String(check.outputExcerpt ?? '').trim()) ||
-    String(check.httpStatusLine ?? '').trim() ||
-    String(check.evidencePath ?? '').trim()
-  );
+const HTTP_STATUS_LINE_RE = /^HTTP\/\S+\s+[1-5]\d{2}\b/;
+
+function checkCarriesRawObservable(check, packetDir, evidenceDir) {
+  if (String(check.command ?? '').trim() && String(check.outputExcerpt ?? '').trim()) {
+    return true;
+  }
+  if (HTTP_STATUS_LINE_RE.test(String(check.httpStatusLine ?? '').trim())) {
+    return true;
+  }
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, check.evidencePath);
+  if (!evidencePath) {
+    return false;
+  }
+  try {
+    const evidenceStat = statSync(evidencePath);
+    return evidenceStat.isFile() && evidenceStat.size > 0;
+  } catch {
+    return false;
+  }
 }
 
 function identitiesMatch(left, right) {
@@ -389,7 +402,7 @@ function safeImageDimensions(width, height) {
   );
 }
 
-async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
+async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl, packetDir, evidenceDir) {
   if (extname(evidencePath).toLowerCase() !== '.json' || !independentTargetUrl) {
     return false;
   }
@@ -415,7 +428,7 @@ async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
             check.result === 'pass' &&
             String(check.observation ?? '').trim() &&
             collapsedText(check.observation) !== collapsedText(claim.claim) &&
-            checkCarriesRawObservable(check)
+            checkCarriesRawObservable(check, packetDir, evidenceDir)
         )
       );
     });
@@ -1285,18 +1298,25 @@ async function independentStructuredGateReasons({
   if (absenceChecks.length !== passingAbsenceChecks.length) {
     reasons.push('independent-verification.json absence-claim checks must pass with a soft-delete-covering query, a raw result excerpt distinct from the claim, and evidence.');
   }
-  const absenceClaimTexts = [
+  const completionClaimTexts = [
     ...arrayOrEmpty(independentVerification?.completionClaims).flatMap((claim) => [
       claim?.claim,
       ...arrayOrEmpty(claim?.falsificationChecks)
     ]),
-    ...databaseCleanupChecks.flatMap((check) => [check?.evidence, check?.productionSafeAlternative])
+    ...databaseCleanupChecks.flatMap((check) => [check?.evidence, check?.productionSafeAlternative]),
+    independentVerification?.summary?.notes
   ].map((value) => String(value ?? ''));
-  if (absenceClaimTexts.some((text) => absenceClaimRe.test(text)) && passingAbsenceChecks.length === 0) {
+  if (completionClaimTexts.some((text) => absenceClaimRe.test(text)) && passingAbsenceChecks.length === 0) {
     reasons.push('independent-verification.json absence claims (no orphan/trash/soft-deleted rows) require a passing absenceClaimChecks row backed by a query result covering soft-deleted rows.');
   }
 
   const qaTeardown = independentVerification?.qaTeardown ?? {};
+  const fixtureCreationEvidencePresent =
+    substantiveObjects(independentVerification?.editorAddRowChecks).length > 0 ||
+    substantiveObjects(browserEvidence?.editorWorkflowChecks).length > 0;
+  if (fixtureCreationEvidencePresent && qaTeardown.fixtureContentCreated !== true) {
+    reasons.push('independent-verification.json qaTeardown cannot declare that no QA fixture content was created while editor add-row or editor workflow evidence records QA content changes; set fixtureContentCreated to true and record the trash-aware teardown or residue inventory.');
+  }
   if (qaTeardown.fixtureContentCreated === true) {
     const residueRows = substantiveObjects(qaTeardown.residueInventory);
     const purged = ['trash_purge', 'ui_delete_plus_trash_purge'].includes(qaTeardown.teardownMethod) &&
@@ -1321,8 +1341,15 @@ async function independentStructuredGateReasons({
     reasons.push('independent-verification.json qaTeardown must record a trash-aware teardown of created QA fixture content or explicitly declare not_applicable with a reason.');
   }
 
+  // Scoped to the same claim-bearing texts as the absence-claim scan, and
+  // sentence-by-sentence so negated statements ("WCAG conformance was NOT
+  // verified locally; deferred to launch") do not false-positive.
   const localWcagClaimRe = /\bwcag\b[\s\S]{0,80}?\b(?:pass(?:ed|es)?|complian(?:t|ce)|conforman(?:t|ce))\b|\b(?:pass(?:ed|es)?|complian(?:t|ce)|conforman(?:t|ce))\b[\s\S]{0,80}?\bwcag\b/i;
-  if (localWcagClaimRe.test(JSON.stringify(independentVerification ?? {}))) {
+  const wcagNegationRe = /\b(?:not|never|no|cannot|can't|isn't|wasn't|un(?:verified|checked|tested|confirmed)|deferred|pending|blocked|out\s+of\s+scope|launch[- ]only)\b/i;
+  const assertsLocalWcagConformance = completionClaimTexts.some((text) =>
+    text.split(/[.;\n]+/).some((sentence) => localWcagClaimRe.test(sentence) && !wcagNegationRe.test(sentence))
+  );
+  if (assertsLocalWcagConformance) {
     reasons.push('independent-verification.json must not assert WCAG conformance in local completion evidence; accessibility certification is launch-only G-LAUNCH-01 evidence requiring a named tool with stored per-URL output.');
   }
 
@@ -1430,13 +1457,13 @@ async function validateIndependentVerification(packetDir, independentVerificatio
           `independent-verification.json completionClaims[${index}].verifierEvidence[${evidenceIndex}] must not be empty.`
         );
       }
-      if (evidenceStat.isFile() && await evidenceBindsClaim(evidencePath, claim, independentTargetUrl)) {
+      if (evidenceStat.isFile() && await evidenceBindsClaim(evidencePath, claim, independentTargetUrl, packetDir, evidenceDir)) {
         semanticallyBoundEvidence = true;
       }
     }
     if (!semanticallyBoundEvidence) {
       errors.push(
-        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks carrying a raw observable (command with output excerpt, HTTP status line, or evidence path) whose observation does not restate the claim.`
+        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks carrying a raw observable (a command with its output excerpt, a real HTTP status line, or a non-empty packet-local evidence path) whose observation does not restate the claim.`
       );
     }
   }
