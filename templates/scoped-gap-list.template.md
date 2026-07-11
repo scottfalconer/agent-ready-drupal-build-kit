@@ -47,6 +47,14 @@ Use this section for important non-launch-gate blockers such as target schema re
 | ARCH-001 | Target schema | Maintainer | UNKNOWN | Pattern map not reviewed | Review source audit and target model | blocked |
 | ARCH-002 | Installed substrate and Recipe fit | Builder/Maintainer | UNKNOWN | Recipe candidates not verified | Complete substrate and Recipe-fit decision | blocked |
 
+## Accepted Stub Exclusions
+
+Record one row per `source-origin-dependence.json` stub finding whose treatment is `stub_accepted`. The verifier requires a single line that names both the finding's `scopedGapListEntry` ID and the exact route; replace the example row before use.
+
+| ID | Route | Matched pattern | Accepted by | Rationale | Status |
+| --- | --- | --- | --- | --- | --- |
+| GAP-STUB-XXX | `/example-route` | example boilerplate phrase | Named owner | Why this stub treatment is accepted | accepted |
+
 ## Notes
 
 - Use `UNKNOWN` only as a status/value placeholder for unresolved evidence; explain the blocker in plain language.

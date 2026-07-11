@@ -1871,6 +1871,59 @@ test('source-origin dependence evidence fails closed on hotlinks, empty asset fi
       })
     },
     {
+      name: 'magic-disposition-with-loadbearing-false-cannot-buy-completion',
+      expected: /disposition string alone is not an accepted strategy/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        // The exact gaming probe: a fully hotlinked link field self-declared as
+        // not load-bearing plus the bare magic disposition string and zero
+        // externalAssetStrategies records must still block completion.
+        value.storedFieldScans.push({
+          entityType: 'node',
+          bundle: 'document',
+          field: 'field_document_link',
+          fieldKind: 'link',
+          loadBearing: false,
+          table: 'node__field_document_link',
+          column: 'field_document_link_uri',
+          totalRows: 561,
+          sourceOriginRows: 561,
+          sampleSourceOriginValues: ['https://source.example/files/report.pdf'],
+          disposition: 'external_asset_strategy_accepted',
+          notes: 'Every document link still points at the source origin.'
+        });
+      })
+    },
+    {
+      name: 'self-declared-loadbearing-false-contradicting-field-output-matrix',
+      expected: /declares loadBearing false but field-output-matrix\.json records affectsAnonymousOutput true/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.storedFieldScans[0].loadBearing = false;
+      })
+    },
+    {
+      name: 'entity-reference-media-field-needs-scan-coverage',
+      expected: /needs a storedFieldScans entry for node\.page\.field_documents/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'field-output-matrix.json'), (value) => {
+        // A Drupal media reference field's machine field type is entity_reference,
+        // not "media"; recording it honestly must still require a scan row.
+        value.bundles[0].fields.push({
+          machineName: 'field_documents',
+          editorLabel: 'Documents',
+          required: false,
+          fieldType: 'entity_reference',
+          widget: 'media_library_widget',
+          formatter: 'entity_reference_entity_view',
+          publicRenderLocations: [],
+          affectsAnonymousOutput: false,
+          containsRawPresentationImplementation: false,
+          presentationBoundary: 'content_fact',
+          editorOnlyRationale: '',
+          accepted: true,
+          notes: 'Media document references.'
+        });
+      })
+    },
+    {
       name: 'remaining-source-origin-rows-without-accepted-disposition',
       expected: /still stores 1 source-origin URL row/i,
       mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
@@ -1939,8 +1992,39 @@ test('source-origin dependence evidence fails closed on hotlinks, empty asset fi
           matchedPattern: 'open the original public resource',
           treatment: 'stub_accepted',
           acceptedBy: '',
+          rationale: 'The archive stub was reviewed.',
+          scopedGapListEntry: ''
+        }];
+      })
+    },
+    {
+      name: 'stub-finding-without-treatment-or-rationale',
+      expected: /stub finding for \/archive must name its route, a supported treatment/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.stubBoilerplateScan.findings = [{
+          route: '/archive',
+          matchedPattern: 'open the original public resource',
+          treatment: 'ignored',
+          acceptedBy: 'Example Owner',
           rationale: '',
           scopedGapListEntry: ''
+        }];
+      })
+    },
+    {
+      name: 'stub-exclusion-requires-structured-gap-list-row',
+      expected: /scoped-gap-list\.md must contain a row naming both the finding's scopedGapListEntry ID and the exact route \//i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        // The fixture gap list contains plenty of raw slashes and paths; a raw
+        // substring test for route "/" would always pass. The structured check
+        // must still fail because no single line names GAP-STUB-001 plus the route.
+        value.stubBoilerplateScan.findings = [{
+          route: '/',
+          matchedPattern: 'open the original public resource',
+          treatment: 'stub_accepted',
+          acceptedBy: 'Example Owner',
+          rationale: 'The owner accepted the stub.',
+          scopedGapListEntry: 'GAP-STUB-001'
         }];
       })
     },
@@ -1972,14 +2056,89 @@ test('source-origin dependence evidence fails closed on hotlinks, empty asset fi
   }
 });
 
+test('honest stub treatments and structured gap-list stub exclusions support completion', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'source-origin-honest-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  // A builder who found boilerplate and migrated the content records the finding
+  // as content_migrated and keeps the audit trail without being blocked.
+  const migratedPacket = join(temp, 'content-migrated');
+  cpSync(canonicalPacket, migratedPacket, { recursive: true });
+  mutateJson(join(migratedPacket, 'source-origin-dependence.json'), (value) => {
+    value.stubBoilerplateScan.findings = [
+      {
+        route: '/archive',
+        matchedPattern: 'open the original public resource',
+        treatment: 'content_migrated',
+        acceptedBy: '',
+        rationale: 'The archive boilerplate was replaced with the migrated source content.',
+        scopedGapListEntry: ''
+      },
+      {
+        route: '/legacy-print-view',
+        matchedPattern: 'archived copy of this page',
+        treatment: 'route_dropped',
+        acceptedBy: '',
+        rationale: 'The print-view route was deliberately dropped from the target.',
+        scopedGapListEntry: ''
+      }
+    ];
+  });
+  const migratedReport = await validatePacket({ packetDir: migratedPacket });
+  assert.equal(
+    migratedReport.completionEvidence.packetSupportsCompletion,
+    true,
+    migratedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  // A stub_accepted finding passes only with a structured gap-list row naming
+  // both the scopedGapListEntry ID and the exact route on one line.
+  const acceptedPacket = join(temp, 'stub-accepted');
+  cpSync(canonicalPacket, acceptedPacket, { recursive: true });
+  mutateJson(join(acceptedPacket, 'source-origin-dependence.json'), (value) => {
+    value.stubBoilerplateScan.findings = [{
+      route: '/',
+      matchedPattern: 'open the original public resource',
+      treatment: 'stub_accepted',
+      acceptedBy: 'Example Owner',
+      rationale: 'The owner accepted a stub treatment for the homepage archive callout.',
+      scopedGapListEntry: 'GAP-STUB-001'
+    }];
+  });
+  const gapListPath = join(acceptedPacket, 'scoped-gap-list.md');
+  writeFileSync(
+    gapListPath,
+    `${readFileSync(gapListPath, 'utf8')}
+## Accepted Stub Exclusions
+
+| ID | Route | Matched pattern | Accepted by | Rationale | Status |
+| --- | --- | --- | --- | --- | --- |
+| GAP-STUB-001 | \`/\` | open the original public resource | Example Owner | Accepted stub treatment | accepted |
+`
+  );
+  const acceptedReport = await validatePacket({ packetDir: acceptedPacket });
+  assert.equal(
+    acceptedReport.completionEvidence.packetSupportsCompletion,
+    true,
+    acceptedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
 test('live verifier hard-flags rendered source-origin references and unaccepted stub boilerplate', async () => {
   let scenario = 'hotlinked';
+  const scenarioBodies = {
+    hotlinked: '<p>Open the original public resource.</p><a href="https://source.example/files/annual-report.pdf">Annual report</a>',
+    unquoted: '<p>Rebuilt content.</p><a href=https://source.example/files/annual-report.pdf>Annual report</a><img srcset="https://source.example/img/hero-480.png 480w, /img/hero-960.png 960w" src="/img/hero.png" alt="Hero">',
+    'default-stub': '<p>Content coming soon.</p><a href="/files/annual-report.pdf">Annual report</a>',
+    local: '<p>Local rebuilt content.</p><a href="/files/annual-report.pdf">Annual report</a>'
+  };
   await withHttpServer(
     (request, response) => {
       const origin = `http://${request.headers.host}`;
-      const body = scenario === 'hotlinked'
-        ? '<p>Open the original public resource.</p><a href="https://source.example/files/annual-report.pdf">Annual report</a>'
-        : '<p>Local rebuilt content.</p><a href="/files/annual-report.pdf">Annual report</a>';
+      const body = scenarioBodies[scenario];
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html><head><title>Target site</title><link rel="canonical" href="${origin}/"><meta name="description" content="Fixture homepage description."></head><body><h1>Target home</h1>${body}</body></html>`);
     },
@@ -2032,6 +2191,40 @@ test('live verifier hard-flags rendered source-origin references and unaccepted 
       });
       assert.equal(acceptedReport.valid, true, acceptedReport.errors.join('\n'));
       assert.doesNotMatch(acceptedReport.errors.join('\n'), /declared source origin/);
+
+      // Unquoted href attributes and srcset candidates are valid HTML that
+      // browsers render; they must not escape the rendered-route scan.
+      scenario = 'unquoted';
+      const unquotedPacket = join(temp, 'unquoted');
+      cpSync(canonicalPacket, unquotedPacket, { recursive: true });
+      const unquotedReport = await verifyLive({
+        packetDir: unquotedPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(unquotedReport.valid, false);
+      assert.match(unquotedReport.errors.join('\n'), /reference\(s\) to the declared source origin/);
+
+      // A stub page with no source-origin link must still be caught by the
+      // kit-default boilerplate patterns even when the builder declares only
+      // never-matching patterns.
+      scenario = 'default-stub';
+      const defaultStubPacket = join(temp, 'default-stub');
+      cpSync(canonicalPacket, defaultStubPacket, { recursive: true });
+      mutateJson(join(defaultStubPacket, 'source-origin-dependence.json'), (value) => {
+        value.stubBoilerplateScan.boilerplatePatterns = ['xyzzy never matches anything'];
+      });
+      const defaultStubReport = await verifyLive({
+        packetDir: defaultStubPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(defaultStubReport.valid, false);
+      assert.match(defaultStubReport.errors.join('\n'), /stub\/archive boilerplate "content coming soon"/);
 
       scenario = 'local';
       const localPacket = join(temp, 'local');

@@ -9,7 +9,7 @@
       "entityType": "node",
       "bundle": "",
       "field": "",
-      "fieldKind": "file | media | link | formatted_text",
+      "fieldKind": "file | media | link | formatted_text | plain_text",
       "loadBearing": false,
       "table": "",
       "column": "",
@@ -44,5 +44,6 @@
       }
     ]
   },
+  "countingRule": "totalRows must be SELECT COUNT(*) FROM <table>. sourceOriginRows must be SELECT COUNT(*) FROM <table> WHERE <column> LIKE '%<host>%' OR-joined across the sourceBaseUrl hostname and every knownSourceAssetHosts entry, using bare hostnames (so plain-text mentions of the domain count, not only full URLs). The default verifier re-runs exactly these queries via drush sqlq and blocks completion on any mismatch.",
   "evidenceScope": "Source-origin dependence measured from stored Drupal fields at import time and re-verified mechanically against the live target at packet time."
 }

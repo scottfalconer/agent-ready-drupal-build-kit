@@ -28,6 +28,17 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 const ASSET_HOST_RE = /^[a-z0-9][a-z0-9.-]*$/i;
 const SQL_IDENTIFIER_RE = /^[a-z0-9_]+$/i;
+// Kit-default stub/archive boilerplate patterns. These are always scanned on fetched
+// primary routes in addition to the builder-declared patterns, so a builder cannot
+// satisfy the stub scan by declaring a never-matching pattern.
+const DEFAULT_STUB_BOILERPLATE_PATTERNS = Object.freeze([
+  'open the original',
+  'archived copy',
+  'view the original document',
+  'visit the original site',
+  'content coming soon',
+  'this page is a placeholder'
+]);
 
 class UsageError extends Error {}
 
@@ -615,9 +626,12 @@ function sourceOriginDependenceContext(declaredSourceBaseUrl, report) {
       .filter(Boolean)
   );
   const stubScan = report?.stubBoilerplateScan ?? {};
-  const stubPatterns = (Array.isArray(stubScan?.boilerplatePatterns) ? stubScan.boilerplatePatterns : [])
-    .map((pattern) => normalizeText(pattern).toLowerCase())
-    .filter(Boolean);
+  const stubPatterns = [...new Set([
+    ...DEFAULT_STUB_BOILERPLATE_PATTERNS,
+    ...(Array.isArray(stubScan?.boilerplatePatterns) ? stubScan.boilerplatePatterns : [])
+      .map((pattern) => normalizeText(pattern).toLowerCase())
+      .filter(Boolean)
+  ])];
   const acceptedStubRoutes = new Set(
     (Array.isArray(stubScan?.findings) ? stubScan.findings : [])
       .filter((finding) => finding?.treatment === 'stub_accepted' && String(finding?.acceptedBy ?? '').trim())
@@ -631,9 +645,26 @@ function sourceOriginReferences(html, baseUrl, hosts) {
   if (hosts.size === 0) {
     return [];
   }
+  const candidates = [];
+  // Quoted and unquoted URL-carrying attributes. Unquoted values (href=https://...)
+  // are valid HTML that browsers render, so they must not escape the scan.
+  for (const match of html.matchAll(/(?:href|src|action|poster)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) {
+    candidates.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  // srcset carries comma-separated "url descriptor" candidates.
+  for (const match of html.matchAll(/srcset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) {
+    const raw = match[1] ?? match[2] ?? match[3] ?? '';
+    for (const candidate of raw.split(',')) {
+      candidates.push(candidate.trim().split(/\s+/)[0] ?? '');
+    }
+  }
+  // Inline CSS url(...) references (backgrounds, fonts) are rendered assets too.
+  for (const match of html.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)"'\s]+))\s*\)/gi)) {
+    candidates.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
   const references = [];
-  for (const match of html.matchAll(/(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
-    const value = decodeEntities(match[1] ?? match[2] ?? '').trim();
+  for (const candidate of candidates) {
+    const value = decodeEntities(candidate ?? '').trim();
     if (!value) {
       continue;
     }

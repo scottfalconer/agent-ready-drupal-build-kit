@@ -58,7 +58,7 @@ const COMPLETION_CLAIM_GATES = new Set([
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
 const MAX_SOURCE_ORIGIN_URL_RATIO = 0.1;
-const SOURCE_ORIGIN_FIELD_KINDS = new Set(['file', 'media', 'link', 'formatted_text']);
+const SOURCE_ORIGIN_FIELD_KINDS = new Set(['file', 'media', 'link', 'formatted_text', 'plain_text']);
 const SOURCE_ORIGIN_DISPOSITIONS = new Set([
   'none_found',
   'localized',
@@ -66,7 +66,14 @@ const SOURCE_ORIGIN_DISPOSITIONS = new Set([
   'redirected',
   'external_asset_strategy_accepted'
 ]);
+// Field types that can store URLs or asset references and therefore need a stored-field
+// scan row. This deliberately covers both human-readable labels (file, image, media,
+// link, text) and the Drupal machine type names a matrix records honestly:
+// entity_reference (media/file references), string/string_long (plain URL storage),
+// and uri (link storage).
+const SOURCE_ORIGIN_SCAN_FIELD_TYPE_RE = /file|image|media|link|text|entity_reference|string|uri/i;
 const STUB_SCAN_STRATEGIES = new Set(['all_imported_routes', 'per_bundle_sample']);
+const STUB_FINDING_TREATMENTS = new Set(['stub_accepted', 'content_migrated', 'route_dropped']);
 const SQL_IDENTIFIER_RE = /^[a-z0-9_]+$/i;
 const ASSET_HOST_RE = /^[a-z0-9][a-z0-9.-]*$/i;
 
@@ -2159,6 +2166,25 @@ function fieldScanKey(entityType, bundle, field) {
     .join('.');
 }
 
+function escapeRegExpText(value) {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// A stub exclusion must be recorded as a structured row: one line of scoped-gap-list.md
+// that names both the finding's scopedGapListEntry ID and the exact route as a
+// delimited token. A raw substring test would let route "/" match any line containing
+// a slash and "/a" match an unrelated "/about" mention.
+function stubExclusionRecordedInGapList(gapListText, entryId, route) {
+  const id = String(entryId ?? '').trim();
+  if (!id || !route) {
+    return false;
+  }
+  const routeToken = new RegExp(`(?:^|[\\s|\`(])${escapeRegExpText(route)}(?=$|[\\s|\`),])`);
+  return gapListText
+    .split('\n')
+    .some((line) => line.includes(id) && routeToken.test(line));
+}
+
 async function sourceOriginDependenceReasons(packetDir, records) {
   const { fieldOutputMatrix, patternMap, routeMatrix, sourceAudit, sourceOriginDependence } = records;
   const reasons = [];
@@ -2212,6 +2238,17 @@ async function sourceOriginDependenceReasons(packetDir, records) {
       .map((row) => identityKey(row.contentTypeOrBundle))
       .filter(Boolean)
   );
+  // loadBearing is never trusted as a self-declared boolean alone: any field the
+  // field-output matrix says affects anonymous output is load-bearing by definition.
+  const anonymousOutputFieldKeys = new Set();
+  for (const bundle of arrayOrEmpty(fieldOutputMatrix?.bundles)) {
+    for (const field of arrayOrEmpty(bundle?.fields)) {
+      if (field?.affectsAnonymousOutput === true) {
+        anonymousOutputFieldKeys.add(fieldScanKey(bundle?.entityType, bundle?.bundle, field?.machineName));
+      }
+    }
+  }
+
   const scans = substantiveObjects(report?.storedFieldScans);
   const scannedFieldKeys = new Set();
   for (const scan of scans) {
@@ -2236,11 +2273,18 @@ async function sourceOriginDependenceReasons(packetDir, records) {
       reasons.push(`source-origin-dependence.json storedFieldScans entry ${key} must declare entity/bundle/field, a supported fieldKind, loadBearing, a real table and column, consistent counts, and a supported disposition.`);
       continue;
     }
+    const effectiveLoadBearing = scan.loadBearing === true || anonymousOutputFieldKeys.has(key);
+    if (scan.loadBearing === false && anonymousOutputFieldKeys.has(key)) {
+      reasons.push(`source-origin-dependence.json ${key} declares loadBearing false but field-output-matrix.json records affectsAnonymousOutput true for the same field; the scan row must match the field-output matrix.`);
+    }
     if (sourceOriginRows > 0 && scan.disposition !== 'external_asset_strategy_accepted') {
       reasons.push(`source-origin-dependence.json ${key} still stores ${sourceOriginRows} source-origin URL row(s); remaining source-origin values must be localized, rewritten, redirected, or explicitly dispositioned external_asset_strategy_accepted.`);
     }
+    if (scan.disposition === 'external_asset_strategy_accepted' && !acceptedStrategyFieldKeys.has(key)) {
+      reasons.push(`source-origin-dependence.json ${key} is dispositioned external_asset_strategy_accepted, but no externalAssetStrategies record with a named acceptedBy covers that field; the disposition string alone is not an accepted strategy.`);
+    }
     if (
-      scan.loadBearing === true &&
+      effectiveLoadBearing &&
       totalRows > 0 &&
       sourceOriginRows / totalRows > MAX_SOURCE_ORIGIN_URL_RATIO &&
       !acceptedStrategyFieldKeys.has(key)
@@ -2254,12 +2298,12 @@ async function sourceOriginDependenceReasons(packetDir, records) {
 
   for (const bundle of arrayOrEmpty(fieldOutputMatrix?.bundles)) {
     for (const field of arrayOrEmpty(bundle?.fields)) {
-      if (!/file|image|media|link|text/i.test(String(field?.fieldType ?? ''))) {
+      if (!SOURCE_ORIGIN_SCAN_FIELD_TYPE_RE.test(String(field?.fieldType ?? ''))) {
         continue;
       }
       const key = fieldScanKey(bundle?.entityType, bundle?.bundle, field?.machineName);
       if (!scannedFieldKeys.has(key)) {
-        reasons.push(`source-origin-dependence.json needs a storedFieldScans entry for ${key}; every file, media, link, and text field in field-output-matrix.json needs a source-origin scan.`);
+        reasons.push(`source-origin-dependence.json needs a storedFieldScans entry for ${key}; every file, media, link, text, entity-reference, string, and uri field in field-output-matrix.json needs a source-origin scan.`);
       }
     }
   }
@@ -2285,14 +2329,16 @@ async function sourceOriginDependenceReasons(packetDir, records) {
   }
   for (const finding of substantiveObjects(stubScan.findings)) {
     const route = normalizeRouteKey(finding.route);
+    if (!route || !STUB_FINDING_TREATMENTS.has(finding.treatment) || !String(finding.rationale ?? '').trim()) {
+      reasons.push(`source-origin-dependence.json stub finding for ${route || '(missing route)'} must name its route, a supported treatment (stub_accepted, content_migrated, or route_dropped), and a rationale.`);
+      continue;
+    }
     if (
-      !route ||
-      finding.treatment !== 'stub_accepted' ||
-      !String(finding.acceptedBy ?? '').trim() ||
-      !String(finding.rationale ?? '').trim() ||
-      !scopedGapListText.includes(route)
+      finding.treatment === 'stub_accepted' &&
+      (!String(finding.acceptedBy ?? '').trim() ||
+        !stubExclusionRecordedInGapList(scopedGapListText, finding.scopedGapListEntry, route))
     ) {
-      reasons.push(`source-origin-dependence.json stub finding for ${route || '(missing route)'} must be a named accepted stub treatment recorded as a per-route exclusion in scoped-gap-list.md.`);
+      reasons.push(`source-origin-dependence.json stub finding for ${route} must be a named accepted stub treatment recorded as a per-route exclusion in scoped-gap-list.md: acceptedBy must be a named owner and scoped-gap-list.md must contain a row naming both the finding's scopedGapListEntry ID and the exact route ${route}.`);
     }
   }
 
