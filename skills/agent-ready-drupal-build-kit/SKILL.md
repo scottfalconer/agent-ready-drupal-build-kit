@@ -80,6 +80,8 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs --pac
 
 If `--target-url URL` is supplied, it must match the current DDEV origin. The verifier does not use an unrelated remote target and never follows redirects across origins.
 
+Treat `scripts/` and `gates.json` as read-only: reports embed a tamper-evident self-hash checked against `VERIFIER-HASHES.json`, and a mismatch downgrades the run to blocked as `verifier modified`. A verifier that fails on this target is a kit/upstream blocker recorded with a named human acceptance in `open-decisions.md`, never something the builder patches.
+
 Do not call the rebuild complete unless the default verifier inspected the intended live target and its final report authorizes the claim. A structurally valid but incomplete packet is useful handoff evidence, not proof that the site is done. Complete-local-rebuild status is separate from production readiness and launch approval.
 
 ## Included runtime files
@@ -90,6 +92,7 @@ Everything required at runtime is inside this skill directory:
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
 - `gates.json` defines the stable gate and packet-file vocabulary.
+- `VERIFIER-HASHES.json` publishes the expected verifier and gates hashes for provenance checks.
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
 - `references/` contains the complete build contract, output inventory, parity specification, playbook, and companion-skill guidance.

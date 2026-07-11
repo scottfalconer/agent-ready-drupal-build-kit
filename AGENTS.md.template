@@ -299,6 +299,8 @@ For explicit structural lint only, run `node [KIT_LOCAL_PATH]/scripts/verify-pac
 
 The default verifier fetches only the detected DDEV target. An explicit `--target-url` must match the current DDEV origin. Redirects are never followed across origins.
 
+The installed kit's verifier scripts and `gates.json` are read-only. Every verifier report embeds tamper-evident `verifierProvenance` (self-hash plus kit version); a self-hash that does not match the kit's published `VERIFIER-HASHES.json` marks the run `verifier modified` and always leaves completion blocked — never self-accept that state through the off-road inventory. If the verifier itself fails on this target, do not patch it: record a kit/upstream blocker with a named human acceptance in `open-decisions.md` and hand back blocked.
+
 This verdict covers the complete local rebuild only. Production deployment, hardening, credentials, legal/privacy acceptance, rollback, and launch approval remain separate gates.
 
 ## Required Review Loop
