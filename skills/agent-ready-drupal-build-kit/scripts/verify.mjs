@@ -1273,6 +1273,11 @@ export async function verifyLive({
     },
     packetVerification: sharedPacketReport,
     completeLocalRebuildClaimAllowed,
+    verdict: completeLocalRebuildClaimAllowed
+      ? 'complete-local-rebuild'
+      : packetReport.valid && liveTargetValid
+        ? 'mechanically-verified-awaiting-human-signoff'
+        : 'blocked',
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
@@ -1310,9 +1315,13 @@ async function main() {
   if (args.packetOnly) {
     process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
   } else if (report.completeLocalRebuildClaimAllowed) {
-    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized. Report: ${args.out}\n`);
+    const independence = report.packetVerification?.completionEvidence?.independence ?? {};
+    const independenceSummary = [
+      ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
+    ].join(', ') || 'not-declared';
+    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized (independence evidence: ${independenceSummary}). Report: ${args.out}\n`);
   } else {
-    process.stderr.write(`Live target checks passed, but completion remains blocked by required review evidence. Report: ${args.out}\n`);
+    process.stderr.write(`Live target checks passed; the verdict ceiling is mechanically verified, awaiting human signoff — completion remains blocked by pending acceptance or required review evidence. Report: ${args.out}\n`);
     process.exitCode = 2;
   }
 }

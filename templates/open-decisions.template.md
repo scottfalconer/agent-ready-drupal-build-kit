@@ -15,6 +15,8 @@ Do not use this file as a reason to stop early. Build, verify, fix, and item-blo
 
 Do not list normal implementation work here. Missing reachable content, broken routes, CSS defects, import retries, field/display mistakes, route alias bugs, editor-form defects, and incomplete packet evidence are work items, not human decisions.
 
+Builder-accepted deviations are human-ratification decisions. If `off-road-inventory.md` contains `OR-` rows, or the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, list a ratification decision for them here; the verifier rejects `Decisions still open: None` while such records exist.
+
 ## Decisions
 
 | ID | Decision needed | Human owner | Current evidence | Options | Recommended default | Impact if deferred | Needed by gate | Status |
