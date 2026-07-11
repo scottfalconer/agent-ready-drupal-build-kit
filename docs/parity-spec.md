@@ -56,6 +56,10 @@ Visual and content parity are part of the default build goal.
 
 Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a named, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a named owner accepts a specific evidence-backed count exclusion.
 
+Matching counts do not establish semantic parity. Every required field in a recurring collection needs a source-derived rule for population, normalized value, field ordering, reference integrity, or placeholder absence as appropriate. Target evaluation and Drupal readback must agree on the pass/violation counts, and exceptions must be item-level and evidenced.
+
+Media parity is role-aware. Every reachable audited asset group must reconcile to managed Drupal Media, genuine external-provider behavior, or an item-level blocker. A source icon, tracking asset, or decorative image does not become valid content media merely because it was downloaded; unresolved assets, incompatible role assignments, and unexplained duplicate placements fail parity.
+
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
 
 ## Minimum Parity Report Shape

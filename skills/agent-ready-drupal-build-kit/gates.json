@@ -130,6 +130,22 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-CONTENT-03",
+      "title": "Recurring-content field semantics reconciled",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-MEDIA-01",
+      "title": "Reachable source assets reconciled to valid Drupal ownership and use",
+      "phase": 6,
+      "evidenceFile": "independent-verification.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-COMPOSITION-01",
       "title": "Flexible page composition model declared",
       "phase": 2,

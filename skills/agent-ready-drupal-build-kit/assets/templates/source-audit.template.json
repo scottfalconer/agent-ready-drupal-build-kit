@@ -19,6 +19,23 @@
   "detectedTechnologySignals": [],
   "formsAndIntegrations": [],
   "mediaSignals": [],
+  "assetInventoryScope": {
+    "reviewed": false,
+    "applies": false,
+    "reason": ""
+  },
+  "assetInventory": [
+    {
+      "id": "",
+      "assetClass": "image | document | video | audio | other",
+      "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+      "discoveredCount": null,
+      "reachableCount": null,
+      "unreachableCount": null,
+      "evidence": "",
+      "notes": ""
+    }
+  ],
   "contentInventory": [],
   "designSignals": [],
   "functionalSignals": [],

@@ -265,6 +265,34 @@
       "evidence": ""
     }
   ],
+  "fieldSemanticChecks": [
+    {
+      "ruleId": "",
+      "entityType": "",
+      "bundle": "",
+      "field": "",
+      "evaluatedCount": null,
+      "passCount": null,
+      "violationCount": null,
+      "violatingEntityIds": [],
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "mediaProvenanceChecks": [
+    {
+      "ledgerId": "",
+      "sourceReachableCount": null,
+      "managedMediaCount": null,
+      "externalProviderCount": null,
+      "itemBlockedCount": null,
+      "unresolvedCount": null,
+      "invalidRoleAssignments": [],
+      "duplicatePlacementFindings": [],
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "coldReaderLabelChecks": [
     {
       "bundle": "",

@@ -57,6 +57,15 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const SEMANTIC_INTEGRITY_RULES = new Set([
+  'population_parity',
+  'value_parity',
+  'ordered_fields',
+  'reference_integrity',
+  'non_placeholder'
+]);
+const SEMANTIC_COMPARISON_OPERATORS = new Set(['eq', 'ne', 'lt', 'lte', 'gt', 'gte']);
+const MEDIA_TARGET_OWNERS = new Set(['managed_media', 'external_provider', 'documented_exception']);
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -72,6 +81,8 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-PARITY-01': 'addressableSurfaceParity',
   'G-CONTENT-01': 'structuredContentOwnership',
   'G-CONTENT-02': 'collectionOwnership',
+  'G-CONTENT-03': 'semanticContentIntegrity',
+  'G-MEDIA-01': 'mediaOwnershipAndProvenance',
   'G-COMPOSITION-01': 'compositionDeclaration',
   'G-COMPOSITION-02': 'compositionFidelity',
   'G-CANVAS-01': 'canvasComponentFidelity',
@@ -233,6 +244,11 @@ function finiteNumberValue(value) {
 
 function numericValue(value) {
   return finiteNumberValue(value) ? Number(value) : null;
+}
+
+function nonNegativeIntegerValue(value) {
+  const number = numericValue(value);
+  return number !== null && Number.isInteger(number) && number >= 0 ? number : null;
 }
 
 function successfulStatus(value) {
@@ -738,6 +754,11 @@ async function independentStructuredGateReasons({
     .filter((route) => route.source && route.target);
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
   const recurringObjects = substantiveObjects(patternMap?.structuredContentModel?.recurringSourceObjects);
+  const semanticRules = substantiveObjects(patternMap?.structuredContentModel?.semanticIntegrityRules);
+  const sourceAssetInventory = substantiveObjects(sourceAudit?.assetInventory);
+  const sourceAssetScope = sourceAudit?.assetInventoryScope ?? {};
+  const mediaOwnershipScope = patternMap?.mediaOwnership?.scope ?? {};
+  const mediaOwnershipLedger = substantiveObjects(patternMap?.mediaOwnership?.ledger);
   const browserItemCounts = arrayOrEmpty(browserEvidence?.publicRouteChecks)
     .flatMap((check) => substantiveObjects(check?.renderedItemCounts).map((count) => ({
       ...count,
@@ -749,6 +770,7 @@ async function independentStructuredGateReasons({
     (record) => String(record.collectionOwner ?? '').trim()
   ) || browserItemCounts.length > 0;
   const collectionEvidenceRequired = collectionScope.applies === true;
+  const mediaEvidenceRequired = sourceAssetScope.applies === true;
   if (
     collectionScope.reviewed !== true ||
     typeof collectionScope.applies !== 'boolean' ||
@@ -963,6 +985,236 @@ async function independentStructuredGateReasons({
       browserCount.accepted !== true
     )) {
       reasons.push(`browser-evidence.json rendered item counts disagree with the accepted reconciliation for collection ${ledger.sourceObject || sourcePath}.`);
+    }
+  }
+
+  const semanticChecks = substantiveObjects(independentVerification?.fieldSemanticChecks);
+  const semanticReadback = substantiveObjects(drupalReadback?.content?.fieldValueStats);
+  if (collectionEvidenceRequired && semanticRules.length === 0) {
+    reasons.push('pattern-map.json must declare field-level semantic integrity rules for in-scope recurring collections.');
+  }
+  if (!collectionEvidenceRequired && semanticRules.length > 0) {
+    reasons.push('pattern-map.json semantic integrity rules require collectionScope.applies=true.');
+  }
+  const semanticRuleIds = new Set();
+  for (const rule of semanticRules) {
+    const id = String(rule.id ?? '').trim();
+    const sourceApplicableCount = nonNegativeIntegerValue(rule.sourceApplicableCount);
+    const expectedTargetPassCount = nonNegativeIntegerValue(rule.expectedTargetPassCount);
+    const exceptionCount = nonNegativeIntegerValue(rule.exceptionCount);
+    const exceptionEvidencePresent = exceptionCount > 0 && await nonEmptyPacketEvidence(
+      packetDir,
+      rule.exceptionEvidence
+    );
+    const orderedFieldsValid = rule.rule !== 'ordered_fields' || (
+      String(rule.comparedField ?? '').trim() &&
+      SEMANTIC_COMPARISON_OPERATORS.has(rule.operator)
+    );
+    const nonOrderedOperatorValid = rule.rule === 'ordered_fields' || rule.operator === 'not_applicable';
+    if (
+      !id ||
+      semanticRuleIds.has(id) ||
+      !String(rule.sourceObject ?? '').trim() ||
+      !String(rule.entityType ?? '').trim() ||
+      !String(rule.bundle ?? '').trim() ||
+      !String(rule.field ?? '').trim() ||
+      !SEMANTIC_INTEGRITY_RULES.has(rule.rule) ||
+      !orderedFieldsValid ||
+      !nonOrderedOperatorValid ||
+      sourceApplicableCount === null ||
+      expectedTargetPassCount === null ||
+      exceptionCount === null ||
+      expectedTargetPassCount + exceptionCount !== sourceApplicableCount ||
+      (exceptionCount > 0 && !exceptionEvidencePresent) ||
+      rule.accepted !== true
+    ) {
+      reasons.push(`pattern-map.json semantic integrity rule ${id || '(missing id)'} must be accepted, uniquely identified, count-reconciled, and evidence any exceptions.`);
+      continue;
+    }
+    semanticRuleIds.add(id);
+
+    const check = semanticChecks.find((candidate) => String(candidate.ruleId ?? '').trim() === id);
+    const readback = semanticReadback.find((candidate) => String(candidate.ruleId ?? '').trim() === id);
+    const checkEvidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check.evidence,
+      independentEvidenceDir
+    );
+    const checkEvaluatedCount = nonNegativeIntegerValue(check?.evaluatedCount);
+    const checkPassCount = nonNegativeIntegerValue(check?.passCount);
+    const checkViolationCount = nonNegativeIntegerValue(check?.violationCount);
+    const readbackEvaluatedCount = nonNegativeIntegerValue(readback?.evaluatedCount);
+    const readbackPassCount = nonNegativeIntegerValue(readback?.passCount);
+    const readbackViolationCount = nonNegativeIntegerValue(readback?.violationCount);
+    if (
+      !check ||
+      !readback ||
+      check.status !== 'pass' ||
+      !exactIdentityMatch(check.entityType, rule.entityType) ||
+      !exactIdentityMatch(check.bundle, rule.bundle) ||
+      !exactIdentityMatch(check.field, rule.field) ||
+      checkEvaluatedCount !== expectedTargetPassCount ||
+      checkPassCount !== expectedTargetPassCount ||
+      checkViolationCount !== 0 ||
+      arrayOrEmpty(check.violatingEntityIds).length > 0 ||
+      readbackEvaluatedCount !== checkEvaluatedCount ||
+      readbackPassCount !== checkPassCount ||
+      readbackViolationCount !== checkViolationCount ||
+      !checkEvidencePresent
+    ) {
+      reasons.push(`independent-verification.json must pass semantic integrity rule ${id} with zero violations and counts matching Drupal readback.`);
+    }
+  }
+  if (collectionEvidenceRequired) {
+    for (const ledger of collectionLedger.filter((record) => record?.accepted === true)) {
+      for (const field of arrayOrEmpty(ledger.requiredFields)) {
+        if (!semanticRules.some((rule) =>
+          rule.accepted === true &&
+          exactIdentityMatch(rule.sourceObject, ledger.sourceObject) &&
+          exactIdentityMatch(rule.bundle, ledger.contentTypeOrBundle) &&
+          exactIdentityMatch(rule.field, field)
+        )) {
+          reasons.push(`pattern-map.json needs a semantic integrity rule for required collection field ${ledger.contentTypeOrBundle}.${field}.`);
+        }
+      }
+    }
+  }
+
+  const sourceHasMediaSignals = hasMeaningfulEntry(sourceAudit?.mediaSignals);
+  const sourceAssetIds = new Set();
+  let reachableSourceAssetCount = 0;
+  if (
+    sourceAssetScope.reviewed !== true ||
+    typeof sourceAssetScope.applies !== 'boolean' ||
+    !String(sourceAssetScope.reason ?? '').trim() ||
+    (sourceHasMediaSignals && sourceAssetInventory.length === 0)
+  ) {
+    reasons.push('source-audit.json must explicitly review reachable asset inventory scope and inventory observed source media.');
+  }
+  for (const asset of sourceAssetInventory) {
+    const id = String(asset.id ?? '').trim();
+    const discoveredCount = nonNegativeIntegerValue(asset.discoveredCount);
+    const reachableCount = nonNegativeIntegerValue(asset.reachableCount);
+    const unreachableCount = nonNegativeIntegerValue(asset.unreachableCount);
+    if (
+      !id ||
+      sourceAssetIds.has(id) ||
+      !String(asset.assetClass ?? '').trim() ||
+      !String(asset.sourceRole ?? '').trim() ||
+      discoveredCount === null ||
+      discoveredCount === 0 ||
+      reachableCount === null ||
+      unreachableCount === null ||
+      discoveredCount !== reachableCount + unreachableCount ||
+      !String(asset.evidence ?? '').trim()
+    ) {
+      reasons.push(`source-audit.json asset inventory row ${id || '(missing id)'} must be uniquely identified and reconcile discovered, reachable, and unreachable counts.`);
+      continue;
+    }
+    sourceAssetIds.add(id);
+    reachableSourceAssetCount += reachableCount;
+  }
+  if (sourceAssetScope.applies !== (reachableSourceAssetCount > 0)) {
+    reasons.push('source-audit.json assetInventoryScope.applies must reflect whether the audited source has reachable public assets.');
+  }
+  if (
+    mediaOwnershipScope.reviewed !== true ||
+    typeof mediaOwnershipScope.applies !== 'boolean' ||
+    !String(mediaOwnershipScope.reason ?? '').trim() ||
+    mediaOwnershipScope.applies !== sourceAssetScope.applies ||
+    (mediaEvidenceRequired && mediaOwnershipLedger.length === 0) ||
+    (!mediaEvidenceRequired && mediaOwnershipLedger.length > 0)
+  ) {
+    reasons.push('pattern-map.json must explicitly align media ownership scope and ledger coverage with reachable source assets.');
+  }
+
+  const mediaChecks = substantiveObjects(independentVerification?.mediaProvenanceChecks);
+  const mediaReadback = substantiveObjects(drupalReadback?.media?.referenceStats);
+  const mediaLedgerIds = new Set();
+  const mediaLedgerCountsByAsset = new Map();
+  for (const ledger of mediaOwnershipLedger) {
+    const id = String(ledger.id ?? '').trim();
+    const sourceAssetId = String(ledger.sourceAssetInventoryId ?? '').trim();
+    const sourceAsset = sourceAssetInventory.find((asset) => String(asset.id ?? '').trim() === sourceAssetId);
+    const sourceReachableCount = nonNegativeIntegerValue(ledger.sourceReachableCount);
+    const exceptionCount = nonNegativeIntegerValue(ledger.exceptionCount);
+    const exceptionEvidencePresent = exceptionCount > 0 && await nonEmptyPacketEvidence(
+      packetDir,
+      ledger.exceptionEvidence
+    );
+    if (
+      !id ||
+      mediaLedgerIds.has(id) ||
+      !sourceAsset ||
+      !exactIdentityMatch(ledger.assetClass, sourceAsset?.assetClass) ||
+      !exactIdentityMatch(ledger.sourceRole, sourceAsset?.sourceRole) ||
+      sourceReachableCount === null ||
+      sourceReachableCount === 0 ||
+      exceptionCount === null ||
+      exceptionCount > sourceReachableCount ||
+      !MEDIA_TARGET_OWNERS.has(ledger.targetOwner) ||
+      (ledger.targetOwner === 'managed_media' && (
+        !String(ledger.mediaBundle ?? '').trim() ||
+        arrayOrEmpty(ledger.referenceFields).length === 0
+      )) ||
+      (ledger.targetOwner === 'external_provider' && arrayOrEmpty(ledger.referenceFields).length === 0) ||
+      (ledger.targetOwner === 'documented_exception' && exceptionCount !== sourceReachableCount) ||
+      (exceptionCount > 0 && !exceptionEvidencePresent) ||
+      ledger.accepted !== true
+    ) {
+      reasons.push(`pattern-map.json media ownership row ${id || '(missing id)'} must be accepted, source-bound, count-reconciled, and evidence every exception.`);
+      continue;
+    }
+    mediaLedgerIds.add(id);
+    mediaLedgerCountsByAsset.set(
+      sourceAssetId,
+      (mediaLedgerCountsByAsset.get(sourceAssetId) ?? 0) + sourceReachableCount
+    );
+
+    const check = mediaChecks.find((candidate) => String(candidate.ledgerId ?? '').trim() === id);
+    const readback = mediaReadback.find((candidate) => String(candidate.ledgerId ?? '').trim() === id);
+    const checkEvidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check.evidence,
+      independentEvidenceDir
+    );
+    const managedMediaCount = nonNegativeIntegerValue(check?.managedMediaCount);
+    const externalProviderCount = nonNegativeIntegerValue(check?.externalProviderCount);
+    const itemBlockedCount = nonNegativeIntegerValue(check?.itemBlockedCount);
+    const unresolvedCount = nonNegativeIntegerValue(check?.unresolvedCount);
+    const checkedSourceCount = nonNegativeIntegerValue(check?.sourceReachableCount);
+    const allowedOwnedCount = sourceReachableCount - exceptionCount;
+    const targetOwnerCountsMatch =
+      (ledger.targetOwner === 'managed_media' && managedMediaCount === allowedOwnedCount && externalProviderCount === 0) ||
+      (ledger.targetOwner === 'external_provider' && externalProviderCount === allowedOwnedCount && managedMediaCount === 0) ||
+      (ledger.targetOwner === 'documented_exception' && managedMediaCount === 0 && externalProviderCount === 0);
+    if (
+      !check ||
+      !readback ||
+      check.status !== 'pass' ||
+      checkedSourceCount !== sourceReachableCount ||
+      managedMediaCount === null ||
+      externalProviderCount === null ||
+      itemBlockedCount === null ||
+      unresolvedCount !== 0 ||
+      managedMediaCount + externalProviderCount + itemBlockedCount + unresolvedCount !== sourceReachableCount ||
+      itemBlockedCount !== exceptionCount ||
+      !targetOwnerCountsMatch ||
+      arrayOrEmpty(check.invalidRoleAssignments).length > 0 ||
+      arrayOrEmpty(check.duplicatePlacementFindings).length > 0 ||
+      nonNegativeIntegerValue(readback.managedMediaCount) !== managedMediaCount ||
+      nonNegativeIntegerValue(readback.externalProviderCount) !== externalProviderCount ||
+      nonNegativeIntegerValue(readback.unresolvedCount) !== unresolvedCount ||
+      !checkEvidencePresent
+    ) {
+      reasons.push(`independent-verification.json must reconcile media provenance row ${id} with Drupal readback, zero unresolved assets, and no invalid-role or duplicate-placement findings.`);
+    }
+  }
+  for (const asset of sourceAssetInventory) {
+    const id = String(asset.id ?? '').trim();
+    const reachableCount = nonNegativeIntegerValue(asset.reachableCount);
+    if (reachableCount > 0 && mediaLedgerCountsByAsset.get(id) !== reachableCount) {
+      reasons.push(`pattern-map.json media ownership ledger must account for every reachable asset in source inventory row ${id}.`);
     }
   }
 
@@ -2700,7 +2952,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     (!hasMeaningfulEntry(drupalContent.nodes) && !hasMeaningfulEntry(drupalContent.canvasPages)) ||
     arrayOrEmpty(drupalContent.defaultOrDemoContent).length > 0 ||
     (collectionEvidenceRequired && !hasMeaningfulEntry(drupalReadback?.views)) ||
-    ((hasMeaningfulEntry(sourceAudit?.mediaSignals) || hasMeaningfulEntry(patternMap?.media)) &&
+    ((sourceAudit?.assetInventoryScope?.applies === true || hasMeaningfulEntry(sourceAudit?.mediaSignals) || hasMeaningfulEntry(patternMap?.media)) &&
       (!hasMeaningfulEntry(drupalReadback?.media?.items) ||
         !isJsonObject(drupalReadback?.media?.countsByType) ||
         Object.keys(drupalReadback.media.countsByType).length === 0)) ||

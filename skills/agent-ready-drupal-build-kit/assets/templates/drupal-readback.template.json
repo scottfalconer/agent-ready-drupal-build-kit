@@ -24,6 +24,7 @@
     "defaultOrDemoContent": [],
     "contentTypes": [],
     "fieldStorage": [],
+    "fieldValueStats": [],
     "formDisplays": [],
     "viewDisplays": [],
     "canvasPages": []
@@ -38,7 +39,8 @@
   },
   "media": {
     "countsByType": {},
-    "items": []
+    "items": [],
+    "referenceStats": []
   },
   "views": [],
   "workflows": [],

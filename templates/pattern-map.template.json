@@ -8,6 +8,29 @@
   "fields": [],
   "vocabularies": [],
   "media": [],
+  "mediaOwnership": {
+    "scope": {
+      "reviewed": false,
+      "applies": false,
+      "reason": ""
+    },
+    "ledger": [
+      {
+        "id": "",
+        "sourceAssetInventoryId": "",
+        "assetClass": "image | document | video | audio | other",
+        "sourceRole": "content | brand | download | embed | icon | tracking | decorative | other",
+        "sourceReachableCount": null,
+        "targetOwner": "managed_media | external_provider | documented_exception",
+        "mediaBundle": "",
+        "referenceFields": [],
+        "exceptionCount": 0,
+        "exceptionEvidence": "",
+        "accepted": false,
+        "notes": ""
+      }
+    ]
+  },
   "menus": [],
   "views": [],
   "sourceIntentRoutes": [],
@@ -51,6 +74,24 @@
         "detailRouteOwner": "entity_view_display | canvas_composition | view_row | documented_exception",
         "editorAddRowEvidence": "",
         "exceptionRationale": "",
+        "accepted": false,
+        "notes": ""
+      }
+    ],
+    "semanticIntegrityRules": [
+      {
+        "id": "",
+        "sourceObject": "",
+        "entityType": "",
+        "bundle": "",
+        "field": "",
+        "comparedField": "",
+        "rule": "population_parity | value_parity | ordered_fields | reference_integrity | non_placeholder",
+        "operator": "eq | ne | lt | lte | gt | gte | not_applicable",
+        "sourceApplicableCount": null,
+        "expectedTargetPassCount": null,
+        "exceptionCount": 0,
+        "exceptionEvidence": "",
         "accepted": false,
         "notes": ""
       }

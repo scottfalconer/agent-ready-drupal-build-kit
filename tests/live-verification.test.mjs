@@ -541,6 +541,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       evidence: 'claim-evidence.json'
     }
   ];
+  independent.fieldSemanticChecks = [];
+  independent.mediaProvenanceChecks = [];
   independent.coldReaderLabelChecks = [
     {
       bundle: 'page',
@@ -729,6 +731,12 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     { claim: 'The source homepage was captured.', url: `${sourceBaseUrl}/`, method: 'browser', result: 'observed' }
   ];
   sourceAudit.observedPatterns = [{ pattern: 'homepage', evidence: `${sourceBaseUrl}/` }];
+  sourceAudit.assetInventoryScope = {
+    reviewed: true,
+    applies: false,
+    reason: 'The source fixture has no reachable public assets.'
+  };
+  sourceAudit.assetInventory = [];
   sourceAudit.contentInventory = [{ route: '/', type: 'homepage', title: 'Source home' }];
   sourceAudit.designSignals = [{ route: '/', signal: 'hero, navigation, and content hierarchy captured' }];
   sourceAudit.routeInventorySummary = {
@@ -752,6 +760,15 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   };
   patternMap.structuredContentModel.recurringSourceObjects = [];
   patternMap.structuredContentModel.collectionOwnershipLedger = [];
+  patternMap.structuredContentModel.semanticIntegrityRules = [];
+  patternMap.mediaOwnership = {
+    scope: {
+      reviewed: true,
+      applies: false,
+      reason: 'The source fixture has no reachable public assets.'
+    },
+    ledger: []
+  };
   patternMap.buildTypeDeclaration = {
     type: 'structured_drupal_native_canvas_unused',
     canvasAvailabilityEvidence: 'Canvas was inspected and is not needed for this one-route fixture.',
@@ -1010,6 +1027,138 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   }
 }
 
+function addQualifyingCollectionSemanticEvidence(packetDir) {
+  mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+    value.structuredContentModel.collectionScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The source homepage contains a recurring card collection.'
+    };
+    value.structuredContentModel.collectionOwnershipLedger = [{
+      sourceRoute: '/',
+      collectionPattern: 'grid',
+      sourceObject: 'card',
+      sourceItemCount: 1,
+      drupalEntityType: 'node',
+      contentTypeOrBundle: 'page',
+      requiredFields: ['body'],
+      collectionOwner: 'view',
+      viewDisplayOrConfig: 'views.view.cards',
+      detailRouteOwner: 'entity_view_display',
+      editorAddRowEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      exceptionRationale: '',
+      accepted: true,
+      notes: 'The fixture card is Drupal-owned.'
+    }];
+    value.structuredContentModel.semanticIntegrityRules = [{
+      id: 'card-body-population',
+      sourceObject: 'card',
+      entityType: 'node',
+      bundle: 'page',
+      field: 'body',
+      comparedField: '',
+      rule: 'population_parity',
+      operator: 'not_applicable',
+      sourceApplicableCount: 1,
+      expectedTargetPassCount: 1,
+      exceptionCount: 0,
+      exceptionEvidence: '',
+      accepted: true,
+      notes: 'Every source card has a populated body.'
+    }];
+  });
+  mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+    value.perRouteItemReconciliation = [{
+      sourcePath: '/',
+      targetPath: '/',
+      sourceObject: 'card',
+      itemType: 'card',
+      sourceCount: 1,
+      targetRenderedCount: 1,
+      targetDrupalEntityCount: 1,
+      mismatchDisposition: 'none',
+      dispositionEvidence: '',
+      acceptedBy: '',
+      rationale: '',
+      accepted: true,
+      notes: 'The source and target each render one card.'
+    }];
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (value) => {
+    for (const check of value.publicRouteChecks) {
+      check.renderedItemCounts = [{ sourceObject: 'card', sourceCount: 1, targetCount: 1, accepted: true }];
+    }
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+    value.perRouteItemCounts = [{
+      sourceRoute: '/', targetRoute: '/', sourceObject: 'card', expectedSourceItemCount: 1,
+      targetRenderedItemCount: 1, targetDrupalEntityCount: 1, missingItems: [], extraItems: [],
+      status: 'pass', evidence: 'claim-evidence.json'
+    }];
+    value.collectionOwnershipChecks = [{
+      sourceRoute: '/', sourceObject: 'card', collectionPattern: 'grid', drupalOwner: 'content_type_plus_view',
+      viewOrCollectionConfig: 'views.view.cards', editorAddRowEvidence: 'claim-evidence.json',
+      status: 'pass', evidence: 'claim-evidence.json'
+    }];
+    value.editorAddRowChecks = [{
+      objectType: 'card', sourceRoute: '/', targetRoute: '/', drupalOwner: 'node',
+      editorRole: 'content editor', editorUser: 'editor', addOrEditRoute: '/node/add/page',
+      task: 'create representative item', publicRouteExpectedToChange: '/', publicOutputChanged: true,
+      listingOrDetailUpdatedWithoutCode: true, status: 'pass', evidence: 'claim-evidence.json'
+    }];
+    value.fieldSemanticChecks = [{
+      ruleId: 'card-body-population', entityType: 'node', bundle: 'page', field: 'body',
+      evaluatedCount: 1, passCount: 1, violationCount: 0, violatingEntityIds: [],
+      status: 'pass', evidence: 'claim-evidence.json'
+    }];
+  });
+  mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+    value.content.fieldValueStats = [{
+      ruleId: 'card-body-population', entityType: 'node', bundle: 'page', field: 'body',
+      evaluatedCount: 1, passCount: 1, violationCount: 0
+    }];
+    value.views = [{ id: 'cards', display: 'page_1', route: '/' }];
+  });
+}
+
+function addQualifyingMediaProvenanceEvidence(packetDir) {
+  mutateJson(join(packetDir, 'source-audit.json'), (value) => {
+    value.assetInventoryScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The source fixture exposes one reachable content image.'
+    };
+    value.assetInventory = [{
+      id: 'content-images', assetClass: 'image', sourceRole: 'content', discoveredCount: 1,
+      reachableCount: 1, unreachableCount: 0, evidence: 'https://source.example/content-image.jpg', notes: ''
+    }];
+  });
+  mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+    value.mediaOwnership = {
+      scope: { reviewed: true, applies: true, reason: 'The reachable source image is owned by Drupal Media.' },
+      ledger: [{
+        id: 'content-images-managed', sourceAssetInventoryId: 'content-images', assetClass: 'image',
+        sourceRole: 'content', sourceReachableCount: 1, targetOwner: 'managed_media', mediaBundle: 'image',
+        referenceFields: ['node.page.field_image'], exceptionCount: 0, exceptionEvidence: '', accepted: true, notes: ''
+      }]
+    };
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+    value.mediaProvenanceChecks = [{
+      ledgerId: 'content-images-managed', sourceReachableCount: 1, managedMediaCount: 1,
+      externalProviderCount: 0, itemBlockedCount: 0, unresolvedCount: 0,
+      invalidRoleAssignments: [], duplicatePlacementFindings: [], status: 'pass', evidence: 'claim-evidence.json'
+    }];
+  });
+  mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+    value.media.countsByType = { image: 1 };
+    value.media.items = [{ id: 1, bundle: 'image', name: 'Content image' }];
+    value.media.referenceStats = [{
+      ledgerId: 'content-images-managed', managedMediaCount: 1, externalProviderCount: 0, unresolvedCount: 0
+    }];
+  });
+}
+
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
   let requestCount = 0;
   await withHttpServer(
@@ -1222,6 +1371,127 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
       );
     }
   );
+});
+
+test('semantic field and media provenance evidence can qualify a recurring collection', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'semantic-media-complete-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  addQualifyingCollectionSemanticEvidence(packetDir);
+  addQualifyingMediaProvenanceEvidence(packetDir);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.equal(
+    report.completionEvidence.packetSupportsCompletion,
+    true,
+    JSON.stringify(report.completionEvidence, null, 2)
+  );
+});
+
+test('semantic field and media provenance gates reject count-only or misowned evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'semantic-media-regressions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+  addQualifyingCollectionSemanticEvidence(canonicalPacket);
+  addQualifyingMediaProvenanceEvidence(canonicalPacket);
+
+  const baseline = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(baseline.completionEvidence.packetSupportsCompletion, true, JSON.stringify(baseline, null, 2));
+
+  const cases = [
+    {
+      name: 'semantic-violation',
+      mutate: (packetDir) => {
+        for (const file of ['independent-verification.json', 'drupal-readback.json']) {
+          mutateJson(join(packetDir, file), (value) => {
+            const record = file === 'independent-verification.json'
+              ? value.fieldSemanticChecks[0]
+              : value.content.fieldValueStats[0];
+            record.passCount = 0;
+            record.violationCount = 1;
+            if (file === 'independent-verification.json') {
+              record.violatingEntityIds = [1];
+            }
+          });
+        }
+      }
+    },
+    {
+      name: 'semantic-exception-without-evidence',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+          const rule = value.structuredContentModel.semanticIntegrityRules[0];
+          rule.expectedTargetPassCount = 0;
+          rule.exceptionCount = 1;
+          rule.exceptionEvidence = '';
+        });
+        for (const file of ['independent-verification.json', 'drupal-readback.json']) {
+          mutateJson(join(packetDir, file), (value) => {
+            const record = file === 'independent-verification.json'
+              ? value.fieldSemanticChecks[0]
+              : value.content.fieldValueStats[0];
+            record.evaluatedCount = 0;
+            record.passCount = 0;
+          });
+        }
+      }
+    },
+    {
+      name: 'managed-asset-replaced-by-external-url',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+          value.mediaProvenanceChecks[0].managedMediaCount = 0;
+          value.mediaProvenanceChecks[0].externalProviderCount = 1;
+        });
+        mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+          value.media.referenceStats[0].managedMediaCount = 0;
+          value.media.referenceStats[0].externalProviderCount = 1;
+        });
+      }
+    },
+    {
+      name: 'unresolved-asset',
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+          const check = value.mediaProvenanceChecks[0];
+          check.managedMediaCount = 0;
+          check.unresolvedCount = 1;
+        });
+        mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+          const readback = value.media.referenceStats[0];
+          readback.managedMediaCount = 0;
+          readback.unresolvedCount = 1;
+        });
+      }
+    },
+    {
+      name: 'invalid-media-role',
+      mutate: (packetDir) => mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+        value.mediaProvenanceChecks[0].invalidRoleAssignments = [{ entityId: 1, reason: 'icon used as hero' }];
+      })
+    },
+    {
+      name: 'duplicate-media-placement',
+      mutate: (packetDir) => mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+        value.mediaProvenanceChecks[0].duplicatePlacementFindings = [{ entityId: 1, field: 'field_gallery' }];
+      })
+    }
+  ];
+
+  for (const { name, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutate(packetDir);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false, name);
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+  }
 });
 
 test('live verifier rejects fetched SEO metadata that is missing or differs from packet claims', async () => {
