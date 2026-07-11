@@ -7,6 +7,7 @@
   "browserFirstRouteExpansion": {
     "browserRenderedSeedRoutes": [],
     "candidateRoutesFromBrowserRenderedLinks": [],
+    "candidateRoutesFromImportedContentBodies": [],
     "candidateRoutesFromBundles": [],
     "candidateRoutesFromMetadata": [],
     "candidateRoutesFromAssets": [],
@@ -52,6 +53,12 @@
       "classification": "canonical | duplicate_alias | legacy | test_staging | private_boundary | unknown",
       "targetDisposition": "keep | redirect | unpublished_import | intentionally_drop | owner_decision_required | blocked",
       "targetPath": "",
+      "noRedirectDisposition": {
+        "accepted": false,
+        "acceptedBy": "",
+        "rationale": "",
+        "evidence": ""
+      },
       "ownerDecisionEvidence": "",
       "accepted": false,
       "notes": ""
@@ -138,6 +145,12 @@
       "targetTitle": "",
       "targetH1": "",
       "expectedRedirect": false,
+      "noRedirectDisposition": {
+        "accepted": false,
+        "acceptedBy": "",
+        "rationale": "",
+        "evidence": ""
+      },
       "accepted": false,
       "notes": ""
     }

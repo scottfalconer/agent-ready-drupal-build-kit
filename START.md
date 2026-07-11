@@ -123,6 +123,6 @@ ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --
 
 Use `scripts/verify-packet.mjs` only for explicit packet-only lint. Packet-only success never authorizes a complete rebuild claim.
 
-An explicit verifier target must match the current DDEV origin. The complete-local-rebuild verdict remains separate from production readiness and launch approval.
+An explicit verifier target must match one of the current project's authoritative DDEV web origins. Configured custom FQDNs qualify; service URLs such as Mailpit do not. The complete-local-rebuild verdict remains separate from production readiness and launch approval.
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.

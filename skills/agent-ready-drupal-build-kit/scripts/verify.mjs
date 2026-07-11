@@ -23,9 +23,12 @@ Options:
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
-const MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
-const SURFACE_CHECK_CONCURRENCY = 12;
+const MAX_LIVE_ROUTE_CHECKS = 1_000;
+const MAX_LIVE_ROUTE_CONCURRENCY = 12;
+const MAX_LIVE_HTTP_REQUESTS = 2_000;
+const MAX_LIVE_HTTP_TASKS = 20_000;
+const LIVE_ROUTE_DEADLINE_MS = 90_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -171,23 +174,6 @@ function matchingTags(html, tagName, predicate) {
   return tags.map(tagAttributes).filter(predicate);
 }
 
-async function mapWithConcurrency(values, concurrency, mapper) {
-  const results = new Array(values.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, values.length) },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        results[index] = await mapper(values[index], index);
-      }
-    }
-  );
-  await Promise.all(workers);
-  return results;
-}
-
 function serverResponseLinks(html, documentUrl, targetOrigin, sourceOrigin) {
   const errors = [];
   const renderedHtml = html
@@ -294,6 +280,19 @@ function normalizePath(value) {
   return pathname !== '/' ? pathname.replace(/\/+$/, '') : '/';
 }
 
+function requestPathAndSearch(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const url = new URL(text, 'https://route-key.invalid/');
+    return `${normalizePath(url.pathname)}${url.search}`;
+  } catch {
+    return '';
+  }
+}
+
 function parseHttpUrl(value, label) {
   let parsed;
   try {
@@ -311,22 +310,35 @@ function parseHttpUrl(value, label) {
   return parsed;
 }
 
-function localTlsHost(hostname) {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+export function isLocalEnvironmentHost(hostname) {
+  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '');
   return (
     host === 'localhost' ||
     host === '::1' ||
+    host === '0.0.0.0' ||
     host === 'host.docker.internal' ||
     host.endsWith('.localhost') ||
     host.endsWith('.ddev.site') ||
+    host.endsWith('.test') ||
     /^127(?:\.\d{1,3}){3}$/.test(host)
   );
 }
 
-function requestOnce(url, { captureBody = 'always' } = {}) {
+function requestOnce(
+  url,
+  { allowRuntimeBoundLocalCertificate = false, captureBody = 'always', deadlineAt = 0 } = {}
+) {
   return new Promise((resolveRequest, rejectRequest) => {
+    const remainingDeadlineMs = deadlineAt > 0 ? deadlineAt - Date.now() : REQUEST_TIMEOUT_MS;
+    if (remainingDeadlineMs <= 0) {
+      rejectRequest(new Error('Live route verification exceeded its total wall-clock deadline.'));
+      return;
+    }
+    const timeoutMs = Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remainingDeadlineMs));
     const client = url.protocol === 'https:' ? https : http;
-    const allowLocalCertificate = url.protocol === 'https:' && localTlsHost(url.hostname);
+    const allowLocalCertificate = url.protocol === 'https:' && (
+      isLocalEnvironmentHost(url.hostname) || allowRuntimeBoundLocalCertificate
+    );
     let settled = false;
     let request;
     const finish = (callback, value) => {
@@ -342,8 +354,12 @@ function requestOnce(url, { captureBody = 'always' } = {}) {
       request?.destroy();
     };
     const wallClockTimeout = setTimeout(
-      () => fail(new Error(`Request exceeded the ${REQUEST_TIMEOUT_MS} ms wall-clock limit.`)),
-      REQUEST_TIMEOUT_MS
+      () => fail(new Error(
+        deadlineAt > 0 && Date.now() >= deadlineAt
+          ? 'Live route verification exceeded its total wall-clock deadline.'
+          : `Request exceeded the ${REQUEST_TIMEOUT_MS} ms wall-clock limit.`
+      )),
+      timeoutMs
     );
     request = client.request(
       url,
@@ -355,7 +371,7 @@ function requestOnce(url, { captureBody = 'always' } = {}) {
         },
         method: 'GET',
         rejectUnauthorized: !allowLocalCertificate,
-        timeout: REQUEST_TIMEOUT_MS
+        timeout: timeoutMs
       },
       (response) => {
         const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
@@ -404,16 +420,210 @@ function requestOnce(url, { captureBody = 'always' } = {}) {
         response.on('error', fail);
       }
     );
-    request.on('timeout', () => fail(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS} ms.`)));
+    request.on('timeout', () => fail(new Error(
+      deadlineAt > 0 && Date.now() >= deadlineAt
+        ? 'Live route verification exceeded its total wall-clock deadline.'
+        : `Request timed out after ${timeoutMs} ms.`
+    )));
     request.on('error', fail);
     request.end();
   });
 }
 
+export function createLiveHttpContext({
+  allowRuntimeBoundLocalCertificate = false,
+  attempted = true,
+  concurrency = MAX_LIVE_ROUTE_CONCURRENCY,
+  deadlineMs = LIVE_ROUTE_DEADLINE_MS,
+  maxRequests = MAX_LIVE_HTTP_REQUESTS,
+  maxTasks = MAX_LIVE_HTTP_TASKS
+} = {}) {
+  const startedAt = Date.now();
+  const errors = [];
+  const errorSet = new Set();
+  const limits = { concurrency, deadlineMs, maxRequests, maxTasks };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      const message = `Live HTTP verification ${name} must be a positive safe integer.`;
+      errors.push(message);
+      errorSet.add(message);
+    }
+  }
+  const limitsValid = errors.length === 0;
+  const deadlineAt = limitsValid ? startedAt + deadlineMs : startedAt;
+  const waiters = [];
+  const tasksByKind = {};
+  let activeRequests = 0;
+  let completedTaskCount = 0;
+  let deadlineExceeded = false;
+  let peakConcurrency = 0;
+  let requestCapExhausted = false;
+  let requestCount = 0;
+  let taskCapExhausted = false;
+  let taskCount = 0;
+  let taskRejectedCount = 0;
+
+  const recordError = (message) => {
+    if (!errorSet.has(message)) {
+      errorSet.add(message);
+      errors.push(message);
+    }
+    return new Error(message);
+  };
+  const deadlineError = () => {
+    deadlineExceeded = true;
+    return recordError('Live route verification exceeded its total wall-clock deadline.');
+  };
+  const ensureUsable = () => {
+    if (!limitsValid) {
+      throw new Error(errors[0]);
+    }
+    if (Date.now() >= deadlineAt) {
+      throw deadlineError();
+    }
+  };
+  const dispatch = () => {
+    while (activeRequests < concurrency && waiters.length > 0) {
+      const waiter = waiters.shift();
+      if (waiter.cancelled) {
+        continue;
+      }
+      if (Date.now() >= deadlineAt) {
+        waiter.cancelled = true;
+        clearTimeout(waiter.timer);
+        waiter.reject(deadlineError());
+        continue;
+      }
+      clearTimeout(waiter.timer);
+      activeRequests += 1;
+      peakConcurrency = Math.max(peakConcurrency, activeRequests);
+      waiter.resolve();
+    }
+  };
+  const acquire = () => {
+    ensureUsable();
+    if (activeRequests < concurrency) {
+      activeRequests += 1;
+      peakConcurrency = Math.max(peakConcurrency, activeRequests);
+      return Promise.resolve();
+    }
+    return new Promise((resolveAcquire, rejectAcquire) => {
+      const remainingMs = Math.max(1, deadlineAt - Date.now());
+      const waiter = {
+        cancelled: false,
+        reject: rejectAcquire,
+        resolve: resolveAcquire,
+        timer: null
+      };
+      waiter.timer = setTimeout(() => {
+        if (waiter.cancelled) {
+          return;
+        }
+        waiter.cancelled = true;
+        rejectAcquire(deadlineError());
+      }, remainingMs);
+      waiters.push(waiter);
+    });
+  };
+  const release = () => {
+    activeRequests = Math.max(0, activeRequests - 1);
+    dispatch();
+  };
+
+  return {
+    allowRuntimeBoundLocalCertificate,
+    deadlineAt,
+    errors,
+    async request(url, { captureBody = 'always' } = {}) {
+      ensureUsable();
+      if (requestCount >= maxRequests) {
+        requestCapExhausted = true;
+        throw recordError(`Live route verification exhausted its ${maxRequests} HTTP request budget.`);
+      }
+      requestCount += 1;
+      await acquire();
+      try {
+        ensureUsable();
+        return await requestOnce(url, {
+          allowRuntimeBoundLocalCertificate,
+          captureBody,
+          deadlineAt
+        });
+      } catch (error) {
+        if (/total wall-clock deadline/i.test(String(error?.message ?? error))) {
+          throw deadlineError();
+        }
+        throw error;
+      } finally {
+        release();
+      }
+    },
+    async runTask(kind, task) {
+      ensureUsable();
+      if (taskCapExhausted || taskCount >= maxTasks) {
+        taskCapExhausted = true;
+        taskRejectedCount += 1;
+        throw recordError(`Live route verification exhausted its ${maxTasks} task budget.`);
+      }
+      const taskKind = String(kind || 'unspecified');
+      taskCount += 1;
+      tasksByKind[taskKind] = (tasksByKind[taskKind] ?? 0) + 1;
+      try {
+        return await task();
+      } finally {
+        completedTaskCount += 1;
+      }
+    },
+    async runTasks(kind, values, mapper) {
+      const items = [...values];
+      ensureUsable();
+      if (taskCapExhausted || taskCount + items.length > maxTasks) {
+        taskCapExhausted = true;
+        taskRejectedCount += items.length;
+        throw recordError(
+          `Live route verification exhausted its ${maxTasks} task budget; ${items.length} ${String(kind || 'unspecified')} tasks could not be scheduled.`
+        );
+      }
+      const outcomes = await Promise.allSettled(items.map((value, index) => this.runTask(
+        kind,
+        () => mapper(value, index)
+      )));
+      const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+      if (rejected) {
+        throw rejected.reason;
+      }
+      return outcomes.map((outcome) => outcome.value);
+    },
+    metrics() {
+      return {
+        attempted,
+        deadlineAt: new Date(deadlineAt).toISOString(),
+        deadlineExceeded,
+        deadlineMs,
+        elapsedMs: Date.now() - startedAt,
+        maxConcurrency: concurrency,
+        maxRequests,
+        maxTasks,
+        peakConcurrency,
+        requestCapExhausted,
+        requestCount,
+        taskCapExhausted,
+        taskCount,
+        taskRejectedCount,
+        completedTaskCount,
+        tasksByKind: { ...tasksByKind }
+      };
+    }
+  };
+}
+
 async function requestFollowingRedirects(
   startUrl,
-  { captureBody = 'always', stopAtExternalRedirect = false } = {}
+  { captureBody = 'always', liveHttpContext, stopAtExternalRedirect = false } = {}
 ) {
+  if (!liveHttpContext) {
+    throw new Error('A verifier-wide live HTTP context is required.');
+  }
   let current = new URL(startUrl);
   if (current.username || current.password) {
     throw new Error(`Refusing credential-bearing request URL ${redactedUrl(current)}.`);
@@ -423,7 +633,7 @@ async function requestFollowingRedirects(
   let localTlsVerificationBypassed = false;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await requestOnce(current, { captureBody });
+    const response = await liveHttpContext.request(current, { captureBody });
     localTlsVerificationBypassed ||= response.localTlsVerificationBypassed;
     const location = response.headers.location;
     if (REDIRECT_STATUSES.has(response.status) && location) {
@@ -464,18 +674,18 @@ async function requestFollowingRedirects(
   throw new Error('Redirect resolution failed.');
 }
 
-async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
+async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix, liveHttpContext) {
   let sourceOrigin = '';
   try {
     sourceOrigin = parseHttpUrl(routeMatrix?.sourceBaseUrl, 'route-matrix.json sourceBaseUrl').origin;
   } catch {
     // Packet and live identity validation report the malformed source URL separately.
   }
-  const declaredSameOriginPaths = new Set();
+  const declaredSameOriginRequests = new Set();
   const declarePath = (value) => {
-    const path = normalizePath(value);
-    if (path) {
-      declaredSameOriginPaths.add(path);
+    const request = requestPathAndSearch(value);
+    if (request) {
+      declaredSameOriginRequests.add(request);
     }
   };
   const routeSeeds = new Map();
@@ -509,7 +719,7 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       declarePath(route.targetPath);
       declarePath(route.targetFinalPath);
       addSeed(route.targetPath, 'accepted-route', {
-        expectedFinalPath: normalizePath(route.targetFinalPath || route.targetPath),
+        expectedFinalRequest: requestPathAndSearch(route.targetFinalPath || route.targetPath),
         expectedRedirect: route.expectedRedirect === true,
         expectedStatus: Number(route.targetStatus),
         kind: 'accepted route'
@@ -526,7 +736,7 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       ['public_200', 'redirect', 'noindex'].includes(String(route?.expectedPublicBehavior ?? ''))
     ) {
       addSeed(route.targetPath, 'target-required-route', {
-        expectedFinalPath: normalizePath(route.targetFinalPath || route.targetPath),
+        expectedFinalRequest: requestPathAndSearch(route.targetFinalPath || route.targetPath),
         expectedRedirect: route.expectedPublicBehavior === 'redirect',
         expectedStatus: Number(route.targetStatus),
         kind: 'target-required route'
@@ -534,13 +744,16 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
     }
   }
 
-  const routeChecks = await mapWithConcurrency(
+  const routeChecks = await liveHttpContext.runTasks(
+    'accepted-route-seed',
     [...routeSeeds.values()],
-    SURFACE_CHECK_CONCURRENCY,
     async (seed) => {
       const errors = [];
       try {
-        const response = await requestFollowingRedirects(seed.url, { captureBody: 'html' });
+        const response = await requestFollowingRedirects(seed.url, {
+          captureBody: 'html',
+          liveHttpContext
+        });
         if (response.status < 200 || response.status >= 300) {
           errors.push(`${redactedPath(seed.url.href, baseUrl)} ended with HTTP ${response.status}; accepted public routes must end with a 2xx response.`);
         }
@@ -559,9 +772,11 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
           if (!contract.expectedRedirect && response.redirects.length > 0) {
             errors.push(`${routeLabel} declares a direct response but the live response redirected.`);
           }
-          const actualFinalPath = normalizePath(response.finalUrl);
-          if (actualFinalPath !== contract.expectedFinalPath) {
-            errors.push(`${routeLabel} resolved to ${actualFinalPath}; expected ${contract.expectedFinalPath}.`);
+          const actualFinalRequest = requestPathAndSearch(response.finalUrl);
+          if (actualFinalRequest !== contract.expectedFinalRequest) {
+            errors.push(
+              `${routeLabel} resolved to ${redactedPath(response.finalUrl, baseUrl)}; expected ${redactedPath(contract.expectedFinalRequest, baseUrl)}.`
+            );
           }
         }
         const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
@@ -681,7 +896,6 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       // Packet completion validation reports malformed exceptions separately.
     }
   }
-  const sourceOriginLinkChecks = [];
   const sourceOriginPairs = new Map();
   for (const route of routeChecks) {
     const referrer = route.finalUrl || route.requestedUrl;
@@ -696,57 +910,56 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       sourceOriginPairs.set(pairKey, pair);
     }
   }
-  for (const [pairKey, pair] of sourceOriginPairs) {
-    const exception = acceptedSourceExceptions.get(pairKey);
-    const passed = Boolean(exception);
-    const checkErrors = passed
-      ? []
-      : [`Server-rendered response link ${redactedUrl(pair.target)} from ${redactedUrl(pair.referrer)} points back to source origin ${sourceOrigin} without an accepted per-link exception.`];
-    sourceOriginLinkChecks.push({
-      acceptedException: exception
-        ? {
-              accepter: exception.accepter,
-              evidence: exception.evidence,
-              rationaleSha256: `sha256:${sha256(String(exception.rationale ?? ''))}`
-          }
-        : null,
-      errors: checkErrors,
-      hrefCount: pair.hrefs.size,
-      hrefSha256: [...pair.hrefs].slice(0, 10).map((href) => `sha256:${sha256(href)}`),
-      passed,
-      referrer: pair.referrer,
-      target: pair.target
-    });
-  }
+  const sourceOriginLinkChecks = await liveHttpContext.runTasks(
+    'source-origin-link',
+    [...sourceOriginPairs.entries()],
+    async ([pairKey, pair]) => {
+      const exception = acceptedSourceExceptions.get(pairKey);
+      const passed = Boolean(exception);
+      const checkErrors = passed
+        ? []
+        : [`Server-rendered response link ${redactedUrl(pair.target)} from ${redactedUrl(pair.referrer)} points back to source origin ${sourceOrigin} without an accepted per-link exception.`];
+      return {
+        acceptedException: exception
+          ? {
+                accepter: exception.accepter,
+                evidence: exception.evidence,
+                rationaleSha256: `sha256:${sha256(String(exception.rationale ?? ''))}`
+            }
+          : null,
+        errors: checkErrors,
+        hrefCount: pair.hrefs.size,
+        hrefSha256: [...pair.hrefs].slice(0, 10).map((href) => `sha256:${sha256(href)}`),
+        passed,
+        referrer: pair.referrer,
+        target: pair.target
+      };
+    }
+  );
 
   const errors = [
     ...seedErrors,
     ...routeChecks.flatMap((check) => check.errors),
     ...sourceOriginLinkChecks.flatMap((check) => check.errors)
   ];
-  let linkChecks = [];
-  if (internalTargets.size > MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS) {
-    errors.push(
-      `Server-rendered response HTML exposes ${internalTargets.size} unique same-origin links, exceeding the ${MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS} safety limit; verification cannot truncate this blocking check.`
-    );
-  } else {
-    linkChecks = await mapWithConcurrency(
-      [...internalTargets.values()],
-      SURFACE_CHECK_CONCURRENCY,
-      async (target) => {
+  const linkChecks = await liveHttpContext.runTasks(
+    'server-rendered-link',
+    [...internalTargets.values()],
+    async (target) => {
         const targetErrors = [];
         const hrefs = [...target.hrefs];
         const referrers = [...target.referrers];
         try {
           const response = await requestFollowingRedirects(new URL(target.url), {
             captureBody: 'never',
+            liveHttpContext,
             stopAtExternalRedirect: true
           });
           const finalUrl = new URL(response.finalUrl);
           finalUrl.hash = '';
-          const startPathDeclared = declaredSameOriginPaths.has(normalizePath(target.url));
+          const startPathDeclared = declaredSameOriginRequests.has(requestPathAndSearch(target.url));
           const finalPathDeclared = finalUrl.origin === baseUrl.origin &&
-            declaredSameOriginPaths.has(normalizePath(finalUrl.href));
+            declaredSameOriginRequests.has(requestPathAndSearch(finalUrl.href));
           const acceptedDispositions = [];
           if (response.externalRedirect) {
             for (const referrer of referrers) {
@@ -826,10 +1039,9 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
             requestedUrl: redactedUrl(target.url)
           };
         }
-      }
-    );
-    errors.push(...linkChecks.flatMap((check) => check.errors));
-  }
+    }
+  );
+  errors.push(...linkChecks.flatMap((check) => check.errors));
 
   return {
     errors,
@@ -874,7 +1086,58 @@ function recursiveStringForKey(value, keys) {
   return '';
 }
 
-function ddevTargetUrl(cwd) {
+function stringValues(value) {
+  if (typeof value === 'string') {
+    return value.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+  return Array.isArray(value) ? value.flatMap(stringValues) : [];
+}
+
+export function ddevProjectWebUrls(description) {
+  const urls = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const primaryValues = [value.primary_url, value.primaryUrl].flatMap(stringValues);
+    const projectWebRecord = primaryValues.length > 0 && (
+      Object.hasOwn(value, 'httpurl') ||
+      Object.hasOwn(value, 'httpsurl') ||
+      Object.hasOwn(value, 'httpUrl') ||
+      Object.hasOwn(value, 'httpsUrl') ||
+      Object.hasOwn(value, 'httpURLs') ||
+      Object.hasOwn(value, 'httpsURLs') ||
+      Object.hasOwn(value, 'docroot') ||
+      Object.hasOwn(value, 'project_tld') ||
+      Object.hasOwn(value, 'additional_fqdns')
+    );
+    if (projectWebRecord) {
+      for (const candidate of [
+        ...primaryValues,
+        ...stringValues(value.urls),
+        ...stringValues(value.httpurl),
+        ...stringValues(value.httpsurl),
+        ...stringValues(value.httpUrl),
+        ...stringValues(value.httpsUrl),
+        ...stringValues(value.httpURLs),
+        ...stringValues(value.httpsURLs)
+      ]) {
+        try {
+          urls.add(parseHttpUrl(candidate, 'DDEV project web URL').origin);
+        } catch {
+          // Ignore malformed describe fields; runtime identity will fail separately if primary is unusable.
+        }
+      }
+    }
+    for (const child of Object.values(value)) {
+      visit(child);
+    }
+  };
+  visit(description);
+  return [...urls];
+}
+
+function ddevTargetDescription(cwd) {
   try {
     const output = execFileSync('ddev', ['describe', '-j'], {
       cwd,
@@ -883,10 +1146,17 @@ function ddevTargetUrl(cwd) {
       timeout: 10_000
     });
     const description = JSON.parse(output);
-    return recursiveStringForKey(description, new Set(['primary_url', 'primaryUrl']));
+    return {
+      primaryUrl: recursiveStringForKey(description, new Set(['primary_url', 'primaryUrl'])),
+      webOrigins: ddevProjectWebUrls(description)
+    };
   } catch {
-    return '';
+    return { primaryUrl: '', webOrigins: [] };
   }
+}
+
+function ddevTargetUrl(cwd) {
+  return ddevTargetDescription(cwd).primaryUrl;
 }
 
 function findDrupalDdevRoot(cwd) {
@@ -1022,6 +1292,170 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   }
 }
 
+function stripYamlComment(line) {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (doubleQuoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (doubleQuoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (!doubleQuoted && character === "'") {
+      if (singleQuoted && line[index + 1] === "'") {
+        index += 1;
+        continue;
+      }
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+    if (!singleQuoted && character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (!singleQuoted && !doubleQuoted && character === '#' && (index === 0 || /\s/.test(line[index - 1]))) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function yamlMappingColon(value) {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (doubleQuoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (doubleQuoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (!doubleQuoted && character === "'") {
+      if (singleQuoted && value[index + 1] === "'") {
+        index += 1;
+        continue;
+      }
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+    if (!singleQuoted && character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (
+      !singleQuoted &&
+      !doubleQuoted &&
+      character === ':' &&
+      (index === value.length - 1 || /\s/.test(value[index + 1]))
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function yamlScalarValues(content) {
+  const values = [];
+  let blockScalar = null;
+  let currentKey = '';
+  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+    const indentation = rawLine.match(/^\s*/)?.[0].length ?? 0;
+    if (blockScalar) {
+      if (!rawLine.trim() || indentation > blockScalar.indentation) {
+        if (rawLine.trim()) {
+          values.push({ key: blockScalar.key, line: index + 1, value: rawLine.trim() });
+        }
+        continue;
+      }
+      blockScalar = null;
+    }
+
+    const uncommented = stripYamlComment(rawLine);
+    const trimmed = uncommented.trim();
+    if (!trimmed || trimmed.startsWith('---') || trimmed.startsWith('...')) {
+      continue;
+    }
+    const sequenceValue = trimmed.startsWith('- ') ? trimmed.slice(2).trim() : trimmed;
+    const colon = yamlMappingColon(sequenceValue);
+    if (colon === -1) {
+      if (trimmed.startsWith('- ') && sequenceValue) {
+        values.push({ key: currentKey, line: index + 1, value: sequenceValue });
+      }
+      continue;
+    }
+    const key = sequenceValue.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+    const scalar = sequenceValue.slice(colon + 1).trim();
+    currentKey = key || currentKey;
+    if (/^[>|][+-]?\d*$/.test(scalar)) {
+      blockScalar = { indentation, key: currentKey };
+    } else if (scalar) {
+      values.push({ key: currentKey, line: index + 1, value: scalar });
+    }
+  }
+  return values;
+}
+
+export function exportedSeoUrlPortabilityFindings(
+  projectRoot,
+  trackedYamlFiles,
+  targetBaseUrl = '',
+  targetOriginIsAuthoritativeRuntime = false,
+  authoritativeRuntimeOrigins = []
+) {
+  const targetOrigins = new Set((Array.isArray(authoritativeRuntimeOrigins) ? authoritativeRuntimeOrigins : [])
+    .map((origin) => String(origin).trim()).filter(Boolean));
+  try {
+    if (targetBaseUrl) {
+      targetOrigins.add(new URL(targetBaseUrl).origin);
+    }
+  } catch {
+    // Existing target validation reports malformed URLs separately.
+  }
+  const findings = [];
+  for (const file of trackedYamlFiles) {
+    const name = basename(file);
+    if (!/^metatag\.metatag_defaults\..+\.ya?ml$/i.test(name) && !/^schema_metatag\..+\.ya?ml$/i.test(name)) {
+      continue;
+    }
+    let content = '';
+    try {
+      content = readFileSync(join(projectRoot, file), 'utf8');
+    } catch {
+      continue;
+    }
+    for (const scalar of yamlScalarValues(content)) {
+      for (const match of scalar.value.matchAll(/https?:\/\/[^\s'"<>]+/gi)) {
+        try {
+          const url = new URL(match[0].replace(/[\])},.;]+$/, ''));
+          if (
+            isLocalEnvironmentHost(url.hostname) ||
+            (targetOriginIsAuthoritativeRuntime && targetOrigins.has(url.origin))
+          ) {
+            findings.push({
+              file,
+              host: url.host,
+              key: scalar.key,
+              line: scalar.line
+            });
+          }
+        } catch {
+          // Rendered metadata validation handles malformed public URLs.
+        }
+      }
+    }
+  }
+  return findings;
+}
+
 function configStatusIsClean(result) {
   if (!result.ok) {
     return false;
@@ -1053,7 +1487,9 @@ function inspectDrupalRuntime(cwd, environment) {
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
       trackedConfigDirectory: '',
-      trackedConfigYamlFiles: []
+      trackedConfigYamlFiles: [],
+      exportedSeoUrlPortabilityFindings: [],
+      webOrigins: []
     };
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
@@ -1070,7 +1506,25 @@ function inspectDrupalRuntime(cwd, environment) {
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
-  const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
+  const describedTarget = inContainer
+    ? { primaryUrl: environmentTargetUrl(environment), webOrigins: environmentWebOrigins(environment) }
+    : ddevTargetDescription(projectRoot);
+  const baseUrl = describedTarget.primaryUrl;
+  const webOrigins = new Set(describedTarget.webOrigins);
+  try {
+    if (baseUrl) {
+      webOrigins.add(parseHttpUrl(baseUrl, 'Current DDEV runtime base URL').origin);
+    }
+  } catch {
+    // Runtime identity validation reports an unusable primary URL separately.
+  }
+  const seoUrlFindings = exportedSeoUrlPortabilityFindings(
+    projectRoot,
+    trackedConfig.yamlFiles,
+    baseUrl,
+    true,
+    [...webOrigins]
+  );
   return {
     baseUrl,
     confirmed,
@@ -1084,7 +1538,9 @@ function inspectDrupalRuntime(cwd, environment) {
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
-    trackedConfigYamlFiles: trackedConfig.yamlFiles
+    trackedConfigYamlFiles: trackedConfig.yamlFiles,
+    exportedSeoUrlPortabilityFindings: seoUrlFindings,
+    webOrigins: [...webOrigins]
   };
 }
 
@@ -1096,6 +1552,20 @@ function environmentTargetUrl(environment) {
     }
   }
   return '';
+}
+
+function environmentWebOrigins(environment) {
+  const origins = new Set();
+  for (const key of ['DDEV_PRIMARY_URL', 'DDEV_PRIMARY_URLS']) {
+    for (const candidate of stringValues(environment[key])) {
+      try {
+        origins.add(parseHttpUrl(candidate, key).origin);
+      } catch {
+        // Invalid environment URLs cannot become authoritative origins.
+      }
+    }
+  }
+  return [...origins];
 }
 
 function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
@@ -1130,9 +1600,12 @@ function comparableUrl(value, baseUrl = undefined) {
   }
 }
 
-function expectedRenderedSeo(browserEvidence, targetPath) {
+function expectedRenderedSeo(browserEvidence, targetPath, requestTarget = '') {
+  const requestKey = requestPathAndSearch(requestTarget);
   const records = (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])
-    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) => normalizePath(url) === targetPath))
+    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) =>
+      requestKey ? requestPathAndSearch(url) === requestKey : normalizePath(url) === targetPath
+    ))
     .filter((check) => check?.accepted === true && check?.renderedSeoSignals?.accepted === true)
     .map((check) => check?.renderedSeoSignals ?? {});
   if (records.length === 0) {
@@ -1188,6 +1661,33 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
   };
 }
 
+function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence) {
+  const requestTarget = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
+  const expectedFinalRequest = requestPathAndSearch(check?.targetFinalUrl || check?.targetUrl);
+  const targetPath = normalizePath(requestTarget);
+  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const declaredStatus = record.targetStatus;
+  const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
+    ? Number(declaredStatus)
+    : 200;
+  return {
+    accepted: check?.accepted === true && Boolean(record.targetPath),
+    expectedBehavior: record.expectedRedirect === true ? 'redirect' : 'public_200',
+    expectedFinalPath: normalizePath(record.targetFinalPath || targetPath),
+    expectedFinalRequest,
+    expectedH1: normalizeText(record.targetH1 || check?.renderedSignals?.targetH1),
+    expectedStatus,
+    expectedTitle: normalizeText(record.targetTitle || check?.renderedSignals?.targetTitle),
+    identityRequired: true,
+    matchesBrowserRenderedSource: true,
+    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath, requestTarget),
+    requestTarget,
+    routeKind: 'browser-representative',
+    statusUsesInitialResponse: record.expectedRedirect === true,
+    targetPath
+  };
+}
+
 function expectedTargetRequiredRoute(record) {
   const targetPath = normalizePath(record?.targetPath);
   return {
@@ -1204,6 +1704,185 @@ function expectedTargetRequiredRoute(record) {
     statusUsesInitialResponse: record?.expectedPublicBehavior === 'redirect',
     targetPath
   };
+}
+
+function packetLocalEvidencePresent(packetDir, value) {
+  const evidence = String(value ?? '').trim();
+  if (!evidence || isAbsolute(evidence)) {
+    return false;
+  }
+  try {
+    const packetRoot = realpathSync(packetDir);
+    for (const candidate of [resolve(packetRoot, 'evidence', evidence), resolve(packetRoot, evidence)]) {
+      try {
+        const evidencePath = realpathSync(candidate);
+        const evidenceStat = statSync(evidencePath);
+        if (pathIsInside(packetRoot, evidencePath) && evidenceStat.isFile() && evidenceStat.size > 0) {
+          return true;
+        }
+      } catch {
+        // Try the other packet-local evidence convention.
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function normalizedNoRedirectDisposition(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return {
+    accepted: value.accepted === true,
+    acceptedBy: String(value.acceptedBy ?? '').trim(),
+    evidence: String(value.evidence ?? '').trim(),
+    rationale: String(value.rationale ?? '').trim()
+  };
+}
+
+function redirectMaterializationExpectations(routeMatrix, packetDir, baseUrl) {
+  const conflicts = [];
+  const expectations = new Map();
+  const addExpectation = ({ declaredIn, noRedirectDisposition, sourceRequest, expectedFinalRequest }) => {
+    const contract = {
+      expectedFinalRequest,
+      noRedirectDisposition: normalizedNoRedirectDisposition(noRedirectDisposition)
+    };
+    const signature = JSON.stringify(contract);
+    const existing = expectations.get(sourceRequest);
+    if (existing) {
+      existing.declaredIn.add(declaredIn);
+      if (existing.signature !== signature) {
+        conflicts.push(
+          `Duplicate redirect mapping contracts for ${redactedPath(sourceRequest, baseUrl)} do not fully agree; reconcile target path+query and noRedirectDisposition across ${[...existing.declaredIn].sort().join(', ')}.`
+        );
+      }
+      return;
+    }
+    expectations.set(sourceRequest, {
+      ...contract,
+      declaredIn: new Set([declaredIn]),
+      signature,
+      sourceRequest
+    });
+  };
+
+  for (const row of Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : []) {
+    const sourceRequest = requestPathAndSearch(row?.sourcePath);
+    const targetRequest = requestPathAndSearch(row?.targetPath);
+    const expectedFinalRequest = requestPathAndSearch(row?.targetFinalPath || row?.targetPath);
+    if (!sourceRequest || !targetRequest || !expectedFinalRequest || sourceRequest === targetRequest) {
+      continue;
+    }
+    addExpectation({
+      declaredIn: 'routes',
+      expectedFinalRequest,
+      noRedirectDisposition: row?.noRedirectDisposition,
+      sourceRequest
+    });
+  }
+  for (const record of Array.isArray(routeMatrix?.sourceRouteDriftClassification)
+    ? routeMatrix.sourceRouteDriftClassification
+    : []) {
+    const sourceRequest = requestPathAndSearch(record?.sourcePath);
+    const targetRequest = requestPathAndSearch(record?.targetPath);
+    if (
+      record?.targetDisposition !== 'redirect' ||
+      !sourceRequest ||
+      !targetRequest ||
+      sourceRequest === targetRequest
+    ) {
+      continue;
+    }
+    addExpectation({
+      declaredIn: 'sourceRouteDriftClassification',
+      expectedFinalRequest: targetRequest,
+      noRedirectDisposition: record?.noRedirectDisposition,
+      sourceRequest
+    });
+  }
+
+  return {
+    conflicts,
+    expectations: [...expectations.values()].map((expectation) => {
+      const disposition = expectation.noRedirectDisposition;
+      const dispositionAccepted = Boolean(
+        disposition?.accepted === true &&
+        disposition.acceptedBy &&
+        disposition.rationale &&
+        packetLocalEvidencePresent(packetDir, disposition.evidence)
+      );
+      return {
+        declaredIn: [...expectation.declaredIn].sort(),
+        expectedFinalRequest: expectation.expectedFinalRequest,
+        noRedirectDisposition: dispositionAccepted ? disposition : null,
+        sourceRequest: expectation.sourceRequest
+      };
+    })
+  };
+}
+
+async function verifyRedirectMaterialization(baseUrl, expectation, liveHttpContext) {
+  const sourceLabel = redactedPath(expectation.sourceRequest, baseUrl);
+  const finalLabel = redactedPath(expectation.expectedFinalRequest, baseUrl);
+  const shared = {
+    declaredIn: expectation.declaredIn,
+    expectedFinalPath: finalLabel,
+    sourcePath: sourceLabel
+  };
+  if (expectation.noRedirectDisposition) {
+    return {
+      ...shared,
+      checked: false,
+      errors: [],
+      noRedirectDisposition: {
+        accepted: true,
+        acceptedBy: expectation.noRedirectDisposition.acceptedBy,
+        evidence: expectation.noRedirectDisposition.evidence,
+        rationaleSha256: `sha256:${sha256(expectation.noRedirectDisposition.rationale)}`
+      },
+      passed: true
+    };
+  }
+  const errors = [];
+  try {
+    const response = await requestFollowingRedirects(
+      new URL(expectation.sourceRequest.replace(/^\//, ''), new URL('/', baseUrl)),
+      { liveHttpContext }
+    );
+    if (![301, 308].includes(response.initialStatus)) {
+      errors.push(
+        `${sourceLabel} is mapped to ${finalLabel} in ${expectation.declaredIn.join(', ')} but returned initial status ${response.initialStatus}; materialize a permanent HTTP 301 or 308 redirect or record a fully accepted, evidenced noRedirectDisposition.`
+      );
+    }
+    const finalUrl = new URL(response.finalUrl);
+    if (finalUrl.origin !== baseUrl.origin) {
+      errors.push(`${sourceLabel} left the target origin instead of resolving to ${finalLabel}.`);
+    }
+    if (requestPathAndSearch(finalUrl) !== expectation.expectedFinalRequest) {
+      errors.push(
+        `${sourceLabel} resolved to ${redactedPath(finalUrl, baseUrl)}; the declared mapping expects exact path+query ${finalLabel}.`
+      );
+    }
+    return {
+      ...shared,
+      checked: true,
+      errors,
+      finalPath: redactedPath(finalUrl, baseUrl),
+      initialStatus: response.initialStatus,
+      passed: errors.length === 0,
+      redirects: response.redirects.map((redirect) => ({
+        from: redactedUrl(redirect.from),
+        status: redirect.status,
+        to: redactedUrl(redirect.to)
+      }))
+    };
+  } catch (error) {
+    errors.push(`${sourceLabel} is mapped to ${finalLabel} but could not be verified on the target: ${error.message}`);
+    return { ...shared, checked: true, errors, passed: false };
+  }
 }
 
 function requiredOriginMatch(errors, label, value, expectedOrigin) {
@@ -1228,6 +1907,25 @@ function absoluteUrlOriginMatch(errors, label, value, expectedOrigin) {
     return;
   }
   requiredOriginMatch(errors, label, text, expectedOrigin);
+}
+
+export function localOnlyFormExceptionsBoundToRuntime(browserEvidence, targetUrl, runtimeOrigins) {
+  const checks = (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).filter((check) => check?.abuseProtection?.mode === 'local_only_exception');
+  if (checks.length === 0) {
+    return true;
+  }
+  try {
+    const target = parseHttpUrl(String(targetUrl), 'Live target URL');
+    const origins = new Set((Array.isArray(runtimeOrigins) ? runtimeOrigins : [runtimeOrigins])
+      .map((value) => parseHttpUrl(String(value), 'Current DDEV runtime web URL').origin));
+    return origins.has(target.origin) && checks.every((check) =>
+      origins.has(parseHttpUrl(String(check?.targetUrl), 'Local-only form target URL').origin)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function completionEvidenceTargetErrors({
@@ -1302,6 +2000,16 @@ function completionEvidenceTargetErrors({
       targetOrigin
     );
   }
+  for (const [index, check] of (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).entries()) {
+    requiredOriginMatch(
+      errors,
+      `browser-evidence.json anonymousFormChecks[${index}].targetUrl`,
+      check?.targetUrl,
+      targetOrigin
+    );
+  }
   for (const [index, review] of (Array.isArray(blindReview?.editorExperienceReviews)
     ? blindReview.editorExperienceReviews
     : []).entries()) {
@@ -1344,8 +2052,9 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected) {
-  const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
+async function verifyRoute(baseUrl, expected, liveHttpContext) {
+  const requestTarget = expected.requestTarget || expected.targetPath;
+  const requestedUrl = new URL(requestTarget.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
@@ -1383,7 +2092,7 @@ async function verifyRoute(baseUrl, expected) {
   }
 
   try {
-    const response = await requestFollowingRedirects(requestedUrl);
+    const response = await requestFollowingRedirects(requestedUrl, { liveHttpContext });
     const actualH1 = elementText(response.body, 'h1');
     const actualTitle = elementText(response.body, 'title');
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
@@ -1394,6 +2103,14 @@ async function verifyRoute(baseUrl, expected) {
     if (normalizePath(response.finalUrl) !== expected.expectedFinalPath) {
       errors.push(
         `${expected.targetPath} resolved to ${normalizePath(response.finalUrl)}; expected ${expected.expectedFinalPath}.`
+      );
+    }
+    if (
+      expected.expectedFinalRequest &&
+      requestPathAndSearch(response.finalUrl) !== expected.expectedFinalRequest
+    ) {
+      errors.push(
+        `${expected.targetPath} resolved to ${redactedPath(response.finalUrl, baseUrl)}; expected exact representative state ${redactedPath(expected.expectedFinalRequest, baseUrl)}.`
       );
     }
     if (new URL(response.finalUrl).origin !== baseUrl.origin) {
@@ -1451,6 +2168,10 @@ async function verifyRoute(baseUrl, expected) {
     }
     return {
       ...expected,
+      expectedFinalRequest: expected.expectedFinalRequest
+        ? redactedPath(expected.expectedFinalRequest, baseUrl)
+        : undefined,
+      requestTarget: expected.requestTarget ? redactedPath(expected.requestTarget, baseUrl) : undefined,
       actualH1,
       actualMetadata: {
         ...actualMetadata,
@@ -1487,6 +2208,10 @@ async function verifyRoute(baseUrl, expected) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
     return {
       ...expected,
+      expectedFinalRequest: expected.expectedFinalRequest
+        ? redactedPath(expected.expectedFinalRequest, baseUrl)
+        : undefined,
+      requestTarget: expected.requestTarget ? redactedPath(expected.requestTarget, baseUrl) : undefined,
       errors,
       passed: false,
       renderedSeo: expected.renderedSeo
@@ -1505,12 +2230,123 @@ async function verifyRoute(baseUrl, expected) {
   }
 }
 
+export async function scheduleLiveRouteChecks({
+  baseUrl,
+  tasks = [],
+  allowRuntimeBoundLocalCertificate = false,
+  maxRoutes = MAX_LIVE_ROUTE_CHECKS,
+  concurrency = MAX_LIVE_ROUTE_CONCURRENCY,
+  deadlineMs = LIVE_ROUTE_DEADLINE_MS,
+  maxRequests = MAX_LIVE_HTTP_REQUESTS,
+  liveHttpContext = null
+} = {}) {
+  const routeTasks = Array.isArray(tasks) ? tasks : [];
+  const errors = [];
+  const numericLimits = { concurrency, deadlineMs, maxRequests, maxRoutes };
+  for (const [name, value] of Object.entries(numericLimits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      errors.push(`Live route verification ${name} must be a positive safe integer.`);
+    }
+  }
+  if (errors.length > 0) {
+    return {
+      checks: [],
+      errors,
+      budget: {
+        attempted: false,
+        deadlineMs,
+        maxConcurrency: concurrency,
+        maxRequests,
+        maxRoutes,
+        requestCount: 0,
+        routeCount: routeTasks.length
+      }
+    };
+  }
+  if (routeTasks.length > maxRoutes) {
+    return {
+      checks: [],
+      errors: [
+        `Live route verification requires ${routeTasks.length} checks, exceeding the ${maxRoutes} route limit; no routes were fetched.`
+      ],
+      budget: {
+        attempted: false,
+        deadlineMs,
+        maxConcurrency: concurrency,
+        maxRequests,
+        maxRoutes,
+        requestCount: 0,
+        routeCount: routeTasks.length
+      }
+    };
+  }
+
+  const context = liveHttpContext ?? createLiveHttpContext({
+    allowRuntimeBoundLocalCertificate,
+    concurrency,
+    deadlineMs,
+    maxRequests,
+    maxTasks: maxRoutes
+  });
+  const checks = await Promise.all(routeTasks.map(async (task) => {
+    const kind = task.bucket === 'primary'
+      ? 'primary-route'
+      : task.bucket === 'target-required'
+        ? 'target-required-route'
+        : 'browser-representative-route';
+    try {
+      return {
+        bucket: task.bucket,
+        check: await context.runTask(kind, () => verifyRoute(baseUrl, task.expected, context))
+      };
+    } catch (error) {
+      return {
+        bucket: task.bucket,
+        check: {
+          ...task.expected,
+          expectedFinalRequest: task.expected?.expectedFinalRequest
+            ? redactedPath(task.expected.expectedFinalRequest, baseUrl)
+            : undefined,
+          errors: [`${task.expected?.targetPath || 'Live route'} could not be scheduled: ${error.message}`],
+          passed: false,
+          renderedSeo: task.expected?.renderedSeo
+            ? {
+                ...task.expected.renderedSeo,
+                canonicalUrl: task.expected.renderedSeo.canonicalUrl
+                  ? redactedUrl(task.expected.renderedSeo.canonicalUrl)
+                  : '',
+                openGraphImage: task.expected.renderedSeo.openGraphImage
+                  ? redactedUrl(task.expected.renderedSeo.openGraphImage)
+                  : ''
+              }
+            : null,
+          requestTarget: task.expected?.requestTarget
+            ? redactedPath(task.expected.requestTarget, baseUrl)
+            : undefined
+        }
+      };
+    }
+  }));
+  const metrics = context.metrics();
+  errors.push(...context.errors);
+  return {
+    checks,
+    errors,
+    budget: {
+      ...metrics,
+      maxRoutes,
+      routeCount: routeTasks.length
+    }
+  };
+}
+
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
   cwd = process.cwd(),
   environment = process.env,
-  drupalRuntime = null
+  drupalRuntime = null,
+  liveHttpLimits = {}
 } = {}) {
   const absolutePacketDir = resolve(cwd, packetDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
@@ -1584,20 +2420,36 @@ export async function verifyLive({
   const runtimeWasInjected = drupalRuntime !== null;
   const inspectedDrupalRuntime = drupalRuntime ?? inspectDrupalRuntime(cwd, environment);
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
-  let runtimeTargetOriginMatches = false;
-  if (target && inspectedDrupalRuntime.baseUrl) {
+  const runtimeWebOrigins = new Set(Array.isArray(inspectedDrupalRuntime.webOrigins)
+    ? inspectedDrupalRuntime.webOrigins
+    : []);
+  if (inspectedDrupalRuntime.baseUrl) {
     try {
       const runtimeTarget = parseHttpUrl(inspectedDrupalRuntime.baseUrl, 'Current DDEV runtime base URL');
-      runtimeTargetOriginMatches = runtimeTarget.origin === target.url.origin;
+      runtimeWebOrigins.add(runtimeTarget.origin);
     } catch {
-      // An invalid or unavailable DDEV URL cannot bind the inspected Drupal runtime to the HTTP target.
+      // An invalid or unavailable DDEV URL cannot bind the inspected Drupal runtime.
     }
   }
+  const runtimeTargetOriginMatches = Boolean(target && runtimeWebOrigins.has(target.url.origin));
   const explicitTargetFetchAllowed =
     !target || target.source !== 'explicit' || runtimeTargetOriginMatches;
   if (!explicitTargetFetchAllowed) {
     liveErrors.push(
       'Explicit target HTTP checks are disabled unless the URL matches the current DDEV runtime.'
+    );
+  }
+  const hasLocalOnlyFormException = (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).some((check) => check?.abuseProtection?.mode === 'local_only_exception');
+  const localOnlyFormExceptionRuntimeBound = Boolean(
+    target &&
+    runtimeAuthoritativeForCompletion &&
+    localOnlyFormExceptionsBoundToRuntime(browserEvidence, target.url.href, [...runtimeWebOrigins])
+  );
+  if (hasLocalOnlyFormException && !localOnlyFormExceptionRuntimeBound) {
+    liveErrors.push(
+      'A local_only_exception form disposition is valid only when its exact target origin is bound to the current authoritative DDEV runtime.'
     );
   }
 
@@ -1628,38 +2480,120 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
-  const routeChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(primaryRoutes.map((route) => verifyRoute(
-        target.url,
-        expectedRoute(routeMatrix, route, browserEvidence)
-      )))
-    : [];
-  for (const route of routeChecks) {
-    liveErrors.push(...route.errors);
-  }
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
-  const targetRequiredRouteChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(target.url, expectedTargetRequiredRoute(route))))
-    : [];
-  for (const route of targetRequiredRouteChecks) {
+  const primaryRoutePaths = new Set(primaryRoutes.map((route) => requestPathAndSearch(route?.targetPath)).filter(Boolean));
+  const representativeChecksByPath = new Map();
+  for (const check of (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])) {
+    const path = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
+    if (path && !primaryRoutePaths.has(path) && !representativeChecksByPath.has(path)) {
+      representativeChecksByPath.set(path, check);
+    }
+  }
+  const liveRouteTasks = [
+    ...primaryRoutes.map((route) => ({
+      bucket: 'primary',
+      expected: expectedRoute(routeMatrix, route, browserEvidence)
+    })),
+    ...targetRequiredRoutes.map((route) => ({
+      bucket: 'target-required',
+      expected: expectedTargetRequiredRoute(route)
+    })),
+    ...[...representativeChecksByPath.values()].map((check) => ({
+      bucket: 'browser-representative',
+      expected: expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
+    }))
+  ];
+  const fetchChecksEnabled = Boolean(target && explicitTargetFetchAllowed);
+  const liveHttpContext = createLiveHttpContext({
+    allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
+    attempted: fetchChecksEnabled,
+    concurrency: liveHttpLimits.concurrency ?? MAX_LIVE_ROUTE_CONCURRENCY,
+    deadlineMs: liveHttpLimits.deadlineMs ?? LIVE_ROUTE_DEADLINE_MS,
+    maxRequests: liveHttpLimits.maxRequests ?? MAX_LIVE_HTTP_REQUESTS,
+    maxTasks: liveHttpLimits.maxTasks ?? MAX_LIVE_HTTP_TASKS
+  });
+  const liveRouteSchedule = fetchChecksEnabled
+    ? await scheduleLiveRouteChecks({
+        allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
+        baseUrl: target.url,
+        liveHttpContext,
+        tasks: liveRouteTasks
+      })
+    : {
+        checks: [],
+        errors: [],
+        budget: {
+          attempted: false,
+          deadlineMs: LIVE_ROUTE_DEADLINE_MS,
+          maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
+          maxRequests: MAX_LIVE_HTTP_REQUESTS,
+          maxRoutes: MAX_LIVE_ROUTE_CHECKS,
+          requestCount: 0,
+          routeCount: liveRouteTasks.length
+        }
+      };
+  liveErrors.push(...liveRouteSchedule.errors);
+  const checksForBucket = (bucket) => liveRouteSchedule.checks
+    .filter((entry) => entry.bucket === bucket)
+    .map((entry) => entry.check);
+  const routeChecks = checksForBucket('primary');
+  const targetRequiredRouteChecks = checksForBucket('target-required');
+  const browserRepresentativeRouteChecks = checksForBucket('browser-representative');
+  for (const route of [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]) {
     liveErrors.push(...route.errors);
   }
-  const serverRenderedResponseSurface = target && explicitTargetFetchAllowed
-    ? await inspectServerRenderedResponseSurface(target.url, routeMatrix)
-    : {
-        errors: [],
-        htmlRouteCount: 0,
-        linkChecks: [],
-        passed: false,
-        routeChecks: [],
-        seedRouteCount: 0,
-        sourceOriginLinkChecks: [],
-        sourceOriginLinkCount: 0,
-        uniqueInternalLinkCount: 0
-      };
+  const emptyServerRenderedResponseSurface = () => ({
+    errors: [],
+    htmlRouteCount: 0,
+    linkChecks: [],
+    passed: false,
+    routeChecks: [],
+    seedRouteCount: 0,
+    sourceOriginLinkChecks: [],
+    sourceOriginLinkCount: 0,
+    uniqueInternalLinkCount: 0
+  });
+  let serverRenderedResponseSurface = emptyServerRenderedResponseSurface();
+  if (fetchChecksEnabled) {
+    try {
+      serverRenderedResponseSurface = await inspectServerRenderedResponseSurface(
+        target.url,
+        routeMatrix,
+        liveHttpContext
+      );
+    } catch (error) {
+      serverRenderedResponseSurface.errors.push(
+        `Server-rendered response surface verification could not complete: ${error.message}`
+      );
+    }
+  }
   liveErrors.push(...serverRenderedResponseSurface.errors);
+
+  const redirectMaterialization = target
+    ? redirectMaterializationExpectations(routeMatrix, absolutePacketDir, target.url)
+    : { conflicts: [], expectations: [] };
+  liveErrors.push(...redirectMaterialization.conflicts);
+  let redirectMaterializationChecks = [];
+  if (fetchChecksEnabled) {
+    try {
+      redirectMaterializationChecks = await liveHttpContext.runTasks(
+        'redirect-materialization',
+        redirectMaterialization.expectations,
+        (expectation) => verifyRedirectMaterialization(target.url, expectation, liveHttpContext)
+      );
+    } catch (error) {
+      liveErrors.push(`Redirect materialization verification could not complete: ${error.message}`);
+    }
+  }
+  liveErrors.push(...redirectMaterializationChecks.flatMap((check) => check.errors));
+  for (const error of liveHttpContext.errors) {
+    if (!liveErrors.includes(error)) {
+      liveErrors.push(error);
+    }
+  }
+  const liveHttpBudget = liveHttpContext.metrics();
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -1727,6 +2661,10 @@ export async function verifyLive({
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
     packetTrackedConfigYamlFiles.length > 0 &&
     packetTrackedConfigYamlFiles.every((path) => runtimeTrackedConfigSet.has(path));
+  const runtimeSeoUrlPortabilityFindings = Array.isArray(inspectedDrupalRuntime.exportedSeoUrlPortabilityFindings)
+    ? inspectedDrupalRuntime.exportedSeoUrlPortabilityFindings
+    : [];
+  const drupalRuntimeSeoUrlsPortable = runtimeSeoUrlPortabilityFindings.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -1736,7 +2674,8 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
-    drupalRuntimeTrackedConfigReadbackMatches;
+    drupalRuntimeTrackedConfigReadbackMatches &&
+    drupalRuntimeSeoUrlsPortable;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
@@ -1779,12 +2718,21 @@ export async function verifyLive({
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
   }
+  if (!drupalRuntimeSeoUrlsPortable) {
+    completionBlockedReasons.push('Exported SEO configuration contains literal local-environment URLs; use request-aware Drupal tokens or managed media tokens.');
+  }
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
   }
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
+    redirectMaterializationChecks: redirectMaterializationChecks.map((check) => ({
+      finalPath: check.finalPath ?? '',
+      initialStatus: check.initialStatus ?? 0,
+      passed: check.passed,
+      sourcePath: check.sourcePath
+    })),
     serverRenderedResponseSurface: {
       linkChecks: serverRenderedResponseSurface.linkChecks.map((check) => ({
         finalStatus: check.finalStatus ?? 0,
@@ -1805,7 +2753,7 @@ export async function verifyLive({
         target: check.target
       }))
     },
-    routeChecks: [...routeChecks, ...targetRequiredRouteChecks].map((route) => ({
+    routeChecks: [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks].map((route) => ({
       bodySha256: route.bodySha256 ?? '',
       finalUrl: route.finalUrl ?? '',
       h1: route.actualH1 ?? '',
@@ -1840,11 +2788,16 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
-      targetFingerprintInputVersion: 2
+      targetFingerprintInputVersion: 3
     },
     routeChecks,
     targetRequiredRouteChecks,
+    browserRepresentativeRouteChecks,
     serverRenderedResponseSurface,
+    redirectMappingConflicts: redirectMaterialization.conflicts,
+    redirectMaterializationChecks,
+    liveHttpBudget,
+    liveRouteBudget: liveHttpBudget,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
@@ -1859,6 +2812,7 @@ export async function verifyLive({
         : '',
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
+      seoUrlsPortable: drupalRuntimeSeoUrlsPortable,
       targetOriginMatches: drupalRuntimeTargetMatches,
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,
       trackedConfigDirectory: runtimeTrackedConfigDirectory,
