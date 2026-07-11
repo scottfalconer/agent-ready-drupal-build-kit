@@ -124,6 +124,7 @@ Use browser-rendered pages as the source truth, then expand with evidence from:
 
 - rendered navigation, footer, legal links, canonical links, Open Graph/social metadata, and click targets;
 - source bundle route data, client-side router manifests, sitemap/robots hints, and embedded JSON;
+- routes referenced from imported content bodies, such as legacy platform links carried into rich text, which source sitemaps routinely omit;
 - asset names, artwork filenames, media manifests, API payloads, and source naming patterns that imply likely public slugs;
 - no-follow redirect checks, not only final pages after `curl -L`.
 

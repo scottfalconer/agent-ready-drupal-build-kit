@@ -27,6 +27,17 @@ A route passes only when:
 
 Do not count 3xx, 401, 403, 404, 5xx, login pages, or unpublished draft 404s as passing route parity, even when the report expected the same response.
 
+Route discovery must harvest routes referenced from imported content bodies — for example legacy platform links carried into rich text — not only sitemap/robots seeds. Record them in `browserFirstRouteExpansion.candidateRoutesFromImportedContentBodies` and classify each like any other discovered source route; source sitemaps routinely omit functional surfaces that imported content links to.
+
+## Rendered Links And Redirect Materialization
+
+Route claims beyond the primary routes are not builder-attested prose; the live verifier re-checks them:
+
+- It re-fetches a seeded random sample of the full `routes` array on every run and records the seed in the report so the sample is reproducible.
+- `menuAndFooterLinksChecked` and `renderedLinksChecked` must be per-link records (`href`, observed `status`, `finalPath`) that the verifier re-fetches. Bare text labels fail packet verification.
+- It crawls same-origin rendered links from the front page and sampled content pages. A rendered link that returns 4xx — including an unrewritten link imported inside body content — is a real route-gate failure, not import noise. Rewrite imported links at import time; the only escape hatch is a per-link `owner_accepted_broken` disposition with `acceptedBy` and `rationale` on the matching link record.
+- When a route row maps a source path to a different target path, the mapping must materialize as an HTTP 301 on the target that lands on the mapped path, or the row must carry a `noRedirectDisposition` with `acceptedBy` and `rationale`. A documented mapping whose source path 404s on the target never passes silently.
+
 ## Functional Parity
 
 Functional parity is scored against the accepted behavior list, not against vague visual similarity.
