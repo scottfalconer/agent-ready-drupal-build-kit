@@ -716,6 +716,7 @@ function completionEvidenceTargetErrors({
   drupalReadback,
   fieldOutputMatrix,
   independentVerification,
+  nextCycleVerification,
   parityReport,
   patternMap,
   sourceAudit,
@@ -731,12 +732,21 @@ function completionEvidenceTargetErrors({
   requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
   requiredOriginMatch(errors, 'drupal-readback.json site', drupalReadback?.site, targetOrigin);
+  requiredOriginMatch(errors, 'next-cycle-verification.json site', nextCycleVerification?.site, targetOrigin);
   requiredOriginMatch(
     errors,
     'independent-verification.json target.baseUrl',
     independentVerification?.target?.baseUrl,
     targetOrigin
   );
+  if (nextCycleVerification?.applicability?.applies === true) {
+    requiredOriginMatch(
+      errors,
+      'next-cycle-verification.json futureContentProbe.publicUrl',
+      nextCycleVerification?.futureContentProbe?.publicUrl,
+      targetOrigin
+    );
+  }
   requiredOriginMatch(
     errors,
     'independent-verification.json target.adminUrl',
@@ -950,6 +960,53 @@ async function verifyRoute(baseUrl, expected) {
   }
 }
 
+async function verifyNextCycleCleanup(baseUrl, nextCycleVerification) {
+  if (nextCycleVerification?.applicability?.applies !== true) {
+    return { applicable: false, errors: [], passed: true };
+  }
+  const errors = [];
+  const declaredUrl = String(nextCycleVerification?.futureContentProbe?.publicUrl ?? '').trim();
+  const expectedStatus = Number(nextCycleVerification?.cleanup?.publicUrlStatusAfterCleanup);
+  let requestedUrl;
+  try {
+    requestedUrl = parseHttpUrl(declaredUrl, 'next-cycle-verification.json futureContentProbe.publicUrl');
+  } catch (error) {
+    errors.push(error.message);
+    return { applicable: true, errors, passed: false, requestedUrl: declaredUrl };
+  }
+  if (requestedUrl.origin !== baseUrl.origin) {
+    errors.push(`Next-cycle cleanup URL origin ${requestedUrl.origin} does not match ${baseUrl.origin}.`);
+  }
+  if (![404, 410].includes(expectedStatus)) {
+    errors.push('Next-cycle cleanup must declare publicUrlStatusAfterCleanup as 404 or 410.');
+  }
+  try {
+    const response = await requestFollowingRedirects(requestedUrl);
+    if (response.redirects.length > 0) {
+      errors.push('Next-cycle cleanup URL still redirects; alias or redirect residue remains.');
+    }
+    if (new URL(response.finalUrl).origin !== baseUrl.origin) {
+      errors.push(`Next-cycle cleanup URL left the target origin and resolved to ${new URL(response.finalUrl).origin}.`);
+    }
+    if (response.status !== expectedStatus) {
+      errors.push(`Next-cycle cleanup URL returned ${response.status}; expected ${expectedStatus}.`);
+    }
+    return {
+      actualStatus: response.status,
+      applicable: true,
+      bodySha256: `sha256:${sha256(response.body)}`,
+      errors,
+      finalUrl: response.finalUrl,
+      passed: errors.length === 0,
+      redirects: response.redirects,
+      requestedUrl: requestedUrl.href
+    };
+  } catch (error) {
+    errors.push(`Next-cycle cleanup URL could not be fetched: ${error.message}`);
+    return { applicable: true, errors, passed: false, requestedUrl: requestedUrl.href };
+  }
+}
+
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
@@ -974,6 +1031,7 @@ export async function verifyLive({
   let drupalReadback = null;
   let browserEvidence = null;
   let fieldOutputMatrix = null;
+  let nextCycleVerification = null;
   let parityReport = null;
   let patternMap = null;
   let sourceAudit = null;
@@ -992,6 +1050,9 @@ export async function verifyLive({
     );
     fieldOutputMatrix = JSON.parse(
       await readFile(join(absolutePacketDir, 'field-output-matrix.json'), 'utf8')
+    );
+    nextCycleVerification = JSON.parse(
+      await readFile(join(absolutePacketDir, 'next-cycle-verification.json'), 'utf8')
     );
     parityReport = JSON.parse(
       await readFile(join(absolutePacketDir, 'parity-report.json'), 'utf8')
@@ -1091,6 +1152,10 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  const nextCycleCleanupCheck = target && explicitTargetFetchAllowed
+    ? await verifyNextCycleCleanup(target.url, nextCycleVerification)
+    : { applicable: nextCycleVerification?.applicability?.applies === true, errors: [], passed: false };
+  liveErrors.push(...nextCycleCleanupCheck.errors);
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -1106,6 +1171,7 @@ export async function verifyLive({
           drupalReadback,
           fieldOutputMatrix,
           independentVerification,
+          nextCycleVerification,
           parityReport,
           patternMap,
           sourceAudit,
@@ -1223,7 +1289,12 @@ export async function verifyLive({
       path: route.targetPath,
       status: route.finalStatus ?? 0,
       title: route.actualTitle ?? ''
-    }))
+    })),
+    nextCycleCleanup: {
+      bodySha256: nextCycleCleanupCheck.bodySha256 ?? '',
+      finalUrl: nextCycleCleanupCheck.finalUrl ?? '',
+      status: nextCycleCleanupCheck.actualStatus ?? 0
+    }
   });
   const sharedPacketReport = {
     ...packetReport,
@@ -1251,10 +1322,11 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
-      targetFingerprintInputVersion: 1
+      targetFingerprintInputVersion: 2
     },
     routeChecks,
     targetRequiredRouteChecks,
+    nextCycleCleanupCheck,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,

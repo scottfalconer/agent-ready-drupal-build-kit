@@ -12,6 +12,8 @@
           "editorLabel": "",
           "required": false,
           "fieldType": "",
+          "targetEntityType": "",
+          "targetBundles": [],
           "widget": "",
           "formatter": "",
           "publicRenderLocations": [],

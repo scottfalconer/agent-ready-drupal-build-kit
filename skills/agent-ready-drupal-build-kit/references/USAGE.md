@@ -71,6 +71,7 @@ drupal-project/
       parity-report.json
       route-matrix.json
       browser-evidence.json
+      next-cycle-verification.json
       independent-verification.json
       blind-adversarial-review.json
       drupal-readback.json
@@ -79,6 +80,7 @@ drupal-project/
       evidence/
         independent-verification/
         blind-adversarial-review/
+        next-cycle/
         live-verification.json
         packet-verification.json
       maintainer-review.md
@@ -102,6 +104,7 @@ Before calling the local build successful, the agent must record:
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
 - route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
 - browser-evidence.json with source/target browser-rendered screenshots or equivalent evidence for visitor-facing routes, visual/functional comparison, Canvas authoring ownership for composed pages, and authenticated non-admin editor tasks;
+- next-cycle-verification.json with machine-backed discovery of recurring date/year/season/period/taxonomy dimensions, a least-privilege non-admin future-cycle publish/public-output probe when applicable, and evidence-backed cleanup with no content, revision, alias, or term residue;
 - independent-verification.json from a fresh verifier context that tries to falsify mechanical packet and live-site completion claims, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness;
 - blind-adversarial-review.json from a fresh reviewer that did not build the site, saw only the brief, target, and source-of-truth materials before public review, covered desktop and mobile, and judged whether the produced site is good enough against the actual requested outcome;
 - live-verification.json from `node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet`, with a zero exit code, matching current DDEV target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status, plus `completeLocalRebuildClaimAllowed: true` before any complete local rebuild claim;
@@ -118,7 +121,7 @@ Before calling the local build successful, the agent must record:
 - a scoped gap list for operator, maintainer, content/business review, legal/privacy, integration, accessibility, performance, security, SEO, and launch evidence;
 - an open decisions handoff that lists only human-owned decisions with current evidence, options, owner role, impact, and affected gate.
 
-The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output on primary routes, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
+The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output on primary routes, re-fetches an applicable cleaned next-cycle probe URL and requires its recorded `404` or `410`, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
 
 ## Fallback
 

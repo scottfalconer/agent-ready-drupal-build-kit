@@ -24,6 +24,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `parity-report.json`
 - `route-matrix.json`
 - `browser-evidence.json`
+- `next-cycle-verification.json`
 - `independent-verification.json`
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
@@ -45,6 +46,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-TARGET-01`: identify and accept a production-equivalent target before a launch claim.
 - `G-ROUTE-01` through `G-ROUTE-06`: cover the full source boundary, browser-expanded routes, repeated-item counts, route drift, fetched target-required routes, front-page behavior, aliases, unexpected public routes, and Starter cleanup. A packet expectation that repeats a live `5xx` does not make that response acceptable.
 - `G-BROWSER-01`, `G-BROWSER-02`, and `G-EDITOR-01`: provide source/target browser evidence, first-fold brand assets, and authenticated non-admin editor tasks.
+- `G-EDITOR-02`: inventory recurring public models and their date, year, season, period, or taxonomy dimensions. When one exists, prove the actual least-privilege non-admin editor can use a value beyond the latest current cycle, publish future-dated content through the required workflow, expose it anonymously, and clean the probe without content, revision, alias, or term residue. Structured N/A is valid only after evidence-backed discovery finds no temporal/cycle dimension.
 - `G-PARITY-01`: accept content, media, visual/design, functional, navigation, Views/page, form/integration, redirect, and public SEO parity for every applicable addressable surface.
 - `G-CONTENT-01` and `G-CONTENT-02`: prove structured-content and collection ownership. Every declared collection row needs source/target counts, Drupal ownership, and non-admin editor add-a-row evidence; counts must match unless a named owner accepts a specific evidence-backed exclusion, and private/unreachable boundaries need evidence.
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
@@ -56,7 +58,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
 
-The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
+The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; re-fetches an applicable cleaned next-cycle probe URL and requires the recorded `404` or `410` with no redirect; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
 
 Completion readiness also fails closed when a required packet file is still byte-identical to its template, JSON contains unresolved enum sentinels, critical parity/browser/readback/route acceptance markers are open, passing completion claims lack non-empty packet-local verifier evidence, a blind `accepted_out_of_scope` record lacks named acceptance/reason/evidence, or an external blocker remains. An external blocker cannot stand in for primary-route coverage.
 

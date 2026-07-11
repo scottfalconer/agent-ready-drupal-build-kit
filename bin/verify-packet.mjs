@@ -84,6 +84,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
   'G-EDITOR-01': 'editorWorkflow',
+  'G-EDITOR-02': 'nextCycleEditorWorkflow',
   'G-SEO-01': 'renderedSeo'
 });
 
@@ -180,6 +181,15 @@ function isoTimestamp(value) {
   }
   const timestamp = Date.parse(text);
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function dateOrTimestamp(value) {
+  const text = String(value ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    const timestamp = Date.parse(`${text}T00:00:00Z`);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  return isoTimestamp(text);
 }
 
 function timestampIsFresh(value, now = Date.now()) {
@@ -361,6 +371,23 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
     return evidenceStat.isFile() && evidenceStat.size > 0;
   } catch {
     return false;
+  }
+}
+
+async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
+  if (!evidencePath) {
+    return null;
+  }
+  try {
+    const evidenceStat = await stat(evidencePath);
+    if (!evidenceStat.isFile() || evidenceStat.size === 0) {
+      return null;
+    }
+    const value = JSON.parse(await readFile(evidencePath, 'utf8'));
+    return isJsonObject(value) ? value : null;
+  } catch {
+    return null;
   }
 }
 
@@ -719,17 +746,376 @@ function editorWorkflowMatchesBundle(check, bundle) {
   return exactIdentityMatch(check?.bundle, bundleName) && exactIdentityMatch(check?.entityType, entityType);
 }
 
+function recurringModelEntityType(owner) {
+  const normalized = String(owner ?? '').trim().toLowerCase();
+  return {
+    content_type: 'node',
+    taxonomy: 'taxonomy_term',
+    media: 'media'
+  }[normalized] ?? normalized;
+}
+
+function recurringModelRequirements(patternMap) {
+  const requirements = [];
+  for (const record of substantiveObjects(patternMap?.structuredContentModel?.recurringSourceObjects)) {
+    if (record?.accepted !== true || !String(record?.bundleOrConfigName ?? '').trim()) {
+      continue;
+    }
+    requirements.push({
+      bundle: String(record.bundleOrConfigName).trim(),
+      entityType: recurringModelEntityType(record.drupalOwner),
+      label: String(record.sourceObject || record.bundleOrConfigName).trim()
+    });
+  }
+  for (const record of substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)) {
+    if (record?.accepted !== true || !String(record?.contentTypeOrBundle ?? '').trim()) {
+      continue;
+    }
+    requirements.push({
+      bundle: String(record.contentTypeOrBundle).trim(),
+      entityType: String(record.drupalEntityType || '').trim(),
+      label: String(record.sourceObject || record.contentTypeOrBundle).trim()
+    });
+  }
+  return requirements.filter((record, index) => requirements.findIndex((candidate) =>
+    exactIdentityMatch(candidate.entityType, record.entityType) && exactIdentityMatch(candidate.bundle, record.bundle)
+  ) === index);
+}
+
+function temporalFieldCandidate(field) {
+  const type = String(field?.fieldType ?? '').trim().toLowerCase();
+  const targetType = String(field?.targetEntityType ?? '').trim().toLowerCase();
+  const identity = `${field?.machineName ?? ''} ${field?.editorLabel ?? ''}`.toLowerCase();
+  return (
+    /(?:^|_)(?:date|datetime|daterange|timestamp)(?:_|$)/.test(type) ||
+    /\b(?:date|day|year|season|period|cycle|edition|taxonomy|term)\b/.test(identity.replaceAll('_', ' ')) ||
+    targetType === 'taxonomy_term'
+  );
+}
+
+async function nextCycleStructuredGateReasons({
+  browserEvidence,
+  fieldOutputMatrix,
+  nextCycleVerification,
+  packetDir,
+  patternMap
+}) {
+  const reasons = [];
+  const record = nextCycleVerification;
+  const applicability = record?.applicability ?? {};
+  const discovery = record?.discovery ?? {};
+  const models = substantiveObjects(discovery?.recurringPublicModels);
+  const evidenceDir = join(packetDir, 'evidence', 'next-cycle');
+  const evidencePresent = (reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir);
+
+  if (record?.schemaVersion !== 'public-kit.next-cycle-verification.1') {
+    reasons.push('next-cycle-verification.json must use schemaVersion public-kit.next-cycle-verification.1.');
+  }
+  if (!httpUrl(record?.site) || isoTimestamp(record?.checkedAt) === null) {
+    reasons.push('next-cycle-verification.json must name the target site and use a UTC ISO checkedAt timestamp.');
+  }
+  if (
+    applicability.reviewed !== true ||
+    typeof applicability.applies !== 'boolean' ||
+    !String(applicability.reason ?? '').trim()
+  ) {
+    reasons.push('next-cycle-verification.json must contain a reviewed applies true/false disposition with a reason.');
+  }
+  if (
+    !hasMeaningfulEntry(discovery?.commands) ||
+    discovery.fieldDefinitionsInspected !== true ||
+    discovery.taxonomyVocabulariesInspected !== true ||
+    discovery.workflowsInspected !== true ||
+    !(await evidencePresent(discovery.evidence))
+  ) {
+    reasons.push('next-cycle-verification.json discovery must inspect fields, taxonomy vocabularies, and workflows with commands and packet-local machine evidence.');
+  }
+
+  const requirements = recurringModelRequirements(patternMap);
+  for (const requirement of requirements) {
+    if (!models.some((model) =>
+      exactIdentityMatch(model?.entityType, requirement.entityType) &&
+      exactIdentityMatch(model?.bundle, requirement.bundle)
+    )) {
+      reasons.push(`next-cycle-verification.json discovery must review recurring public model ${requirement.entityType}.${requirement.bundle}.`);
+    }
+  }
+
+  const dimensionRecords = [];
+  for (const [modelIndex, model] of models.entries()) {
+    const modelDimensions = substantiveObjects(model?.dimensions);
+    if (
+      model.reviewed !== true ||
+      !String(model?.entityType ?? '').trim() ||
+      !String(model?.bundle ?? '').trim() ||
+      !hasMeaningfulEntry(model?.publicRoutes) ||
+      (modelDimensions.length === 0 && !String(model?.noTemporalCycleDimensionRationale ?? '').trim())
+    ) {
+      reasons.push(`next-cycle-verification.json discovery.recurringPublicModels[${modelIndex}] must identify a reviewed public model and either its dimensions or a model-specific N/A rationale.`);
+    }
+    for (const [dimensionIndex, dimension] of modelDimensions.entries()) {
+      if (
+        !String(dimension?.id ?? '').trim() ||
+        !['date', 'datetime', 'year', 'season', 'period', 'taxonomy'].includes(dimension?.kind) ||
+        !String(dimension?.machineName ?? '').trim() ||
+        !String(dimension?.configName ?? '').trim() ||
+        !String(dimension?.latestCurrentValue ?? '').trim() ||
+        !finiteNumberValue(dimension?.latestCurrentComparable)
+      ) {
+        reasons.push(`next-cycle-verification.json discovery.recurringPublicModels[${modelIndex}].dimensions[${dimensionIndex}] must identify a comparable date, season, year, period, or taxonomy dimension.`);
+      }
+      dimensionRecords.push({ dimension, model });
+    }
+  }
+  const discoveryEvidence = await packetJsonEvidence(packetDir, discovery?.evidence, evidenceDir);
+  const recordSite = httpUrl(record?.site);
+  const discoveryTarget = httpUrl(discoveryEvidence?.targetBaseUrl);
+  if (
+    !discoveryEvidence ||
+    !recordSite ||
+    !discoveryTarget ||
+    discoveryTarget.origin !== recordSite.origin ||
+    isoTimestamp(discoveryEvidence?.checkedAt) !== isoTimestamp(record?.checkedAt) ||
+    !hasMeaningfulEntry(discoveryEvidence?.commands) ||
+    numericValue(discoveryEvidence?.temporalCycleDimensionsFound) !== dimensionRecords.length
+  ) {
+    reasons.push('next-cycle-verification.json discovery evidence must be structured JSON bound to the target, commands, timestamp, and exact discovered-dimension count.');
+  }
+
+  for (const bundle of substantiveObjects(fieldOutputMatrix?.bundles)) {
+    const isRecurring = requirements.some((requirement) =>
+      exactIdentityMatch(requirement.entityType, bundle?.entityType) && exactIdentityMatch(requirement.bundle, bundle?.bundle)
+    );
+    if (!isRecurring) {
+      continue;
+    }
+    for (const field of substantiveObjects(bundle?.fields).filter(temporalFieldCandidate)) {
+      const model = models.find((candidate) =>
+        exactIdentityMatch(candidate?.entityType, bundle?.entityType) && exactIdentityMatch(candidate?.bundle, bundle?.bundle)
+      );
+      if (!substantiveObjects(model?.dimensions).some((dimension) =>
+        exactIdentityMatch(dimension?.machineName, field?.machineName)
+      )) {
+        reasons.push(`next-cycle-verification.json discovery must identify temporal/cycle field ${bundle.entityType}.${bundle.bundle}.${field.machineName}.`);
+      }
+    }
+  }
+
+  if (dimensionRecords.length > 0 && applicability.applies !== true) {
+    reasons.push('next-cycle-verification.json cannot use N/A when discovery found a temporal, cycle, or taxonomy dimension.');
+  }
+  if (applicability.applies === false) {
+    if (dimensionRecords.length > 0) {
+      reasons.push('next-cycle-verification.json structured N/A requires zero discovered temporal/cycle dimensions.');
+    }
+    if (arrayOrEmpty(record?.blockers).length > 0) {
+      reasons.push('next-cycle-verification.json structured N/A cannot contain unresolved blockers.');
+    }
+    return reasons;
+  }
+  if (applicability.applies !== true) {
+    return reasons;
+  }
+  if (dimensionRecords.length === 0) {
+    reasons.push('next-cycle-verification.json applies=true requires at least one discovered temporal/cycle dimension.');
+  }
+
+  const editor = record?.leastPrivilegeEditor ?? {};
+  const passingBrowserEditor = substantiveObjects(browserEvidence?.editorWorkflowChecks).some((check) =>
+    check?.accepted === true &&
+    check?.status === 'pass' &&
+    exactIdentityMatch(check?.editorUser, editor.editorUser) &&
+    exactIdentityMatch(check?.editorRole, editor.editorRole)
+  );
+  if (
+    !String(editor?.editorUser ?? '').trim() ||
+    !String(editor?.editorRole ?? '').trim() ||
+    privilegedEditorIdentity(editor?.editorUser) ||
+    privilegedEditorIdentity(editor?.editorRole) ||
+    editor.leastPrivilegeRoleConfirmed !== true ||
+    !passingBrowserEditor
+  ) {
+    reasons.push('next-cycle-verification.json must use the same proven least-privilege non-admin editor identity as browser-evidence.json.');
+  }
+
+  const permissionChecks = substantiveObjects(editor?.permissionChecks);
+  for (const [index, check] of permissionChecks.entries()) {
+    if (
+      !['create_cycle_value', 'select_cycle_value', 'create_taxonomy_term', 'use_taxonomy_term', 'publish_content'].includes(check?.capability) ||
+      !String(check?.permission ?? '').trim() ||
+      check?.granted !== true ||
+      check?.status !== 'pass' ||
+      !(await evidencePresent(check?.evidence))
+    ) {
+      reasons.push(`next-cycle-verification.json leastPrivilegeEditor.permissionChecks[${index}] must contain an evidence-backed granted permission.`);
+    }
+  }
+  const permissionCapabilities = new Set(permissionChecks
+    .filter((check) => check?.granted === true && check?.status === 'pass')
+    .map((check) => check.capability));
+  if (!permissionCapabilities.has('publish_content')) {
+    reasons.push('next-cycle-verification.json must verify the non-admin publish permission.');
+  }
+
+  const periodProbe = record?.futurePeriodOrTermProbe ?? {};
+  const matchedDimension = dimensionRecords.find(({ dimension }) =>
+    exactIdentityMatch(dimension?.id, periodProbe?.dimensionId)
+  );
+  if (
+    !matchedDimension ||
+    !['created', 'selected_existing'].includes(periodProbe?.operation) ||
+    !String(periodProbe?.value ?? '').trim() ||
+    !finiteNumberValue(periodProbe?.comparable) ||
+    !finiteNumberValue(matchedDimension?.dimension?.latestCurrentComparable) ||
+    Number(periodProbe.comparable) <= Number(matchedDimension.dimension.latestCurrentComparable) ||
+    !exactIdentityMatch(periodProbe?.editorUser, editor?.editorUser) ||
+    !exactIdentityMatch(periodProbe?.editorRole, editor?.editorRole) ||
+    periodProbe?.status !== 'pass' ||
+    !(await evidencePresent(periodProbe?.evidence))
+  ) {
+    reasons.push('next-cycle-verification.json must prove a non-admin created or selected future period/term beyond the latest current comparable value.');
+  }
+  const taxonomyDimension = matchedDimension?.dimension?.kind === 'taxonomy';
+  const requiredPeriodCapability = taxonomyDimension
+    ? (periodProbe?.operation === 'created' ? 'create_taxonomy_term' : 'use_taxonomy_term')
+    : (periodProbe?.operation === 'created' ? 'create_cycle_value' : 'select_cycle_value');
+  if (requiredPeriodCapability && !permissionCapabilities.has(requiredPeriodCapability)) {
+    reasons.push(`next-cycle-verification.json must verify ${requiredPeriodCapability} for the future period/term probe.`);
+  }
+
+  const contentProbe = record?.futureContentProbe ?? {};
+  const createdAt = isoTimestamp(contentProbe?.createdAt);
+  const futureDate = dateOrTimestamp(contentProbe?.futureDate);
+  const transition = contentProbe?.workflowTransition ?? {};
+  const publicUrl = httpUrl(contentProbe?.publicUrl);
+  if (
+    !String(contentProbe?.probeId ?? '').trim() ||
+    !String(contentProbe?.entityType ?? '').trim() ||
+    !String(contentProbe?.bundle ?? '').trim() ||
+    !exactIdentityMatch(contentProbe?.editorUser, editor?.editorUser) ||
+    !exactIdentityMatch(contentProbe?.editorRole, editor?.editorRole) ||
+    createdAt === null ||
+    futureDate === null ||
+    futureDate <= createdAt ||
+    contentProbe?.published !== true ||
+    !['moderation', 'publication_status'].includes(transition?.type) ||
+    !String(transition?.fromState ?? '').trim() ||
+    !String(transition?.toState ?? '').trim() ||
+    exactIdentityMatch(transition?.fromState, transition?.toState) ||
+    transition?.status !== 'pass' ||
+    !(await evidencePresent(transition?.evidence)) ||
+    !publicUrl ||
+    !successfulStatus(contentProbe?.anonymousStatus) ||
+    !String(contentProbe?.outputMarker ?? '').trim() ||
+    contentProbe?.outputObserved !== true ||
+    contentProbe?.status !== 'pass' ||
+    !(await evidencePresent(contentProbe?.evidence))
+  ) {
+    reasons.push('next-cycle-verification.json must prove a future-dated non-admin publish transition and anonymous public output.');
+  }
+  if (matchedDimension && !(
+    exactIdentityMatch(contentProbe?.entityType, matchedDimension.model?.entityType) &&
+    exactIdentityMatch(contentProbe?.bundle, matchedDimension.model?.bundle)
+  )) {
+    reasons.push('next-cycle-verification.json future content probe must use the recurring model that owns the selected dimension.');
+  }
+  const passingModelBrowserEditor = substantiveObjects(browserEvidence?.editorWorkflowChecks).some((check) =>
+    check?.accepted === true &&
+    check?.status === 'pass' &&
+    exactIdentityMatch(check?.editorUser, editor?.editorUser) &&
+    exactIdentityMatch(check?.editorRole, editor?.editorRole) &&
+    exactIdentityMatch(check?.entityType, contentProbe?.entityType) &&
+    exactIdentityMatch(check?.bundle, contentProbe?.bundle)
+  );
+  if (!passingModelBrowserEditor) {
+    reasons.push('browser-evidence.json must prove the next-cycle editor identity on the same recurring entity type and bundle.');
+  }
+  const probeEvidence = await packetJsonEvidence(packetDir, contentProbe?.evidence, evidenceDir);
+  const evidenceTarget = httpUrl(probeEvidence?.targetBaseUrl);
+  const evidencePublicUrl = httpUrl(probeEvidence?.publicUrl);
+  if (
+    !probeEvidence ||
+    !recordSite ||
+    !evidenceTarget ||
+    evidenceTarget.origin !== recordSite.origin ||
+    isoTimestamp(probeEvidence?.checkedAt) !== isoTimestamp(record?.checkedAt) ||
+    !exactIdentityMatch(probeEvidence?.editorUser, editor?.editorUser) ||
+    !exactIdentityMatch(probeEvidence?.editorRole, editor?.editorRole) ||
+    !exactIdentityMatch(probeEvidence?.probeId, contentProbe?.probeId) ||
+    String(probeEvidence?.futureValue ?? '').trim() !== String(periodProbe?.value ?? '').trim() ||
+    dateOrTimestamp(probeEvidence?.futureDate) !== futureDate ||
+    !publicUrl ||
+    !evidencePublicUrl ||
+    evidencePublicUrl.href !== publicUrl.href ||
+    numericValue(probeEvidence?.anonymousStatus) !== numericValue(contentProbe?.anonymousStatus) ||
+    String(probeEvidence?.outputMarker ?? '').trim() !== String(contentProbe?.outputMarker ?? '').trim() ||
+    probeEvidence?.result !== 'pass'
+  ) {
+    reasons.push('next-cycle-verification.json future probe evidence must be structured JSON bound to the target, editor, future value/date, probe entity, and anonymous output marker.');
+  }
+
+  const cleanup = record?.cleanup ?? {};
+  const cleanupCheckedAt = isoTimestamp(cleanup?.checkedAt);
+  const expectedPeriodCleanup = periodProbe?.operation === 'created' ? 'deleted' : 'not_created';
+  if (
+    !exactIdentityMatch(cleanup?.probeId, contentProbe?.probeId) ||
+    cleanupCheckedAt === null ||
+    (createdAt !== null && cleanupCheckedAt < createdAt) ||
+    cleanup?.probeContentDeleted !== true ||
+    cleanup?.periodOrTermCleanup !== expectedPeriodCleanup ||
+    numericValue(cleanup?.contentResidueCount) !== 0 ||
+    numericValue(cleanup?.revisionResidueCount) !== 0 ||
+    numericValue(cleanup?.aliasResidueCount) !== 0 ||
+    numericValue(cleanup?.periodOrTermResidueCount) !== 0 ||
+    ![404, 410].includes(numericValue(cleanup?.publicUrlStatusAfterCleanup)) ||
+    cleanup?.status !== 'pass' ||
+    !(await evidencePresent(cleanup?.evidence))
+  ) {
+    reasons.push('next-cycle-verification.json cleanup must prove zero content, revision, alias, and period/term residue and a 404/410 probe URL.');
+  }
+  const cleanupEvidence = await packetJsonEvidence(packetDir, cleanup?.evidence, evidenceDir);
+  const cleanupTarget = httpUrl(cleanupEvidence?.targetBaseUrl);
+  if (
+    !cleanupEvidence ||
+    !recordSite ||
+    !cleanupTarget ||
+    cleanupTarget.origin !== recordSite.origin ||
+    isoTimestamp(cleanupEvidence?.checkedAt) !== isoTimestamp(record?.checkedAt) ||
+    !exactIdentityMatch(cleanupEvidence?.probeId, cleanup?.probeId) ||
+    numericValue(cleanupEvidence?.contentResidueCount) !== 0 ||
+    numericValue(cleanupEvidence?.revisionResidueCount) !== 0 ||
+    numericValue(cleanupEvidence?.aliasResidueCount) !== 0 ||
+    numericValue(cleanupEvidence?.periodOrTermResidueCount) !== 0 ||
+    numericValue(cleanupEvidence?.publicUrlStatusAfterCleanup) !== numericValue(cleanup?.publicUrlStatusAfterCleanup) ||
+    cleanupEvidence?.result !== 'pass'
+  ) {
+    reasons.push('next-cycle-verification.json cleanup evidence must be structured JSON bound to the target, probe identity, zero residue counts, and final public URL status.');
+  }
+  if (arrayOrEmpty(record?.blockers).length > 0) {
+    reasons.push('next-cycle-verification.json cannot pass with unresolved blockers.');
+  }
+  return reasons;
+}
+
 async function independentStructuredGateReasons({
   browserEvidence,
   drupalReadback,
   fieldOutputMatrix,
   independentVerification,
+  nextCycleVerification,
   packetDir,
   patternMap,
   routeMatrix,
   sourceAudit
 }) {
   const reasons = [];
+  reasons.push(...await nextCycleStructuredGateReasons({
+    browserEvidence,
+    fieldOutputMatrix,
+    nextCycleVerification,
+    packetDir,
+    patternMap
+  }));
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
     .map((route) => ({
       source: normalizeRouteKey(route?.sourcePath),
@@ -2182,6 +2568,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    nextCycleVerification,
     parityReport,
     patternMap,
     routeMatrix,
@@ -2192,6 +2579,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    nextCycleVerification,
     packetDir,
     patternMap,
     routeMatrix,
@@ -2719,6 +3107,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     ['route-matrix.json', routeMatrix?.checkedAt],
     ['parity-report.json', parityReport?.checkedAt],
     ['browser-evidence.json', browserEvidence?.checkedAt],
+    ['next-cycle-verification.json', nextCycleVerification?.checkedAt],
     ['independent-verification.json', independentVerification?.checkedAt],
     ['blind-adversarial-review.json', blindAdversarialReview?.checkedAt],
     ['drupal-readback.json', drupalReadback?.checkedAt],
@@ -2764,6 +3153,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), []);
   const drupalReadback = await readJson(join(packetDir, 'drupal-readback.json'), []);
   const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
+  const nextCycleVerification = await readJson(join(packetDir, 'next-cycle-verification.json'), []);
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
@@ -2774,6 +3164,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
       browserEvidence,
       drupalReadback,
       fieldOutputMatrix,
+      nextCycleVerification,
       patternMap,
       routeMatrix,
       sourceAudit
@@ -2794,6 +3185,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    nextCycleVerification,
     parityReport,
     patternMap,
     routeMatrix,
