@@ -24,7 +24,10 @@ Options:
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
-const MAX_BROWSER_REPRESENTATIVE_CONCURRENCY = 12;
+const MAX_LIVE_ROUTE_CHECKS = 1_000;
+const MAX_LIVE_ROUTE_CONCURRENCY = 12;
+const MAX_LIVE_HTTP_REQUESTS = 2_000;
+const LIVE_ROUTE_DEADLINE_MS = 90_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -144,16 +147,6 @@ function elementText(html, tag) {
   return normalizeText(decodeEntities(match[1].replace(/<[^>]+>/g, ' ')));
 }
 
-function renderedBodyText(html) {
-  const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  return normalizeText(decodeEntities(
-    body
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-  ));
-}
-
 function tagAttributes(tag) {
   const attributes = {};
   const matcher = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
@@ -229,6 +222,19 @@ function normalizePath(value) {
   return pathname !== '/' ? pathname.replace(/\/+$/, '') : '/';
 }
 
+function requestPathAndSearch(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const url = new URL(text, 'https://route-key.invalid/');
+    return `${normalizePath(url.pathname)}${url.search}`;
+  } catch {
+    return '';
+  }
+}
+
 function parseHttpUrl(value, label) {
   let parsed;
   try {
@@ -246,22 +252,32 @@ function parseHttpUrl(value, label) {
   return parsed;
 }
 
-function localTlsHost(hostname) {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+export function isLocalEnvironmentHost(hostname) {
+  const host = String(hostname ?? '').toLowerCase().replace(/^\[|\]$/g, '');
   return (
     host === 'localhost' ||
     host === '::1' ||
+    host === '0.0.0.0' ||
     host === 'host.docker.internal' ||
     host.endsWith('.localhost') ||
     host.endsWith('.ddev.site') ||
+    host.endsWith('.test') ||
     /^127(?:\.\d{1,3}){3}$/.test(host)
   );
 }
 
-function requestOnce(url) {
+function requestOnce(url, { allowRuntimeBoundLocalCertificate = false, deadlineAt = 0 } = {}) {
   return new Promise((resolveRequest, rejectRequest) => {
+    const remainingDeadlineMs = deadlineAt > 0 ? deadlineAt - Date.now() : REQUEST_TIMEOUT_MS;
+    if (remainingDeadlineMs <= 0) {
+      rejectRequest(new Error('Live route verification exceeded its total wall-clock deadline.'));
+      return;
+    }
+    const timeoutMs = Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remainingDeadlineMs));
     const client = url.protocol === 'https:' ? https : http;
-    const allowLocalCertificate = url.protocol === 'https:' && localTlsHost(url.hostname);
+    const allowLocalCertificate = url.protocol === 'https:' && (
+      isLocalEnvironmentHost(url.hostname) || allowRuntimeBoundLocalCertificate
+    );
     let settled = false;
     let request;
     const finish = (callback, value) => {
@@ -277,8 +293,12 @@ function requestOnce(url) {
       request?.destroy();
     };
     const wallClockTimeout = setTimeout(
-      () => fail(new Error(`Request exceeded the ${REQUEST_TIMEOUT_MS} ms wall-clock limit.`)),
-      REQUEST_TIMEOUT_MS
+      () => fail(new Error(
+        deadlineAt > 0 && Date.now() >= deadlineAt
+          ? 'Live route verification exceeded its total wall-clock deadline.'
+          : `Request exceeded the ${REQUEST_TIMEOUT_MS} ms wall-clock limit.`
+      )),
+      timeoutMs
     );
     request = client.request(
       url,
@@ -290,7 +310,7 @@ function requestOnce(url) {
         },
         method: 'GET',
         rejectUnauthorized: !allowLocalCertificate,
-        timeout: REQUEST_TIMEOUT_MS
+        timeout: timeoutMs
       },
       (response) => {
         const chunks = [];
@@ -324,20 +344,37 @@ function requestOnce(url) {
         response.on('error', fail);
       }
     );
-    request.on('timeout', () => fail(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS} ms.`)));
+    request.on('timeout', () => fail(new Error(
+      deadlineAt > 0 && Date.now() >= deadlineAt
+        ? 'Live route verification exceeded its total wall-clock deadline.'
+        : `Request timed out after ${timeoutMs} ms.`
+    )));
     request.on('error', fail);
     request.end();
   });
 }
 
-async function requestFollowingRedirects(startUrl) {
+async function requestFollowingRedirects(
+  startUrl,
+  { allowRuntimeBoundLocalCertificate = false, deadlineAt = 0, requestBudget = null } = {}
+) {
   let current = new URL(startUrl);
   const allowedOrigin = current.origin;
   const redirects = [];
   let localTlsVerificationBypassed = false;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await requestOnce(current);
+    if (deadlineAt > 0 && Date.now() >= deadlineAt) {
+      throw new Error('Live route verification exceeded its total wall-clock deadline.');
+    }
+    if (requestBudget) {
+      if (requestBudget.remaining <= 0) {
+        throw new Error(`Live route verification exhausted its ${requestBudget.maximum} HTTP request budget.`);
+      }
+      requestBudget.remaining -= 1;
+      requestBudget.used += 1;
+    }
+    const response = await requestOnce(current, { allowRuntimeBoundLocalCertificate, deadlineAt });
     localTlsVerificationBypassed ||= response.localTlsVerificationBypassed;
     const location = response.headers.location;
     if (REDIRECT_STATUSES.has(response.status) && location) {
@@ -381,7 +418,58 @@ function recursiveStringForKey(value, keys) {
   return '';
 }
 
-function ddevTargetUrl(cwd) {
+function stringValues(value) {
+  if (typeof value === 'string') {
+    return value.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+  return Array.isArray(value) ? value.flatMap(stringValues) : [];
+}
+
+export function ddevProjectWebUrls(description) {
+  const urls = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const primaryValues = [value.primary_url, value.primaryUrl].flatMap(stringValues);
+    const projectWebRecord = primaryValues.length > 0 && (
+      Object.hasOwn(value, 'httpurl') ||
+      Object.hasOwn(value, 'httpsurl') ||
+      Object.hasOwn(value, 'httpUrl') ||
+      Object.hasOwn(value, 'httpsUrl') ||
+      Object.hasOwn(value, 'httpURLs') ||
+      Object.hasOwn(value, 'httpsURLs') ||
+      Object.hasOwn(value, 'docroot') ||
+      Object.hasOwn(value, 'project_tld') ||
+      Object.hasOwn(value, 'additional_fqdns')
+    );
+    if (projectWebRecord) {
+      for (const candidate of [
+        ...primaryValues,
+        ...stringValues(value.urls),
+        ...stringValues(value.httpurl),
+        ...stringValues(value.httpsurl),
+        ...stringValues(value.httpUrl),
+        ...stringValues(value.httpsUrl),
+        ...stringValues(value.httpURLs),
+        ...stringValues(value.httpsURLs)
+      ]) {
+        try {
+          urls.add(parseHttpUrl(candidate, 'DDEV project web URL').origin);
+        } catch {
+          // Ignore malformed describe fields; runtime identity will fail separately if primary is unusable.
+        }
+      }
+    }
+    for (const child of Object.values(value)) {
+      visit(child);
+    }
+  };
+  visit(description);
+  return [...urls];
+}
+
+function ddevTargetDescription(cwd) {
   try {
     const output = execFileSync('ddev', ['describe', '-j'], {
       cwd,
@@ -390,10 +478,17 @@ function ddevTargetUrl(cwd) {
       timeout: 10_000
     });
     const description = JSON.parse(output);
-    return recursiveStringForKey(description, new Set(['primary_url', 'primaryUrl']));
+    return {
+      primaryUrl: recursiveStringForKey(description, new Set(['primary_url', 'primaryUrl'])),
+      webOrigins: ddevProjectWebUrls(description)
+    };
   } catch {
-    return '';
+    return { primaryUrl: '', webOrigins: [] };
   }
+}
+
+function ddevTargetUrl(cwd) {
+  return ddevTargetDescription(cwd).primaryUrl;
 }
 
 function findDrupalDdevRoot(cwd) {
@@ -529,12 +624,133 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   }
 }
 
-export function exportedSeoUrlPortabilityFindings(projectRoot, trackedYamlFiles, targetBaseUrl = '') {
-  let targetOrigin = '';
+function stripYamlComment(line) {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (doubleQuoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (doubleQuoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (!doubleQuoted && character === "'") {
+      if (singleQuoted && line[index + 1] === "'") {
+        index += 1;
+        continue;
+      }
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+    if (!singleQuoted && character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (!singleQuoted && !doubleQuoted && character === '#' && (index === 0 || /\s/.test(line[index - 1]))) {
+      return line.slice(0, index);
+    }
+  }
+  return line;
+}
+
+function yamlMappingColon(value) {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (doubleQuoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (doubleQuoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (!doubleQuoted && character === "'") {
+      if (singleQuoted && value[index + 1] === "'") {
+        index += 1;
+        continue;
+      }
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+    if (!singleQuoted && character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (
+      !singleQuoted &&
+      !doubleQuoted &&
+      character === ':' &&
+      (index === value.length - 1 || /\s/.test(value[index + 1]))
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function yamlScalarValues(content) {
+  const values = [];
+  let blockScalar = null;
+  let currentKey = '';
+  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+    const indentation = rawLine.match(/^\s*/)?.[0].length ?? 0;
+    if (blockScalar) {
+      if (!rawLine.trim() || indentation > blockScalar.indentation) {
+        if (rawLine.trim()) {
+          values.push({ key: blockScalar.key, line: index + 1, value: rawLine.trim() });
+        }
+        continue;
+      }
+      blockScalar = null;
+    }
+
+    const uncommented = stripYamlComment(rawLine);
+    const trimmed = uncommented.trim();
+    if (!trimmed || trimmed.startsWith('---') || trimmed.startsWith('...')) {
+      continue;
+    }
+    const sequenceValue = trimmed.startsWith('- ') ? trimmed.slice(2).trim() : trimmed;
+    const colon = yamlMappingColon(sequenceValue);
+    if (colon === -1) {
+      if (trimmed.startsWith('- ') && sequenceValue) {
+        values.push({ key: currentKey, line: index + 1, value: sequenceValue });
+      }
+      continue;
+    }
+    const key = sequenceValue.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+    const scalar = sequenceValue.slice(colon + 1).trim();
+    currentKey = key || currentKey;
+    if (/^[>|][+-]?\d*$/.test(scalar)) {
+      blockScalar = { indentation, key: currentKey };
+    } else if (scalar) {
+      values.push({ key: currentKey, line: index + 1, value: scalar });
+    }
+  }
+  return values;
+}
+
+export function exportedSeoUrlPortabilityFindings(
+  projectRoot,
+  trackedYamlFiles,
+  targetBaseUrl = '',
+  targetOriginIsAuthoritativeRuntime = false,
+  authoritativeRuntimeOrigins = []
+) {
+  const targetOrigins = new Set((Array.isArray(authoritativeRuntimeOrigins) ? authoritativeRuntimeOrigins : [])
+    .map((origin) => String(origin).trim()).filter(Boolean));
   try {
-    targetOrigin = targetBaseUrl ? new URL(targetBaseUrl).origin : '';
+    if (targetBaseUrl) {
+      targetOrigins.add(new URL(targetBaseUrl).origin);
+    }
   } catch {
-    // The existing target validation reports malformed URLs separately.
+    // Existing target validation reports malformed URLs separately.
   }
   const findings = [];
   for (const file of trackedYamlFiles) {
@@ -548,23 +764,19 @@ export function exportedSeoUrlPortabilityFindings(projectRoot, trackedYamlFiles,
     } catch {
       continue;
     }
-    for (const [index, line] of content.split(/\r?\n/).entries()) {
-      for (const match of line.matchAll(/https?:\/\/[^\s'"<>]+/gi)) {
+    for (const scalar of yamlScalarValues(content)) {
+      for (const match of scalar.value.matchAll(/https?:\/\/[^\s'"<>]+/gi)) {
         try {
-          const url = new URL(match[0].replace(/[),.;]+$/, ''));
-          const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-          const localHost =
-            host === 'localhost' ||
-            host === '::1' ||
-            host.endsWith('.localhost') ||
-            host.endsWith('.ddev.site') ||
-            /^127(?:\.\d{1,3}){3}$/.test(host);
-          if (localHost || (targetOrigin && url.origin === targetOrigin)) {
+          const url = new URL(match[0].replace(/[\])},.;]+$/, ''));
+          if (
+            isLocalEnvironmentHost(url.hostname) ||
+            (targetOriginIsAuthoritativeRuntime && targetOrigins.has(url.origin))
+          ) {
             findings.push({
               file,
               host: url.host,
-              key: line.match(/^\s*([^:#]+):/)?.[1]?.trim() ?? '',
-              line: index + 1
+              key: scalar.key,
+              line: scalar.line
             });
           }
         } catch {
@@ -608,7 +820,8 @@ function inspectDrupalRuntime(cwd, environment) {
       siteUuid: '',
       trackedConfigDirectory: '',
       trackedConfigYamlFiles: [],
-      exportedSeoUrlPortabilityFindings: []
+      exportedSeoUrlPortabilityFindings: [],
+      webOrigins: []
     };
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
@@ -625,8 +838,25 @@ function inspectDrupalRuntime(cwd, environment) {
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
-  const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
-  const seoUrlFindings = exportedSeoUrlPortabilityFindings(projectRoot, trackedConfig.yamlFiles, baseUrl);
+  const describedTarget = inContainer
+    ? { primaryUrl: environmentTargetUrl(environment), webOrigins: environmentWebOrigins(environment) }
+    : ddevTargetDescription(projectRoot);
+  const baseUrl = describedTarget.primaryUrl;
+  const webOrigins = new Set(describedTarget.webOrigins);
+  try {
+    if (baseUrl) {
+      webOrigins.add(parseHttpUrl(baseUrl, 'Current DDEV runtime base URL').origin);
+    }
+  } catch {
+    // Runtime identity validation reports an unusable primary URL separately.
+  }
+  const seoUrlFindings = exportedSeoUrlPortabilityFindings(
+    projectRoot,
+    trackedConfig.yamlFiles,
+    baseUrl,
+    true,
+    [...webOrigins]
+  );
   return {
     baseUrl,
     confirmed,
@@ -641,7 +871,8 @@ function inspectDrupalRuntime(cwd, environment) {
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
     trackedConfigYamlFiles: trackedConfig.yamlFiles,
-    exportedSeoUrlPortabilityFindings: seoUrlFindings
+    exportedSeoUrlPortabilityFindings: seoUrlFindings,
+    webOrigins: [...webOrigins]
   };
 }
 
@@ -653,6 +884,20 @@ function environmentTargetUrl(environment) {
     }
   }
   return '';
+}
+
+function environmentWebOrigins(environment) {
+  const origins = new Set();
+  for (const key of ['DDEV_PRIMARY_URL', 'DDEV_PRIMARY_URLS']) {
+    for (const candidate of stringValues(environment[key])) {
+      try {
+        origins.add(parseHttpUrl(candidate, key).origin);
+      } catch {
+        // Invalid environment URLs cannot become authoritative origins.
+      }
+    }
+  }
+  return [...origins];
 }
 
 function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
@@ -687,9 +932,12 @@ function comparableUrl(value, baseUrl = undefined) {
   }
 }
 
-function expectedRenderedSeo(browserEvidence, targetPath) {
+function expectedRenderedSeo(browserEvidence, targetPath, requestTarget = '') {
+  const requestKey = requestPathAndSearch(requestTarget);
   const records = (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])
-    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) => normalizePath(url) === targetPath))
+    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) =>
+      requestKey ? requestPathAndSearch(url) === requestKey : normalizePath(url) === targetPath
+    ))
     .filter((check) => check?.accepted === true && check?.renderedSeoSignals?.accepted === true)
     .map((check) => check?.renderedSeoSignals ?? {});
   if (records.length === 0) {
@@ -746,7 +994,9 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
 }
 
 function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence) {
-  const targetPath = normalizePath(check?.targetUrl || check?.targetFinalUrl);
+  const requestTarget = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
+  const expectedFinalRequest = requestPathAndSearch(check?.targetFinalUrl || check?.targetUrl);
+  const targetPath = normalizePath(requestTarget);
   const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
@@ -755,21 +1005,15 @@ function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
   return {
     accepted: check?.accepted === true && Boolean(record.targetPath),
     expectedBehavior: record.expectedRedirect === true ? 'redirect' : 'public_200',
-    expectedBodySignals: check?.routeRole === 'detail'
-      ? (Array.isArray(check?.detailContentSignals?.loadBearingFields)
-          ? check.detailContentSignals.loadBearingFields
-            .filter((field) => field?.visible === true)
-            .map((field) => normalizeText(field?.targetSignal))
-            .filter(Boolean)
-          : [])
-      : [],
     expectedFinalPath: normalizePath(record.targetFinalPath || targetPath),
+    expectedFinalRequest,
     expectedH1: normalizeText(record.targetH1 || check?.renderedSignals?.targetH1),
     expectedStatus,
     expectedTitle: normalizeText(record.targetTitle || check?.renderedSignals?.targetTitle),
     identityRequired: true,
     matchesBrowserRenderedSource: true,
-    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath),
+    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath, requestTarget),
+    requestTarget,
     routeKind: 'browser-representative',
     statusUsesInitialResponse: record.expectedRedirect === true,
     targetPath
@@ -816,6 +1060,25 @@ function absoluteUrlOriginMatch(errors, label, value, expectedOrigin) {
     return;
   }
   requiredOriginMatch(errors, label, text, expectedOrigin);
+}
+
+export function localOnlyFormExceptionsBoundToRuntime(browserEvidence, targetUrl, runtimeOrigins) {
+  const checks = (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).filter((check) => check?.abuseProtection?.mode === 'local_only_exception');
+  if (checks.length === 0) {
+    return true;
+  }
+  try {
+    const target = parseHttpUrl(String(targetUrl), 'Live target URL');
+    const origins = new Set((Array.isArray(runtimeOrigins) ? runtimeOrigins : [runtimeOrigins])
+      .map((value) => parseHttpUrl(String(value), 'Current DDEV runtime web URL').origin));
+    return origins.has(target.origin) && checks.every((check) =>
+      origins.has(parseHttpUrl(String(check?.targetUrl), 'Local-only form target URL').origin)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function completionEvidenceTargetErrors({
@@ -942,8 +1205,9 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected) {
-  const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
+async function verifyRoute(baseUrl, expected, runtimeBudget = {}) {
+  const requestTarget = expected.requestTarget || expected.targetPath;
+  const requestedUrl = new URL(requestTarget.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
@@ -981,10 +1245,9 @@ async function verifyRoute(baseUrl, expected) {
   }
 
   try {
-    const response = await requestFollowingRedirects(requestedUrl);
+    const response = await requestFollowingRedirects(requestedUrl, runtimeBudget);
     const actualH1 = elementText(response.body, 'h1');
     const actualTitle = elementText(response.body, 'title');
-    const actualBodyText = renderedBodyText(response.body);
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
@@ -993,6 +1256,14 @@ async function verifyRoute(baseUrl, expected) {
     if (normalizePath(response.finalUrl) !== expected.expectedFinalPath) {
       errors.push(
         `${expected.targetPath} resolved to ${normalizePath(response.finalUrl)}; expected ${expected.expectedFinalPath}.`
+      );
+    }
+    if (
+      expected.expectedFinalRequest &&
+      requestPathAndSearch(response.finalUrl) !== expected.expectedFinalRequest
+    ) {
+      errors.push(
+        `${expected.targetPath} resolved to ${requestPathAndSearch(response.finalUrl)}; expected exact representative state ${expected.expectedFinalRequest}.`
       );
     }
     if (new URL(response.finalUrl).origin !== baseUrl.origin) {
@@ -1016,11 +1287,6 @@ async function verifyRoute(baseUrl, expected) {
       errors.push(
         `${expected.targetPath} title was ${JSON.stringify(actualTitle)}; expected ${JSON.stringify(expected.expectedTitle)}.`
       );
-    }
-    for (const signal of (Array.isArray(expected.expectedBodySignals) ? expected.expectedBodySignals : [])) {
-      if (!actualBodyText.toLowerCase().includes(signal.toLowerCase())) {
-        errors.push(`${expected.targetPath} is missing expected visible detail signal ${JSON.stringify(signal)}.`);
-      }
     }
     if (expected.renderedSeo) {
       const seo = expected.renderedSeo;
@@ -1072,6 +1338,83 @@ async function verifyRoute(baseUrl, expected) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
     return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href };
   }
+}
+
+export async function scheduleLiveRouteChecks({
+  baseUrl,
+  tasks = [],
+  allowRuntimeBoundLocalCertificate = false,
+  maxRoutes = MAX_LIVE_ROUTE_CHECKS,
+  concurrency = MAX_LIVE_ROUTE_CONCURRENCY,
+  deadlineMs = LIVE_ROUTE_DEADLINE_MS,
+  maxRequests = MAX_LIVE_HTTP_REQUESTS
+} = {}) {
+  const routeTasks = Array.isArray(tasks) ? tasks : [];
+  const errors = [];
+  const numericLimits = { concurrency, deadlineMs, maxRequests, maxRoutes };
+  for (const [name, value] of Object.entries(numericLimits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      errors.push(`Live route verification ${name} must be a positive safe integer.`);
+    }
+  }
+  if (errors.length > 0) {
+    return {
+      checks: [],
+      errors,
+      budget: {
+        attempted: false,
+        deadlineMs,
+        maxConcurrency: concurrency,
+        maxRequests,
+        maxRoutes,
+        requestCount: 0,
+        routeCount: routeTasks.length
+      }
+    };
+  }
+  if (routeTasks.length > maxRoutes) {
+    return {
+      checks: [],
+      errors: [
+        `Live route verification requires ${routeTasks.length} checks, exceeding the ${maxRoutes} route limit; no routes were fetched.`
+      ],
+      budget: {
+        attempted: false,
+        deadlineMs,
+        maxConcurrency: concurrency,
+        maxRequests,
+        maxRoutes,
+        requestCount: 0,
+        routeCount: routeTasks.length
+      }
+    };
+  }
+
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + deadlineMs;
+  const requestBudget = { maximum: maxRequests, remaining: maxRequests, used: 0 };
+  const checks = await mapWithConcurrency(routeTasks, concurrency, async (task) => ({
+    bucket: task.bucket,
+    check: await verifyRoute(baseUrl, task.expected, {
+      allowRuntimeBoundLocalCertificate,
+      deadlineAt,
+      requestBudget
+    })
+  }));
+  return {
+    checks,
+    errors,
+    budget: {
+      attempted: true,
+      deadlineMs,
+      elapsedMs: Date.now() - startedAt,
+      maxConcurrency: concurrency,
+      maxRequests,
+      maxRoutes,
+      requestCount: requestBudget.used,
+      routeCount: routeTasks.length
+    }
+  };
 }
 
 export async function verifyLive({
@@ -1153,20 +1496,36 @@ export async function verifyLive({
   const runtimeWasInjected = drupalRuntime !== null;
   const inspectedDrupalRuntime = drupalRuntime ?? inspectDrupalRuntime(cwd, environment);
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
-  let runtimeTargetOriginMatches = false;
-  if (target && inspectedDrupalRuntime.baseUrl) {
+  const runtimeWebOrigins = new Set(Array.isArray(inspectedDrupalRuntime.webOrigins)
+    ? inspectedDrupalRuntime.webOrigins
+    : []);
+  if (inspectedDrupalRuntime.baseUrl) {
     try {
       const runtimeTarget = parseHttpUrl(inspectedDrupalRuntime.baseUrl, 'Current DDEV runtime base URL');
-      runtimeTargetOriginMatches = runtimeTarget.origin === target.url.origin;
+      runtimeWebOrigins.add(runtimeTarget.origin);
     } catch {
-      // An invalid or unavailable DDEV URL cannot bind the inspected Drupal runtime to the HTTP target.
+      // An invalid or unavailable DDEV URL cannot bind the inspected Drupal runtime.
     }
   }
+  const runtimeTargetOriginMatches = Boolean(target && runtimeWebOrigins.has(target.url.origin));
   const explicitTargetFetchAllowed =
     !target || target.source !== 'explicit' || runtimeTargetOriginMatches;
   if (!explicitTargetFetchAllowed) {
     liveErrors.push(
       'Explicit target HTTP checks are disabled unless the URL matches the current DDEV runtime.'
+    );
+  }
+  const hasLocalOnlyFormException = (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).some((check) => check?.abuseProtection?.mode === 'local_only_exception');
+  const localOnlyFormExceptionRuntimeBound = Boolean(
+    target &&
+    runtimeAuthoritativeForCompletion &&
+    localOnlyFormExceptionsBoundToRuntime(browserEvidence, target.url.href, [...runtimeWebOrigins])
+  );
+  if (hasLocalOnlyFormException && !localOnlyFormExceptionRuntimeBound) {
+    liveErrors.push(
+      'A local_only_exception form disposition is valid only when its exact target origin is bound to the current authoritative DDEV runtime.'
     );
   }
 
@@ -1197,43 +1556,58 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
-  const routeChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(primaryRoutes.map((route) => verifyRoute(
-        target.url,
-        expectedRoute(routeMatrix, route, browserEvidence)
-      )))
-    : [];
-  for (const route of routeChecks) {
-    liveErrors.push(...route.errors);
-  }
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
-  const targetRequiredRouteChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(target.url, expectedTargetRequiredRoute(route))))
-    : [];
-  for (const route of targetRequiredRouteChecks) {
-    liveErrors.push(...route.errors);
-  }
-  const primaryRoutePaths = new Set(primaryRoutes.map((route) => normalizePath(route?.targetPath)).filter(Boolean));
+  const primaryRoutePaths = new Set(primaryRoutes.map((route) => requestPathAndSearch(route?.targetPath)).filter(Boolean));
   const representativeChecksByPath = new Map();
   for (const check of (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])) {
-    const path = normalizePath(check?.targetUrl || check?.targetFinalUrl);
+    const path = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
     if (path && !primaryRoutePaths.has(path) && !representativeChecksByPath.has(path)) {
       representativeChecksByPath.set(path, check);
     }
   }
-  const browserRepresentativeRouteChecks = target && explicitTargetFetchAllowed
-    ? await mapWithConcurrency(
-        representativeChecksByPath.values(),
-        MAX_BROWSER_REPRESENTATIVE_CONCURRENCY,
-        (check) => verifyRoute(
-          target.url,
-          expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
-        )
-      )
-    : [];
-  for (const route of browserRepresentativeRouteChecks) {
+  const liveRouteTasks = [
+    ...primaryRoutes.map((route) => ({
+      bucket: 'primary',
+      expected: expectedRoute(routeMatrix, route, browserEvidence)
+    })),
+    ...targetRequiredRoutes.map((route) => ({
+      bucket: 'target-required',
+      expected: expectedTargetRequiredRoute(route)
+    })),
+    ...[...representativeChecksByPath.values()].map((check) => ({
+      bucket: 'browser-representative',
+      expected: expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
+    }))
+  ];
+  const liveRouteSchedule = target && explicitTargetFetchAllowed
+    ? await scheduleLiveRouteChecks({
+        allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
+        baseUrl: target.url,
+        tasks: liveRouteTasks
+      })
+    : {
+        checks: [],
+        errors: [],
+        budget: {
+          attempted: false,
+          deadlineMs: LIVE_ROUTE_DEADLINE_MS,
+          maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
+          maxRequests: MAX_LIVE_HTTP_REQUESTS,
+          maxRoutes: MAX_LIVE_ROUTE_CHECKS,
+          requestCount: 0,
+          routeCount: liveRouteTasks.length
+        }
+      };
+  liveErrors.push(...liveRouteSchedule.errors);
+  const checksForBucket = (bucket) => liveRouteSchedule.checks
+    .filter((entry) => entry.bucket === bucket)
+    .map((entry) => entry.check);
+  const routeChecks = checksForBucket('primary');
+  const targetRequiredRouteChecks = checksForBucket('target-required');
+  const browserRepresentativeRouteChecks = checksForBucket('browser-representative');
+  for (const route of [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]) {
     liveErrors.push(...route.errors);
   }
 
@@ -1409,6 +1783,7 @@ export async function verifyLive({
     routeChecks,
     targetRequiredRouteChecks,
     browserRepresentativeRouteChecks,
+    liveRouteBudget: liveRouteSchedule.budget,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,

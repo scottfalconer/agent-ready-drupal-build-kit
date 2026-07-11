@@ -60,7 +60,9 @@ Content parity requires reachable public source material to exist as Drupal-owne
 
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
 
-Each collection with separate public item details also needs one representative detail-route comparison that proves visible load-bearing fields and matches the declared detail owner or carries an evidenced deviation. Every recorded public browser route needs raw route-bound axe-core output with no unresolved WCAG A/AA violations, no undispositioned WCAG-tagged incomplete nodes, and applicable keyboard, focus, accessible-name, and form-error checks.
+Each collection with separate public item details also needs one representative detail-route comparison. Its checked fields must cover required fields and fields mapped to anonymous detail output, match a concrete Drupal owner config ID across the model/browser/independent records, and prove computed visibility at field-local selectors. Every recorded public browser route needs raw axe-core output bound to the exact URL and accepted full-default or WCAG-tagged rule scope, with no unresolved WCAG A/AA violations, no incomplete nodes lacking structured exact-rule/target evidence, and applicable keyboard, focus, accessible-name, and form-error checks.
+
+Each source form gets one stable `formKey` reused across source audit, pattern map, browser evidence, and independent verification so multiple forms on one route remain distinct. Outcome and abuse-protection evidence must be mode-specific packet-local JSON bound to that key and exact target; local mail capture or a local-only abuse exception does not establish production delivery, provider readiness, retention/privacy compliance, or launch approval.
 
 ## Minimum Parity Report Shape
 

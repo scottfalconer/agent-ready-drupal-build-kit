@@ -66,6 +66,11 @@
         "engine": "axe-core",
         "engineVersion": "",
         "executedInBrowser": false,
+        "ruleScope": {
+          "mode": "full_default | wcag_tags",
+          "tags": [],
+          "accepted": false
+        },
         "report": "",
         "incompleteReviewed": false,
         "incompleteDispositions": [
@@ -93,6 +98,7 @@
       "detailContentSignals": {
         "contentTypeOrBundle": "",
         "drupalOwner": "",
+        "drupalOwnerConfigId": "",
         "ownerDeviation": {
           "applies": false,
           "rationale": "",
@@ -103,6 +109,18 @@
             "field": "",
             "sourceSignal": "",
             "targetSignal": "",
+            "selector": "",
+            "computedVisibility": {
+              "matchedElementCount": 0,
+              "display": "",
+              "visibility": "",
+              "opacity": "",
+              "hiddenAttribute": false,
+              "ariaHidden": false,
+              "boundingWidth": 0,
+              "boundingHeight": 0,
+              "text": ""
+            },
             "visible": false
           }
         ],
@@ -125,6 +143,7 @@
   ],
   "anonymousFormChecks": [
     {
+      "formKey": "",
       "sourceRoute": "",
       "targetUrl": "",
       "purpose": "",

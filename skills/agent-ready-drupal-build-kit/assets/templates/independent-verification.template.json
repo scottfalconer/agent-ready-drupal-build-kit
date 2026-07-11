@@ -105,6 +105,7 @@
       "contentTypeOrBundle": "",
       "declaredDetailOwner": "",
       "observedDetailOwner": "",
+      "drupalOwnerConfigId": "",
       "ownerDeviationEvidence": "",
       "loadBearingFieldsVerified": [],
       "status": "pass | fail | blocked",
@@ -125,6 +126,7 @@
   ],
   "anonymousFormChecks": [
     {
+      "formKey": "",
       "sourceRoute": "",
       "targetRoute": "",
       "purpose": "contact_message | application | registration | newsletter | survey | other",

@@ -889,6 +889,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   for (const [viewport, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
     writeJson(join(browserEvidenceDir, `axe-home-${viewport}.json`), {
       testEngine: { name: 'axe-core', version: '4.10.2' },
+      toolOptions: { runOnly: null, rules: {} },
       testEnvironment: {
         userAgent: 'Fixture Browser/1.0',
         windowWidth: width,
@@ -899,7 +900,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       passes: [],
       violations: [],
       incomplete: [],
-      inapplicable: []
+      inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
     });
   }
   browser.site = targetBaseUrl;
@@ -958,6 +959,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
         engine: 'axe-core',
         engineVersion: '4.10.2',
         executedInBrowser: true,
+        ruleScope: { mode: 'full_default', tags: [], accepted: true },
         report: `evidence/browser/axe-home-${viewport}.json`,
         incompleteReviewed: true,
         incompleteDispositions: [],
@@ -1066,6 +1068,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
   const sourceBaseUrl = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8')).sourceBaseUrl;
   mutateJson(join(packetDir, 'source-audit.json'), (sourceAudit) => {
     sourceAudit.formsAndIntegrations = [{
+      formKey: 'contact-main',
       kind: 'public_submission_form',
       sourceRoute: '/contact',
       purpose: 'contact_message',
@@ -1078,6 +1081,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
   });
   mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
     patternMap.forms = [{
+      formKey: 'contact-main',
       sourceRoute: '/contact',
       targetRoute: '/contact',
       purpose: 'contact_message',
@@ -1129,6 +1133,23 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
       status: 'pass',
       evidence: 'claim-evidence.json'
     }];
+    independent.anonymousFormChecks = [{
+      formKey: 'contact-main',
+      sourceRoute: '/contact',
+      targetRoute: '/contact',
+      purpose: 'contact_message',
+      modeledOwner: 'webform',
+      browserOwner: 'webform',
+      expectedOutcome: 'message_delivery',
+      browserOutcome: outcomeMode,
+      anonymousInvalidAndValidSubmissionVerified: true,
+      outcomeEvidence: 'evidence/browser/form-outcome.json',
+      abuseProtectionDisposition: 'rendered_honeypot',
+      abuseProtectionRationale: 'A credential-free honeypot is rendered and enforced locally.',
+      abuseProtectionEvidence: 'evidence/browser/form-abuse-protection.json',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
   });
 
   const browserPath = join(packetDir, 'browser-evidence.json');
@@ -1150,6 +1171,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
   contact.accessibilityCheck.manualChecks.formLabelsErrorsAndFocusNotApplicableRationale = '';
   browser.publicRouteChecks.push(contact);
   browser.anonymousFormChecks = [{
+    formKey: 'contact-main',
     sourceRoute: '/contact',
     targetUrl: `${targetBaseUrl}/contact`,
     purpose: 'contact_message',
@@ -1174,36 +1196,59 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
   const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
   writeJson(join(browserEvidenceDir, 'axe-contact.json'), {
     testEngine: { name: 'axe-core', version: '4.10.2' },
+    toolOptions: { runOnly: null, rules: {} },
     testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
     timestamp: testCheckedAt,
     url: `${targetBaseUrl}/contact`,
     passes: [],
     violations: [],
     incomplete: [],
-    inapplicable: []
+    inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
   });
   writeJson(join(browserEvidenceDir, 'form-outcome.json'), {
+    schemaVersion: 'public-kit.form-outcome-evidence.1',
     checkedAt: testCheckedAt,
+    formKey: 'contact-main',
     targetUrl: `${targetBaseUrl}/contact`,
-    outcomeMode,
+    mode: outcomeMode,
+    result: 'pass',
+    handlerOwner: 'fixture outcome handler',
+    resultReference: 'synthetic-result-1',
+    provider: ['provider_delivery', 'provider_handoff'].includes(outcomeMode) ? 'Fixture provider' : '',
+    rationale: outcomeMode === 'other' ? 'The explicit fixture outcome is intentionally custom.' : '',
     observation: 'Synthetic submission reached the configured local outcome.'
   });
   writeJson(join(browserEvidenceDir, 'form-abuse-protection.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
     checkedAt: testCheckedAt,
+    formKey: 'contact-main',
     targetUrl: `${targetBaseUrl}/contact`,
     mode: 'rendered_honeypot',
+    result: 'pass',
+    renderedSelector: 'input[name="fixture_honeypot"]',
+    enforcementVerified: true,
     observation: 'The anonymous form rendered and enforced its honeypot field.'
   });
   writeJson(join(browserEvidenceDir, 'form-local-abuse-exception.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
     checkedAt: testCheckedAt,
+    formKey: 'contact-main',
     targetUrl: `${targetBaseUrl}/contact`,
     mode: 'local_only_exception',
+    result: 'accepted_gap',
+    localTargetVerified: true,
+    rationale: 'The DDEV review target is local-only and requires a production control before launch.',
     observation: 'The DDEV review target is local-only and the production abuse-control choice remains a launch gap.'
   });
   writeJson(join(browserEvidenceDir, 'form-rate-limiting.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
     checkedAt: testCheckedAt,
+    formKey: 'contact-main',
     targetUrl: `${targetBaseUrl}/contact`,
     mode: 'configured_rate_limiting',
+    result: 'pass',
+    configurationOwner: 'fixture.rate_limit',
+    enforcementVerified: true,
     observation: 'Anonymous submission throttling was read back from Drupal configuration and exercised.'
   });
 }
@@ -2490,6 +2535,45 @@ test('browser completion evidence requires route-bound in-browser axe results wi
       })
     },
     {
+      name: 'partial-rule-scope',
+      expected: /ruleScope and report toolOptions\.runOnly must include wcag2aa/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+          browser.publicRouteChecks[0].accessibilityCheck.ruleScope = {
+            mode: 'wcag_tags',
+            tags: ['wcag2a'],
+            accepted: true
+          };
+        });
+        mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+          axe.toolOptions.runOnly = { type: 'tag', values: ['wcag2a'] };
+        });
+      }
+    },
+    {
+      name: 'empty-rule-results',
+      expected: /has no evaluated axe rules/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+        axe.passes = [];
+        axe.violations = [];
+        axe.incomplete = [];
+        axe.inapplicable = [];
+      })
+    },
+    {
+      name: 'query-state-mismatch',
+      expected: /bind the reviewed target route to a real browser environment/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+          browser.publicRouteChecks[0].targetUrl = 'https://target.example/?state=claimed';
+          browser.publicRouteChecks[0].targetFinalUrl = 'https://target.example/?state=claimed';
+        });
+        mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+          axe.url = 'https://target.example/?state=other';
+        });
+      }
+    },
+    {
       name: 'undispositioned-wcag-incomplete',
       expected: /incomplete WCAG result color-contrast.*needs a matching rationale and packet-local disposition evidence/i,
       mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
@@ -2512,6 +2596,28 @@ test('browser completion evidence requires route-bound in-browser axe results wi
     assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
   }
 
+  const realWcagTagsPacket = join(temp, 'real-axe-wcag-tags');
+  cpSync(canonicalPacket, realWcagTagsPacket, { recursive: true });
+  const realWcagTags = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+  mutateJson(join(realWcagTagsPacket, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks) {
+      check.accessibilityCheck.ruleScope = { mode: 'wcag_tags', tags: realWcagTags, accepted: true };
+    }
+  });
+  for (const viewport of ['desktop', 'mobile']) {
+    mutateJson(join(realWcagTagsPacket, `evidence/browser/axe-home-${viewport}.json`), (axe) => {
+      axe.toolOptions.runOnly = viewport === 'mobile'
+        ? realWcagTags
+        : { type: 'tag', values: realWcagTags };
+    });
+  }
+  const realWcagTagsReport = await validatePacket({ packetDir: realWcagTagsPacket });
+  assert.equal(
+    realWcagTagsReport.completionEvidence.packetSupportsCompletion,
+    true,
+    realWcagTagsReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
   const dispositionedPacket = join(temp, 'dispositioned-wcag-incomplete');
   cpSync(canonicalPacket, dispositionedPacket, { recursive: true });
   mutateJson(join(dispositionedPacket, 'evidence/browser/axe-home-desktop.json'), (axe) => {
@@ -2523,10 +2629,13 @@ test('browser completion evidence requires route-bound in-browser axe results wi
     }];
   });
   writeJson(join(dispositionedPacket, 'evidence/browser/axe-incomplete-review.json'), {
+    schemaVersion: 'public-kit.axe-incomplete-disposition.1',
     checkedAt: testCheckedAt,
-    route: '/',
+    targetUrl: 'https://target.example/',
     ruleId: 'color-contrast',
     target: ['.gradient-link'],
+    disposition: 'manual_pass',
+    result: 'pass',
     observation: 'Manual computed-style review confirmed a passing contrast ratio across the gradient.'
   });
   mutateJson(join(dispositionedPacket, 'browser-evidence.json'), (browser) => {
@@ -2544,6 +2653,18 @@ test('browser completion evidence requires route-bound in-browser axe results wi
     true,
     dispositioned.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
+
+  const mismatchedDispositionPacket = join(temp, 'mismatched-incomplete-evidence');
+  cpSync(dispositionedPacket, mismatchedDispositionPacket, { recursive: true });
+  mutateJson(join(mismatchedDispositionPacket, 'evidence/browser/axe-incomplete-review.json'), (evidence) => {
+    evidence.target = ['.different-link'];
+  });
+  const mismatchedDisposition = await validatePacket({ packetDir: mismatchedDispositionPacket });
+  assert.equal(mismatchedDisposition.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    mismatchedDisposition.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /needs a matching rationale and packet-local disposition evidence/i
+  );
 });
 
 test('anonymous public forms require submissions, outcome handling, and a vendor-neutral abuse-protection disposition', async () => {
@@ -2559,6 +2680,95 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     passing.completionEvidence.packetSupportsCompletion,
     true,
     passing.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const twoFormsPacket = join(temp, 'two-forms-one-route');
+  cpSync(passingPacket, twoFormsPacket, { recursive: true });
+  mutateJson(join(twoFormsPacket, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.formsAndIntegrations.push({
+      ...structuredClone(sourceAudit.formsAndIntegrations[0]),
+      formKey: 'newsletter-footer',
+      purpose: 'newsletter',
+      expectedOutcome: 'provider_handoff'
+    });
+  });
+  mutateJson(join(twoFormsPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms.push({
+      ...structuredClone(patternMap.forms[0]),
+      formKey: 'newsletter-footer',
+      purpose: 'newsletter',
+      drupalOwner: 'external_provider',
+      expectedOutcome: 'provider_handoff'
+    });
+  });
+  mutateJson(join(twoFormsPacket, 'browser-evidence.json'), (browser) => {
+    const second = structuredClone(browser.anonymousFormChecks[0]);
+    second.formKey = 'newsletter-footer';
+    second.purpose = 'newsletter';
+    second.drupalOwner = 'external_provider';
+    second.outcome = { mode: 'provider_handoff', evidence: 'evidence/browser/newsletter-outcome.json' };
+    second.abuseProtection = {
+      mode: 'provider_managed',
+      dispositionVerified: true,
+      rationale: 'The provider manages anonymous abuse controls.',
+      evidence: 'evidence/browser/newsletter-abuse.json'
+    };
+    browser.anonymousFormChecks.push(second);
+  });
+  mutateJson(join(twoFormsPacket, 'independent-verification.json'), (independent) => {
+    const second = structuredClone(independent.anonymousFormChecks[0]);
+    second.formKey = 'newsletter-footer';
+    second.purpose = 'newsletter';
+    second.modeledOwner = 'external_provider';
+    second.browserOwner = 'external_provider';
+    second.expectedOutcome = 'provider_handoff';
+    second.browserOutcome = 'provider_handoff';
+    second.outcomeEvidence = 'evidence/browser/newsletter-outcome.json';
+    second.abuseProtectionDisposition = 'provider_managed';
+    second.abuseProtectionEvidence = 'evidence/browser/newsletter-abuse.json';
+    independent.anonymousFormChecks.push(second);
+  });
+  writeJson(join(twoFormsPacket, 'evidence/browser/newsletter-outcome.json'), {
+    schemaVersion: 'public-kit.form-outcome-evidence.1', checkedAt: testCheckedAt,
+    formKey: 'newsletter-footer', targetUrl: 'https://target.example/contact',
+    mode: 'provider_handoff', result: 'pass', handlerOwner: 'Fixture provider adapter',
+    resultReference: 'synthetic-handoff-1', provider: 'Fixture provider', observation: 'Synthetic handoff completed.'
+  });
+  writeJson(join(twoFormsPacket, 'evidence/browser/newsletter-abuse.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1', checkedAt: testCheckedAt,
+    formKey: 'newsletter-footer', targetUrl: 'https://target.example/contact',
+    mode: 'provider_managed', result: 'pass', provider: 'Fixture provider',
+    enforcementVerified: true, observation: 'Provider-managed protection was verified.'
+  });
+  const twoForms = await validatePacket({ packetDir: twoFormsPacket });
+  assert.equal(
+    twoForms.completionEvidence.packetSupportsCompletion,
+    true,
+    twoForms.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const duplicateFormKeyPacket = join(temp, 'duplicate-form-key');
+  cpSync(twoFormsPacket, duplicateFormKeyPacket, { recursive: true });
+  mutateJson(join(duplicateFormKeyPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[1].formKey = 'contact-main';
+  });
+  const duplicateFormKey = await validatePacket({ packetDir: duplicateFormKeyPacket });
+  assert.equal(duplicateFormKey.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    duplicateFormKey.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /unique, non-empty formKey/i
+  );
+
+  const wrongOutcomeEvidencePacket = join(temp, 'wrong-outcome-evidence-binding');
+  cpSync(passingPacket, wrongOutcomeEvidencePacket, { recursive: true });
+  mutateJson(join(wrongOutcomeEvidencePacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.formKey = 'another-form';
+  });
+  const wrongOutcomeEvidence = await validatePacket({ packetDir: wrongOutcomeEvidencePacket });
+  assert.equal(wrongOutcomeEvidence.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    wrongOutcomeEvidence.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /outcome-appropriate handler/i
   );
 
   const storageOnlyPacket = join(temp, 'storage-only');
@@ -2620,6 +2830,14 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
   mutateJson(join(explicitOtherPacket, 'browser-evidence.json'), (browser) => {
     browser.anonymousFormChecks[0].outcome.mode = 'other';
   });
+  mutateJson(join(explicitOtherPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].expectedOutcome = 'other';
+    independent.anonymousFormChecks[0].browserOutcome = 'other';
+  });
+  mutateJson(join(explicitOtherPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.mode = 'other';
+    evidence.rationale = 'The explicit fixture outcome is intentionally custom.';
+  });
   const explicitOther = await validatePacket({ packetDir: explicitOtherPacket });
   assert.equal(
     explicitOther.completionEvidence.packetSupportsCompletion,
@@ -2666,11 +2884,34 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
       evidence: 'evidence/browser/form-local-abuse-exception.json'
     };
   });
+  mutateJson(join(localExceptionPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].abuseProtectionDisposition = 'local_only_exception';
+    independent.anonymousFormChecks[0].abuseProtectionRationale = 'This DDEV-only review target remains a launch gap.';
+    independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-local-abuse-exception.json';
+  });
   const localException = await validatePacket({ packetDir: localExceptionPacket });
   assert.equal(
     localException.completionEvidence.packetSupportsCompletion,
     true,
     localException.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const localDdevExceptionPacket = join(temp, 'local-ddev-exception');
+  cpSync(localExceptionPacket, localDdevExceptionPacket, { recursive: true });
+  mutateJson(join(localDdevExceptionPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-local-abuse-exception.json'), (evidence) => {
+    evidence.targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  const localDdevException = await validatePacket({ packetDir: localDdevExceptionPacket });
+  assert.equal(
+    localDdevException.completionEvidence.packetSupportsCompletion,
+    true,
+    localDdevException.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
   const rateLimitedPacket = join(temp, 'configured-rate-limiting');
@@ -2682,6 +2923,11 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
       rationale: 'Drupal-owned anonymous submission throttling is configured.',
       evidence: 'evidence/browser/form-rate-limiting.json'
     };
+  });
+  mutateJson(join(rateLimitedPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].abuseProtectionDisposition = 'configured_rate_limiting';
+    independent.anonymousFormChecks[0].abuseProtectionRationale = 'Drupal-owned anonymous submission throttling is configured.';
+    independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-rate-limiting.json';
   });
   const rateLimited = await validatePacket({ packetDir: rateLimitedPacket });
   assert.equal(
@@ -2726,6 +2972,7 @@ test('separate public collection details require browser proof of visible load-b
       collectionOwner: 'view',
       viewDisplayOrConfig: 'views.view.events',
       detailRouteOwner: 'entity_view_display',
+      drupalOwnerConfigId: 'core.entity_view_display.node.event.full',
       detailRouteMode: 'separate_public_route',
       representativeDetailSourcePath: '/events/source-event',
       representativeDetailTargetPath: '/events/target-event',
@@ -2779,29 +3026,53 @@ test('separate public collection details require browser proof of visible load-b
     detail.detailContentSignals = {
       contentTypeOrBundle: 'event',
       drupalOwner: 'custom_controller',
+      drupalOwnerConfigId: 'mccall.event_controller',
       ownerDeviation: { applies: false, rationale: '', evidence: '' },
       loadBearingFields: [
-        { field: 'title', sourceSignal: 'Source event', targetSignal: 'Target event', visible: true },
-        { field: 'field_start', sourceSignal: 'July 10, 2026', targetSignal: 'July 10, 2026', visible: true }
+        {
+          field: 'title', sourceSignal: 'Source event', targetSignal: 'Target event', selector: 'h1',
+          computedVisibility: { matchedElementCount: 1, display: 'block', visibility: 'visible', opacity: '1', hiddenAttribute: false, ariaHidden: false, boundingWidth: 600, boundingHeight: 48, text: 'Target event' },
+          visible: true
+        },
+        {
+          field: 'field_start', sourceSignal: 'July 10, 2026', targetSignal: 'July 10, 2026', selector: '.event-date',
+          computedVisibility: { matchedElementCount: 1, display: 'block', visibility: 'visible', opacity: '1', hiddenAttribute: false, ariaHidden: false, boundingWidth: 220, boundingHeight: 24, text: 'July 10, 2026' },
+          visible: true
+        }
       ],
       accepted: true
     };
     browser.publicRouteChecks.push(detail);
   });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks = [{
+      sourceRoute: '/events/source-event',
+      targetRoute: '/events/target-event',
+      contentTypeOrBundle: 'event',
+      declaredDetailOwner: 'entity_view_display',
+      observedDetailOwner: 'custom_controller',
+      drupalOwnerConfigId: 'mccall.event_controller',
+      ownerDeviationEvidence: '',
+      loadBearingFieldsVerified: ['title', 'field_start'],
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+  });
   writeJson(join(packetDir, 'evidence/browser/axe-event-owner.json'), {
     testEngine: { name: 'axe-core', version: '4.10.2' },
+    toolOptions: { runOnly: null, rules: {} },
     testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
     timestamp: testCheckedAt,
     url: 'https://target.example/events/target-event',
     passes: [],
     violations: [],
     incomplete: [],
-    inapplicable: []
+    inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
   });
   const ownerMismatch = await validatePacket({ packetDir });
   assert.match(
     ownerMismatch.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /detail owner custom_controller must match collection Event owner entity_view_display/i
+    /detail owner\/config must match Drupal readback and collection Event owner entity_view_display/i
   );
 
   writeJson(join(packetDir, 'evidence/browser/detail-owner-deviation.json'), {
@@ -2819,14 +3090,148 @@ test('separate public collection details require browser proof of visible load-b
       evidence: 'evidence/browser/detail-owner-deviation.json'
     };
   });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].ownerDeviationEvidence = 'evidence/browser/detail-owner-deviation.json';
+  });
   const ownerDeviation = await validatePacket({ packetDir });
   assert.doesNotMatch(
     ownerDeviation.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /detail owner custom_controller must match collection Event owner entity_view_display/i
+    /detail owner\/config must match Drupal readback and collection Event owner entity_view_display/i
+  );
+
+  const exactOwnerPacket = join(temp, 'exact-detail-owner-readback');
+  cpSync(packetDir, exactOwnerPacket, { recursive: true });
+  mutateJson(join(exactOwnerPacket, 'browser-evidence.json'), (browser) => {
+    const signals = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals;
+    signals.drupalOwner = 'entity_view_display';
+    signals.drupalOwnerConfigId = 'core.entity_view_display.node.event.full';
+    signals.ownerDeviation = { applies: false, rationale: '', evidence: '' };
+  });
+  mutateJson(join(exactOwnerPacket, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].observedDetailOwner = 'entity_view_display';
+    independent.detailRouteChecks[0].drupalOwnerConfigId = 'core.entity_view_display.node.event.full';
+    independent.detailRouteChecks[0].ownerDeviationEvidence = '';
+  });
+  mutateJson(join(exactOwnerPacket, 'drupal-readback.json'), (readback) => {
+    readback.content.viewDisplays.push('core.entity_view_display.node.event.full');
+  });
+  const exactOwner = await validatePacket({ packetDir: exactOwnerPacket });
+  assert.doesNotMatch(
+    exactOwner.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /detail owner\/config|owner\/config-bound passing detailRouteChecks row/i
+  );
+
+  const listingOnlyFieldPacket = join(temp, 'listing-only-public-field');
+  cpSync(exactOwnerPacket, listingOnlyFieldPacket, { recursive: true });
+  mutateJson(join(listingOnlyFieldPacket, 'field-output-matrix.json'), (matrix) => {
+    matrix.bundles.push({
+      entityType: 'node',
+      bundle: 'event',
+      fields: [{
+        machineName: 'field_teaser', editorLabel: 'Teaser', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['/events'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'Listing-only teaser.'
+      }]
+    });
+  });
+  const listingOnlyField = await validatePacket({ packetDir: listingOnlyFieldPacket });
+  assert.doesNotMatch(
+    listingOnlyField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const declaredDetailLocationPacket = join(temp, 'declared-detail-public-field');
+  cpSync(exactOwnerPacket, declaredDetailLocationPacket, { recursive: true });
+  mutateJson(join(declaredDetailLocationPacket, 'field-output-matrix.json'), (matrix) => {
+    matrix.bundles.push({
+      entityType: 'node', bundle: 'event', fields: [{
+        machineName: 'field_listing_only', editorLabel: 'Listing only', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['/events'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'First split bundle row.'
+      }]
+    });
+    matrix.bundles.push({
+      entityType: 'node', bundle: 'event', fields: [{
+        machineName: 'field_public_detail', editorLabel: 'Public detail', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['canonical_detail'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'Explicit detail output.'
+      }]
+    });
+  });
+  const declaredDetailLocation = await validatePacket({ packetDir: declaredDetailLocationPacket });
+  assert.match(
+    declaredDetailLocation.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const hiddenFieldPacket = join(temp, 'hidden-detail-field');
+  cpSync(packetDir, hiddenFieldPacket, { recursive: true });
+  mutateJson(join(hiddenFieldPacket, 'browser-evidence.json'), (browser) => {
+    const field = browser.publicRouteChecks.find((check) => check.routeRole === 'detail')
+      .detailContentSignals.loadBearingFields.find((record) => record.field === 'field_start');
+    field.computedVisibility.display = 'none';
+  });
+  const hiddenField = await validatePacket({ packetDir: hiddenFieldPacket });
+  assert.match(
+    hiddenField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const broadSelectorPacket = join(temp, 'broad-detail-selector');
+  cpSync(exactOwnerPacket, broadSelectorPacket, { recursive: true });
+  mutateJson(join(broadSelectorPacket, 'browser-evidence.json'), (browser) => {
+    const fields = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals.loadBearingFields;
+    fields[0].selector = 'body';
+    fields[0].computedVisibility.text = 'Target event July 10, 2026';
+  });
+  const broadSelector = await validatePacket({ packetDir: broadSelectorPacket });
+  assert.match(
+    broadSelector.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const reusedSelectorPacket = join(temp, 'reused-detail-selector');
+  cpSync(exactOwnerPacket, reusedSelectorPacket, { recursive: true });
+  mutateJson(join(reusedSelectorPacket, 'browser-evidence.json'), (browser) => {
+    const fields = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals.loadBearingFields;
+    fields[1].selector = fields[0].selector;
+  });
+  const reusedSelector = await validatePacket({ packetDir: reusedSelectorPacket });
+  assert.match(
+    reusedSelector.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const underdeclaredFieldPacket = join(temp, 'underdeclared-detail-field');
+  cpSync(packetDir, underdeclaredFieldPacket, { recursive: true });
+  mutateJson(join(underdeclaredFieldPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.structuredContentModel.collectionOwnershipLedger[0].detailLoadBearingFields = ['title'];
+  });
+  const underdeclaredField = await validatePacket({ packetDir: underdeclaredFieldPacket });
+  assert.match(
+    underdeclaredField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const independentOwnerPacket = join(temp, 'independent-detail-owner-mismatch');
+  cpSync(packetDir, independentOwnerPacket, { recursive: true });
+  mutateJson(join(independentOwnerPacket, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].drupalOwnerConfigId = 'different.owner.config';
+  });
+  const independentOwner = await validatePacket({ packetDir: independentOwnerPacket });
+  assert.match(
+    independentOwner.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /owner\/config-bound passing detailRouteChecks row/i
   );
 });
 
-test('live verification fetches non-primary browser representative routes', async () => {
+test('live verification fetches non-primary representatives without treating body substrings as visibility proof', async () => {
   await withHttpServer(
     (request, response) => {
       if (request.url === '/events/target-event') {
@@ -2890,13 +3295,14 @@ test('live verification fetches non-primary browser representative routes', asyn
       });
       writeJson(join(packetDir, 'evidence/browser/axe-event-detail.json'), {
         testEngine: { name: 'axe-core', version: '4.10.2' },
+        toolOptions: { runOnly: null, rules: {} },
         testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
         timestamp: testCheckedAt,
         url: `${baseUrl}/events/target-event`,
         passes: [],
         violations: [],
         incomplete: [],
-        inapplicable: []
+        inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
       });
 
       const report = await verifyLive({
@@ -2907,9 +3313,89 @@ test('live verification fetches non-primary browser representative routes', asyn
         drupalRuntime: injectedDrupalRuntime(baseUrl)
       });
       assert.equal(report.browserRepresentativeRouteChecks.length, 1);
-      assert.equal(report.browserRepresentativeRouteChecks[0].passed, false);
-      assert.match(report.browserRepresentativeRouteChecks[0].errors.join('\n'), /missing expected visible detail signal "July 10, 2026"/i);
-      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.browserRepresentativeRouteChecks[0].passed, true);
+      assert.doesNotMatch(report.browserRepresentativeRouteChecks[0].errors.join('\n'), /visible detail signal/i);
+      assert.equal(report.liveTargetValid, true);
+    }
+  );
+});
+
+test('live verification preserves and independently checks representative query states', async () => {
+  const seen = new Set();
+  await withHttpServer(
+    (request, response) => {
+      if (request.url.startsWith('/search?')) {
+        seen.add(request.url);
+        const origin = `http://${request.headers.host}`;
+        if (new URL(`${origin}${request.url}`).searchParams.get('state') === 'drop') {
+          response.writeHead(302, { location: '/search' });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}${request.url}"><meta name="description" content="State ${new URL(`${origin}${request.url}`).searchParams.get('state')}"></head><body><h1>Search</h1></body></html>`);
+        return;
+      }
+      if (request.url === '/search') {
+        const origin = `http://${request.headers.host}`;
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}/search?state=drop"><meta name="description" content="State drop"></head><body><h1>Search</h1></body></html>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'representative-query-states-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.routes.push({
+          sourcePath: '/search', sourceStatus: 200, sourceFinalPath: '/search', sourceTitle: 'Search', sourceH1: 'Search',
+          targetPath: '/search', targetStatus: 200, targetFinalPath: '/search', targetTitle: 'Search', targetH1: 'Search',
+          expectedRedirect: false, accepted: true, notes: 'Query-state fixture.'
+        });
+      });
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        for (const state of ['a', 'b', 'drop']) {
+          const check = structuredClone(browser.publicRouteChecks[0]);
+          check.routeRole = 'other';
+          check.sourceUrl = `https://source.example/search?state=${state}`;
+          check.sourceFinalUrl = check.sourceUrl;
+          check.targetUrl = `${baseUrl}/search?state=${state}`;
+          check.targetFinalUrl = check.targetUrl;
+          check.renderedSignals.sourceTitle = 'Search';
+          check.renderedSignals.targetTitle = 'Search';
+          check.renderedSignals.sourceH1 = 'Search';
+          check.renderedSignals.targetH1 = 'Search';
+          check.renderedSeoSignals.targetCanonicalUrl = check.targetUrl;
+          check.renderedSeoSignals.targetMetaDescription = `State ${state}`;
+          check.accessibilityCheck.report = `evidence/browser/axe-search-${state}.json`;
+          browser.publicRouteChecks.push(check);
+        }
+      });
+      for (const state of ['a', 'b', 'drop']) {
+        writeJson(join(packetDir, `evidence/browser/axe-search-${state}.json`), {
+          testEngine: { name: 'axe-core', version: '4.10.2' }, toolOptions: { runOnly: null, rules: {} },
+          testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
+          timestamp: testCheckedAt, url: `${baseUrl}/search?state=${state}`,
+          passes: [], violations: [], incomplete: [], inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+        });
+      }
+
+      const report = await verifyLive({
+        packetDir, cwd: repoRoot, environment: {}, targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.browserRepresentativeRouteChecks.length, 3);
+      assert.equal(report.browserRepresentativeRouteChecks.filter((check) => check.passed).length, 2);
+      assert.match(
+        report.browserRepresentativeRouteChecks.find((check) => check.requestTarget.endsWith('state=drop')).errors.join('\n'),
+        /expected exact representative state \/search\?state=drop/i
+      );
+      assert.deepEqual([...seen].sort(), ['/search?state=a', '/search?state=b', '/search?state=drop']);
     }
   );
 });
@@ -2982,13 +3468,14 @@ test('live verification caps non-primary representative route concurrency', asyn
       for (let index = 0; index < representativeCount; index += 1) {
         writeJson(join(packetDir, `evidence/browser/axe-representative-${index}.json`), {
           testEngine: { name: 'axe-core', version: '4.10.2' },
+          toolOptions: { runOnly: null, rules: {} },
           testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
           timestamp: testCheckedAt,
           url: `${baseUrl}/representative-${index}`,
           passes: [],
           violations: [],
           incomplete: [],
-          inapplicable: []
+          inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
         });
       }
 

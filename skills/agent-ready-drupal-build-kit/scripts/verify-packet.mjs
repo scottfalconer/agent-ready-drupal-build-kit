@@ -367,6 +367,19 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   }
 }
 
+async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
+  if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
+    return null;
+  }
+  try {
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    return isJsonObject(evidence) ? evidence : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeImageDimensions(width, height) {
   return (
     Number.isSafeInteger(width) &&
@@ -978,6 +991,97 @@ async function independentStructuredGateReasons({
     ))
   ) {
     reasons.push('independent-verification.json must contain passing rendered embed/media checks when the source audit identifies embeds or integrations.');
+  }
+
+  const independentDetailChecks = substantiveObjects(independentVerification?.detailRouteChecks);
+  for (const ledger of collectionLedger.filter((record) =>
+    record?.accepted === true && record?.detailRouteMode === 'separate_public_route'
+  )) {
+    const expectedFields = detailExpectedFields(ledger, fieldOutputMatrix, recurringObjects);
+    const browserDetail = arrayOrEmpty(browserEvidence?.publicRouteChecks).find((candidate) =>
+      candidate?.routeRole === 'detail' &&
+      normalizeRouteKey(candidate?.sourceUrl) === normalizeRouteKey(ledger?.representativeDetailSourcePath) &&
+      routeRecordPath(candidate) === normalizeRouteKey(ledger?.representativeDetailTargetPath)
+    );
+    const browserSignals = browserDetail?.detailContentSignals ?? {};
+    const deviation = browserSignals?.ownerDeviation ?? {};
+    const check = independentDetailChecks.find((candidate) =>
+      normalizeRouteKey(candidate?.sourceRoute) === normalizeRouteKey(ledger?.representativeDetailSourcePath) &&
+      normalizeRouteKey(candidate?.targetRoute) === normalizeRouteKey(ledger?.representativeDetailTargetPath)
+    );
+    const evidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.evidence,
+      independentEvidenceDir
+    );
+    const deviationEvidencePresent = deviation?.applies === true && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.ownerDeviationEvidence
+    );
+    const verifiedFields = new Set(arrayOrEmpty(check?.loadBearingFieldsVerified).map((field) =>
+      identityKey(isJsonObject(field) ? field.field : field)
+    ));
+    if (
+      !check ||
+      check?.status !== 'pass' ||
+      !exactIdentityMatch(check?.contentTypeOrBundle, ledger?.contentTypeOrBundle) ||
+      !exactIdentityMatch(check?.declaredDetailOwner, ledger?.detailRouteOwner) ||
+      !exactIdentityMatch(check?.observedDetailOwner, browserSignals?.drupalOwner) ||
+      !exactIdentityMatch(check?.drupalOwnerConfigId, browserSignals?.drupalOwnerConfigId) ||
+      (deviation?.applies === true && (
+        check?.ownerDeviationEvidence !== deviation?.evidence || !deviationEvidencePresent
+      )) ||
+      (deviation?.applies !== true && (
+        !exactIdentityMatch(browserSignals?.drupalOwner, ledger?.detailRouteOwner) ||
+        !exactIdentityMatch(browserSignals?.drupalOwnerConfigId, ledger?.drupalOwnerConfigId)
+      )) ||
+      expectedFields.length === 0 ||
+      expectedFields.some((field) => !verifiedFields.has(identityKey(field))) ||
+      !evidencePresent
+    ) {
+      reasons.push(`independent-verification.json needs an owner/config-bound passing detailRouteChecks row covering every required public field for ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'}.`);
+    }
+  }
+
+  const modeledForms = substantiveObjects(patternMap?.forms);
+  const independentFormChecks = substantiveObjects(independentVerification?.anonymousFormChecks);
+  if (
+    (modeledForms.length > 0 || independentFormChecks.length > 0) &&
+    (!uniqueRecordKeys(modeledForms, 'formKey') || !uniqueRecordKeys(independentFormChecks, 'formKey'))
+  ) {
+    reasons.push('pattern-map.json forms and independent-verification.json anonymousFormChecks must use unique, non-empty formKey values.');
+  }
+  for (const form of modeledForms) {
+    const browserCheck = substantiveObjects(browserEvidence?.anonymousFormChecks).find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === String(form?.formKey ?? '').trim()
+    );
+    const check = independentFormChecks.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === String(form?.formKey ?? '').trim()
+    );
+    const evidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.evidence,
+      independentEvidenceDir
+    );
+    if (
+      !check ||
+      !browserCheck ||
+      check?.status !== 'pass' ||
+      normalizeRouteKey(check?.sourceRoute) !== normalizeRouteKey(form?.sourceRoute) ||
+      normalizeRouteKey(check?.targetRoute) !== normalizeRouteKey(form?.targetRoute) ||
+      !exactIdentityMatch(check?.purpose, form?.purpose) ||
+      !exactIdentityMatch(check?.modeledOwner, form?.drupalOwner) ||
+      !exactIdentityMatch(check?.browserOwner, browserCheck?.drupalOwner) ||
+      check?.expectedOutcome !== form?.expectedOutcome ||
+      check?.browserOutcome !== browserCheck?.outcome?.mode ||
+      check?.anonymousInvalidAndValidSubmissionVerified !== true ||
+      check?.outcomeEvidence !== browserCheck?.outcome?.evidence ||
+      check?.abuseProtectionDisposition !== browserCheck?.abuseProtection?.mode ||
+      check?.abuseProtectionEvidence !== browserCheck?.abuseProtection?.evidence ||
+      !evidencePresent
+    ) {
+      reasons.push(`independent-verification.json needs a passing formKey-bound anonymousFormChecks row matching model, browser outcome, and abuse evidence for ${form?.formKey || '(missing formKey)'}.`);
+    }
   }
 
   const rawScan = independentVerification?.rawEmbedAndMarkupScan ?? {};
@@ -1969,6 +2073,13 @@ function routeHasViewport(checks, route, viewport) {
 }
 
 const AXE_WCAG_TAG_RE = /^wcag(?:2|21|22)(?:a|aa)$/i;
+const REQUIRED_AXE_WCAG_TAGS = new Set([
+  'wcag2a',
+  'wcag2aa',
+  'wcag21a',
+  'wcag21aa',
+  'wcag22aa'
+]);
 
 function sameHttpRoute(left, right) {
   const leftUrl = httpUrl(left);
@@ -1977,7 +2088,89 @@ function sameHttpRoute(left, right) {
     leftUrl &&
     rightUrl &&
     leftUrl.origin === rightUrl.origin &&
-    normalizeRouteKey(leftUrl) === normalizeRouteKey(rightUrl)
+    leftUrl.pathname === rightUrl.pathname &&
+    leftUrl.search === rightUrl.search
+  );
+}
+
+function axeRuleScopeReasons(accessibility, report, prefix) {
+  const reasons = [];
+  const declared = accessibility?.ruleScope ?? {};
+  const mode = String(declared?.mode ?? '');
+  const declaredTags = new Set(arrayOrEmpty(declared?.tags).map((tag) => String(tag).toLowerCase()));
+  const toolOptions = isJsonObject(report?.toolOptions) ? report.toolOptions : {};
+  const runOnly = toolOptions.runOnly;
+  const disabledRules = Object.entries(isJsonObject(toolOptions.rules) ? toolOptions.rules : {})
+    .filter(([, value]) => isJsonObject(value) && value.enabled === false)
+    .map(([rule]) => rule);
+  const resultCount = ['passes', 'incomplete', 'inapplicable', 'violations']
+    .reduce((count, key) => count + arrayOrEmpty(report?.[key]).length, 0);
+
+  if (declared?.accepted !== true || !['full_default', 'wcag_tags'].includes(mode)) {
+    reasons.push(`${prefix}.ruleScope must declare and accept full_default or wcag_tags coverage.`);
+    return reasons;
+  }
+  if (disabledRules.length > 0) {
+    reasons.push(`${prefix}.report disables axe rules (${disabledRules.join(', ')}), so it is not a complete declared WCAG run.`);
+  }
+  if (resultCount === 0) {
+    reasons.push(`${prefix}.report has no evaluated axe rules; empty result arrays cannot prove accessibility coverage.`);
+  }
+  if (mode === 'full_default') {
+    if (runOnly !== undefined && runOnly !== null && runOnly !== false) {
+      reasons.push(`${prefix}.report toolOptions.runOnly must be absent for declared full_default coverage.`);
+    }
+    if (declaredTags.size > 0) {
+      reasons.push(`${prefix}.ruleScope.tags must be empty for full_default coverage.`);
+    }
+    return reasons;
+  }
+
+  const normalizedRunOnly = Array.isArray(runOnly)
+    ? { type: 'tag', values: runOnly }
+    : runOnly;
+  const actualTags = new Set(arrayOrEmpty(normalizedRunOnly?.values).map((tag) => String(tag).toLowerCase()));
+  if (!isJsonObject(normalizedRunOnly) || normalizedRunOnly.type !== 'tag') {
+    reasons.push(`${prefix}.report toolOptions.runOnly must use tag mode for declared wcag_tags coverage.`);
+  }
+  for (const requiredTag of REQUIRED_AXE_WCAG_TAGS) {
+    if (!declaredTags.has(requiredTag) || !actualTags.has(requiredTag)) {
+      reasons.push(`${prefix}.ruleScope and report toolOptions.runOnly must include ${requiredTag}.`);
+    }
+  }
+  if (
+    declaredTags.size !== actualTags.size ||
+    [...declaredTags].some((tag) => !actualTags.has(tag))
+  ) {
+    reasons.push(`${prefix}.ruleScope.tags must exactly match report toolOptions.runOnly.values.`);
+  }
+  return reasons;
+}
+
+async function axeIncompleteEvidenceMatches({
+  browserEvidenceDir,
+  disposition,
+  incomplete,
+  nodeTarget,
+  packetDir,
+  report
+}) {
+  const evidence = await packetEvidenceJson(packetDir, disposition?.evidence, browserEvidenceDir);
+  const reportTimestamp = isoTimestamp(report?.timestamp);
+  const evidenceTimestamp = isoTimestamp(evidence?.checkedAt);
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.axe-incomplete-disposition.1' &&
+    sameHttpRoute(evidence?.targetUrl, report?.url) &&
+    String(evidence?.ruleId ?? '') === String(incomplete?.id ?? '') &&
+    JSON.stringify(arrayOrEmpty(evidence?.target)) === JSON.stringify(nodeTarget) &&
+    evidence?.disposition === disposition?.disposition &&
+    evidence?.result === 'pass' &&
+    String(evidence?.observation ?? '').trim() &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    reportTimestamp !== null &&
+    evidenceTimestamp !== null &&
+    evidenceTimestamp >= reportTimestamp &&
+    evidenceTimestamp - reportTimestamp <= MAX_COMPLETION_EVIDENCE_SPAN_MS
   );
 }
 
@@ -2012,14 +2205,14 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
     const environment = report.testEnvironment ?? {};
     const engine = report.testEngine ?? {};
     if (
-      !/axe-core/i.test(String(engine.name ?? '')) ||
+      String(engine.name ?? '').toLowerCase() !== 'axe-core' ||
       String(engine.version ?? '').trim() !== String(accessibility.engineVersion ?? '').trim() ||
       !String(environment.userAgent ?? '').trim() ||
       !finiteNumberValue(environment.windowWidth) ||
       !finiteNumberValue(environment.windowHeight) ||
       Number(environment.windowWidth) !== Number(check?.viewport?.width) ||
       Number(environment.windowHeight) !== Number(check?.viewport?.height) ||
-      isoTimestamp(report.timestamp) === null ||
+      !timestampIsFresh(report.timestamp) ||
       !Array.isArray(report.passes) ||
       !Array.isArray(report.incomplete) ||
       !Array.isArray(report.inapplicable) ||
@@ -2028,6 +2221,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
     ) {
       reasons.push(`${prefix}.report must bind the reviewed target route to a real browser environment and the declared axe-core version.`);
     }
+    reasons.push(...axeRuleScopeReasons(accessibility, report, prefix));
     const violations = arrayOrEmpty(report.violations);
     const unresolvedWcag = violations.filter((violation) =>
       arrayOrEmpty(violation?.tags).some((tag) => AXE_WCAG_TAG_RE.test(String(tag))) &&
@@ -2049,16 +2243,19 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
           JSON.stringify(arrayOrEmpty(record?.target)) === JSON.stringify(target)
         );
         const disposition = dispositionIndex >= 0 ? incompleteDispositions[dispositionIndex] : null;
-        const evidencePresent = disposition && await nonEmptyPacketEvidence(
+        const evidenceMatches = disposition && await axeIncompleteEvidenceMatches({
+          browserEvidenceDir,
+          disposition,
+          incomplete,
+          nodeTarget: target,
           packetDir,
-          disposition.evidence,
-          browserEvidenceDir
-        );
+          report
+        });
         if (
           !disposition ||
           !['manual_pass', 'false_positive', 'not_applicable'].includes(disposition.disposition) ||
           !String(disposition.rationale ?? '').trim() ||
-          !evidencePresent
+          !evidenceMatches
         ) {
           reasons.push(`${prefix}.report incomplete WCAG result ${incomplete?.id || 'unknown-rule'} at ${JSON.stringify(target)} needs a matching rationale and packet-local disposition evidence.`);
         } else {
@@ -2088,6 +2285,171 @@ function formOutcomeMatches(expected, actual) {
     other: new Set(['other'])
   };
   return allowed[expected]?.has(actual) === true;
+}
+
+function uniqueRecordKeys(records, keyName) {
+  const keys = records.map((record) => String(record?.[keyName] ?? '').trim()).filter(Boolean);
+  return keys.length === records.length && new Set(keys).size === keys.length;
+}
+
+async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) {
+  const evidence = await packetEvidenceJson(packetDir, check?.outcome?.evidence, browserEvidenceDir);
+  const mode = String(check?.outcome?.mode ?? '');
+  const providerRequired = ['provider_delivery', 'provider_handoff'].includes(mode);
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.form-outcome-evidence.1' &&
+    String(evidence?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
+    sameHttpRoute(evidence?.targetUrl, check?.targetUrl) &&
+    evidence?.mode === mode &&
+    evidence?.result === 'pass' &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    String(evidence?.handlerOwner ?? '').trim() &&
+    String(evidence?.resultReference ?? '').trim() &&
+    String(evidence?.observation ?? '').trim() &&
+    (!providerRequired || String(evidence?.provider ?? '').trim()) &&
+    (mode !== 'other' || String(evidence?.rationale ?? '').trim())
+  );
+}
+
+async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check) {
+  const evidence = await packetEvidenceJson(packetDir, check?.abuseProtection?.evidence, browserEvidenceDir);
+  const mode = String(check?.abuseProtection?.mode ?? '');
+  const localException = mode === 'local_only_exception';
+  const modeSpecific =
+    (['rendered_honeypot', 'rendered_challenge'].includes(mode) &&
+      String(evidence?.renderedSelector ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (mode === 'configured_rate_limiting' &&
+      String(evidence?.configurationOwner ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (mode === 'provider_managed' &&
+      String(evidence?.provider ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (localException &&
+      evidence?.localTargetVerified === true &&
+      String(evidence?.rationale ?? '').trim());
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.form-abuse-evidence.1' &&
+    String(evidence?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
+    sameHttpRoute(evidence?.targetUrl, check?.targetUrl) &&
+    evidence?.mode === mode &&
+    evidence?.result === (localException ? 'accepted_gap' : 'pass') &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    String(evidence?.observation ?? '').trim() &&
+    modeSpecific
+  );
+}
+
+function detailFieldVisible(record) {
+  const visibility = record?.computedVisibility ?? {};
+  const selector = String(record?.selector ?? '').trim();
+  const documentWideSelector = /^(?:\*|:root|html|body|main|#page|\[role=["']?main["']?\])$/i.test(selector);
+  const opacity = Number(visibility?.opacity);
+  const width = Number(visibility?.boundingWidth);
+  const height = Number(visibility?.boundingHeight);
+  const visibleText = String(visibility?.text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const expectedText = String(record?.targetSignal ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return Boolean(
+    selector &&
+    !documentWideSelector &&
+    Number(visibility?.matchedElementCount) === 1 &&
+    String(visibility?.display ?? '').toLowerCase() !== 'none' &&
+    !['hidden', 'collapse'].includes(String(visibility?.visibility ?? '').toLowerCase()) &&
+    Number.isFinite(opacity) && opacity > 0 &&
+    visibility?.hiddenAttribute === false &&
+    visibility?.ariaHidden === false &&
+    Number.isFinite(width) && width > 0 &&
+    Number.isFinite(height) && height > 0 &&
+    expectedText && visibleText.includes(expectedText)
+  );
+}
+
+function recordConfigIdentities(record, owner) {
+  if (typeof record === 'string') {
+    const value = record.trim();
+    if (!value) {
+      return [];
+    }
+    return owner === 'view_row' && !value.startsWith('views.view.')
+      ? [value, `views.view.${value}`]
+      : [value];
+  }
+  if (!isJsonObject(record)) {
+    return [];
+  }
+  const identities = new Set([
+    record?.configId,
+    record?.id,
+    record?.config,
+    record?.name,
+    record?.displayConfig
+  ].map((value) => String(value ?? '').trim()).filter(Boolean));
+  if (owner === 'entity_view_display' && record?.bundle && record?.mode) {
+    identities.add(`core.entity_view_display.${record.entityType || 'node'}.${record.bundle}.${record.mode}`);
+  }
+  if (owner === 'view_row' && record?.id) {
+    identities.add(`views.view.${record.id}`);
+    for (const display of arrayOrEmpty(record?.displays)) {
+      const displayId = String(isJsonObject(display) ? display.id || display.displayId : display).trim();
+      if (displayId) {
+        identities.add(`views.view.${record.id}:${displayId}`);
+      }
+    }
+  }
+  return [...identities];
+}
+
+function drupalOwnerConfigExists(drupalReadback, owner, configId) {
+  const recordsByOwner = {
+    entity_view_display: drupalReadback?.content?.viewDisplays,
+    canvas_composition: drupalReadback?.content?.canvasPages,
+    view_row: drupalReadback?.views
+  };
+  if (owner === 'documented_exception') {
+    return true;
+  }
+  return arrayOrEmpty(recordsByOwner[owner]).some((record) =>
+    recordConfigIdentities(record, owner).some((identity) => exactIdentityMatch(identity, configId))
+  );
+}
+
+function detailExpectedFields(ledger, fieldOutputMatrix, recurringSourceObjects = []) {
+  const expected = new Set(
+    arrayOrEmpty(ledger?.requiredFields).map((field) => String(field).trim()).filter(Boolean)
+  );
+  for (const field of arrayOrEmpty(ledger?.detailLoadBearingFields)) {
+    if (String(field).trim()) {
+      expected.add(String(field).trim());
+    }
+  }
+  for (const recurring of recurringSourceObjects) {
+    if (exactIdentityMatch(recurring?.bundleOrConfigName, ledger?.contentTypeOrBundle)) {
+      for (const field of arrayOrEmpty(recurring?.requiredFields)) {
+        if (String(field).trim()) {
+          expected.add(String(field).trim());
+        }
+      }
+    }
+  }
+  const matchingFieldBundles = arrayOrEmpty(fieldOutputMatrix?.bundles).filter((bundle) =>
+    exactIdentityMatch(bundle?.entityType, ledger?.drupalEntityType) &&
+    exactIdentityMatch(bundle?.bundle, ledger?.contentTypeOrBundle)
+  );
+  for (const field of matchingFieldBundles.flatMap((bundle) => arrayOrEmpty(bundle?.fields))) {
+    const locations = arrayOrEmpty(field?.publicRenderLocations).map((location) => String(location).trim()).filter(Boolean);
+    const appliesToDetail = locations.some((location) =>
+      normalizeRouteKey(location) === normalizeRouteKey(ledger?.representativeDetailTargetPath) ||
+      exactIdentityMatch(location, ledger?.drupalOwnerConfigId) ||
+      ['detail', 'full', 'canonicaldetail'].includes(identityKey(location))
+    ) || (locations.length === 0 && arrayOrEmpty(ledger?.detailLoadBearingFields).some((declared) =>
+      exactIdentityMatch(declared, field?.machineName)
+    ));
+    if (
+      (field?.required === true || field?.affectsAnonymousOutput === true) &&
+      appliesToDetail &&
+      String(field?.machineName ?? '').trim()
+    ) {
+      expected.add(String(field.machineName).trim());
+    }
+  }
+  return [...expected];
 }
 
 function escapedRegex(value) {
@@ -2768,9 +3130,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
     const sourceDetail = normalizeRouteKey(ledger?.representativeDetailSourcePath);
     const targetDetail = normalizeRouteKey(ledger?.representativeDetailTargetPath);
-    const expectedFields = arrayOrEmpty(ledger?.detailLoadBearingFields)
-      .map((field) => String(field).trim())
-      .filter(Boolean);
+    const expectedFields = detailExpectedFields(ledger, fieldOutputMatrix, recurringSourceObjects);
+    const declaredDetailFields = new Set(
+      arrayOrEmpty(ledger?.detailLoadBearingFields).map((field) => identityKey(field)).filter(Boolean)
+    );
     const matchingRoute = routeRows.find((route) =>
       normalizeRouteKey(route?.sourcePath) === sourceDetail &&
       normalizeRouteKey(route?.targetPath) === targetDetail &&
@@ -2784,14 +3147,24 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     );
     const detailSignals = detailCheck?.detailContentSignals ?? {};
     const actualFields = arrayOrEmpty(detailSignals?.loadBearingFields);
-    const fieldsVerified = expectedFields.length > 0 && expectedFields.every((field) =>
-      actualFields.some((record) =>
+    const fieldsDeclared = expectedFields.length > 0 && expectedFields.every((field) =>
+      declaredDetailFields.has(identityKey(field))
+    );
+    const verifiedFieldRecords = expectedFields.map((field) =>
+      actualFields.find((record) =>
         exactIdentityMatch(record?.field, field) &&
         record?.visible === true &&
         String(record?.sourceSignal ?? '').trim() &&
-        String(record?.targetSignal ?? '').trim()
+        String(record?.targetSignal ?? '').trim() &&
+        detailFieldVisible(record)
       )
     );
+    const verifiedSelectors = verifiedFieldRecords
+      .map((record) => String(record?.selector ?? '').trim())
+      .filter(Boolean);
+    const fieldsVerified = fieldsDeclared &&
+      verifiedFieldRecords.every(Boolean) &&
+      new Set(verifiedSelectors).size === expectedFields.length;
     const ownerDeviation = detailSignals?.ownerDeviation ?? {};
     const ownerDeviationEvidencePresent = ownerDeviation?.applies === true && await nonEmptyPacketEvidence(
       packetDir,
@@ -2799,14 +3172,22 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       browserEvidenceDir
     );
     const detailOwnerMatches = exactIdentityMatch(detailSignals?.drupalOwner, ledger?.detailRouteOwner);
+    const detailOwnerConfigMatches = exactIdentityMatch(
+      detailSignals?.drupalOwnerConfigId,
+      ledger?.drupalOwnerConfigId
+    ) && drupalOwnerConfigExists(
+      drupalReadback,
+      ledger?.detailRouteOwner,
+      ledger?.drupalOwnerConfigId
+    );
     const detailOwnerDeviationAccepted = Boolean(
       String(detailSignals?.drupalOwner ?? '').trim() &&
       ownerDeviation?.applies === true &&
       String(ownerDeviation?.rationale ?? '').trim() &&
       ownerDeviationEvidencePresent
     );
-    if (detailCheck && !detailOwnerMatches && !detailOwnerDeviationAccepted) {
-      reasons.push(`browser-evidence.json detail owner ${detailSignals?.drupalOwner || '(missing)'} must match collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} owner ${ledger.detailRouteOwner || '(missing)'}, or record an evidenced owner deviation.`);
+    if (detailCheck && (!detailOwnerMatches || !detailOwnerConfigMatches) && !detailOwnerDeviationAccepted) {
+      reasons.push(`browser-evidence.json detail owner/config must match Drupal readback and collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} owner ${ledger.detailRouteOwner || '(missing)'}, or record an evidenced owner deviation.`);
     }
     if (
       !sourceDetail ||
@@ -2815,6 +3196,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       !detailCheck ||
       detailSignals?.accepted !== true ||
       !exactIdentityMatch(detailSignals?.contentTypeOrBundle, ledger?.contentTypeOrBundle) ||
+      (!detailOwnerMatches && !detailOwnerDeviationAccepted) ||
+      (!detailOwnerConfigMatches && !detailOwnerDeviationAccepted) ||
       !fieldsVerified ||
       !renderedSeoRoutes.has(targetDetail)
     ) {
@@ -2827,12 +3210,21 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   );
   const modeledForms = substantiveObjects(patternMap?.forms);
   const anonymousFormChecks = substantiveObjects(browserEvidence?.anonymousFormChecks);
+  if (
+    (sourcePublicForms.length > 0 || modeledForms.length > 0 || anonymousFormChecks.length > 0) &&
+    (!uniqueRecordKeys(sourcePublicForms, 'formKey') ||
+      !uniqueRecordKeys(modeledForms, 'formKey') ||
+      !uniqueRecordKeys(anonymousFormChecks, 'formKey'))
+  ) {
+    reasons.push('Anonymous public forms must use unique, non-empty formKey values in source-audit.json, pattern-map.json, and browser-evidence.json.');
+  }
   if (sourcePublicForms.some((sourceForm) => {
     const form = modeledForms.find((candidate) =>
-      normalizeRouteKey(candidate?.sourceRoute) === normalizeRouteKey(sourceForm?.sourceRoute)
+      String(candidate?.formKey ?? '').trim() === String(sourceForm?.formKey ?? '').trim()
     );
     return !form ||
       form?.accepted !== true ||
+      normalizeRouteKey(form?.sourceRoute) !== normalizeRouteKey(sourceForm?.sourceRoute) ||
       !exactIdentityMatch(form?.purpose, sourceForm?.purpose) ||
       String(form?.expectedOutcome ?? '') !== String(sourceForm?.expectedOutcome ?? '') ||
       !String(form?.drupalOwner ?? '').trim();
@@ -2840,12 +3232,15 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('pattern-map.json must map every audited anonymous public submission form without changing its source purpose or expectedOutcome, and must name its accepted Drupal/provider owner.');
   }
   for (const form of modeledForms) {
+    const formKey = String(form?.formKey ?? '').trim();
     const sourceRoute = normalizeRouteKey(form?.sourceRoute);
     const targetRoute = normalizeRouteKey(form?.targetRoute);
     const expectedOutcome = String(form?.expectedOutcome ?? '');
+    const sourceForm = sourcePublicForms.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === formKey
+    );
     const check = anonymousFormChecks.find((candidate) =>
-      normalizeRouteKey(candidate?.sourceRoute) === sourceRoute &&
-      routeRecordPath(candidate) === targetRoute
+      String(candidate?.formKey ?? '').trim() === formKey
     );
     const routeRecord = routeRows.find((candidate) =>
       normalizeRouteKey(candidate?.targetPath) === targetRoute && candidate?.accepted === true
@@ -2853,16 +3248,16 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     const browserFormCheck = publicRouteChecks.find((candidate) =>
       candidate?.routeRole === 'form' && routeRecordPath(candidate) === targetRoute && candidate?.accepted === true
     );
-    const outcomeEvidencePresent = check && await nonEmptyPacketEvidence(
+    const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
       packetDir,
-      check?.outcome?.evidence,
-      browserEvidenceDir
+      browserEvidenceDir,
+      check
     );
     const abuseProtectionMode = String(check?.abuseProtection?.mode ?? '');
-    const abuseProtectionEvidencePresent = check && await nonEmptyPacketEvidence(
+    const abuseProtectionEvidenceMatches = check && await formAbuseEvidenceMatches(
       packetDir,
-      check?.abuseProtection?.evidence,
-      browserEvidenceDir
+      browserEvidenceDir,
+      check
     );
     if (check && (
       !exactIdentityMatch(check?.purpose, form?.purpose) ||
@@ -2872,6 +3267,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
     if (
       form?.accepted !== true ||
+      !formKey ||
+      !sourceForm ||
       !sourceRoute ||
       !targetRoute ||
       !String(form?.purpose ?? '').trim() ||
@@ -2880,6 +3277,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       !routeRecord ||
       !browserFormCheck ||
       !check ||
+      normalizeRouteKey(check?.sourceRoute) !== sourceRoute ||
+      routeRecordPath(check) !== targetRoute ||
       check?.accepted !== true ||
       check?.status !== 'pass' ||
       check?.anonymousSession !== true ||
@@ -2890,10 +3289,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       check?.validSubmission?.performed !== true ||
       check?.validSubmission?.successStateVisible !== true ||
       !formOutcomeMatches(expectedOutcome, check?.outcome?.mode) ||
-      !outcomeEvidencePresent ||
+      !outcomeEvidenceMatches ||
       !['rendered_honeypot', 'rendered_challenge', 'configured_rate_limiting', 'provider_managed', 'local_only_exception'].includes(abuseProtectionMode) ||
       check?.abuseProtection?.dispositionVerified !== true ||
-      !abuseProtectionEvidencePresent ||
+      !abuseProtectionEvidenceMatches ||
       (abuseProtectionMode === 'local_only_exception' && !String(check?.abuseProtection?.rationale ?? '').trim()) ||
       arrayOrEmpty(check?.blockers).length > 0
     ) {
@@ -2901,6 +3300,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
   if (anonymousFormChecks.some((check) => !modeledForms.some((form) =>
+    String(form?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
     normalizeRouteKey(form?.sourceRoute) === normalizeRouteKey(check?.sourceRoute) &&
     normalizeRouteKey(form?.targetRoute) === routeRecordPath(check)
   ))) {
