@@ -44,17 +44,25 @@ function textPromptAfter(content, heading) {
   return section.match(/```text\n([\s\S]*?)\n```/)?.[1] ?? '';
 }
 
-test('each required review packet file has a matching template', () => {
+test('each required or non-authoritative packet record has a matching template', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
-  const missing = gates.reviewPacketFiles.filter((file) => !existsSync(join(templatesDir, requiredTemplateName(file))));
+  const packetEvidenceFiles = [
+    ...gates.reviewPacketFiles,
+    ...gates.nonAuthoritativeRecords.map((record) => record.evidenceFile)
+  ];
+  const missing = packetEvidenceFiles.filter((file) => !existsSync(join(templatesDir, requiredTemplateName(file))));
 
   assert.deepEqual(missing, []);
 });
 
 test('template directory contains only packet templates named by gates.json', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
-  const requiredFiles = new Set(gates.reviewPacketFiles);
-  const templateFiles = new Set(gates.reviewPacketFiles.map(requiredTemplateName));
+  const packetEvidenceFiles = [
+    ...gates.reviewPacketFiles,
+    ...gates.nonAuthoritativeRecords.map((record) => record.evidenceFile)
+  ];
+  const requiredFiles = new Set(packetEvidenceFiles);
+  const templateFiles = new Set(packetEvidenceFiles.map(requiredTemplateName));
   const listed = new Set(
     spawnSync('find', [templatesDir, '-maxdepth', '1', '-type', 'f'], { encoding: 'utf8' })
       .stdout.trim()

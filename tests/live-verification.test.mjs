@@ -1002,8 +1002,6 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.blockers = [];
   writeJson(readbackPath, readback);
 
-  addQualifyingReproductionEvidence(packetDir, targetBaseUrl);
-
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
@@ -1117,6 +1115,11 @@ function addQualifyingReproductionEvidence(packetDir, targetBaseUrl) {
   const configObjectSha256 = fileSha256(join(evidenceDir, evidenceFiles.configObject));
   writeJson(join(packetDir, 'reproduction-evidence.json'), {
     schemaVersion: 'public-kit.reproduction-evidence.1',
+    recordId: 'E-REPRO-01',
+    reportedResult: 'evidence_recorded',
+    authoritativeForCompletion: false,
+    limitation:
+      'Builder-authored packet evidence; the verifier does not create a disposable target or independently observe the exercise.',
     site: targetBaseUrl,
     checkedAt: testCheckedAt,
     reviewer: 'Fixture Reproduction Reviewer',
@@ -1240,7 +1243,7 @@ function addQualifyingReproductionEvidence(packetDir, targetBaseUrl) {
       ],
       evidence: [evidenceFiles.readback]
     },
-    accepted: true,
+    builderReportedComplete: true,
     blockers: []
   });
 }
@@ -2140,7 +2143,6 @@ test('a coherent but stale packet cannot authorize current local completion', as
 
   const staleCheckedAt = '2020-01-01T00:00:00Z';
   for (const file of [
-    'reproduction-evidence.json',
     'source-audit.json',
     'pattern-map.json',
     'route-matrix.json',
@@ -2162,122 +2164,50 @@ test('a coherent but stale packet cannot authorize current local completion', as
   );
 });
 
-test('G-REPRO-01 fails closed when disposable clean-reproduction proof is incomplete', async () => {
-  const temp = mkdtempSync(join(tmpdir(), 'reproduction-gate-fail-closed-'));
+test('E-REPRO-01 is optional non-authoritative evidence and never changes completion support', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'reproduction-evidence-non-authoritative-'));
   const canonicalPacket = join(temp, 'canonical');
   copyTemplatePacket(canonicalPacket);
   writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
   addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
 
-  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  const missingReport = await validatePacket({ packetDir: canonicalPacket });
   assert.equal(
-    canonicalReport.completionEvidence.packetSupportsCompletion,
+    missingReport.completionEvidence.packetSupportsCompletion,
     true,
-    JSON.stringify(canonicalReport.completionEvidence, null, 2)
+    JSON.stringify(missingReport.completionEvidence, null, 2)
   );
+  assert.equal(missingReport.nonAuthoritativeEvidence.disposableReproduction.result, 'not_recorded');
+  assert.equal(missingReport.nonAuthoritativeEvidence.disposableReproduction.authoritativeForCompletion, false);
 
-  const cases = [
-    {
-      name: 'snapshot-is-not-clean-install',
-      expected: /true clean install\/config import.*snapshot restoration.*recovery evidence/i,
-      mutate: (reproduction) => {
-        reproduction.reproductionMode = 'snapshot_restore';
-        reproduction.cleanInstallConfigImport.freshDrupalInstall = false;
-        reproduction.cleanInstallConfigImport.databaseSnapshotUsed = true;
-      }
-    },
-    {
-      name: 'working-target-is-not-disposable',
-      expected: /isolated disposable target.*working target was not used/i,
-      mutate: (reproduction) => {
-        reproduction.disposableEnvironment.targetBaseUrl = 'https://target.example';
-        reproduction.disposableEnvironment.workingTargetUsed = true;
-      }
-    },
-    {
-      name: 'machine-local-input',
-      expected: /five portable immutable inputs.*SHA-256 digests/i,
-      mutate: (reproduction) => {
-        reproduction.immutableInputs[0].source = '/Users/example/dev/site/composer.lock';
-      }
-    },
-    {
-      name: 'input-digest-mismatch',
-      expected: /five portable immutable inputs.*SHA-256 digests/i,
-      mutate: (reproduction) => {
-        reproduction.immutableInputs[0].sha256 = `sha256:${'0'.repeat(64)}`;
-      }
-    },
-    {
-      name: 'incomplete-command-transcript',
-      expected: /complete successful six-phase transcript.*never executes/i,
-      mutate: (reproduction) => {
-        reproduction.transcript.commands = reproduction.transcript.commands
-          .filter((command) => command.phase !== 'config_import');
-      }
-    },
-    {
-      name: 'snapshot-content-restore',
-      expected: /canonical content and managed-file restore\/import mechanisms/i,
-      mutate: (reproduction) => {
-        reproduction.restorationMechanisms.content.mechanism = 'Database snapshot restore';
-      }
-    },
-    {
-      name: 'working-target-changed',
-      expected: /working target identity is byte-identical.*never used/i,
-      mutate: (reproduction) => {
-        reproduction.workingTargetUntouched.afterIdentity.sha256 = `sha256:${'0'.repeat(64)}`;
-      }
-    },
-    {
-      name: 'stable-identifier-mismatch',
-      expected: /final readback must match stable entity IDs/i,
-      mutate: (reproduction) => {
-        reproduction.finalReadback.entityIdentifiers[0].actualIdentifier = 'fixture:different';
-      }
-    },
-    {
-      name: 'count-mismatch',
-      expected: /final readback must match.*counts/i,
-      mutate: (reproduction) => {
-        reproduction.finalReadback.counts[0].actual = 2;
-      }
-    },
-    {
-      name: 'config-mismatch',
-      expected: /final readback must match.*config hashes/i,
-      mutate: (reproduction) => {
-        reproduction.finalReadback.configHashes[0].actualSha256 = `sha256:${'0'.repeat(64)}`;
-      }
-    },
-    {
-      name: 'managed-file-mismatch',
-      expected: /final readback must match.*managed-file hashes/i,
-      mutate: (reproduction) => {
-        reproduction.finalReadback.managedFileHashes[0].actualSha256 = `sha256:${'0'.repeat(64)}`;
-      }
-    },
-    {
-      name: 'route-mismatch',
-      expected: /final readback must match.*public routes/i,
-      mutate: (reproduction) => {
-        reproduction.finalReadback.routes[0].actualStatus = 404;
-      }
-    }
-  ];
+  addQualifyingReproductionEvidence(canonicalPacket, 'https://target.example');
+  const completeReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(completeReport.valid, true, completeReport.errors.join('\n'));
+  assert.equal(completeReport.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(completeReport.nonAuthoritativeEvidence.disposableReproduction.result, 'evidence_recorded');
+  assert.equal(completeReport.nonAuthoritativeEvidence.disposableReproduction.authoritativeForCompletion, false);
 
-  for (const { name, expected, mutate } of cases) {
-    const packetDir = join(temp, name);
-    cpSync(canonicalPacket, packetDir, { recursive: true });
-    mutateJson(join(packetDir, 'reproduction-evidence.json'), mutate);
+  const partialPacket = join(temp, 'partial');
+  cpSync(canonicalPacket, partialPacket, { recursive: true });
+  mutateJson(join(partialPacket, 'reproduction-evidence.json'), (reproduction) => {
+    reproduction.transcript.commands = reproduction.transcript.commands
+      .filter((command) => command.phase !== 'config_import');
+  });
+  const partialReport = await validatePacket({ packetDir: partialPacket });
+  assert.equal(partialReport.valid, true, partialReport.errors.join('\n'));
+  assert.equal(partialReport.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(partialReport.nonAuthoritativeEvidence.disposableReproduction.result, 'evidence_incomplete');
+  assert.match(partialReport.warnings.join('\n'), /E-REPRO-01 is non-authoritative and incomplete/i);
 
-    const report = await validatePacket({ packetDir });
-
-    assert.equal(report.valid, true, `${name}: ${report.errors.join('\n')}`);
-    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
-    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
-  }
+  const blockedPacket = join(temp, 'blocked');
+  cpSync(canonicalPacket, blockedPacket, { recursive: true });
+  mutateJson(join(blockedPacket, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.homepageParity.accepted = false;
+  });
+  const blockedReport = await validatePacket({ packetDir: blockedPacket });
+  assert.equal(blockedReport.nonAuthoritativeEvidence.disposableReproduction.result, 'evidence_recorded');
+  assert.equal(blockedReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(blockedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'), /homepage parity is not accepted/i);
 });
 
 test('reproduction verifier treats packet command strings as inert transcript data', async () => {
@@ -2288,6 +2218,7 @@ test('reproduction verifier treats packet command strings as inert transcript da
   copyTemplatePacket(packetDir);
   writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
   addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  addQualifyingReproductionEvidence(packetDir, 'https://target.example');
   mutateJson(join(packetDir, 'reproduction-evidence.json'), (reproduction) => {
     reproduction.transcript.commands[0].command =
       'ddev composer install --no-interaction && touch verifier-must-not-run';
@@ -2297,6 +2228,8 @@ test('reproduction verifier treats packet command strings as inert transcript da
 
   assert.equal(report.valid, true, report.errors.join('\n'));
   assert.equal(report.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(report.nonAuthoritativeEvidence.disposableReproduction.result, 'evidence_recorded');
+  assert.equal(report.nonAuthoritativeEvidence.disposableReproduction.authoritativeForCompletion, false);
   assert.equal(existsSync(sentinel), false, 'packet-provided transcript command must never execute');
 });
 

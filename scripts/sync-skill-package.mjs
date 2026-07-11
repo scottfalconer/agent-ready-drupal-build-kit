@@ -57,6 +57,12 @@ function parseArgs(argv) {
 
 function copyPlan(assetsOnly) {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const packetEvidenceFiles = [
+    ...gates.reviewPacketFiles,
+    ...(Array.isArray(gates.nonAuthoritativeRecords)
+      ? gates.nonAuthoritativeRecords.map((record) => record.evidenceFile)
+      : [])
+  ];
   const plan = [
     { source: join(repoRoot, 'gates.json'), destination: join(skillRoot, 'gates.json') },
     { source: join(repoRoot, 'AGENTS.md.template'), destination: join(skillRoot, 'references', 'build-contract.md') },
@@ -65,7 +71,7 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'recommended-agent-skills.md'), destination: join(skillRoot, 'references', 'recommended-agent-skills.md') },
     { source: join(repoRoot, 'docs', 'parity-spec.md'), destination: join(skillRoot, 'references', 'parity-spec.md') },
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
-    ...gates.reviewPacketFiles.map((packetFile) => {
+    ...packetEvidenceFiles.map((packetFile) => {
       const name = templateName(packetFile);
       return {
         source: join(repoRoot, 'templates', name),

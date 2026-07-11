@@ -28,8 +28,11 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
-- `reproduction-evidence.json`
 - `launch-checklist.md`
+
+Optional non-authoritative records:
+
+- `reproduction-evidence.json` records a builder-observed disposable clean-install exercise. The linter may label it `E-REPRO-01: evidence_recorded`, but it is not required and cannot authorize or block completion.
 
 ## Generated Verifier Evidence
 
@@ -51,12 +54,13 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
-- `G-REPRO-01`: require a fresh Drupal install/config import in a disposable target from five digest-bound immutable input classes, declared content/file restore mechanisms, an inert six-phase transcript, stable ID/count/config/file/route readback, and byte-identical proof that the working target was untouched. Snapshot restore remains recovery evidence and cannot clear this gate.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
 - `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
+
+`E-REPRO-01` is intentionally outside the gate vocabulary. Its checklist covers a clean disposable install/config import, digest-bound inputs, content and file restoration, inert transcript data, working-target identity, and readback. Those packet claims remain builder-authored until a verifier-owned runner independently creates the target and reconciles it with canonical working-target facts and the full primary route set.
 
 The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
 

@@ -8,7 +8,6 @@
     "scoped-gap-list.md",
     "open-decisions.md",
     "off-road-inventory.md",
-    "reproduction-evidence.json",
     "maintainer-review.md",
     "operator-run.md",
     "production-target.md",
@@ -24,6 +23,17 @@
   "generatedEvidenceFiles": [
     "evidence/live-verification.json",
     "evidence/packet-verification.json"
+  ],
+  "nonAuthoritativeRecords": [
+    {
+      "id": "E-REPRO-01",
+      "title": "Builder-reported disposable reproduction evidence",
+      "evidenceFile": "reproduction-evidence.json",
+      "checkedBy": "packet-linter",
+      "result": "evidence_recorded",
+      "authoritativeForCompletion": false,
+      "limitation": "The packet linter checks record shape and packet-local hashes only. It does not create a disposable Drupal target, execute transcript commands, or independently reconcile the reproduced site with canonical working-target facts."
+    }
   ],
   "gates": [
     {
@@ -192,14 +202,6 @@
       "phase": 6,
       "evidenceFile": "off-road-inventory.md",
       "checkedBy": "verifier",
-      "blocking": "handoff"
-    },
-    {
-      "id": "G-REPRO-01",
-      "title": "Drupal build reproduced from immutable inputs in a disposable environment",
-      "phase": 6,
-      "evidenceFile": "reproduction-evidence.json",
-      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

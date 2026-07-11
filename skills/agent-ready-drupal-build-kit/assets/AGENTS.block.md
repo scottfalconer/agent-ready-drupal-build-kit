@@ -15,7 +15,7 @@ Non-negotiable gates:
 - Keep configuration in a non-empty tracked sync directory and prove active configuration has no drift from it. Record clean-install/import reproduction separately only when it was actually run.
 - Test actual anonymous routes and realistic non-admin editor tasks against the running Drupal site. Every custom or repeating public bundle needs an editor workflow, and load-bearing/anonymous-output fields need falsification checks.
 - Preserve real packet-local evidence and separate builder work from independent and blind review.
-- Reproduce from digest-bound immutable inputs in an isolated disposable target; prove clean install/config import, content/file restoration, stable readback, and an untouched working target. Snapshot restore alone does not pass.
+- Optionally record a builder-observed clean reproduction in a disposable target, never the working target. The packet linter does not create a target or execute transcript commands; `E-REPRO-01: evidence_recorded` is non-authoritative and does not affect completion.
 - Treat packet-only validation and injected test runtimes as diagnostic only. The default live-target verifier must independently inspect the current DDEV origin and Git-tracked config YAML before it may derive local completion authorization.
 
 Default verification:

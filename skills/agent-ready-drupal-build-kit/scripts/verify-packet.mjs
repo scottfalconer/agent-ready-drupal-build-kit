@@ -80,7 +80,6 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
-  'G-REPRO-01': 'disposableReproduction',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -409,22 +408,26 @@ function portableInputSource(value) {
   return !isAbsolute(text) && !text.split(/[\\/]+/).includes('..');
 }
 
-async function reproductionGateReasons(packetDir, reproductionEvidence, routeMatrix) {
+async function reproductionEvidenceRecordReasons(packetDir, reproductionEvidence, routeMatrix) {
   const reasons = [];
   const evidenceDir = join(packetDir, 'evidence', 'reproduction');
   const workingSite = httpUrl(reproductionEvidence?.site);
   const packetTarget = httpUrl(routeMatrix?.targetBaseUrl);
   if (
     reproductionEvidence?.schemaVersion !== 'public-kit.reproduction-evidence.1' ||
+    reproductionEvidence?.recordId !== 'E-REPRO-01' ||
+    reproductionEvidence?.reportedResult !== 'evidence_recorded' ||
+    reproductionEvidence?.authoritativeForCompletion !== false ||
+    !/does not create|not independently/i.test(String(reproductionEvidence?.limitation ?? '')) ||
     !workingSite ||
     !packetTarget ||
     workingSite.origin !== packetTarget.origin ||
     isoTimestamp(reproductionEvidence?.checkedAt) === null ||
     !String(reproductionEvidence?.reviewer ?? '').trim() ||
-    reproductionEvidence?.accepted !== true ||
+    reproductionEvidence?.builderReportedComplete !== true ||
     arrayOrEmpty(reproductionEvidence?.blockers).length > 0
   ) {
-    reasons.push('reproduction-evidence.json must identify the packet target and contain a reviewed, accepted G-REPRO-01 run with no blockers.');
+    reasons.push('reproduction-evidence.json must identify E-REPRO-01 as non-authoritative evidence_recorded for the packet target and contain a complete builder-reported exercise with no blockers.');
   }
 
   const cleanInstall = reproductionEvidence?.cleanInstallConfigImport ?? {};
@@ -439,7 +442,7 @@ async function reproductionGateReasons(packetDir, reproductionEvidence, routeMat
     cleanInstall.managedFilesRestored !== true ||
     !(await allPacketEvidencePresent(packetDir, cleanInstall.evidence, evidenceDir))
   ) {
-    reasons.push('G-REPRO-01 requires a true clean install/config import; database snapshot restoration is recovery evidence, not clean reproduction.');
+    reasons.push('E-REPRO-01 records a claimed clean install/config import; database snapshot restoration is recovery evidence, not clean reproduction.');
   }
 
   const disposable = reproductionEvidence?.disposableEnvironment ?? {};
@@ -908,7 +911,8 @@ function validateGateVocabulary(gates, errors) {
   const ids = new Set();
   const knownEvidenceFiles = new Set([
     ...arrayOrEmpty(gates?.reviewPacketFiles),
-    ...arrayOrEmpty(gates?.generatedEvidenceFiles)
+    ...arrayOrEmpty(gates?.generatedEvidenceFiles),
+    ...arrayOrEmpty(gates?.nonAuthoritativeRecords).map((record) => record?.evidenceFile).filter(Boolean)
   ]);
   for (const gate of gates?.gates ?? []) {
     if (!gate.id || ids.has(gate.id)) {
@@ -942,6 +946,26 @@ function validateGateVocabulary(gates, errors) {
   for (const gateId of Object.keys(MACHINE_GATE_EVALUATORS)) {
     if (!ids.has(gateId)) {
       errors.push(`machine evaluator ${gateId} does not correspond to a gate in gates.json.`);
+    }
+  }
+
+  const recordIds = new Set();
+  for (const record of arrayOrEmpty(gates?.nonAuthoritativeRecords)) {
+    if (!record?.id || recordIds.has(record.id) || ids.has(record.id)) {
+      errors.push(`gates.json has a missing or duplicate non-authoritative record id: ${record?.id || '(missing)'}.`);
+    }
+    recordIds.add(record?.id);
+    if (
+      !String(record?.title ?? '').trim() ||
+      !String(record?.evidenceFile ?? '').trim() ||
+      record?.checkedBy !== 'packet-linter' ||
+      record?.result !== 'evidence_recorded' ||
+      record?.authoritativeForCompletion !== false ||
+      !String(record?.limitation ?? '').trim()
+    ) {
+      errors.push(
+        `non-authoritative record ${record?.id || '(missing)'} must declare packet-linter, evidence_recorded, authoritativeForCompletion false, and its limitation.`
+      );
     }
   }
 }
@@ -2488,11 +2512,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     independentVerification,
     parityReport,
     patternMap,
-    reproductionEvidence,
     routeMatrix,
     sourceAudit
   } = records;
-  reasons.push(...await reproductionGateReasons(packetDir, reproductionEvidence, routeMatrix));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -3020,7 +3042,6 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const completionTimestamps = [
-    ['reproduction-evidence.json', reproductionEvidence?.checkedAt],
     ['source-audit.json', sourceAudit?.checkedAt],
     ['pattern-map.json', patternMap?.checkedAt],
     ['route-matrix.json', routeMatrix?.checkedAt],
@@ -3064,7 +3085,11 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     await validateRequiredFiles(packetDir, gates, errors);
   }
 
-  const reproductionEvidence = await readJson(join(packetDir, 'reproduction-evidence.json'), []);
+  const reproductionEvidencePath = join(packetDir, 'reproduction-evidence.json');
+  const reproductionEvidencePresent = existsSync(reproductionEvidencePath);
+  const reproductionEvidence = reproductionEvidencePresent
+    ? await readJson(reproductionEvidencePath, [])
+    : null;
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
@@ -3096,6 +3121,21 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   );
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
+  const reproductionEvidenceReasons = reproductionEvidencePresent
+    ? await reproductionEvidenceRecordReasons(packetDir, reproductionEvidence, routeMatrix)
+    : [];
+  const reproductionEvidenceResult = !reproductionEvidencePresent
+    ? 'not_recorded'
+    : reproductionEvidenceReasons.length === 0
+      ? 'evidence_recorded'
+      : 'evidence_incomplete';
+  if (reproductionEvidenceReasons.length > 0) {
+    warnings.push(
+      ...reproductionEvidenceReasons.map(
+        (reason) => `E-REPRO-01 is non-authoritative and incomplete: ${reason}`
+      )
+    );
+  }
   const completionReadiness = await packetCompletionReadiness(packetDir, gates, {
     blindAdversarialReview,
     browserEvidence,
@@ -3104,7 +3144,6 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     independentVerification,
     parityReport,
     patternMap,
-    reproductionEvidence,
     routeMatrix,
     sourceAudit
   });
@@ -3120,6 +3159,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    nonAuthoritativeEvidence: {
+      disposableReproduction: {
+        recordId: 'E-REPRO-01',
+        result: reproductionEvidenceResult,
+        authoritativeForCompletion: false,
+        limitation:
+          'Builder-authored packet evidence was not independently observed. The verifier did not create a disposable Drupal target, execute transcript commands, or reconcile the reproduced site with canonical working-target facts.',
+        reasons: reproductionEvidenceReasons
+      }
+    },
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,

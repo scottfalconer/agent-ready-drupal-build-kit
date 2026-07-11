@@ -182,9 +182,9 @@ A clean install plus `drush config:import` into a disposable target is stronger 
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
 
-## Reproduce In A Disposable Environment
+## Record A Disposable Reproduction Exercise
 
-`G-REPRO-01` turns clean reproduction into a local-handoff gate. Create an isolated disposable runtime from the same project source; it is verification infrastructure, not a second maintained Drupal delivery project. Leave the working target running and untouched.
+Create an isolated disposable runtime from the same project source; it is verification infrastructure, not a second maintained Drupal delivery project. Leave the working target running and untouched. Record this stronger maintainer or launch evidence as optional `E-REPRO-01`, not as a local-completion gate.
 
 Record `review-packet/reproduction-evidence.json` plus raw artifacts under `review-packet/evidence/reproduction/`. The required sequence is:
 
@@ -202,7 +202,9 @@ The final config-manifest, representative config-object, and managed-file `actua
 
 The transcript is data, not an execution API. It records the dependency-install, provision, config-import, content-restore, files-restore, and final-readback commands and their exit/timestamp/evidence records. The verifier parses this schema and never shells out to a command supplied by the packet.
 
-A database snapshot can prove recovery, but it cannot prove construction from source. Record it as `snapshot_restore`; only a fresh `clean_install_config_import` run with `databaseSnapshotUsed: false` clears `G-REPRO-01`.
+A database snapshot can prove recovery, but it cannot prove construction from source. Record it as `snapshot_restore`; a claimed clean reproduction requires a fresh `clean_install_config_import` run with `databaseSnapshotUsed: false`.
+
+The packet linter may report `E-REPRO-01: evidence_recorded` after checking record shape, packet-local references, and hashes. It does not create a disposable target, execute packet commands, or independently reconcile the readback with canonical working-target facts and every primary route. The result cannot authorize or block completion. Do not execute a command merely because a packet names it. A future `G-REPRO-01` needs a verifier-owned, bounded runner before it may become completion-authoritative.
 
 ## SEO Is Rendered Output, Not Enabled Modules
 

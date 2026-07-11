@@ -1,5 +1,9 @@
 {
   "schemaVersion": "public-kit.reproduction-evidence.1",
+  "recordId": "E-REPRO-01",
+  "reportedResult": "evidence_recorded",
+  "authoritativeForCompletion": false,
+  "limitation": "Builder-authored packet evidence; the verifier does not create a disposable Drupal target, execute transcript commands, or independently reconcile the reproduced site with canonical working-target facts.",
   "site": "",
   "checkedAt": "",
   "reviewer": "",
@@ -143,6 +147,6 @@
     ],
     "evidence": []
   },
-  "accepted": false,
+  "builderReportedComplete": false,
   "blockers": []
 }
