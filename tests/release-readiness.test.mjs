@@ -135,6 +135,26 @@ test('npm package excludes local agent state and keeps verifier bins executable'
   }
 });
 
+test('PACKAGE-MANIFEST.json includedPaths matches the npm pack surface exactly', () => {
+  const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: repoRoot,
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const [pack] = JSON.parse(result.stdout);
+  const packedTopLevelPaths = [...new Set(
+    pack.files.map((file) => (file.path.includes('/') ? `${file.path.split('/')[0]}/` : file.path))
+  )].sort();
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'PACKAGE-MANIFEST.json'), 'utf8'));
+
+  assert.deepEqual(
+    [...manifest.includedPaths].sort(),
+    packedTopLevelPaths,
+    'PACKAGE-MANIFEST.json includedPaths drifted from npm pack --dry-run --json; update the manifest to match the shipped surface'
+  );
+});
+
 test('public repository surface includes conventional license, CI, and contribution metadata', () => {
   const license = readFileSync(join(repoRoot, 'LICENSE'), 'utf8');
   const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
