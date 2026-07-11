@@ -75,7 +75,7 @@ A current-cycle CRUD task does not prove that editors can run the next event, se
 
 When discovery finds a dimension, use the same least-privilege non-admin identity proven in browser evidence. Create or select a period/term whose comparable value is beyond the latest current value, create future-dated content, complete the real moderation or publication-status transition, and confirm a unique marker on anonymous public output. Verify the exact taxonomy/cycle and publish permissions used.
 
-Delete the content probe and any period/term created solely for it. Record zero remaining content records, revisions, aliases, and period/term records, plus a final `404` or `410` for the public probe URL. The live verifier re-fetches that URL and rejects redirects or a remaining public response. Use structured N/A only when evidence-backed discovery finds no temporal/cycle dimension; a current predefined option list is not an N/A rationale.
+Delete the content probe and any period/term created solely for it. Record zero remaining content records, revisions, aliases, and period/term records, plus a final `404` or `410` for the public probe URL. The live verifier re-fetches that URL and rejects redirects or a remaining public response. It also runs a metadata-only Drush census of active field, option-list, taxonomy, and workflow configuration; a packet that omits a live temporal/cycle candidate cannot declare this gate N/A. Use structured N/A only when evidence-backed discovery and that live census find no temporal/cycle dimension; a current predefined option list is not an N/A rationale.
 
 ## Independent Mechanical Verification Pass
 
