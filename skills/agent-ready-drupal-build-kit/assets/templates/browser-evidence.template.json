@@ -4,6 +4,10 @@
   "checkedAt": "",
   "toolOrMethod": "",
   "evidenceRoot": "review-packet/evidence/browser/",
+  "globalChromeRegression": {
+    "dynamicRegionSelectors": [],
+    "notes": "Selectors may mask explicitly dynamic non-chrome regions. The verifier rejects masks that intersect brand, header, navigation, or footer elements."
+  },
   "publicRouteChecks": [
     {
       "routeRole": "homepage | primary | landing | listing | detail | taxonomy | search | form | legal | media | other",

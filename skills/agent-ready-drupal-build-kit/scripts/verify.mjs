@@ -9,7 +9,12 @@ import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validatePacket } from './verify-packet.mjs';
-import { applyVerificationLifecycle } from './lifecycle.mjs';
+import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
+import {
+  captureGlobalChrome,
+  captureSummary,
+  finalizeGlobalChromeCapture
+} from './global-chrome.mjs';
 import {
   buildSiteState,
   collectFileManifest,
@@ -2255,6 +2260,33 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  let chromeContext = { lifecyclePresent: false, latestVerifiedAnchor: null, contract: null };
+  try {
+    chromeContext = globalChromeCaptureContext({ packetDir: absolutePacketDir });
+  } catch (error) {
+    liveErrors.push(`Global chrome lifecycle context could not be read: ${error.message}`);
+  }
+  const rawGlobalChromeCapture = chromeContext.lifecyclePresent && target && explicitTargetFetchAllowed && runtimeAuthoritativeForCompletion
+    ? await captureGlobalChrome({
+        baseUrl: target.url,
+        primaryRoutes,
+        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+        environment
+      })
+    : {
+        schemaVersion: 'public-kit.global-chrome-capture.1',
+        checkedAt: new Date().toISOString(),
+        status: 'unavailable',
+        authoritative: false,
+        captureMode: 'verifier-owned-browser',
+        targetOrigin: target?.url?.origin ?? '',
+        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+        browser: { executable: '', product: '' },
+        routes: [],
+        errors: [chromeContext.lifecyclePresent
+          ? 'Verifier-owned browser capture is disabled for an injected or unavailable runtime.'
+          : 'No lifecycle baseline exists yet; the next live verifier run will establish the global chrome anchor.']
+      };
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -2449,6 +2481,30 @@ export async function verifyLive({
     buildState.complete = buildStateReady;
     buildState.blockers = stateBlockers;
   }
+  let globalChromeCapture = null;
+  if (buildStateReady) {
+    try {
+      globalChromeCapture = finalizeGlobalChromeCapture({
+        capture: rawGlobalChromeCapture,
+        packetDir: absolutePacketDir,
+        stateFingerprint: buildState.fingerprint
+      });
+    } catch (error) {
+      globalChromeCapture = {
+        schemaVersion: 'public-kit.global-chrome-capture.1',
+        checkedAt: rawGlobalChromeCapture.checkedAt,
+        status: 'blocked',
+        authoritative: false,
+        captureMode: 'verifier-owned-browser',
+        targetOrigin: target?.url?.origin ?? '',
+        resultStateFingerprint: buildState.fingerprint,
+        contract: rawGlobalChromeCapture.contract,
+        browser: rawGlobalChromeCapture.browser,
+        routes: [],
+        errors: [`Global chrome capture finalization failed: ${error.message}`]
+      };
+    }
+  }
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -2511,7 +2567,8 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
-    routeChecks: routeEvidenceManifest
+    routeChecks: routeEvidenceManifest,
+    globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? ''
   });
   const sharedPacketReport = {
     ...packetReport,
@@ -2544,6 +2601,8 @@ export async function verifyLive({
     },
     routeChecks,
     targetRequiredRouteChecks,
+    globalChromeCapture,
+    globalChromeCaptureSummary: captureSummary(globalChromeCapture),
     liveTargetValid,
     buildState,
     drupalRuntime: {

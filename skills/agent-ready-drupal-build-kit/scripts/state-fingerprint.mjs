@@ -726,6 +726,7 @@ export function buildSiteState({
     targetIdentity: canonicalValue(targetIdentity),
     configManifest: config,
     codeManifest: code,
+    entityInventory: canonicalValue(entityInventory ?? {}),
     entityInventoryFingerprint: components.entityInventory,
     routeManifest: routes,
     routeManifestFingerprint: components.routeManifest,

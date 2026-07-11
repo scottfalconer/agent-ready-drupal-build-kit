@@ -27,8 +27,11 @@ import {
   completeChange,
   readLifecycleStatus
 } from '../bin/lifecycle.mjs';
+import { normalizeGlobalChromeContract } from '../bin/global-chrome.mjs';
 
 const digest = (seed) => `sha256:${seed.repeat(64)}`;
+const chromeScreenshotBytes = Buffer.from('fixture-global-chrome-screenshot');
+const chromeScreenshotSha256 = sha256(chromeScreenshotBytes);
 
 function manifestEntries(overrides = {}) {
   return [
@@ -68,6 +71,80 @@ function siteState(overrides = {}) {
   });
 }
 
+function globalChromeCapture(buildState, overrides = {}) {
+  const contract = normalizeGlobalChromeContract({ dynamicRegionSelectors: ['[data-dynamic]'] });
+  const routes = (buildState.routeManifest ?? []).flatMap((route) => ['desktop', 'mobile'].map((viewport) => ({
+    path: route.path,
+    viewport: { name: viewport, width: viewport === 'desktop' ? 1280 : 390, height: viewport === 'desktop' ? 800 : 844 },
+    signals: {
+      title: 'Fixture',
+      finalUrl: `https://fixture.ddev.site${route.path}`,
+      maskViolations: [],
+      maskedRegionCount: 0,
+      roles: {
+        brand: { present: true, visible: true, box: { top: 10, left: 10, width: 120, height: 40 }, identity: { href: '/', image: '/logo.svg', alt: 'Fixture', text: '' } },
+        header: { present: true, visible: true, box: { top: 0, left: 0, width: viewport === 'desktop' ? 1280 : 390, height: 80 } },
+        navigation: { present: true, visible: true, box: { top: 20, left: 140, width: 400, height: 40 } },
+        footer: { present: true, visible: true, box: { top: 900, left: 0, width: viewport === 'desktop' ? 1280 : 390, height: 120 } }
+      },
+      meaningfulHrefs: [
+        { scope: 'header', href: '/', label: 'Home' },
+        { scope: 'navigation', href: '/about', label: 'About' },
+        { scope: 'footer', href: '/legal', label: 'Legal' }
+      ],
+      placeholderHrefs: [],
+      mobileMenu: {
+        triggerPresent: viewport === 'mobile',
+        triggerVisible: viewport === 'mobile',
+        activationWorks: viewport === 'mobile',
+        expandedBefore: 'false',
+        expandedAfter: viewport === 'mobile' ? 'true' : '',
+        controlledMenuVisible: viewport === 'mobile'
+      },
+      layout: {
+        viewportWidth: viewport === 'desktop' ? 1280 : 390,
+        viewportHeight: viewport === 'desktop' ? 800 : 844,
+        documentHeight: 1100,
+        normalizedPageHeight: 1100,
+        mainBox: { top: 80, left: 0, width: viewport === 'desktop' ? 1280 : 390, height: 820 },
+        headerBox: { top: 0, left: 0, width: viewport === 'desktop' ? 1280 : 390, height: 80 },
+        footerBox: { top: 900, left: 0, width: viewport === 'desktop' ? 1280 : 390, height: 120 }
+      }
+    },
+    screenshot: {
+      path: 'evidence/global-chrome.png',
+      sha256: chromeScreenshotSha256,
+      size: chromeScreenshotBytes.length,
+      width: viewport === 'desktop' ? 1280 : 390,
+      height: 1100,
+      clipped: false
+    }
+  })));
+  const core = {
+    schemaVersion: 'public-kit.global-chrome-capture.1',
+    checkedAt: new Date().toISOString(),
+    status: 'captured',
+    authoritative: true,
+    captureMode: 'verifier-owned-browser',
+    targetOrigin: 'https://fixture.ddev.site',
+    resultStateFingerprint: buildState.fingerprint,
+    contract,
+    browser: { executable: 'fixture-chrome', product: 'Fixture Chrome' },
+    routes,
+    errors: [],
+    ...overrides
+  };
+  return { ...core, captureFingerprint: sha256(core) };
+}
+
+function mutateGlobalChromeCapture(report, mutate) {
+  const capture = JSON.parse(JSON.stringify(report.globalChromeCapture));
+  delete capture.captureFingerprint;
+  mutate(capture);
+  capture.captureFingerprint = sha256(capture);
+  return { ...report, globalChromeCapture: capture };
+}
+
 function passingReport(buildState = siteState(), overrides = {}) {
   const routeChecks = (buildState.routeManifest ?? []).map((route) => ({
     targetPath: route.path,
@@ -84,6 +161,7 @@ function passingReport(buildState = siteState(), overrides = {}) {
     liveTargetValid: true,
     routeChecks,
     targetRequiredRouteChecks: [],
+    globalChromeCapture: globalChromeCapture(buildState),
     drupalRuntime: {
       authoritativeForCompletion: true,
       confirmed: true,
@@ -108,6 +186,7 @@ function lifecycleFixture() {
   mkdirSync(join(packetDir, 'evidence'), { recursive: true });
   writeFileSync(join(projectRoot, 'composer.json'), '{"name":"fixture/site"}\n');
   writeFileSync(join(packetDir, 'evidence', 'change-check.json'), '{"status":"pass"}\n');
+  writeFileSync(join(packetDir, 'evidence', 'global-chrome.png'), chromeScreenshotBytes);
   return { packetDir, projectRoot };
 }
 
@@ -586,7 +665,7 @@ test('repair and extension records require classified impact and allow only one 
   }
   assert.deepEqual(
     repair.requiredChecks.filter((check) => check.evaluator === 'machine').map((check) => check.id),
-    ['baseline-route-smoke', 'config-clean', 'state-bound']
+    ['baseline-route-smoke', 'config-clean', 'global-chrome-regression', 'state-bound']
   );
   assert.equal(repair.wideningCheck.evaluator, 'authored');
   assert.throws(
@@ -727,6 +806,181 @@ test('change completion fails closed on missing checks and stale fingerprints, t
   assert.throws(
     () => completeChange({ packetDir, id: change.id, verification: completeVerification }),
     /already evidence_recorded/i
+  );
+});
+
+test('global chrome is machine-evaluated and fails when branding disappears despite passing route smoke', () => {
+  const { packetDir } = lifecycleFixture();
+  const baselineState = siteState();
+  applyVerificationLifecycle({ packetDir, report: passingReport(baselineState) });
+  const change = beginChange({
+    packetDir,
+    id: 'canvas-page-region',
+    kind: 'repair',
+    summary: 'Repair the shared Canvas PageRegion',
+    surfaces: ['canvas'],
+    routes: ['/'],
+    acceptance: ['The shared brand and navigation remain visible']
+  });
+  const resultState = siteState({
+    configManifest: [
+      ...manifestEntries(),
+      { path: 'config/sync/canvas.page_region.mercury.header.yml', sha256: digest('7'), size: 80 }
+    ]
+  });
+  const goodReport = passingReport(resultState, { completeLocalRebuildClaimAllowed: false });
+  const missingBrandReport = mutateGlobalChromeCapture(goodReport, (capture) => {
+    for (const route of capture.routes) route.signals.roles.brand.visible = false;
+  });
+  const input = verificationFor(change, resultState.fingerprint);
+
+  assert.throws(
+    () => completeChange({
+      packetDir,
+      id: change.id,
+      verification: input,
+      diagnosticReport: missingBrandReport,
+      testOnlyAllowInjectedReport: true
+    }),
+    /brand disappeared or became non-visible/i
+  );
+
+  const completed = completeChange({
+    packetDir,
+    id: change.id,
+    verification: input,
+    diagnosticReport: goodReport,
+    testOnlyAllowInjectedReport: true
+  });
+  assert.equal(completed.status, 'evidence_recorded');
+  const stored = JSON.parse(readFileSync(join(
+    packetDir,
+    'evidence',
+    'lifecycle',
+    'changes',
+    change.id,
+    'verification.json'
+  ), 'utf8'));
+  const chromeCheck = stored.checks.find((check) => check.id === 'global-chrome-regression');
+  assert.equal(chromeCheck.status, 'pass');
+  assert.match(chromeCheck.evidence.join('\n'), /anchor-capture:sha256:/);
+  assert.equal(stored.globalChromeRegression.anchorStateFingerprint, baselineState.fingerprint);
+  assert.equal(stored.globalChromeRegression.resultStateFingerprint, resultState.fingerprint);
+});
+
+test('PageRegion config impact auto-triggers global chrome even when the declared surface omits it', () => {
+  const { packetDir } = lifecycleFixture();
+  const baselineState = siteState();
+  applyVerificationLifecycle({ packetDir, report: passingReport(baselineState) });
+  const change = beginChange({
+    packetDir,
+    id: 'content-with-hidden-region-impact',
+    kind: 'extension',
+    summary: 'Add content while a PageRegion config file also changes',
+    surfaces: ['content'],
+    routes: ['/'],
+    acceptance: ['The content extension appears']
+  });
+  assert.equal(change.requiredChecks.some((check) => check.id === 'global-chrome-regression'), false);
+  const resultState = siteState({
+    configManifest: [
+      ...manifestEntries(),
+      { path: 'config/sync/canvas.page_region.mercury.footer.yml', sha256: digest('8'), size: 80 }
+    ]
+  });
+  const input = verificationFor(change, resultState.fingerprint);
+  input.checks.push({
+    id: 'conservative-full-regression',
+    status: 'pass',
+    observation: 'The unexpected config impact received conservative regression coverage.',
+    evidence: ['evidence/change-check.json']
+  });
+  completeChange({
+    packetDir,
+    id: change.id,
+    verification: input,
+    diagnosticReport: passingReport(resultState, { completeLocalRebuildClaimAllowed: false }),
+    testOnlyAllowInjectedReport: true
+  });
+  const stored = JSON.parse(readFileSync(join(
+    packetDir,
+    'evidence',
+    'lifecycle',
+    'changes',
+    change.id,
+    'verification.json'
+  ), 'utf8'));
+  assert.ok(stored.checks.some((check) => check.id === 'global-chrome-regression'));
+  assert.deepEqual(stored.globalChromeImpact.triggerConfigPaths, ['config/sync/canvas.page_region.mercury.footer.yml']);
+});
+
+test('global chrome comparison rejects a changed mask contract instead of trusting a passing authored check', () => {
+  const { packetDir } = lifecycleFixture();
+  const baselineState = siteState();
+  applyVerificationLifecycle({ packetDir, report: passingReport(baselineState) });
+  const change = beginChange({
+    packetDir,
+    id: 'mask-anchor-contract',
+    kind: 'repair',
+    summary: 'Keep the verified dynamic-region contract',
+    surfaces: ['theme-global'],
+    acceptance: ['Global chrome remains stable']
+  });
+  const resultState = siteState({
+    codeManifest: [{ path: 'web/themes/custom/fixture/fixture.theme', sha256: digest('8'), size: 200 }]
+  });
+  const report = mutateGlobalChromeCapture(
+    passingReport(resultState, { completeLocalRebuildClaimAllowed: false }),
+    (capture) => { capture.contract = normalizeGlobalChromeContract({ dynamicRegionSelectors: ['main'] }); }
+  );
+  assert.throws(
+    () => completeChange({
+      packetDir,
+      id: change.id,
+      verification: verificationFor(change, resultState.fingerprint),
+      diagnosticReport: report,
+      testOnlyAllowInjectedReport: true
+    }),
+    /latest verified anchor mask\/selector contract/i
+  );
+});
+
+test('an applicable global chrome change fails closed when no executable browser capture is available', () => {
+  const { packetDir } = lifecycleFixture();
+  const baselineState = siteState();
+  applyVerificationLifecycle({ packetDir, report: passingReport(baselineState) });
+  const change = beginChange({
+    packetDir,
+    id: 'browser-required',
+    kind: 'repair',
+    summary: 'Change shared navigation',
+    surfaces: ['navigation'],
+    acceptance: ['Navigation remains usable']
+  });
+  const resultState = siteState({
+    configManifest: [
+      ...manifestEntries(),
+      { path: 'config/sync/system.menu.main.yml', sha256: digest('9'), size: 80 }
+    ]
+  });
+  const report = mutateGlobalChromeCapture(
+    passingReport(resultState, { completeLocalRebuildClaimAllowed: false }),
+    (capture) => {
+      capture.status = 'unavailable';
+      capture.authoritative = false;
+      capture.routes = [];
+      capture.errors = ['No Chrome/Chromium executable was found.'];
+    }
+  );
+  assert.throws(
+    () => completeChange({
+      packetDir,
+      id: change.id,
+      verification: verificationFor(change, resultState.fingerprint),
+      diagnosticReport: report,
+      testOnlyAllowInjectedReport: true
+    }),
+    /executable global chrome capture is unavailable.*no chrome\/chromium/i
   );
 });
 

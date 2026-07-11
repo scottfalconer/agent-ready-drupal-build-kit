@@ -32,6 +32,7 @@
     "Product-style README front door that points to the single canonical USAGE.md prompt",
     "Create-once, integrity-checked initial rebuild baseline plus separate current-state reporting, so later site changes do not revoke the first completed milestone",
     "Post-baseline repair and extension lifecycle with status, begin, complete, abandon, impact-targeted evidence, and optional later full-verification checkpoints",
+    "Verifier-owned state-bound global chrome regression with direct CDP desktop/mobile captures, verified-anchor dynamic masks, automatic PageRegion/theme/block/menu/navigation impact detection, and fail-closed brand/header/nav/footer/link/mobile/layout comparisons",
     "Exact state binding across tracked config, runtime facts, declared editorial revisions, managed public assets, stable routes, and recursively manifested packet evidence",
     "docs/site-lifecycle.md guidance for continuing from a verified Drupal foundation without mandating full source review, Git commits, Canvas, or launch gates for every change",
     "Self-contained installable Agent Skill with project-local runtime assets, target initializer, and verifiers",

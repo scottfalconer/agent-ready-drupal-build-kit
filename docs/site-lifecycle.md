@@ -26,6 +26,7 @@ Lifecycle evidence lives under `review-packet/evidence/lifecycle/` and is genera
 - `changes/<change-id>/full-verification.json` optionally binds a later authoritative full verifier report to that exact evidence-recorded result.
 - `changes/<change-id>/abandonment.json` closes a withdrawn or mistaken active intent with a reason instead of deleting history.
 - `checkpoints/<checkpoint-id>.json` retains an optional later result from the full original gate suite.
+- `chrome/anchors/<type>-<id>.json` retains create-once verifier-owned desktop/mobile captures for verified anchors; `chrome/runs/` retains the state-bound PNG bytes consumed by those records and later comparisons.
 
 A pre-lifecycle packet remains structurally valid. A historical green report without a strong state fingerprint is legacy, unbound evidence and must not be silently promoted into a baseline.
 
@@ -40,7 +41,9 @@ Classify each meaningful task before implementation:
 - A **repair** corrects something the original rebuild should already have delivered: an omitted route, broken editor workflow, visual regression, unsafe custom rendering, stale configuration, or another defect against the original contract. Cite the relevant source observation, route, baseline claim, or gate.
 - An **extension** adds new requested scope: a campaign, integration, content model, Canvas experience, or feature not required by the source rebuild. Use the new acceptance criteria and regression-test affected existing surfaces.
 
-The kind explains why the change exists. Impact determines what must be checked. A Canvas extension that changes a global page region, for example, needs Canvas/editor evidence for the new route and header, navigation, footer, and responsive regression evidence across existing routes.
+The kind explains why the change exists. Impact determines what must be checked. A Canvas extension that changes a global page region, for example, needs Canvas/editor evidence for the new route and executable header, navigation, footer, brand, link, mobile-menu, and material-layout regression evidence across existing routes.
+
+`global-chrome-regression` is machine-evaluated. Declared Canvas, global-theme, and navigation surfaces select it, and the lifecycle also detects changed `canvas.page_region`, brand/global Canvas assets, block placement, menus/navigation, shared entity displays, custom-theme files, and public `menu_link_content` state. Chrome/Chromium is driven directly over CDP at 1280x800 and 390x844; no authored status can replace the computed comparison. Explicit dynamic selectors are frozen in the verified anchor, visually masked outside global chrome, and rejected if they intersect brand/header/navigation/footer elements. Missing chrome, lost meaningful links, a broken mobile menu, or material normalized page-height/main-offset changes fail even when HTTP status, title, and H1 still pass.
 
 ## Lifecycle Workflow
 
@@ -59,6 +62,8 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet rev
 ```
 
 Exit `2` can be expected when already-existing edits differ from the latest anchor. Classify those edits with `--adopt-current`; do not use a stale cached fingerprint.
+
+The first verifier version that supports executable global-chrome checks needs one refresh while the current state still matches the latest verified anchor. That run captures and creates the anchor without rewriting the historical baseline. A global-impact `begin` fails closed when this anchor is missing, so refresh before editing rather than manufacturing a later screenshot.
 
 Begin one active repair or extension **before** implementation:
 

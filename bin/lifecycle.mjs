@@ -17,6 +17,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, collectFileManifest, sha256 } from './state-fingerprint.mjs';
+import {
+  compareGlobalChromeCaptures,
+  globalChromeImpact,
+  normalizeGlobalChromeContract,
+  validateGlobalChromeCapture,
+  validateScreenshotArtifacts
+} from './global-chrome.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -29,12 +36,14 @@ const CHANGE_VERIFICATION_SCHEMA = 'public-kit.change-verification.1';
 const CHANGE_FULL_VERIFICATION_SCHEMA = 'public-kit.change-full-verification.1';
 const CHANGE_ABANDONMENT_SCHEMA = 'public-kit.change-abandonment.1';
 const SITE_STATE_SCHEMA = 'public-kit.site-state.1';
+const GLOBAL_CHROME_ANCHOR_SCHEMA = 'public-kit.global-chrome-anchor.1';
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const FRESH_INSPECTION_MS = 10 * 60 * 1000;
 const FUTURE_SKEW_MS = 2 * 60 * 1000;
-const MACHINE_CHECK_IDS = new Set(['state-bound', 'config-clean', 'baseline-route-smoke']);
+const UNIVERSAL_MACHINE_CHECK_IDS = new Set(['state-bound', 'config-clean', 'baseline-route-smoke']);
+const MACHINE_CHECK_IDS = new Set([...UNIVERSAL_MACHINE_CHECK_IDS, 'global-chrome-regression']);
 
 function loadChangePolicy() {
   const path = join(KIT_ROOT, 'gates.json');
@@ -66,7 +75,7 @@ function loadChangePolicy() {
     }
   }
   if (canonicalJson([...profiles.universal.checks].sort(comparePortable)) !==
-      canonicalJson([...MACHINE_CHECK_IDS].sort(comparePortable))) {
+      canonicalJson([...UNIVERSAL_MACHINE_CHECK_IDS].sort(comparePortable))) {
     throw new Error('gates.json universal change checks must match the lifecycle machine evaluators.');
   }
   return { checks, profiles };
@@ -173,7 +182,8 @@ function packetEvidence(packetDir) {
 function ensureLifecycleDirectories(root) {
   mkdirSync(join(root, 'changes'), { recursive: true });
   mkdirSync(join(root, 'checkpoints'), { recursive: true });
-  for (const path of [root, join(root, 'changes'), join(root, 'checkpoints')]) {
+  mkdirSync(join(root, 'chrome', 'anchors'), { recursive: true });
+  for (const path of [root, join(root, 'changes'), join(root, 'checkpoints'), join(root, 'chrome'), join(root, 'chrome', 'anchors')]) {
     assertDirectoryNotSymlink(path, 'Lifecycle directory');
   }
 }
@@ -464,6 +474,89 @@ function checkpointPath(root, id) {
   return join(root, 'checkpoints', `${safeId(id, 'Checkpoint ID')}.json`);
 }
 
+function globalChromeAnchorPath(root, type, id) {
+  if (!['initial', 'change', 'checkpoint'].includes(type)) throw new Error(`Unsupported global chrome anchor type ${type}.`);
+  return join(root, 'chrome', 'anchors', `${type}-${safeId(id, 'Global chrome anchor ID')}.json`);
+}
+
+function validateGlobalChromeAnchor(anchor, root, expected = {}) {
+  if (!isObject(anchor) || anchor.schemaVersion !== GLOBAL_CHROME_ANCHOR_SCHEMA) {
+    throw new Error(`Global chrome anchor must use schemaVersion ${GLOBAL_CHROME_ANCHOR_SCHEMA}.`);
+  }
+  if (!['initial', 'change', 'checkpoint'].includes(anchor.anchorType)) throw new Error('Global chrome anchor type is invalid.');
+  safeId(anchor.anchorId, 'Global chrome anchor ID');
+  if (expected.type && anchor.anchorType !== expected.type || expected.id && anchor.anchorId !== expected.id) {
+    throw new Error('Global chrome anchor path identity does not match its record.');
+  }
+  const state = fingerprint(anchor.siteStateFingerprint, 'Global chrome anchor siteStateFingerprint');
+  timestamp(anchor.capturedAt, 'Global chrome anchor capturedAt');
+  const capture = validateGlobalChromeCapture(anchor.capture, { stateFingerprint: state, requireAuthoritative: true });
+  if (capture.captureFingerprint !== anchor.captureFingerprint) throw new Error('Global chrome anchor capture fingerprint is invalid.');
+  verifyCertificate(anchor, 'Global chrome anchor');
+  validateScreenshotArtifacts(resolve(root, '..', '..'), capture);
+  return anchor;
+}
+
+function readGlobalChromeAnchor(root, type, id, { required = false } = {}) {
+  const path = globalChromeAnchorPath(root, type, id);
+  if (!existsSync(path)) {
+    if (required) throw new Error(`Latest verified anchor ${type}:${id} has no executable global chrome capture. Run the live verifier while the current state still matches that anchor before beginning global-impact work.`);
+    return null;
+  }
+  assertRegularFile(path, `Global chrome anchor ${type}:${id}`);
+  return validateGlobalChromeAnchor(readJson(path, `Global chrome anchor ${type}:${id}`), root, { type, id });
+}
+
+function latestVerifiedGraphAnchor(graph) {
+  return [...graph.chain].reverse().find((anchor) =>
+    ['initial', 'checkpoint'].includes(anchor.type) || anchor.credential === 'full_verified'
+  ) ?? null;
+}
+
+function persistMatchingGlobalChromeAnchor(root, graph, report) {
+  const capture = report?.globalChromeCapture;
+  if (!capture || capture.status !== 'captured' || capture.authoritative !== true) return null;
+  const matching = [...graph.chain].reverse().find((anchor) =>
+    anchor.fingerprint === report.buildState?.fingerprint &&
+    (['initial', 'checkpoint'].includes(anchor.type) || anchor.credential === 'full_verified')
+  );
+  if (!matching) return null;
+  const path = globalChromeAnchorPath(root, matching.type, matching.id);
+  if (existsSync(path)) return readGlobalChromeAnchor(root, matching.type, matching.id, { required: true });
+  validateGlobalChromeCapture(capture, { stateFingerprint: matching.fingerprint, requireAuthoritative: true });
+  validateScreenshotArtifacts(resolve(root, '..', '..'), capture);
+  const value = certify({
+    schemaVersion: GLOBAL_CHROME_ANCHOR_SCHEMA,
+    anchorType: matching.type,
+    anchorId: matching.id,
+    credential: matching.credential,
+    capturedAt: capture.checkedAt,
+    siteStateFingerprint: matching.fingerprint,
+    captureFingerprint: capture.captureFingerprint,
+    capture: cloneCanonical(capture)
+  });
+  writeCreateOnlyJson(path, value, `Global chrome anchor ${matching.type}:${matching.id}`);
+  return validateGlobalChromeAnchor(value, root, { type: matching.type, id: matching.id });
+}
+
+export function globalChromeCaptureContext({ packetDir = 'review-packet' } = {}) {
+  const { root } = packetEvidence(packetDir);
+  ensureLifecycleDirectories(root);
+  const baseline = readInitialBaseline(root);
+  if (!baseline) return { lifecyclePresent: false, latestVerifiedAnchor: null, contract: null };
+  const graph = buildLifecycleGraph(root, baseline);
+  const latest = latestVerifiedGraphAnchor(graph);
+  const anchor = latest ? readGlobalChromeAnchor(root, latest.type, latest.id) : null;
+  return {
+    lifecyclePresent: true,
+    latestVerifiedAnchor: latest
+      ? { id: latest.id, type: latest.type, fingerprint: latest.fingerprint, credential: latest.credential }
+      : null,
+    contract: anchor ? normalizeGlobalChromeContract(anchor.capture.contract) : null,
+    anchorCaptureFingerprint: anchor?.captureFingerprint ?? ''
+  };
+}
+
 function validateInitialBaseline(baseline) {
   if (!isObject(baseline) || baseline.schemaVersion !== BASELINE_SCHEMA || baseline.status !== 'passed') {
     throw new Error(`Initial baseline must use schemaVersion ${BASELINE_SCHEMA} with status passed.`);
@@ -539,6 +632,9 @@ function validateChangeIntent(intent, expectedId = '') {
   }
   if (sha256({ schemaVersion: SITE_STATE_SCHEMA, componentFingerprints: intent.baseComponentFingerprints }) !== base) {
     throw new Error(`Change ${id} baseComponentFingerprints do not match baseFingerprint.`);
+  }
+  if (intent.baseBuildState !== undefined && validateBuildState(intent.baseBuildState, `Change ${id} baseBuildState`) !== base) {
+    throw new Error(`Change ${id} baseBuildState does not match baseFingerprint.`);
   }
   if (!Array.isArray(intent.baseRouteManifest) ||
       sha256(intent.baseRouteManifest) !== intent.baseComponentFingerprints.routeManifest) {
@@ -653,8 +749,16 @@ function expectedComponents(surfaces, allComponents) {
   return expected;
 }
 
-function requiredChecksForTransition(change, unexpected) {
+function requiredChecksForTransition(change, unexpected, chromeImpact = { triggered: false }) {
   const checks = cloneCanonical(change.requiredChecks);
+  if (chromeImpact.triggered && !checks.some((check) => check.id === 'global-chrome-regression')) {
+    checks.push({
+      id: 'global-chrome-regression',
+      description: CHANGE_POLICY.checks['global-chrome-regression'],
+      evaluator: 'machine',
+      sourceSurfaces: ['detected-global-chrome-impact']
+    });
+  }
   if (unexpected.length && !checks.some((check) => check.id === change.wideningCheck.id)) {
     checks.push(cloneCanonical(change.wideningCheck));
   }
@@ -740,7 +844,15 @@ function validateTargetedVerification(verification, intent, root = '') {
   if (canonicalJson(effectiveSurfaces) !== canonicalJson(verification.effectiveSurfaces)) {
     throw new Error(`${label} effective surfaces are invalid.`);
   }
-  const required = requiredChecksForTransition(intent, widened ? [...unexpected, ...unexpectedRoutes] : []);
+  const chromeImpact = globalChromeImpact(intent.baseBuildState ?? {}, verification.resultBuildState);
+  if (canonicalJson(chromeImpact) !== canonicalJson(verification.globalChromeImpact)) {
+    throw new Error(`${label} global chrome impact inventory is invalid.`);
+  }
+  const required = requiredChecksForTransition(
+    intent,
+    widened ? [...unexpected, ...unexpectedRoutes] : [],
+    chromeImpact
+  );
   const checks = new Map((verification.checks ?? []).map((check) => [check?.id, check]));
   if (!Array.isArray(verification.checks) || checks.size !== verification.checks.length) {
     throw new Error(`${label} has duplicate or invalid check identifiers.`);
@@ -755,6 +867,26 @@ function validateTargetedVerification(verification, intent, root = '') {
     }
   }
   if (checks.size !== required.length) throw new Error(`${label} contains checks outside its derived required set.`);
+  if (required.some((check) => check.id === 'global-chrome-regression')) {
+    const anchorType = String(verification.globalChromeAnchor?.type ?? '');
+    const anchorId = String(verification.globalChromeAnchor?.id ?? '');
+    const anchor = readGlobalChromeAnchor(root, anchorType, anchorId, { required: true });
+    const currentCapture = validateGlobalChromeCapture(
+      verification.inspectionReport.globalChromeCapture,
+      { stateFingerprint: result, requireAuthoritative: true }
+    );
+    validateScreenshotArtifacts(resolve(root, '..', '..'), currentCapture);
+    const compared = compareGlobalChromeCaptures({
+      anchor: anchor.capture,
+      current: currentCapture,
+      primaryRoutes: intent.baselineRoutes.primary
+    });
+    if (canonicalJson(compared) !== canonicalJson(verification.globalChromeRegression) || compared.passed !== true) {
+      throw new Error(`${label} executable global chrome regression comparison is invalid or failing.`);
+    }
+  } else if (verification.globalChromeRegression !== null || verification.globalChromeAnchor !== null) {
+    throw new Error(`${label} contains unrequired global chrome regression evidence.`);
+  }
   const acceptance = new Map((verification.acceptanceEvidence ?? []).map((claim) => [claim?.criterionId, claim]));
   if (!Array.isArray(verification.acceptanceEvidence) ||
       acceptance.size !== verification.acceptanceEvidence.length) {
@@ -1155,10 +1287,10 @@ function loadVerificationInput(verification, projectRoot) {
   return readJson(path, 'Change verification input');
 }
 
-function derivedMachineChecks(report, resultFingerprint, baselineRoutes, affectedRoutes) {
+function derivedMachineChecks(report, resultFingerprint, baselineRoutes, affectedRoutes, globalChromeRegression = null) {
   const reportHash = sha256(report);
   const facts = machineFacts(report, 'Fresh inspection', baselineRoutes, affectedRoutes);
-  return new Map([
+  const checks = new Map([
     ['state-bound', {
       id: 'state-bound',
       status: 'pass',
@@ -1178,9 +1310,22 @@ function derivedMachineChecks(report, resultFingerprint, baselineRoutes, affecte
       evidence: [`embedded-inspection-report:${reportHash}`]
     }]
   ]);
+  if (globalChromeRegression) {
+    checks.set('global-chrome-regression', {
+      id: 'global-chrome-regression',
+      status: 'pass',
+      observation: `Verifier-owned desktop/mobile capture comparison passed ${globalChromeRegression.findings.length} primary-route viewport checks against ${globalChromeRegression.anchorStateFingerprint}.`,
+      evidence: [
+        `anchor-capture:${globalChromeRegression.anchorCaptureFingerprint}`,
+        `result-capture:${globalChromeRegression.resultCaptureFingerprint}`,
+        `comparison:${globalChromeRegression.comparisonFingerprint}`
+      ]
+    });
+  }
+  return checks;
 }
 
-function buildTargetedVerification({ input, change, report, projectRoot, packet, root }) {
+function buildTargetedVerification({ input, change, report, projectRoot, packet, root, globalChromeAnchor }) {
   if (!isObject(input) || input.schemaVersion !== CHANGE_VERIFICATION_SCHEMA || input.changeId !== change.id) {
     throw new Error(`Change verification must use schemaVersion ${CHANGE_VERIFICATION_SCHEMA} for ${change.id}.`);
   }
@@ -1202,7 +1347,38 @@ function buildTargetedVerification({ input, change, report, projectRoot, packet,
   const unexpectedRoutes = undeclaredRouteChanges(changedRoutes, change.affectedRoutes);
   const widened = unexpected.length > 0 || unexpectedRoutes.length > 0;
   const effectiveSurfaces = [...new Set([...change.surfaces, ...(widened ? ['unknown'] : [])])].sort(comparePortable);
-  const required = requiredChecksForTransition(change, widened ? [...unexpected, ...unexpectedRoutes] : []);
+  const chromeImpact = globalChromeImpact(change.baseBuildState ?? {}, report.buildState);
+  const required = requiredChecksForTransition(
+    change,
+    widened ? [...unexpected, ...unexpectedRoutes] : [],
+    chromeImpact
+  );
+  let globalChromeRegression = null;
+  let globalChromeAnchorIdentity = null;
+  if (required.some((check) => check.id === 'global-chrome-regression')) {
+    if (!globalChromeAnchor) {
+      throw new Error('Executable global chrome regression requires a persisted latest verified anchor capture.');
+    }
+    const currentCapture = validateGlobalChromeCapture(report.globalChromeCapture, {
+      stateFingerprint: result,
+      requireAuthoritative: true
+    });
+    validateScreenshotArtifacts(packet, currentCapture);
+    globalChromeRegression = compareGlobalChromeCaptures({
+      anchor: globalChromeAnchor.capture,
+      current: currentCapture,
+      primaryRoutes: change.baselineRoutes.primary
+    });
+    if (!globalChromeRegression.passed) {
+      throw new Error(`Executable global chrome regression failed: ${globalChromeRegression.errors.join(' ')}`);
+    }
+    globalChromeAnchorIdentity = {
+      type: globalChromeAnchor.anchorType,
+      id: globalChromeAnchor.anchorId,
+      stateFingerprint: globalChromeAnchor.siteStateFingerprint,
+      captureFingerprint: globalChromeAnchor.captureFingerprint
+    };
+  }
   if (!Array.isArray(input.checks)) {
     throw new Error('Change verification checks must be an array.');
   }
@@ -1215,7 +1391,13 @@ function buildTargetedVerification({ input, change, report, projectRoot, packet,
   if (authored.size !== input.checks.length) {
     throw new Error('Change verification has duplicate or invalid check identifiers.');
   }
-  const machine = derivedMachineChecks(report, result, change.baselineRoutes, change.affectedRoutes);
+  const machine = derivedMachineChecks(
+    report,
+    result,
+    change.baselineRoutes,
+    change.affectedRoutes,
+    globalChromeRegression
+  );
   const checks = [];
   for (const requiredCheck of required) {
     if (requiredCheck.evaluator === 'machine') {
@@ -1307,6 +1489,9 @@ function buildTargetedVerification({ input, change, report, projectRoot, packet,
     inspectionReportSha256: sha256(inspectionReport),
     inspectionReport,
     machineFacts: machineFacts(report, 'Fresh inspection', change.baselineRoutes, change.affectedRoutes),
+    globalChromeImpact: chromeImpact,
+    globalChromeAnchor: globalChromeAnchorIdentity,
+    globalChromeRegression,
     checks: checks.sort((left, right) => comparePortable(left.id, right.id)),
     acceptanceEvidence: acceptanceEvidence.sort((left, right) => comparePortable(left.criterionId, right.criterionId))
   });
@@ -1564,10 +1749,23 @@ export function applyVerificationLifecycle({
     if (!changeId || !boundChange) throw new Error('A checkpoint must bind the same full_verified change.');
     checkpoint = createCheckpoint({ root, checkpointId, report, changeId: boundChange.id });
   }
-  return recordCurrentState(root, baseline, report, {
+  const finalGraph = buildLifecycleGraph(root, baseline);
+  const chromeAnchor = persistMatchingGlobalChromeAnchor(root, finalGraph, report);
+  const current = recordCurrentState(root, baseline, report, {
     boundChangeId: boundChange?.id ?? '',
     checkpointId: checkpoint?.checkpointId ?? ''
   });
+  return {
+    ...current,
+    globalChromeAnchor: chromeAnchor
+      ? {
+          anchorType: chromeAnchor.anchorType,
+          anchorId: chromeAnchor.anchorId,
+          siteStateFingerprint: chromeAnchor.siteStateFingerprint,
+          captureFingerprint: chromeAnchor.captureFingerprint
+        }
+      : null
+  };
 }
 
 /** Read and validate lifecycle records plus the generated current-state snapshot. */
@@ -1713,6 +1911,12 @@ export function beginChange({
     .map((criterion) => String(criterion).trim()).filter(Boolean))];
   if (criterionTexts.length === 0) throw new Error('At least one --acceptance criterion is required.');
   const criteria = criterionTexts.map((text, index) => ({ id: `criterion-${index + 1}`, text }));
+  const requiredChecks = impactChecks(kind, normalizedSurfaces);
+  if (requiredChecks.some((check) => check.id === 'global-chrome-regression')) {
+    const latestVerified = latestVerifiedGraphAnchor(graph);
+    if (!latestVerified) throw new Error('Global-impact work requires a latest verified lifecycle anchor.');
+    readGlobalChromeAnchor(root, latestVerified.type, latestVerified.id, { required: true });
+  }
   const directory = changeDirectory(root, changeId);
   if (existsSync(directory)) throw new Error(`Change ${changeId} already exists and lifecycle change IDs are never reused.`);
   const intent = certify({
@@ -1724,6 +1928,7 @@ export function beginChange({
     baseAnchorId: graph.tail.id,
     baseAnchorType: graph.tail.type,
     baseFingerprint: graph.tail.fingerprint,
+    baseBuildState: cloneCanonical(graph.tail.buildState),
     baseComponentFingerprints: cloneCanonical(graph.tail.buildState.componentFingerprints),
     baseRouteManifest: cloneCanonical(graph.tail.buildState.routeManifest ?? []),
     adoptedCurrentState: Boolean(adoptCurrent),
@@ -1744,7 +1949,7 @@ export function beginChange({
     },
     baselineRoutes: cloneCanonical(graph.tail.routeInventory),
     acceptanceCriteria: criteria,
-    requiredChecks: impactChecks(kind, normalizedSurfaces)
+    requiredChecks
   });
   const validatedIntent = validateChangeIntent(intent, changeId);
   mkdirSync(directory, { recursive: false });
@@ -1803,7 +2008,19 @@ export function completeChange({
     change.affectedRoutes
   );
   const input = loadVerificationInput(verification, projectRoot);
-  const accepted = buildTargetedVerification({ input, change, report, projectRoot, packet, root });
+  const latestVerified = latestVerifiedGraphAnchor(graph);
+  const globalChromeAnchor = latestVerified
+    ? readGlobalChromeAnchor(root, latestVerified.type, latestVerified.id)
+    : null;
+  const accepted = buildTargetedVerification({
+    input,
+    change,
+    report,
+    projectRoot,
+    packet,
+    root,
+    globalChromeAnchor
+  });
   writeCreateOnlyJson(changeVerificationPath(root, changeId), accepted, `Change ${changeId} targeted verification`);
   const updated = readChangeRecord(root, changeId);
   recordCurrentState(root, baseline, report, { boundChangeId: changeId });
