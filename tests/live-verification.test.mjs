@@ -13,6 +13,7 @@ import {
   DRUPAL_ENTITY_INVENTORY_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   inspectCriticalAssets,
+  stateBoundRuntimeFacts,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
@@ -86,6 +87,37 @@ test('Drupal runtime identity emits digest-only active config, schema, settings,
   assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /pendingDatabaseUpdateCount/);
   assert.doesNotMatch(DRUPAL_RUNTIME_FACTS_EVAL, /effectiveSettingsSha256/);
   assert.doesNotMatch(DRUPAL_RUNTIME_FACTS_EVAL, /print json_encode\(\$settings/);
+});
+
+test('machine-local runtime changes are evidence-only while Drupal-owned runtime state stays intrinsic', () => {
+  const facts = {
+    coreVersion: '11.3.0',
+    activeConfigEntryCount: 123,
+    effectiveActiveConfigSha256: `sha256:${'1'.repeat(64)}`,
+    systemSchemaEntryCount: 45,
+    systemSchemaSha256: `sha256:${'2'.repeat(64)}`,
+    databaseUpdateStatusConfirmed: true,
+    pendingDatabaseUpdateCount: 0,
+    databaseUpdatesPending: false,
+    phpVersion: '8.3.0',
+    databaseDriver: 'mysql',
+    effectiveSettingsEntryCount: 12,
+    effectiveSettingsHmacSha256: `sha256:${'3'.repeat(64)}`,
+    configSplitDirectories: ['/var/www/html/config/dev']
+  };
+  const baseline = stateBoundRuntimeFacts(facts);
+  const moved = stateBoundRuntimeFacts({
+    ...facts,
+    phpVersion: '8.4.0',
+    databaseDriver: 'pgsql',
+    effectiveSettingsHmacSha256: `sha256:${'4'.repeat(64)}`,
+    configSplitDirectories: ['/opt/drupal/config/dev']
+  });
+
+  assert.deepEqual(moved.intrinsic, baseline.intrinsic);
+  assert.notEqual(moved.environmentBinding.fingerprint, baseline.environmentBinding.fingerprint);
+  assert.equal(JSON.stringify(baseline.intrinsic).includes('phpVersion'), false);
+  assert.equal(JSON.stringify(baseline.intrinsic).includes('effectiveSettings'), false);
 });
 
 function templateName(packetFile) {

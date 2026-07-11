@@ -423,6 +423,23 @@ test('site-state fingerprints identify the component that changed and reject tam
   assert.notEqual(changedRuntime.componentFingerprints.runtimeFacts, baseline.componentFingerprints.runtimeFacts);
   assert.notEqual(changedRuntime.fingerprint, baseline.fingerprint);
 
+  const changedRuntimeEnvironment = siteState({
+    runtimeEnvironmentBinding: {
+      schemaVersion: 'public-kit.runtime-environment-binding.1',
+      entryCount: 4,
+      fingerprint: digest('7')
+    }
+  });
+  assert.equal(changedRuntimeEnvironment.fingerprint, baseline.fingerprint);
+  assert.equal(
+    changedRuntimeEnvironment.componentFingerprints.runtimeFacts,
+    baseline.componentFingerprints.runtimeFacts
+  );
+  assert.notEqual(
+    changedRuntimeEnvironment.evidenceBindings.runtimeEnvironment.fingerprint,
+    baseline.evidenceBindings.runtimeEnvironment.fingerprint
+  );
+
   const tamperedManifest = {
     ...baseline.configManifest,
     fingerprint: digest('0')
