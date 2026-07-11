@@ -42,6 +42,20 @@ const MAX_SCREENSHOT_DIMENSION = 12_000;
 const MAX_SCREENSHOT_PIXELS = 50_000_000;
 const MAX_PNG_INFLATED_BYTES = 200 * 1024 * 1024;
 const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set(['launch-checklist.md', 'production-target.md']);
+// Keys whose string values reference evidence files on disk. The workspace-hygiene scan
+// walks packet artifacts for these keys and warns when a reference resolves outside the packet.
+const EVIDENCE_REFERENCE_KEYS = new Set([
+  'evidence',
+  'failureEvidence',
+  'formScreenshot',
+  'liveSiteEvidence',
+  'nonAdminEditorPublicOutputProof',
+  'resultScreenshot',
+  'sourceScreenshot',
+  'targetScreenshot',
+  'verifierEvidence'
+]);
+const DDEV_DRUPAL_TYPE_RE = /^\s*type:\s*["']?drupal(?:\d+)?["']?\s*(?:#.*)?$/mi;
 const COMPLETION_CLAIM_GATES = new Set([
   'content',
   'media',
@@ -349,6 +363,107 @@ function resolveReviewEvidencePath(packetDir, evidenceDir, value) {
   }
 
   return '';
+}
+
+function packetEvidenceReferences(value, references = new Set()) {
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      packetEvidenceReferences(child, references);
+    }
+    return references;
+  }
+  if (!isJsonObject(value)) {
+    return references;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (EVIDENCE_REFERENCE_KEYS.has(key)) {
+      for (const entry of Array.isArray(child) ? child : [child]) {
+        if (typeof entry === 'string' && entry.trim()) {
+          references.add(entry.trim());
+        }
+      }
+    }
+    packetEvidenceReferences(child, references);
+  }
+  return references;
+}
+
+function evidenceReferenceEscapesPacket(packetDir, reference) {
+  const path = String(reference ?? '').trim();
+  if (!path || httpUrl(path)) {
+    return false;
+  }
+
+  const packetRoot = resolve(packetDir);
+  const resolvesInsidePacket = [
+    join(packetRoot, 'evidence'),
+    join(packetRoot, 'evidence', 'blind-adversarial-review'),
+    join(packetRoot, 'evidence', 'independent-verification')
+  ].some((evidenceDir) => resolveReviewEvidencePath(packetRoot, evidenceDir, path));
+  if (resolvesInsidePacket) {
+    return false;
+  }
+
+  const candidates = [
+    isAbsolute(path) ? resolve(path) : '',
+    resolve(path),
+    resolve(dirname(packetRoot), path),
+    resolve(packetRoot, path)
+  ].filter(Boolean);
+  return candidates.some((candidate) => !isWithin(packetRoot, candidate) && existsSync(candidate));
+}
+
+async function detectedDrupalProjectRoot(startDirectory) {
+  let candidate = resolve(startDirectory);
+  while (true) {
+    const configPath = join(candidate, '.ddev', 'config.yaml');
+    if (existsSync(configPath)) {
+      try {
+        if (DDEV_DRUPAL_TYPE_RE.test(await readFile(configPath, 'utf8'))) {
+          return candidate;
+        }
+      } catch {
+        return '';
+      }
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) {
+      return '';
+    }
+    candidate = parent;
+  }
+}
+
+async function appendWorkspaceHygieneWarnings(packetDir, artifacts, warnings) {
+  const packetRoot = resolve(packetDir);
+  const projectRoot = await detectedDrupalProjectRoot(packetRoot);
+  if (projectRoot && dirname(projectRoot) !== projectRoot) {
+    const strayPacket = join(dirname(projectRoot), basename(packetRoot));
+    let strayPacketIsDirectory = false;
+    try {
+      strayPacketIsDirectory = resolve(strayPacket) !== packetRoot && (await stat(strayPacket)).isDirectory();
+    } catch {
+      // A missing or unreadable sibling is not a stray packet.
+    }
+    if (strayPacketIsDirectory) {
+      warnings.push(
+        `A stray ${basename(packetRoot)} directory exists in the parent of the detected project root; evidence written through cwd-relative paths may have escaped the project. Consolidate it into the packet inside the project and remove the stray copy.`
+      );
+    }
+  }
+
+  for (const [file, artifact] of Object.entries(artifacts)) {
+    if (!isJsonObject(artifact) && !Array.isArray(artifact)) {
+      continue;
+    }
+    for (const reference of packetEvidenceReferences(artifact)) {
+      if (evidenceReferenceEscapesPacket(packetRoot, reference)) {
+        warnings.push(
+          `${file} references evidence at ${reference} which resolves outside the review packet; move the file into the packet and use a packet-relative reference.`
+        );
+      }
+    }
+  }
 }
 
 async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
@@ -1893,6 +2008,38 @@ async function validateRecipeStartPoint(packetDir, errors) {
   }
 }
 
+function operatorRestoreArtifacts(text) {
+  const section = String(text ?? '').match(/^##\s+Restore Path\s*$([\s\S]*?)(?=^##\s|(?![\s\S]))/m)?.[1] ?? '';
+  return [...section.matchAll(/^\s*-\s*`([^`\n]+)`/gm)].map((match) => match[1].trim()).filter(Boolean);
+}
+
+async function validateOperatorRestorePath(packetDir, errors) {
+  const path = join(packetDir, 'operator-run.md');
+  if (!existsSync(path)) {
+    return;
+  }
+
+  const packetRoot = resolve(packetDir);
+  const projectRoot = dirname(packetRoot);
+  const text = await readFile(path, 'utf8');
+  for (const artifact of operatorRestoreArtifacts(text)) {
+    if (isAbsolute(artifact)) {
+      errors.push(
+        `operator-run.md restore artifact ${artifact} must be a relative path inside the review packet or its project, not an absolute machine path.`
+      );
+      continue;
+    }
+    const restoreArtifactExists = [resolve(packetRoot, artifact), resolve(projectRoot, artifact)].some(
+      (candidate) => (isWithin(packetRoot, candidate) || isWithin(projectRoot, candidate)) && existsSync(candidate)
+    );
+    if (!restoreArtifactExists) {
+      errors.push(
+        `operator-run.md restore artifact ${artifact} must resolve to an existing file inside the review packet or its project root.`
+      );
+    }
+  }
+}
+
 function packetTemplateName(packetFile) {
   const finalDot = packetFile.lastIndexOf('.');
   return finalDot === -1
@@ -2035,6 +2182,12 @@ async function markdownCompletionReadiness(packetDir) {
     !uncheckedStatement(operator, 'Repeatability blocked')
   ) {
     reasons.push('operator-run.md must identify the operator/runtime, point to concrete run evidence, and record an accepted repeatability decision.');
+  }
+  if (
+    !markdownField(operator, 'Restore method (database snapshot, rebuild scripts, config import)') ||
+    operatorRestoreArtifacts(operator).length === 0
+  ) {
+    reasons.push('operator-run.md must record a structured restore path: a restore method plus at least one backticked restore artifact path.');
   }
 
   const maintainer = texts['maintainer-review.md'];
@@ -2788,6 +2941,22 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   );
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
+  await validateOperatorRestorePath(packetDir, errors);
+  await appendWorkspaceHygieneWarnings(
+    packetDir,
+    {
+      'blind-adversarial-review.json': blindAdversarialReview,
+      'browser-evidence.json': browserEvidence,
+      'drupal-readback.json': drupalReadback,
+      'field-output-matrix.json': fieldOutputMatrix,
+      'independent-verification.json': independentVerification,
+      'parity-report.json': parityReport,
+      'pattern-map.json': patternMap,
+      'route-matrix.json': routeMatrix,
+      'source-audit.json': sourceAudit
+    },
+    warnings
+  );
   const completionReadiness = await packetCompletionReadiness(packetDir, gates, {
     blindAdversarialReview,
     browserEvidence,
@@ -2843,6 +3012,9 @@ async function main() {
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
 
+  for (const warning of report.warnings) {
+    process.stderr.write(`- warning: ${warning}\n`);
+  }
   if (!report.valid) {
     process.stderr.write(`Packet verification failed. Report: ${args.out}\n`);
     for (const error of report.errors) {

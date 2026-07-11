@@ -276,6 +276,8 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
 }
 
 function addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl) {
+  mkdirSync(join(packetDir, 'evidence', 'restore'), { recursive: true });
+  writeFileSync(join(packetDir, 'evidence', 'restore', 'db-snapshot.sql.gz'), 'fixture database snapshot');
   writeFileSync(join(packetDir, 'operator-run.md'), `# Independent Operator Run Record
 
 ## Operator
@@ -295,6 +297,12 @@ function addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl) 
 - Browser-rendered evidence: evidence/blind-adversarial-review/
 - Command transcript: drupal-readback.json commands
 - Reviewer: Fixture Reviewer
+
+## Restore Path
+
+- Restore method (database snapshot, rebuild scripts, config import): Database snapshot plus tracked config import
+- Restore artifacts:
+  - \`evidence/restore/db-snapshot.sql.gz\`
 
 ## Decision
 
@@ -1969,6 +1977,85 @@ test('blanket-filled packet templates remain valid lint but cannot support compl
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /source-audit\.json/);
   assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /maintainer-review\.md/);
+});
+
+test('a referenced-but-missing restore artifact fails packet verification', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'restore-path-packet-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const baseline = await validatePacket({ packetDir });
+  assert.equal(baseline.valid, true, baseline.errors.join('\n'));
+
+  const operatorPath = join(packetDir, 'operator-run.md');
+  const operatorRun = readFileSync(operatorPath, 'utf8');
+
+  writeFileSync(join(temp, 'rebuild-content.sh'), '#!/bin/sh\necho fixture rebuild\n');
+  writeFileSync(
+    operatorPath,
+    operatorRun.replace('`evidence/restore/db-snapshot.sql.gz`', '`rebuild-content.sh`')
+  );
+  const projectRelativeArtifact = await validatePacket({ packetDir });
+  assert.equal(projectRelativeArtifact.valid, true, projectRelativeArtifact.errors.join('\n'));
+
+  writeFileSync(
+    operatorPath,
+    operatorRun.replace('`evidence/restore/db-snapshot.sql.gz`', '`evidence/restore/missing-snapshot.sql.gz`')
+  );
+  const missingArtifact = await validatePacket({ packetDir });
+  assert.equal(missingArtifact.valid, false);
+  assert.match(
+    missingArtifact.errors.join('\n'),
+    /restore artifact evidence\/restore\/missing-snapshot\.sql\.gz must resolve to an existing file/
+  );
+
+  writeFileSync(
+    operatorPath,
+    operatorRun.replace('`evidence/restore/db-snapshot.sql.gz`', '`/home/builder/db-snapshot.sql.gz`')
+  );
+  const absoluteArtifact = await validatePacket({ packetDir });
+  assert.equal(absoluteArtifact.valid, false);
+  assert.match(absoluteArtifact.errors.join('\n'), /must be a relative path inside the review packet/);
+
+  writeFileSync(operatorPath, operatorRun.replace(/^## Restore Path[\s\S]*?(?=^## Decision)/m, ''));
+  const missingSection = await validatePacket({ packetDir });
+  assert.equal(missingSection.valid, true, missingSection.errors.join('\n'));
+  assert.equal(missingSection.completionEvidence.packetCompletionReady, false);
+  assert.match(
+    missingSection.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /structured restore path/
+  );
+});
+
+test('workspace hygiene defects surface as warnings without failing the packet', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'workspace-hygiene-'));
+  const projectRoot = join(temp, 'example-project');
+  mkdirSync(join(projectRoot, '.ddev'), { recursive: true });
+  writeFileSync(join(projectRoot, '.ddev', 'config.yaml'), 'name: example-project\ntype: drupal11\n');
+  mkdirSync(join(temp, 'review-packet'), { recursive: true });
+
+  const packetDir = join(projectRoot, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(join(projectRoot, 'escaped-capture.png'), 'escaped evidence fixture');
+  mutateJson(join(packetDir, 'source-audit.json'), (value) => {
+    value.evidence = '../escaped-capture.png';
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.match(
+    report.warnings.join('\n'),
+    /stray review-packet directory exists in the parent of the detected project root/
+  );
+  assert.match(
+    report.warnings.join('\n'),
+    /source-audit\.json references evidence at \.\.\/escaped-capture\.png which resolves outside the review packet/
+  );
 });
 
 test('completed Markdown can retain instructional references to UNKNOWN without being treated as unresolved', async () => {

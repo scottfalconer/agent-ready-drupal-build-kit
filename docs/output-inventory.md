@@ -41,7 +41,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 
 `gates.json` declares whether each gate blocks local handoff or launch. These grouped criteria explain what the gate IDs mean; they do not create unnamed gates:
 
-- `G-OPERATOR-01` and `G-HANDOFF-01`: record the operator run and present only genuinely human-owned open decisions.
+- `G-OPERATOR-01` and `G-HANDOFF-01`: record the operator run — including a structured restore path whose listed snapshot or script artifacts must exist on disk — and present only genuinely human-owned open decisions.
 - `G-TARGET-01`: identify and accept a production-equivalent target before a launch claim.
 - `G-ROUTE-01` through `G-ROUTE-06`: cover the full source boundary, browser-expanded routes, repeated-item counts, route drift, fetched target-required routes, front-page behavior, aliases, unexpected public routes, and Starter cleanup. A packet expectation that repeats a live `5xx` does not make that response acceptable.
 - `G-BROWSER-01`, `G-BROWSER-02`, and `G-EDITOR-01`: provide source/target browser evidence, first-fold brand assets, and authenticated non-admin editor tasks.

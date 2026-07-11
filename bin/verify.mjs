@@ -1299,6 +1299,9 @@ async function main() {
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
 
+  for (const warning of report.warnings ?? []) {
+    process.stderr.write(`- warning: ${warning}\n`);
+  }
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
     for (const error of report.errors) {
