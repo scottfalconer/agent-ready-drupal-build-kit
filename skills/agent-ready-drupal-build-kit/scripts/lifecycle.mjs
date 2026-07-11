@@ -17,6 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, collectFileManifest, sha256 } from './state-fingerprint.mjs';
+import { storeEvidenceObject } from './canonical-facts.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -1120,24 +1121,18 @@ function safeEvidenceReference(projectRoot, packet, reference) {
 }
 
 function snapshotEvidenceReference({ root, projectRoot, changeId, reference }) {
-  const suffix = basename(reference.absolutePath).replace(/[^a-zA-Z0-9._-]+/g, '-') || 'evidence';
-  const filename = `${reference.sha256.slice('sha256:'.length)}-${suffix}`;
-  const directory = join(changeDirectory(root, changeId), 'evidence');
-  mkdirSync(directory, { recursive: true });
-  assertDirectoryNotSymlink(directory, `Change ${changeId} evidence snapshot directory`);
-  const path = join(directory, filename);
-  if (existsSync(path)) {
-    assertRegularFile(path, `Change ${changeId} evidence snapshot`);
-  } else {
-    writeFileSync(path, readFileSync(reference.absolutePath), { flag: 'wx' });
-  }
-  const manifest = collectFileManifest(projectRoot, [portableProjectPath(projectRoot, path)]);
-  if (manifest.entries[0].sha256 !== reference.sha256 || manifest.entries[0].size !== reference.size) {
+  const packet = dirname(dirname(root));
+  const object = storeEvidenceObject({
+    packetDir: packet,
+    projectRoot,
+    sourcePath: reference.absolutePath
+  });
+  if (object.sha256 !== reference.sha256 || object.size !== reference.size) {
     throw new Error(`Change ${changeId} evidence snapshot does not match ${reference.path}.`);
   }
   return {
     originalPath: reference.path,
-    path: portableProjectPath(projectRoot, path),
+    path: object.projectPath,
     sha256: reference.sha256,
     size: reference.size
   };

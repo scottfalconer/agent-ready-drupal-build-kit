@@ -219,6 +219,17 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 
 ### Phase 6: Independent Verification
 
+Before final verification, fill `review-packet/fact-provenance.json` with the real run actor and claim reviewers, then generate the canonical fact store:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/canonical-facts.mjs generate --packet review-packet
+node [KIT_LOCAL_PATH]/scripts/canonical-facts.mjs check --packet review-packet
+```
+
+Use `agent`, `subagent`, `tool`, or `named_human` truthfully. Every fact claim is an `evidence_observation`; `humanGateAcceptanceRecordedHere` stays false. Never claim a named human merely to clear a field. Dedicated human-gate records retain their own acceptance semantics.
+
+The generator stores normalized site, route, config, ownership, and completion facts once, creates deterministic `evidence/facts/summary.md`, and rejects contradictory duplicates. It copies raw bytes to `evidence/objects/sha256/<digest>` so multiple claims and lifecycle changes can share one object while preserving every existing evidence path. Do not hand-edit generated fact outputs or delete legacy evidence. See `[KIT_LOCAL_PATH]/references/canonical-facts.md`.
+
 Before final handoff, run a fresh independent verification pass whose job is to falsify the mechanical completion claims against the live Drupal site and current packet.
 
 Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. The verifier should be a context that did not build the site. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence. Record any same-context fallback as degraded independence in `review-packet/independent-verification.json`.
@@ -778,4 +789,5 @@ Gate records, either accepted evidence or blocked stubs:
 - generated lifecycle evidence under `evidence/lifecycle/` after the first successful full verification;
 - Drupal readback;
 - field-output matrix;
+- fact provenance plus generated canonical fact/object-store evidence;
 - launch checklist.

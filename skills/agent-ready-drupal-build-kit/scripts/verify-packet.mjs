@@ -6,6 +6,8 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
 
+import { verifyCanonicalFactStore } from './canonical-facts.mjs';
+
 const KIT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = 'Usage: node <path-to-skill>/scripts/verify-packet.mjs --packet review-packet --out review-packet/evidence/packet-verification.json';
@@ -80,6 +82,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
+  'G-FACTS-01': 'canonicalFactsAndEvidenceObjects',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -2175,6 +2178,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   reasons.push(...await markdownCompletionReadiness(packetDir));
+  if (records.factStoreVerification?.ready !== true) {
+    reasons.push(...arrayOrEmpty(records.factStoreVerification?.reasons));
+  }
 
   const {
     blindAdversarialReview,
@@ -2766,6 +2772,10 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
+  const factStoreVerification = verifyCanonicalFactStore({ packetDir });
+  if (factStoreVerification.valid !== true) {
+    errors.push(...arrayOrEmpty(factStoreVerification.errors));
+  }
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
   const independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
@@ -2792,6 +2802,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     blindAdversarialReview,
     browserEvidence,
     drupalReadback,
+    factStoreVerification,
     fieldOutputMatrix,
     independentVerification,
     parityReport,
@@ -2820,6 +2831,14 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         independentVerificationSupportsCompletion &&
         blindAdversarialReviewSupportsCompletion &&
         completionReadiness.packetCompletionReady
+    },
+    canonicalFacts: {
+      ready: factStoreVerification.ready,
+      factFingerprint: factStoreVerification.factFingerprint ?? '',
+      claimFingerprint: factStoreVerification.claimFingerprint ?? '',
+      objectFingerprint: factStoreVerification.objectFingerprint ?? '',
+      objectCount: factStoreVerification.objectCount ?? 0,
+      reasons: arrayOrEmpty(factStoreVerification.reasons)
     },
     completeLocalRebuildClaimAllowed: false,
     valid: errors.length === 0,

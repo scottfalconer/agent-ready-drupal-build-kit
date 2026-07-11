@@ -51,6 +51,7 @@ Build the real Drupal site, not a static lookalike, screenshot, packet-only arti
 5. Export configuration to a non-empty tracked sync directory and prove active configuration has no drift from it. Record a separate clean-install/import reproduction run only when one was actually performed. Record local-only database cleanup and other off-road work.
 6. Test anonymous public routes and a realistic non-admin editor workflow. Every custom public bundle and every bundle that owns repeating public content needs this workflow. A representative editor must be able to add or change recurring content and see it on the expected public route without code changes. Independently falsify each load-bearing field and each field claimed to affect anonymous output.
 7. Keep `review-packet/` current using the initialized templates. Record facts and evidence, not optimistic summaries.
+8. Fill `fact-provenance.json` with truthful agent, subagent, tool, or named-human observation metadata, then run `scripts/canonical-facts.mjs generate --packet review-packet`. The generated facts/summary must be deterministic and contradiction-free; identical evidence bytes share the SHA-256 object store without deleting original paths. This metadata never grants human-gate acceptance.
 
 ## Review and verification
 
@@ -65,6 +66,7 @@ Completion authority comes from the final verifier, not builder-authored `comple
 Run the live-target verifier by default:
 
 ```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/canonical-facts.mjs generate --packet review-packet
 node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
 ```
 
@@ -115,6 +117,7 @@ Everything required at runtime is inside this skill directory:
 
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
 - `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
+- `scripts/canonical-facts.mjs` generates/checks canonical facts, deterministic summaries, provenance metadata, and the shared SHA-256 evidence object store.
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
 - `gates.json` defines the stable gate and packet-file vocabulary.

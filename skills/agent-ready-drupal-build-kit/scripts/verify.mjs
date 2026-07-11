@@ -172,6 +172,7 @@ function verifierFingerprint() {
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
+    join(scriptDirectory, 'canonical-facts.mjs'),
     join(KIT_ROOT, 'gates.json')
   ]
     .filter((path) => existsSync(path))

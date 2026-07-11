@@ -1352,6 +1352,13 @@ test('targeted records preserve report and evidence hashes after mutable live ou
   assert.equal(record.inspectionReportSha256, sha256(record.inspectionReport));
   const semantic = record.checks.find((check) => check.id === 'repair-regression');
   assert.match(semantic.evidenceManifest[0].sha256, /^sha256:[a-f0-9]{64}$/);
+  assert.match(semantic.evidenceManifest[0].path, /review-packet\/evidence\/objects\/sha256\/[a-f0-9]{64}$/);
+  const referencedObjects = [
+    ...record.checks.flatMap((check) => check.evidenceManifest ?? []),
+    ...record.acceptanceEvidence.flatMap((claim) => claim.evidenceManifest ?? [])
+  ].map((entry) => entry.path);
+  assert.equal(new Set(referencedObjects).size, 1, 'checks and claims with identical evidence reuse one object');
+  assert.equal(readFileSync(join(packetDir, 'evidence', 'change-check.json'), 'utf8'), '{"status":"pass"}\n');
   writeFileSync(join(packetDir, 'evidence', 'change-check.json'), '{"status":"changed later"}\n');
   writeFileSync(join(packetDir, 'evidence', 'live-verification.json'), '{"overwritten":true}\n');
   assert.equal(readLifecycleStatus(packetDir).changes[0].status, 'evidence_recorded');

@@ -2,7 +2,7 @@
 
 The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling. It records that the initial source-site rebuild passed the complete-local-rebuild bar for the exact Drupal state inspected at that time. The initial rebuild remains done when later work changes the site.
 
-The baseline record and its adjacent certificate let the kit detect unsupported edits to the record. They are not cryptographic immutability or tamper-proof storage; repository access controls and Git history remain the provenance boundary.
+The baseline record and its adjacent certificate let the kit detect unsupported edits to the record. They are not cryptographic immutability or tamper-proof storage; repository access controls and Git history remain the provenance boundary. New targeted evidence snapshots reuse `review-packet/evidence/objects/sha256/` by byte digest, while existing per-change snapshot paths remain valid and are never deleted.
 
 Keep the installed kit in the project after the first pass. Later agents can classify repairs and extensions, bind authored evidence to exact states, and optionally re-evaluate the current packet and live target against the full original verifier gates without restarting or revoking the initial rebuild.
 

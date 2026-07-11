@@ -28,6 +28,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
+- `fact-provenance.json`
 - `launch-checklist.md`
 
 ## Generated Verifier Evidence
@@ -36,6 +37,16 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 
 - `live-verification.json` from the default live-target-and-packet run.
 - `packet-verification.json` from an explicit packet-only lint run.
+
+The canonical fact generator writes these files under `review-packet/evidence/facts/`:
+
+- `canonical-facts.json`: normalized site, route, config, ownership, and completion facts stored once.
+- `summary.md`: deterministic human-readable output generated from canonical facts and provenance.
+- `claims.json`: run, reviewer, and claim metadata with evidence-object digest references; it never records human-gate acceptance.
+- `object-index.json`: SHA-256 object metadata, original paths, and all claim references.
+- `manifest.json`: integrity manifest for generated fact-store outputs.
+
+Raw bytes are copied without deleting their original path to `review-packet/evidence/objects/sha256/<digest>`. New lifecycle evidence snapshots share this object store; legacy per-change snapshot paths remain readable.
 
 After the first successful full verification, the kit also manages lifecycle evidence under `review-packet/evidence/lifecycle/`:
 
@@ -62,6 +73,7 @@ Lifecycle evidence is additive and is not required to structurally validate a pa
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
+- `G-FACTS-01`: require current deterministic canonical facts/summary, contradiction-free duplicated site/route/config/ownership/completion values, honest agent/subagent/tool/named-human observation metadata, and untampered content-addressed evidence objects. This gate never substitutes for `checkedBy: human` acceptance.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
 - `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.

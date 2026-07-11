@@ -8,6 +8,7 @@
     "scoped-gap-list.md",
     "open-decisions.md",
     "off-road-inventory.md",
+    "fact-provenance.json",
     "maintainer-review.md",
     "operator-run.md",
     "production-target.md",
@@ -24,11 +25,17 @@
     "evidence/live-verification.json",
     "evidence/packet-verification.json",
     "evidence/lifecycle/initial-baseline.json",
-    "evidence/lifecycle/current-state.json"
+    "evidence/lifecycle/current-state.json",
+    "evidence/facts/canonical-facts.json",
+    "evidence/facts/claims.json",
+    "evidence/facts/object-index.json",
+    "evidence/facts/summary.md",
+    "evidence/facts/manifest.json"
   ],
   "generatedEvidenceDirectories": [
     "evidence/lifecycle/changes",
-    "evidence/lifecycle/checkpoints"
+    "evidence/lifecycle/checkpoints",
+    "evidence/objects/sha256"
   ],
   "changeChecks": {
     "state-bound": "The kit freshly inspected the result fingerprint and bound it to the recorded base and change intent.",
@@ -289,6 +296,14 @@
       "phase": 6,
       "evidenceFile": "off-road-inventory.md",
       "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-FACTS-01",
+      "title": "Canonical facts and content-addressed evidence are current and contradiction-free",
+      "phase": 6,
+      "evidenceFile": "evidence/facts/manifest.json",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

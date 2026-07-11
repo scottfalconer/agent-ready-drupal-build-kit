@@ -141,7 +141,7 @@ test('initializer dry-run honors an explicit project and nested packet without w
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Dry run valid:/);
   assert.match(result.stdout, /AGENTS\.md: would update kit block/);
-  assert.match(result.stdout, /Review packet: 18 missing, 0 preserved/);
+  assert.match(result.stdout, /Review packet: 19 missing, 0 preserved/);
   assert.equal(existsSync(join(root, 'AGENTS.md')), false);
   assert.equal(existsSync(join(root, 'evidence')), false);
 });
@@ -274,7 +274,7 @@ User-authored tail.
   const second = runInitializer(initializer, root);
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /AGENTS\.md: unchanged/);
-  assert.match(second.stdout, /0 created, 18 preserved/);
+  assert.match(second.stdout, /0 created, 19 preserved/);
   assert.equal(readFileSync(agentsPath, 'utf8'), firstAgents);
   assert.equal(readFileSync(sourceAudit, 'utf8'), '{"preserve":"user evidence"}\n');
 
@@ -362,6 +362,16 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.equal(lifecycleHelp.status, 0, lifecycleHelp.stderr);
   assert.match(lifecycleHelp.stdout, /lifecycle\.mjs/);
 
+  const factsPath = join(installedSkill, 'scripts', 'canonical-facts.mjs');
+  assert.equal(existsSync(factsPath), true);
+  assert.notEqual(statSync(factsPath).mode & 0o111, 0, 'canonical-facts.mjs should be executable');
+  const factsHelp = spawnSync(process.execPath, [factsPath, '--help'], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.equal(factsHelp.status, 0, factsHelp.stderr);
+  assert.match(factsHelp.stdout, /canonical-facts\.mjs/);
+
   const packetOnly = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
     '--packet',
@@ -384,7 +394,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(30 files\)/);
+  assert.match(result.stdout, /is in sync \(33 files\)/);
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -421,7 +431,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(30 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(33 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

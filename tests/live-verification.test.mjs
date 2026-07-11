@@ -14,6 +14,7 @@ import {
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import { generateCanonicalFactStore } from '../bin/canonical-facts.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -1078,6 +1079,72 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+  addQualifyingFactProvenance(packetDir);
+  generateCanonicalFactStore({ packetDir });
+}
+
+function addQualifyingFactProvenance(packetDir) {
+  const agent = {
+    kind: 'agent',
+    id: 'fixture-builder-agent',
+    name: 'Fixture Builder Agent',
+    identityBasis: 'Recorded test agent identity'
+  };
+  const sharedEvidence = 'evidence/independent-verification/claim-evidence.json';
+  writeJson(join(packetDir, 'fact-provenance.json'), {
+    schemaVersion: 'public-kit.fact-provenance.1',
+    humanGateAcceptanceRecordedHere: false,
+    run: {
+      id: 'fixture-fact-run',
+      startedAt: testCheckedAt,
+      finishedAt: testCheckedAt,
+      actor: agent
+    },
+    claims: [
+      {
+        claimId: 'site-route-observation',
+        gate: 'G-ROUTE-01',
+        authority: 'evidence_observation',
+        status: 'observed',
+        checkedAt: testCheckedAt,
+        reviewer: agent,
+        factKeys: ['site.target.origin', 'route:/:status'],
+        evidence: [sharedEvidence]
+      },
+      {
+        claimId: 'config-ownership-observation',
+        gate: 'G-CONFIG-01',
+        authority: 'evidence_observation',
+        status: 'observed',
+        checkedAt: testCheckedAt,
+        reviewer: {
+          kind: 'subagent',
+          id: 'fixture-review-subagent',
+          name: 'Fixture Review Subagent',
+          identityBasis: 'Recorded child-agent task identity',
+          parentActorId: agent.id
+        },
+        factKeys: ['config.status.clean', 'ownership:/:pageOwner'],
+        evidence: [sharedEvidence]
+      },
+      {
+        claimId: 'completion-observation',
+        gate: 'G-VERIFY-01',
+        authority: 'evidence_observation',
+        status: 'observed',
+        checkedAt: testCheckedAt,
+        reviewer: {
+          kind: 'tool',
+          id: 'fixture-verifier-tool',
+          name: 'Fixture Verifier',
+          identityBasis: 'Recorded verifier executable',
+          tool: 'node bin/verify-packet.mjs'
+        },
+        factKeys: ['completion.independent.verdict'],
+        evidence: [sharedEvidence]
+      }
+    ]
+  });
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -2397,6 +2464,37 @@ test('a coherent but stale packet cannot authorize current local completion', as
     report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
     /newest completion evidence is older than seven days/i
   );
+});
+
+test('canonical fact gate blocks stale generated output and contradictory packet copies', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'canonical-fact-gate-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const passing = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(passing.canonicalFacts.ready, true, JSON.stringify(passing.canonicalFacts, null, 2));
+  assert.equal(passing.completionEvidence.packetSupportsCompletion, true);
+
+  const stalePacket = join(temp, 'stale');
+  cpSync(canonicalPacket, stalePacket, { recursive: true });
+  writeFileSync(join(stalePacket, 'evidence', 'facts', 'summary.md'), '# Hand-edited summary\n');
+  const stale = await validatePacket({ packetDir: stalePacket });
+  assert.equal(stale.valid, true, stale.errors.join('\n'));
+  assert.equal(stale.canonicalFacts.ready, false);
+  assert.equal(stale.completionEvidence.packetSupportsCompletion, false);
+  assert.match(stale.completionEvidence.packetCompletionBlockedReasons.join('\n'), /stale or non-deterministic.*summary\.md/i);
+
+  const contradictoryPacket = join(temp, 'contradictory');
+  cpSync(canonicalPacket, contradictoryPacket, { recursive: true });
+  mutateJson(join(contradictoryPacket, 'browser-evidence.json'), (browser) => {
+    browser.site = 'https://contradictory.example';
+  });
+  const contradictory = await validatePacket({ packetDir: contradictoryPacket });
+  assert.equal(contradictory.valid, false);
+  assert.equal(contradictory.canonicalFacts.ready, false);
+  assert.match(contradictory.errors.join('\n'), /Canonical fact contradictions detected: site\.target\.origin/i);
 });
 
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {

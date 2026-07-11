@@ -26,12 +26,14 @@
     "test": "node --test tests/*.test.mjs",
     "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs",
-    "lifecycle": "node bin/lifecycle.mjs"
+    "lifecycle": "node bin/lifecycle.mjs",
+    "facts": "node bin/canonical-facts.mjs"
   },
   "bin": {
     "agent-ready-drupal-verify": "bin/verify.mjs",
     "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs",
-    "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs"
+    "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs",
+    "agent-ready-drupal-facts": "bin/canonical-facts.mjs"
   },
   "engines": {
     "node": ">=20"

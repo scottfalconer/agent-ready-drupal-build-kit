@@ -66,6 +66,7 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'parity-spec.md'), destination: join(skillRoot, 'references', 'parity-spec.md') },
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
+    { source: join(repoRoot, 'docs', 'canonical-facts.md'), destination: join(skillRoot, 'references', 'canonical-facts.md') },
     ...gates.reviewPacketFiles.map((packetFile) => {
       const name = templateName(packetFile);
       return {
@@ -94,6 +95,11 @@ function copyPlan(assetsOnly) {
       {
         source: join(repoRoot, 'bin', 'lifecycle.mjs'),
         destination: join(skillRoot, 'scripts', 'lifecycle.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'canonical-facts.mjs'),
+        destination: join(skillRoot, 'scripts', 'canonical-facts.mjs'),
         executable: true
       }
     );

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "public-kit.fact-provenance.1",
+  "humanGateAcceptanceRecordedHere": false,
+  "run": {
+    "id": "",
+    "startedAt": "",
+    "finishedAt": "",
+    "actor": {
+      "kind": "agent | subagent | tool | named_human",
+      "id": "",
+      "name": "",
+      "identityBasis": "",
+      "parentActorId": "",
+      "tool": ""
+    }
+  },
+  "claims": []
+}
