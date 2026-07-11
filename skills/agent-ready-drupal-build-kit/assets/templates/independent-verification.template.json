@@ -131,7 +131,7 @@
       "reasonRequired": "privacy_legal_footer | sitemap | robots | login_admin | front_page | locally_introduced_menu_link | locally_introduced_footer_link | other",
       "targetStatus": null,
       "targetFinalUrl": "",
-      "expectedPublicBehavior": "public_200 | redirect | private_403 | noindex | blocked",
+      "expectedPublicBehavior": "public_200 | redirect | noindex | blocked",
       "status": "pass | fail | blocked",
       "evidence": ""
     }

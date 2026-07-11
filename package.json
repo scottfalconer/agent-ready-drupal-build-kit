@@ -24,6 +24,7 @@
   "scripts": {
     "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
     "test": "node --test tests/*.test.mjs",
+    "test:integration:drupal-audits": "node tests/integration/drupal-audits.mjs",
     "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs"
   },

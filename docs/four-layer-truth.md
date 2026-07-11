@@ -27,9 +27,9 @@ Examples:
 
 Next evidence layer: public route status.
 
-## Layer 3: Public Route Status
+## Layer 3: Route Status
 
-The target route returns the expected public status for the intended visitor state.
+The target route returns the expected anonymous status for the intended visitor state. Public/anonymous coverage lives in the route matrix. Denied/admin/private routes live in the separate structured private inventory and never satisfy public coverage.
 
 Examples:
 

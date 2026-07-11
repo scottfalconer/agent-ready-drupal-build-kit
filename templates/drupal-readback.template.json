@@ -5,6 +5,7 @@
   "commands": [],
   "drupal": {
     "status": {},
+    "siteName": "",
     "siteUuid": "",
     "enabledModules": [],
     "defaultTheme": "",
@@ -43,20 +44,37 @@
     "duplicateAliases": [],
     "redirects": [],
     "unexpectedPublicRoutes": [],
+    "privateRoutes": [
+      {
+        "id": "",
+        "routeName": "",
+        "path": "",
+        "requestMethod": "GET | HEAD | POST | PUT | PATCH | DELETE | OPTIONS",
+        "classification": "admin | authenticated | internal | disabled",
+        "expectedAnonymousBehavior": "denied_403 | login_redirect | not_found_404",
+        "expectedStatus": null,
+        "expectedFinalPath": "",
+        "owner": "",
+        "rationale": "",
+        "evidence": "",
+        "accepted": false
+      }
+    ],
     "menus": [],
     "menuLinks": [],
     "publicBundleAliasPolicies": [
       {
         "entityType": "",
         "bundle": "",
-        "strategy": "pathauto_pattern | editor_supplied_alias | no_public_detail_route",
+        "strategy": "pathauto_pattern | editor_supplied_alias | canonical_detail_route_denied",
         "patternId": "",
         "probeEntityId": "",
+        "existingEntityId": "",
         "probeLanguage": "",
         "existingAliasExample": "",
         "probeAlias": "",
-        "structureMatchesExistingContent": false,
-        "editorCanCreateExpectedAlias": false,
+        "owner": "",
+        "rationale": "",
         "evidence": "",
         "accepted": false,
         "notes": ""
@@ -72,12 +90,14 @@
   "rolesAndPermissionsNotes": [],
   "implementationQuality": {
     "canvasTemplateAudit": {
+      "activeConfigFileCount": 0,
       "trackedConfigFileCount": 0,
       "matchingConfigCount": 0,
       "templates": [
         {
           "configName": "",
           "path": "",
+          "tracked": false,
           "enabled": false,
           "id": "",
           "entityType": "",
@@ -141,7 +161,19 @@
           "machineName": "",
           "type": "module | theme",
           "path": "",
+          "infoFile": "",
           "purpose": "",
+          "sourceNameLint": {
+            "sourceTokens": [],
+            "matchedTokens": [],
+            "status": "pass | exception",
+            "exception": {
+              "accepted": false,
+              "owner": "",
+              "rationale": "",
+              "evidence": ""
+            }
+          },
           "solutionLadders": [
             {
               "capabilityId": "",
@@ -312,6 +344,8 @@
           "requirements": {},
           "routeParameters": {},
           "requestMethod": "GET | HEAD | POST | PUT | PATCH | DELETE | OPTIONS",
+          "requestContentType": "",
+          "requestBody": "",
           "representativePath": "",
           "anonymousAccessDisposition": "allowed | denied",
           "anonymousAccessEvidence": "",
@@ -319,6 +353,7 @@
             "kind": "concrete_path | route_name",
             "value": ""
           },
+          "privateRouteId": "",
           "accessReviewed": false,
           "cacheabilityReviewed": false,
           "sanitizationReviewed": false,

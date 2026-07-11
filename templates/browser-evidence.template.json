@@ -89,6 +89,7 @@
       "resultScreenshot": "",
       "fieldsAndWidgetsVerified": [],
       "publicOutputAffected": "",
+      "createdContentPath": "",
       "visualOrBehaviorResult": "",
       "status": "pass | needs-review | fail | blocked",
       "acceptedExceptions": [],

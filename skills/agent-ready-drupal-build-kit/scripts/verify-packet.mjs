@@ -255,9 +255,6 @@ function expectedPublicBehaviorMatches(behavior, status, finalPath, requestedPat
   if (behavior === 'redirect') {
     return redirectStatus(status) && Boolean(normalizedFinalPath) && normalizedFinalPath !== normalizedRequestedPath;
   }
-  if (behavior === 'private_403') {
-    return numericValue(status) === 403 && normalizedFinalPath === normalizedRequestedPath;
-  }
   if (behavior === 'noindex') {
     return successfulStatus(status) && normalizedFinalPath === normalizedRequestedPath;
   }
@@ -283,6 +280,49 @@ function exactIdentityMatch(left, right) {
   const leftKey = identityKey(left);
   const rightKey = identityKey(right);
   return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+const GENERIC_SOURCE_NAME_TOKENS = new Set([
+  'city', 'county', 'department', 'district', 'example', 'government', 'home', 'official', 'portal', 'public',
+  'site', 'source', 'state', 'town', 'village', 'website', 'www'
+]);
+
+function boundaryTokens(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function sourceNameLint(machineName, sourceBaseUrl, sourceSiteName) {
+  const sourceTokens = new Set();
+  const addSourceToken = (token) => {
+    if (token.length >= 4 && !GENERIC_SOURCE_NAME_TOKENS.has(token)) {
+      sourceTokens.add(token);
+    }
+  };
+  try {
+    for (const label of new URL(String(sourceBaseUrl ?? '')).hostname.split('.')) {
+      for (const token of boundaryTokens(label)) {
+        addSourceToken(token);
+      }
+    }
+  } catch {
+    // A malformed hostname is already rejected elsewhere; the site name still contributes tokens.
+  }
+  for (const token of boundaryTokens(sourceSiteName)) {
+    addSourceToken(token);
+  }
+  const machineTokens = new Set(boundaryTokens(machineName));
+  const sortedSourceTokens = [...sourceTokens].sort();
+  return {
+    matchedTokens: sortedSourceTokens.filter((token) => machineTokens.has(token)),
+    sourceTokens: sortedSourceTokens
+  };
+}
+
+function normalizedStringArray(values) {
+  return arrayOrEmpty(values).map((value) => String(value).trim()).filter(Boolean).sort();
 }
 
 function solutionStageInvalid(stage, candidateKey, candidateInvalid) {
@@ -423,7 +463,7 @@ function publicCanvasTargets(drupalReadback, patternMap) {
     }
   }
   for (const policy of substantiveObjects(drupalReadback?.routing?.publicBundleAliasPolicies)) {
-    if (policy.strategy === 'no_public_detail_route') {
+    if (policy.strategy === 'canonical_detail_route_denied') {
       const key = bundleKey(policy.entityType, policy.bundle);
       if (key) {
         noDetailBundles.add(key);
@@ -505,6 +545,25 @@ function normalizeRouteKey(value) {
   } catch {
     return text.split(/[?#]/)[0] || '/';
   }
+}
+
+function aliasStructure(value) {
+  const segments = normalizeRouteKey(value).split('/').filter(Boolean);
+  return {
+    depth: segments.length,
+    first: segments[0] ?? '',
+    parent: segments.length > 1 ? `/${segments.slice(0, -1).join('/')}` : '/'
+  };
+}
+
+function aliasStructuresMatch(left, right, strategy) {
+  const leftStructure = aliasStructure(left);
+  const rightStructure = aliasStructure(right);
+  return strategy === 'pathauto_pattern'
+    ? leftStructure.depth === rightStructure.depth &&
+        Boolean(leftStructure.first) &&
+        leftStructure.first === rightStructure.first
+    : leftStructure.parent === rightStructure.parent;
 }
 
 function httpUrl(value) {
@@ -2695,7 +2754,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
         record.targetFinalPath || record.targetPath,
         record.targetPath
       ) ||
-      (record.expectedPublicBehavior === 'private_403' ? record.shouldBePublic !== false : record.shouldBePublic !== true)
+      record.shouldBePublic !== true
     )
   ) {
     reasons.push('route-matrix.json must contain accepted target-required route records, including the front page, with consistent expectedPublicBehavior, non-5xx status, final path, visibility, and Drupal owner; blocked behavior cannot complete.');
@@ -3060,6 +3119,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     !drupalCommands.some((command) => /config:status|config\s+status/i.test(command)) ||
     !drupalCommands.some((command) => /git\s+ls-files/i.test(command)) ||
     !String(drupalReadback?.drupal?.siteUuid ?? '').trim() ||
+    !String(drupalReadback?.drupal?.siteName ?? '').trim() ||
     !isJsonObject(drupalReadback?.drupal?.status) ||
     Object.keys(drupalReadback.drupal.status).length === 0 ||
     !hasMeaningfulEntry(drupalReadback?.drupal?.enabledModules) ||
@@ -3095,6 +3155,36 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('drupal-readback.json must substantively identify the bootstrapped site, config, Drupal structures, public content, menus, and editor permissions with no blockers.');
   }
 
+  const privateRoutes = substantiveObjects(drupalRouting.privateRoutes);
+  const privateRouteIds = new Set();
+  for (const route of privateRoutes) {
+    const duplicate = privateRouteIds.has(route?.id);
+    privateRouteIds.add(route?.id);
+    const requestedPath = normalizeRouteKey(route?.path);
+    const finalPath = normalizeRouteKey(route?.expectedFinalPath || route?.path);
+    const requestMethod = String(route?.requestMethod ?? '').trim().toUpperCase();
+    const status = numericValue(route?.expectedStatus);
+    const behaviorMatches =
+      (route?.expectedAnonymousBehavior === 'denied_403' && status === 403 && finalPath === requestedPath) ||
+      (route?.expectedAnonymousBehavior === 'login_redirect' && redirectStatus(status) && finalPath && finalPath !== requestedPath) ||
+      (route?.expectedAnonymousBehavior === 'not_found_404' && status === 404 && finalPath === requestedPath);
+    if (
+      duplicate ||
+      !/^PRIVATE-[A-Za-z0-9_.-]+$/.test(String(route?.id ?? '')) ||
+      !String(route?.routeName ?? '').trim() ||
+      !requestedPath ||
+      !/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(requestMethod) ||
+      !['admin', 'authenticated', 'internal', 'disabled'].includes(route?.classification) ||
+      !behaviorMatches ||
+      !String(route?.owner ?? '').trim() ||
+      !String(route?.rationale ?? '').trim() ||
+      !await nonEmptyPacketEvidence(packetDir, route?.evidence) ||
+      route?.accepted !== true
+    ) {
+      reasons.push(`drupal-readback.json private route ${route?.id || route?.routeName || requestedPath || '(unnamed)'} needs an exact unique identity, denied/login/not-found anonymous behavior, owner, rationale, and packet-local evidence.`);
+    }
+  }
+
   const implementationQuality = drupalReadback?.implementationQuality ?? {};
   const canvasTemplateAudit = implementationQuality.canvasTemplateAudit ?? {};
   const canvasTemplates = substantiveObjects(canvasTemplateAudit.templates);
@@ -3108,7 +3198,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     canvasTemplateIdentities.add(identity);
     return duplicate ||
       !/^canvas\.content_template\..+$/i.test(String(template?.configName ?? '').trim()) ||
-      !trackedConfigPaths.has(String(template?.path ?? '').trim()) ||
+      template?.tracked !== trackedConfigPaths.has(String(template?.path ?? '').trim()) ||
       typeof template?.enabled !== 'boolean' ||
       !String(template?.id ?? '').trim() ||
       !String(template?.entityType ?? '').trim() ||
@@ -3120,6 +3210,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   });
   if (
     canvasTemplateAudit.completed !== true ||
+    !Number.isInteger(canvasTemplateAudit.activeConfigFileCount) ||
+    canvasTemplateAudit.activeConfigFileCount < canvasTemplateAudit.trackedConfigFileCount ||
     !Number.isInteger(canvasTemplateAudit.trackedConfigFileCount) ||
     canvasTemplateAudit.trackedConfigFileCount !== trackedConfigPaths.size ||
     !Number.isInteger(canvasTemplateAudit.matchingConfigCount) ||
@@ -3128,7 +3220,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     arrayOrEmpty(canvasTemplateAudit.errors).length > 0 ||
     arrayOrEmpty(canvasTemplateAudit.conflicts).length > 0
   ) {
-    reasons.push('drupal-readback.json implementationQuality.canvasTemplateAudit must deterministically inventory tracked canvas.content_template.* config and accurately disposition each target.');
+    reasons.push('drupal-readback.json implementationQuality.canvasTemplateAudit must deterministically inventory active sync-directory canvas.content_template.* config, including untracked files, and accurately disposition each public target.');
   }
   const unusedCanvasConflicts = canvasTemplates.filter((template) =>
     template.enabled === true &&
@@ -3137,7 +3229,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   );
   for (const template of unusedCanvasConflicts) {
     reasons.push(
-      `drupal-readback.json declares Canvas intentionally unused while tracked config enables ${template.configName} for public ${template.entityType}.${template.bundle}.${template.viewMode}; active Canvas content templates supersede theme entity templates for that target.`
+      `drupal-readback.json declares Canvas intentionally unused while active sync config enables ${template.configName} for public ${template.entityType}.${template.bundle}.${template.viewMode}; active Canvas content templates supersede theme entity templates for that target.`
     );
   }
 
@@ -3173,10 +3265,45 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const rawCustomSourceFiles = arrayOrEmpty(customInventory.sourceFiles);
   const customSourceFiles = substantiveObjects(rawCustomSourceFiles);
   const customRoutes = substantiveObjects(customInventory.routes);
+  const customRouteNames = customRoutes.map((route) => String(route?.name ?? '').trim()).filter(Boolean);
+  const customRouteNamesUnique = new Set(customRouteNames).size === customRouteNames.length;
   const customControllers = substantiveObjects(customInventory.controllers);
   const customTests = arrayOrEmpty(customInventory.tests).map((path) => String(path).trim()).filter(Boolean);
   const themeExtensions = customExtensions.filter((extension) => extension?.type === 'theme');
   const themeOwnershipFindings = substantiveObjects(customInventory.themeOwnershipFindings);
+  const invalidSourceNameLintExtensions = new Set();
+  for (const extension of customExtensions) {
+    const expectedLint = sourceNameLint(
+      extension?.machineName,
+      routeMatrix?.sourceBaseUrl,
+      sourceAudit?.site?.name
+    );
+    const lint = extension?.sourceNameLint ?? {};
+    const sourceTokensMatch = JSON.stringify(normalizedStringArray(lint.sourceTokens)) ===
+      JSON.stringify(expectedLint.sourceTokens);
+    const matchedTokensMatch = JSON.stringify(normalizedStringArray(lint.matchedTokens)) ===
+      JSON.stringify(expectedLint.matchedTokens);
+    let valid = sourceTokensMatch && matchedTokensMatch;
+    if (expectedLint.matchedTokens.length === 0) {
+      valid = valid && lint.status === 'pass' && lint?.exception?.accepted !== true;
+    } else {
+      const exception = lint?.exception ?? {};
+      valid = valid &&
+        lint.status === 'exception' &&
+        exception.accepted === true &&
+        Boolean(String(exception.owner ?? '').trim()) &&
+        Boolean(String(exception.rationale ?? '').trim()) &&
+        await nonEmptyPacketEvidence(packetDir, exception.evidence);
+    }
+    if (!valid) {
+      invalidSourceNameLintExtensions.add(extension);
+    }
+  }
+  if (invalidSourceNameLintExtensions.size > 0) {
+    reasons.push(
+      `drupal-readback.json custom extension source-name lint must match the declared source hostname/site-name boundary tokens, with a named, rationale-backed, packet-evidenced accepted exception for each match: ${[...invalidSourceNameLintExtensions].map((extension) => extension?.machineName || '(unnamed extension)').join(', ')}.`
+    );
+  }
   const sourceFileIds = new Set();
   const sourceFilePaths = new Set();
   const invalidCustomSourceFile = customSourceFiles.some((sourceFile) => {
@@ -3380,6 +3507,26 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const customRouteInvalid = (route) => {
     const testException = route?.testException ?? {};
     const routeBinding = route?.routeMatrixBinding ?? {};
+    const publicRouteBindingInvalid = route?.anonymousAccessDisposition === 'allowed' && (
+      !['concrete_path', 'route_name'].includes(routeBinding.kind) ||
+      !String(routeBinding.value ?? '').trim() ||
+      (routeBinding.kind === 'concrete_path' &&
+        normalizeRouteKey(routeBinding.value) !== normalizeRouteKey(route.representativePath)) ||
+      (routeBinding.kind === 'route_name' && routeBinding.value !== route.name) ||
+      !routeMatrixRecords.some((record) =>
+        (routeBinding.kind === 'concrete_path' &&
+          normalizeRouteKey(record?.targetPath) === normalizeRouteKey(routeBinding.value)) ||
+        (routeBinding.kind === 'route_name' && record?.routeName === routeBinding.value)
+      )
+    );
+    const privateDispositionInvalid = route?.anonymousAccessDisposition === 'denied' && !privateRoutes.some((record) =>
+      record?.id === route?.privateRouteId &&
+      record?.routeName === route?.name &&
+      normalizeRouteKey(record?.path) === normalizeRouteKey(route?.representativePath) &&
+      String(record?.requestMethod ?? '').trim().toUpperCase() === String(route?.requestMethod ?? '').trim().toUpperCase() &&
+      ['denied_403', 'login_redirect', 'not_found_404'].includes(record?.expectedAnonymousBehavior) &&
+      record?.accepted === true
+    );
     const hasTestDisposition = String(route?.testEvidence ?? '').trim() || (
       String(testException.reason ?? '').trim() &&
       String(testException.acceptedBy ?? '').trim() &&
@@ -3407,20 +3554,14 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       !isJsonObject(route?.requirements) ||
       !isJsonObject(route?.routeParameters) ||
       !/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/i.test(String(route?.requestMethod ?? '').trim()) ||
+      /[\r\n]/.test(String(route?.requestContentType ?? '')) ||
+      String(route?.requestBody ?? '').length > 100_000 ||
       !normalizeRouteKey(route?.representativePath) ||
       /[{}]/.test(String(route?.representativePath ?? '')) ||
       !['allowed', 'denied'].includes(route?.anonymousAccessDisposition) ||
       !String(route?.anonymousAccessEvidence ?? '').trim() ||
-      !['concrete_path', 'route_name'].includes(routeBinding.kind) ||
-      !String(routeBinding.value ?? '').trim() ||
-      (routeBinding.kind === 'concrete_path' &&
-        normalizeRouteKey(routeBinding.value) !== normalizeRouteKey(route.representativePath)) ||
-      (routeBinding.kind === 'route_name' && routeBinding.value !== route.name) ||
-      !routeMatrixRecords.some((record) =>
-        (routeBinding.kind === 'concrete_path' &&
-          normalizeRouteKey(record?.targetPath) === normalizeRouteKey(routeBinding.value)) ||
-        (routeBinding.kind === 'route_name' && record?.routeName === routeBinding.value)
-      ) ||
+      publicRouteBindingInvalid ||
+      privateDispositionInvalid ||
       route?.accessReviewed !== true ||
       route?.cacheabilityReviewed !== true ||
       route?.sanitizationReviewed !== true ||
@@ -3460,15 +3601,20 @@ async function packetCompletionReadiness(packetDir, gates, records) {
             String(exception.acceptedBy ?? '').trim() &&
             String(exception.evidence ?? '').trim();
         });
-        return !String(extension?.machineName ?? '').trim() ||
+        return !/^[a-z][a-z0-9_]*$/.test(String(extension?.machineName ?? '')) ||
           !['module', 'theme'].includes(String(extension?.type ?? '').trim()) ||
           !String(extension?.path ?? '').trim() ||
+          !String(extension?.infoFile ?? '').trim() ||
+          dirname(String(extension.infoFile).replaceAll('\\', '/')) !== String(extension.path).replaceAll('\\', '/') ||
+          basename(String(extension.infoFile)) !== `${extension.machineName}.info.yml` ||
+          invalidSourceNameLintExtensions.has(extension) ||
           !String(extension?.purpose ?? '').trim() ||
           !Number.isInteger(extension?.phpFileCount) ||
           extension.phpFileCount < 0 ||
           (extension.phpFileCount > 0 && (!checkHasDisposition('coding_standards') || !checkHasDisposition('static_analysis'))) ||
           extension?.accepted !== true;
       }) ||
+      !customRouteNamesUnique ||
       customRoutes.some(customRouteInvalid) ||
       customControllers.some(customControllerInvalid)
     )) ||
@@ -3478,34 +3624,82 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const aliasPolicies = substantiveObjects(drupalRouting.publicBundleAliasPolicies);
-  const recurringDetailOwners = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+  const acceptedBundleLedgers = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)
     .filter((ledger) =>
       ledger?.accepted === true &&
-      ['entity_view_display', 'canvas_composition'].includes(ledger?.detailRouteOwner) &&
       String(ledger?.drupalEntityType ?? '').trim() &&
       String(ledger?.contentTypeOrBundle ?? '').trim()
     );
-  for (const ledger of recurringDetailOwners) {
-    const policy = aliasPolicies.find((candidate) =>
-      exactIdentityMatch(candidate?.entityType, ledger.drupalEntityType) &&
-      exactIdentityMatch(candidate?.bundle, ledger.contentTypeOrBundle)
+  const bundleLedgerGroups = new Map();
+  for (const ledger of acceptedBundleLedgers) {
+    const key = `${identityKey(ledger.drupalEntityType)}.${identityKey(ledger.contentTypeOrBundle)}`;
+    const group = bundleLedgerGroups.get(key) ?? [];
+    group.push(ledger);
+    bundleLedgerGroups.set(key, group);
+  }
+  for (const [key, ledgers] of bundleLedgerGroups) {
+    const [representative] = ledgers;
+    const ownershipKinds = new Set(ledgers.map((ledger) => ledger?.detailRouteOwner));
+    const expectedStrategies = ownershipKinds.has('documented_exception')
+      ? ['pathauto_pattern', 'editor_supplied_alias', 'canonical_detail_route_denied']
+      : ownershipKinds.has('entity_view_display') || ownershipKinds.has('canvas_composition')
+        ? ['pathauto_pattern', 'editor_supplied_alias']
+        : ['canonical_detail_route_denied'];
+    if (
+      (ownershipKinds.has('entity_view_display') || ownershipKinds.has('canvas_composition')) &&
+      (ownershipKinds.has('view_row') || ownershipKinds.has('no_public_detail_route'))
+    ) {
+      reasons.push(`pattern-map.json collection ledgers disagree about public-detail ownership for ${key}.`);
+      continue;
+    }
+    const matchingPolicies = aliasPolicies.filter((candidate) =>
+      exactIdentityMatch(candidate?.entityType, representative.drupalEntityType) &&
+      exactIdentityMatch(candidate?.bundle, representative.contentTypeOrBundle)
+    );
+    if (matchingPolicies.length !== 1) {
+      reasons.push(`drupal-readback.json must record exactly one future-detail disposition for recurring bundle ${representative.drupalEntityType}.${representative.contentTypeOrBundle}.`);
+      continue;
+    }
+    const [policy] = matchingPolicies;
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, policy?.evidence);
+    const commonInvalid =
+      !expectedStrategies.includes(policy?.strategy) ||
+      !String(policy?.probeEntityId ?? '').trim() ||
+      !String(policy?.owner ?? '').trim() ||
+      !String(policy?.rationale ?? '').trim() ||
+      !evidencePresent ||
+      policy?.accepted !== true;
+    if (policy?.strategy === 'canonical_detail_route_denied') {
+      if (commonInvalid) {
+        reasons.push(`drupal-readback.json no-public-detail disposition for ${key} needs a published live probe, owner, rationale, and packet-local evidence.`);
+      }
+      continue;
+    }
+    const createCheck = editorWorkflowChecks.find((check) =>
+      check?.workflow === 'create' &&
+      check?.accepted === true &&
+      check?.status === 'pass' &&
+      exactIdentityMatch(check?.entityType, policy?.entityType) &&
+      exactIdentityMatch(check?.bundle, policy?.bundle)
     );
     if (
-      !policy ||
-      !['pathauto_pattern', 'editor_supplied_alias'].includes(policy.strategy) ||
-      (policy.strategy === 'pathauto_pattern' && !String(policy.patternId ?? '').trim()) ||
-      !String(policy.probeEntityId ?? '').trim() ||
-      !/^\/[^?#]*$/.test(String(policy.probeAlias ?? '').trim()) ||
-      (
-        !String(policy.existingAliasExample ?? '').trim() ||
-        !String(policy.probeAlias ?? '').trim() ||
-        policy.structureMatchesExistingContent !== true ||
-        policy.editorCanCreateExpectedAlias !== true
-      ) ||
-      !String(policy.evidence ?? '').trim() ||
-      policy.accepted !== true
+      commonInvalid ||
+      (policy?.strategy === 'pathauto_pattern' && !String(policy?.patternId ?? '').trim()) ||
+      !String(policy?.existingEntityId ?? '').trim() ||
+      String(policy?.existingEntityId) === String(policy?.probeEntityId) ||
+      !/^\/[^?#]*$/.test(String(policy?.existingAliasExample ?? '').trim()) ||
+      !/^\/[^?#]*$/.test(String(policy?.probeAlias ?? '').trim()) ||
+      !aliasStructuresMatch(policy?.existingAliasExample, policy?.probeAlias, policy?.strategy) ||
+      !createCheck ||
+      normalizeRouteKey(createCheck?.createdContentPath) !== normalizeRouteKey(policy?.probeAlias)
     ) {
-      reasons.push(`drupal-readback.json must record a working future-content alias policy for recurring public detail owner ${ledger.drupalEntityType}.${ledger.contentTypeOrBundle}.`);
+      reasons.push(`drupal-readback.json public-detail alias policy for ${key} must bind distinct live existing/probe entities, consistent aliases, and an accepted non-admin create workflow whose createdContentPath exactly matches the probe alias.`);
+    }
+  }
+  for (const policy of aliasPolicies) {
+    const key = `${identityKey(policy?.entityType)}.${identityKey(policy?.bundle)}`;
+    if (!bundleLedgerGroups.has(key)) {
+      reasons.push(`drupal-readback.json publicBundleAliasPolicies contains ${key || '(unnamed bundle)'} without a matching accepted collection ownership ledger.`);
     }
   }
 

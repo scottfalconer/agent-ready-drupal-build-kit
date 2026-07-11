@@ -105,6 +105,9 @@ function decodeEntities(value) {
   const named = new Map([
     ['amp', '&'],
     ['apos', "'"],
+    ['mdash', '—'],
+    ['middot', '·'],
+    ['ndash', '–'],
     ['gt', '>'],
     ['lt', '<'],
     ['nbsp', ' '],
@@ -263,7 +266,11 @@ function localTlsHost(hostname) {
   );
 }
 
-function requestOnce(url) {
+function requestOnce(url, method = 'GET') {
+  const requestMethod = String(method ?? '').trim().toUpperCase();
+  if (!/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(requestMethod)) {
+    return Promise.reject(new Error('Unsupported HTTP request method ' + (requestMethod || '(missing)') + '.'));
+  }
   return new Promise((resolveRequest, rejectRequest) => {
     const client = url.protocol === 'https:' ? https : http;
     const allowLocalCertificate = url.protocol === 'https:' && localTlsHost(url.hostname);
@@ -293,7 +300,7 @@ function requestOnce(url) {
           'accept-encoding': 'identity',
           'user-agent': 'agent-ready-drupal-build-kit-live-verifier/1'
         },
-        method: 'GET',
+        method: requestMethod,
         rejectUnauthorized: !allowLocalCertificate,
         timeout: REQUEST_TIMEOUT_MS
       },
@@ -484,29 +491,87 @@ function ddevDocroot(projectRoot) {
   }
 }
 
-function filesBelow(root, limit = 10_000) {
-  if (!existsSync(root) || !statSync(root).isDirectory()) {
-    return [];
-  }
+const CUSTOM_EXTENSION_DIRECTORY_LIMIT = 10_000;
+const CUSTOM_EXTENSION_FILE_LIMIT = 10_000;
+const CUSTOM_EXTENSION_SCAN_DEADLINE_MS = 5_000;
+const CUSTOM_EXTENSION_WALK_EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor']);
+
+export function customExtensionFiles(root, label, options = {}) {
+  const directoryLimit = options.directoryLimit ?? CUSTOM_EXTENSION_DIRECTORY_LIMIT;
+  const fileLimit = options.fileLimit ?? CUSTOM_EXTENSION_FILE_LIMIT;
+  const deadlineMs = options.deadlineMs ?? CUSTOM_EXTENSION_SCAN_DEADLINE_MS;
+  const now = options.now ?? Date.now;
+  const startedAt = now();
+  const errors = [];
   const files = [];
-  const pending = [root];
-  while (pending.length > 0 && files.length < limit) {
+  let rootRealPath = '';
+  try {
+    rootRealPath = realpathSync(root);
+    if (!statSync(rootRealPath).isDirectory()) {
+      return { errors: [`${label} is not a directory and cannot be inventoried as a custom extension.`], files };
+    }
+  } catch (error) {
+    return { errors: [`${label} could not be resolved for custom extension inventory: ${error.message}`], files };
+  }
+
+  const pending = [{ logicalPath: root, realPath: rootRealPath }];
+  const visitedRealDirectories = new Set();
+  scan: while (pending.length > 0) {
+    if (now() - startedAt > deadlineMs) {
+      errors.push(`Custom extension inventory exceeded its ${deadlineMs}ms deadline under ${label}.`);
+      break;
+    }
     const directory = pending.pop();
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!['.git', 'node_modules', 'vendor'].includes(entry.name)) {
-          pending.push(path);
+    if (visitedRealDirectories.has(directory.realPath)) {
+      continue;
+    }
+    visitedRealDirectories.add(directory.realPath);
+    if (visitedRealDirectories.size > directoryLimit) {
+      errors.push(`Custom extension inventory exceeded ${directoryLimit} directories under ${label}.`);
+      break;
+    }
+
+    let entries = [];
+    try {
+      entries = readdirSync(directory.logicalPath, { withFileTypes: true });
+    } catch (error) {
+      errors.push(`${label} could not read ${directory.logicalPath}: ${error.message}`);
+      continue;
+    }
+    for (const entry of entries) {
+      if (CUSTOM_EXTENSION_WALK_EXCLUDED_DIRECTORIES.has(entry.name)) {
+        continue;
+      }
+      if (now() - startedAt > deadlineMs) {
+        errors.push(`Custom extension inventory exceeded its ${deadlineMs}ms deadline under ${label}.`);
+        break scan;
+      }
+      const logicalPath = join(directory.logicalPath, entry.name);
+      let realPath = '';
+      let stats;
+      try {
+        realPath = realpathSync(logicalPath);
+        if (!pathIsInside(rootRealPath, realPath)) {
+          errors.push(`${logicalPath} resolves outside custom extension root ${label}.`);
+          continue;
         }
-      } else if (entry.isFile()) {
-        files.push(path);
-        if (files.length >= limit) {
-          throw new Error(`Custom extension file inventory exceeded ${limit} files under ${root}.`);
+        stats = statSync(realPath);
+      } catch (error) {
+        errors.push(`${logicalPath} could not be resolved for custom extension inventory: ${error.message}`);
+        continue;
+      }
+      if (stats.isDirectory()) {
+        pending.push({ logicalPath, realPath });
+      } else if (stats.isFile()) {
+        if (files.length >= fileLimit) {
+          errors.push(`Custom extension inventory exceeded ${fileLimit} files under ${label}.`);
+          break scan;
         }
+        files.push(logicalPath);
       }
     }
   }
-  return files;
+  return { errors, files };
 }
 
 function routingRecords(text, file, extension) {
@@ -829,7 +894,6 @@ $route_provider = \Drupal::service('router.route_provider');
 $url_generator = \Drupal::service('url_generator');
 $access_manager = \Drupal::service('access_manager');
 $router = \Drupal::service('router.no_access_checks');
-$param_converter = \Drupal::service('paramconverter_manager');
 $container = \Drupal::getContainer();
 $anonymous = new \Drupal\Core\Session\AnonymousUserSession();
 $route_inputs = is_array($audit_input['routes'] ?? NULL) ? $audit_input['routes'] : [];
@@ -846,7 +910,15 @@ foreach ($route_bindings as $binding) {
 $inputs_by_name = [];
 foreach ($route_inputs as $input) {
   if (is_array($input) && !empty($input['name'])) {
-    $inputs_by_name[(string) $input['name']] = $input;
+    $input_name = (string) $input['name'];
+    if (isset($inputs_by_name[$input_name])) {
+      $output['violations'][] = [
+        'name' => $input_name,
+        'reason' => 'duplicate_custom_route_name',
+      ];
+      continue;
+    }
+    $inputs_by_name[$input_name] = $input;
   }
 }
 
@@ -940,6 +1012,8 @@ foreach ($route_provider->getAllRoutes() as $live_name => $live_route) {
       'controller' => (string) $live_route->getDefault('_controller'),
       'routeParameters' => is_array($binding['routeParameters'] ?? NULL) ? $binding['routeParameters'] : [],
       'requestMethod' => (string) ($binding['requestMethod'] ?? ''),
+      'requestContentType' => (string) ($binding['requestContentType'] ?? ''),
+      'requestBody' => (string) ($binding['requestBody'] ?? ''),
       'discovery' => 'live_callback',
     ];
     break;
@@ -956,6 +1030,8 @@ foreach ($route_inputs as $input) {
     'filesystemController' => (string) ($input['controller'] ?? ''),
     'routeParameters' => is_array($input['routeParameters'] ?? NULL) ? $input['routeParameters'] : [],
     'requestMethod' => strtoupper((string) ($input['requestMethod'] ?? '')),
+    'requestContentType' => (string) ($input['requestContentType'] ?? ''),
+    'requestBody' => (string) ($input['requestBody'] ?? ''),
     'discovery' => (string) ($input['discovery'] ?? 'routing_yaml'),
     'accessCheckCompleted' => FALSE,
     'parameterConversionCompleted' => FALSE,
@@ -991,7 +1067,18 @@ foreach ($route_inputs as $input) {
         ['absolute' => FALSE]
       );
       $request_uri = ($base_url ?: 'http://localhost') . $record['representativePath'];
-      $request = \Symfony\Component\HttpFoundation\Request::create($request_uri, $record['requestMethod']);
+      $server = $record['requestContentType'] !== ''
+        ? ['CONTENT_TYPE' => $record['requestContentType'], 'HTTP_ACCEPT' => $record['requestContentType']]
+        : [];
+      $request = \Symfony\Component\HttpFoundation\Request::create(
+        $request_uri,
+        $record['requestMethod'],
+        [],
+        [],
+        [],
+        $server,
+        $record['requestBody']
+      );
       $matched = $router->matchRequest($request);
       $record['matchedRouteName'] = (string) ($matched[\Drupal\Core\Routing\RouteObjectInterface::ROUTE_NAME] ?? '');
       if ($record['matchedRouteName'] !== $record['name']) {
@@ -1001,9 +1088,10 @@ foreach ($route_inputs as $input) {
         continue;
       }
       $record['requestMatched'] = TRUE;
-      $converted = $param_converter->convert($matched);
+      // router.no_access_checks runs Drupal's routing enhancers, including
+      // parameter conversion. Converting a second time corrupts already-upcast
+      // entity parameters (for example, /node/{node}).
       $request->attributes->add($matched);
-      $request->attributes->add($converted);
       $record['parameterConversionCompleted'] = TRUE;
       $access = $access_manager->checkRequest($request, $anonymous, TRUE);
       $record['anonymousAccess'] = $access->isAllowed()
@@ -1049,7 +1137,9 @@ export function inspectCustomRouteRuntime(projectRoot, environment, routes, exte
       routeParameters: parameters && typeof parameters === 'object' && !Array.isArray(parameters)
         ? parameters
         : {},
-      requestMethod: String(binding.requestMethod ?? '').trim().toUpperCase()
+      requestMethod: String(binding.requestMethod ?? '').trim().toUpperCase(),
+      requestContentType: String(binding.requestContentType ?? '').trim(),
+      requestBody: String(binding.requestBody ?? '')
     };
   });
   const baseUrl = environmentTargetUrl(environment) || ddevTargetUrl(projectRoot) || 'http://localhost';
@@ -1076,7 +1166,63 @@ export function inspectCustomRouteRuntime(projectRoot, environment, routes, exte
   }
 }
 
-export function inspectCustomCode(projectRoot) {
+const GENERIC_SOURCE_NAME_TOKENS = new Set([
+  'city', 'county', 'department', 'district', 'example', 'government', 'home', 'official', 'portal', 'public',
+  'site', 'source', 'state', 'town', 'village', 'website', 'www'
+]);
+
+function boundaryTokens(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+export function sourceNameLint(machineName, sourceBaseUrl, sourceSiteName) {
+  const sourceTokens = new Set();
+  const addSourceToken = (token) => {
+    if (token.length >= 4 && !GENERIC_SOURCE_NAME_TOKENS.has(token)) {
+      sourceTokens.add(token);
+    }
+  };
+  try {
+    for (const label of new URL(String(sourceBaseUrl ?? '')).hostname.split('.')) {
+      for (const token of boundaryTokens(label)) {
+        addSourceToken(token);
+      }
+    }
+  } catch {
+    // The source-audit site name still supplies a conservative lint vocabulary.
+  }
+  for (const token of boundaryTokens(sourceSiteName)) {
+    addSourceToken(token);
+  }
+  const machineTokens = new Set(boundaryTokens(machineName));
+  const sortedSourceTokens = [...sourceTokens].sort();
+  const matchedTokens = sortedSourceTokens.filter((token) => machineTokens.has(token));
+  return {
+    matchedTokens,
+    sourceTokens: sortedSourceTokens,
+    status: matchedTokens.length > 0 ? 'source_name_match' : 'pass'
+  };
+}
+
+export function inspectCustomCode(projectRoot, sourceIdentity = {}) {
+  let projectRealPath = '';
+  try {
+    projectRealPath = realpathSync(projectRoot);
+  } catch (error) {
+    return {
+      completed: false,
+      controllers: [],
+      errors: ['Project root could not be resolved for custom extension inventory: ' + error.message],
+      extensions: [],
+      routes: [],
+      sourceFiles: [],
+      tests: [],
+      themeOwnershipFindings: []
+    };
+  }
   const docroot = ddevDocroot(projectRoot);
   const extensions = [];
   const routes = [];
@@ -1090,39 +1236,92 @@ export function inspectCustomCode(projectRoot) {
     ['theme', join(docroot, 'themes', 'custom')]
   ]) {
     const root = join(projectRoot, relativeRoot);
-    if (!existsSync(root) || !statSync(root).isDirectory()) {
+    if (!existsSync(root)) {
       continue;
     }
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) {
+    let rootEntries = [];
+    try {
+      if (!statSync(root).isDirectory()) {
+        errors.push(`${relativeRoot.split(sep).join('/')} is not a custom-extension directory.`);
         continue;
       }
+      rootEntries = readdirSync(root, { withFileTypes: true });
+    } catch (error) {
+      errors.push(`${relativeRoot.split(sep).join('/')} could not be read for custom extension inventory: ${error.message}`);
+      continue;
+    }
+    for (const entry of rootEntries.sort((left, right) => left.name.localeCompare(right.name))) {
       const extensionRoot = join(root, entry.name);
-      if (!existsSync(join(extensionRoot, `${entry.name}.info.yml`))) {
+      let extensionRootRealPath = '';
+      let extensionRootIsDirectory = false;
+      try {
+        extensionRootRealPath = realpathSync(extensionRoot);
+        extensionRootIsDirectory = statSync(extensionRootRealPath).isDirectory();
+      } catch (error) {
+        if (entry.isDirectory() || entry.isSymbolicLink()) {
+          errors.push(`${relative(projectRoot, extensionRoot).split(sep).join('/')} could not be resolved for custom extension inventory: ${error.message}`);
+        }
         continue;
       }
+      if (!extensionRootIsDirectory) {
+        continue;
+      }
+
       const extensionPath = relative(projectRoot, extensionRoot).split(sep).join('/');
-      let files = [];
+      if (!pathIsInside(projectRealPath, extensionRootRealPath)) {
+        errors.push(extensionPath + ' resolves outside the project root and cannot be inventoried as custom code.');
+        continue;
+      }
+      const walked = customExtensionFiles(extensionRoot, extensionPath);
+      errors.push(...walked.errors.map((error) => error.replaceAll(extensionRoot, extensionPath)));
+      const files = walked.files;
+      const infoFiles = files.filter((file) =>
+        dirname(file) === extensionRoot && /\.info\.yml$/.test(basename(file))
+      );
+      if (infoFiles.length !== 1) {
+        errors.push(`${extensionPath} must contain exactly one top-level *.info.yml file; found ${infoFiles.length}.`);
+        continue;
+      }
+      const infoFile = infoFiles[0];
+      const machineName = basename(infoFile).replace(/\.info\.yml$/, '');
+      let declaredType = '';
       try {
-        files = filesBelow(extensionRoot);
+        declaredType = topLevelYamlScalars(readFileSync(infoFile, 'utf8')).get('type') || '';
       } catch (error) {
-        errors.push(error.message);
+        errors.push(`${relative(projectRoot, infoFile).split(sep).join('/')} could not be read as extension metadata: ${error.message}`);
+      }
+      if (machineName !== entry.name) {
+        errors.push(`${extensionPath} directory name does not match derived extension machine name ${machineName}.`);
+      }
+      if (!/^[a-z][a-z0-9_]*$/.test(machineName)) {
+        errors.push(`${relative(projectRoot, infoFile).split(sep).join('/')} does not derive a valid Drupal extension machine name.`);
+      }
+      if (!['module', 'theme'].includes(declaredType)) {
+        errors.push(`${relative(projectRoot, infoFile).split(sep).join('/')} must declare top-level type: module or type: theme.`);
+      } else if (declaredType !== type) {
+        errors.push(`${relative(projectRoot, infoFile).split(sep).join('/')} declares type ${declaredType} inside the custom ${type} root.`);
       }
       extensions.push({
-        machineName: entry.name,
+        infoFile: relative(projectRoot, infoFile).split(sep).join('/'),
+        machineName,
         path: extensionPath,
         phpFileCount: files.filter((file) => /\.(?:php|module|install|inc|theme)$/i.test(file)).length,
-        type
+        sourceNameLint: sourceNameLint(
+          machineName,
+          sourceIdentity.sourceBaseUrl,
+          sourceIdentity.sourceSiteName
+        ),
+        type: declaredType
       });
       if (type === 'theme') {
-        const themeOwnership = inspectThemeOwnership(entry.name, projectRoot, files);
+        const themeOwnership = inspectThemeOwnership(machineName, projectRoot, files);
         errors.push(...themeOwnership.errors);
         themeOwnershipFindings.push(...themeOwnership.findings);
       }
       for (const file of files) {
         const sharedPath = relative(projectRoot, file).split(sep).join('/');
         try {
-          const sourceFile = inspectCustomSourceFile(entry.name, extensionRoot, projectRoot, file);
+          const sourceFile = inspectCustomSourceFile(machineName, extensionRoot, projectRoot, file);
           if (sourceFile) {
             sourceFiles.push(sourceFile);
           }
@@ -1130,19 +1329,33 @@ export function inspectCustomCode(projectRoot) {
           errors.push(`Custom source inventory could not read ${sharedPath}: ${error.message}`);
         }
         if (/\/src\/Controller\/.*\.php$/i.test(sharedPath)) {
-          controllers.push({ extension: entry.name, path: sharedPath });
+          controllers.push({ extension: machineName, path: sharedPath });
         }
         if (/\/tests\/.*\.(?:php|yml)$/i.test(sharedPath)) {
           tests.push(sharedPath);
         }
         if (/\.routing\.ya?ml$/i.test(sharedPath)) {
           try {
-            routes.push(...routingRecords(readFileSync(file, 'utf8'), sharedPath, entry.name));
+            routes.push(...routingRecords(readFileSync(file, 'utf8'), sharedPath, machineName));
           } catch {
-            routes.push({ controller: '', extension: entry.name, file: sharedPath, name: '', path: '', public: false });
+            routes.push({ controller: '', extension: machineName, file: sharedPath, name: '', path: '', public: false });
           }
         }
       }
+    }
+  }
+  const routesByName = new Map();
+  for (const route of routes) {
+    if (!route.name) {
+      continue;
+    }
+    const definitions = routesByName.get(route.name) ?? [];
+    definitions.push(route.file);
+    routesByName.set(route.name, definitions);
+  }
+  for (const [name, files] of routesByName) {
+    if (files.length > 1) {
+      errors.push('Custom route name ' + name + ' is declared more than once: ' + files.join(', ') + '.');
     }
   }
   return {
@@ -1430,10 +1643,22 @@ function inspectDisplayPluginCompatibility(projectRoot, environment) {
   }
 }
 
-const ALIAS_POLICY_AUDIT_PHP = String.raw`
+export const ALIAS_POLICY_AUDIT_PHP = String.raw`
 $output = ['records' => [], 'violations' => [], 'completed' => FALSE];
 $entity_type_manager = \Drupal::entityTypeManager();
 $alias_manager = \Drupal::service('path_alias.manager');
+$router = \Drupal::service('router.no_access_checks');
+$access_manager = \Drupal::service('access_manager');
+$anonymous = new \Drupal\Core\Session\AnonymousUserSession();
+$normalize = static fn (string $path): string => '/' . trim($path, '/');
+$alias_structure = static function (string $path) use ($normalize): array {
+  $segments = array_values(array_filter(explode('/', trim($normalize($path), '/')), 'strlen'));
+  return [
+    'depth' => count($segments),
+    'first' => $segments[0] ?? '',
+    'parent' => count($segments) > 1 ? '/' . implode('/', array_slice($segments, 0, -1)) : '/',
+  ];
+};
 foreach ($alias_policies as $policy) {
   $record = [
     'entityType' => (string) ($policy['entityType'] ?? ''),
@@ -1441,12 +1666,25 @@ foreach ($alias_policies as $policy) {
     'strategy' => (string) ($policy['strategy'] ?? ''),
     'patternId' => (string) ($policy['patternId'] ?? ''),
     'probeEntityId' => (string) ($policy['probeEntityId'] ?? ''),
+    'existingEntityId' => (string) ($policy['existingEntityId'] ?? ''),
+    'existingAliasExample' => (string) ($policy['existingAliasExample'] ?? ''),
     'probeAlias' => (string) ($policy['probeAlias'] ?? ''),
     'probeLanguage' => (string) ($policy['probeLanguage'] ?? ''),
     'entityLoaded' => FALSE,
     'bundleMatches' => FALSE,
+    'existingEntityLoaded' => FALSE,
+    'existingBundleMatches' => FALSE,
+    'existingAliasResolvesToEntity' => FALSE,
+    'existingEntityResolvesToAlias' => FALSE,
+    'structureMatchesExistingContent' => FALSE,
     'aliasResolvesToEntity' => FALSE,
     'entityResolvesToAlias' => FALSE,
+    'probePublished' => FALSE,
+    'canonicalRouteAvailable' => FALSE,
+    'canonicalAnonymousAccess' => '',
+    'canonicalHasAlias' => FALSE,
+    'existingAnonymousAccess' => '',
+    'probeAnonymousAccess' => '',
     'patternLoaded' => FALSE,
     'patternEnabled' => FALSE,
     'patternApplies' => FALSE,
@@ -1467,16 +1705,121 @@ foreach ($alias_policies as $policy) {
     if (!$record['bundleMatches']) {
       $record_violations[] = 'probe_entity_bundle_mismatch';
     }
+    $record['probePublished'] = !($entity instanceof \Drupal\Core\Entity\EntityPublishedInterface) || $entity->isPublished();
+    if (!$record['probePublished']) {
+      $record_violations[] = 'probe_entity_not_published';
+    }
     $record['probeLanguage'] = $record['probeLanguage'] ?: $entity->language()->getId();
-    $internal_path = '/' . ltrim($entity->toUrl('canonical')->getInternalPath(), '/');
-    $record['internalPath'] = $internal_path;
-    $record['resolvedInternalPath'] = $alias_manager->getPathByAlias($record['probeAlias'], $record['probeLanguage']);
-    $record['resolvedAlias'] = $alias_manager->getAliasByPath($internal_path, $record['probeLanguage']);
-    $normalize = static fn (string $path): string => '/' . trim($path, '/');
-    $record['aliasResolvesToEntity'] = $normalize($record['resolvedInternalPath']) === $normalize($internal_path);
-    $record['entityResolvesToAlias'] = $normalize($record['resolvedAlias']) === $normalize($record['probeAlias']);
-    if (!$record['aliasResolvesToEntity'] || !$record['entityResolvesToAlias']) {
-      $record_violations[] = 'probe_alias_resolution_mismatch';
+    if ($record['strategy'] === 'canonical_detail_route_denied') {
+      try {
+        $canonical_path = '/' . ltrim($entity->toUrl('canonical')->getInternalPath(), '/');
+        $record['internalPath'] = $canonical_path;
+        $canonical_alias = $alias_manager->getAliasByPath($canonical_path, $record['probeLanguage']);
+        $record['canonicalHasAlias'] = $normalize($canonical_alias) !== $normalize($canonical_path);
+        if ($record['canonicalHasAlias']) {
+          $record_violations[] = 'canonical_detail_route_has_public_alias';
+        }
+        $request = \Symfony\Component\HttpFoundation\Request::create('http://localhost' . $canonical_path, 'GET');
+        try {
+          $matched = $router->matchRequest($request);
+          $record['canonicalRouteAvailable'] = TRUE;
+          // router.no_access_checks may already upcast route parameters. Re-running
+          // param conversion here can attempt to convert an entity object a second time.
+          $request->attributes->add($matched);
+          $access = $access_manager->checkRequest($request, $anonymous, TRUE);
+          $record['canonicalAnonymousAccess'] = $access->isAllowed()
+            ? 'allowed'
+            : ($access->isForbidden() ? 'denied' : 'neutral');
+          if ($record['canonicalAnonymousAccess'] !== 'denied') {
+            $record_violations[] = 'canonical_detail_route_not_anonymously_denied';
+          }
+        }
+        catch (\Symfony\Component\Routing\Exception\ResourceNotFoundException) {
+          $record['canonicalRouteAvailable'] = FALSE;
+        }
+      }
+      catch (\Drupal\Core\Entity\Exception\UndefinedLinkTemplateException | \Symfony\Component\Routing\Exception\RouteNotFoundException) {
+        $record['canonicalRouteAvailable'] = FALSE;
+      }
+    }
+    else {
+      $internal_path = '/' . ltrim($entity->toUrl('canonical')->getInternalPath(), '/');
+      $record['internalPath'] = $internal_path;
+      if ($normalize($record['probeAlias']) === $normalize($internal_path)) {
+        $record_violations[] = 'probe_alias_is_raw_canonical_path';
+      }
+      $existing = $entity_type_manager->getStorage($record['entityType'])->load($record['existingEntityId']);
+      if ($record['existingEntityId'] === $record['probeEntityId']) {
+        $record_violations[] = 'existing_entity_must_differ_from_probe';
+      }
+      $record['existingEntityLoaded'] = (bool) $existing;
+      if (!$existing) {
+        $record_violations[] = 'existing_entity_not_found';
+      }
+      else {
+        $record['existingBundleMatches'] = $existing->bundle() === $record['bundle'];
+        if (!$record['existingBundleMatches']) {
+          $record_violations[] = 'existing_entity_bundle_mismatch';
+        }
+        if ($existing instanceof \Drupal\Core\Entity\EntityPublishedInterface && !$existing->isPublished()) {
+          $record_violations[] = 'existing_entity_not_published';
+        }
+        $existing_language = $existing->language()->getId();
+        $existing_internal_path = '/' . ltrim($existing->toUrl('canonical')->getInternalPath(), '/');
+        $record['existingInternalPath'] = $existing_internal_path;
+        if ($normalize($record['existingAliasExample']) === $normalize($existing_internal_path)) {
+          $record_violations[] = 'existing_alias_is_raw_canonical_path';
+        }
+        $record['resolvedExistingInternalPath'] = $alias_manager->getPathByAlias($record['existingAliasExample'], $existing_language);
+        $record['resolvedExistingAlias'] = $alias_manager->getAliasByPath($existing_internal_path, $existing_language);
+        $record['existingAliasResolvesToEntity'] = $normalize($record['resolvedExistingInternalPath']) === $normalize($existing_internal_path);
+        $record['existingEntityResolvesToAlias'] = $normalize($record['resolvedExistingAlias']) === $normalize($record['existingAliasExample']);
+        if (!$record['existingAliasResolvesToEntity'] || !$record['existingEntityResolvesToAlias']) {
+          $record_violations[] = 'existing_alias_resolution_mismatch';
+        }
+        $probe_structure = $alias_structure($record['probeAlias']);
+        $existing_structure = $alias_structure($record['existingAliasExample']);
+        $record['structureMatchesExistingContent'] = $record['strategy'] === 'pathauto_pattern'
+          ? $probe_structure['depth'] === $existing_structure['depth'] &&
+            $probe_structure['first'] !== '' &&
+            $probe_structure['first'] === $existing_structure['first']
+          : $probe_structure['parent'] === $existing_structure['parent'];
+        if (!$record['structureMatchesExistingContent']) {
+          $record_violations[] = 'probe_alias_structure_mismatch';
+        }
+      }
+      $record['resolvedInternalPath'] = $alias_manager->getPathByAlias($record['probeAlias'], $record['probeLanguage']);
+      $record['resolvedAlias'] = $alias_manager->getAliasByPath($internal_path, $record['probeLanguage']);
+      $record['aliasResolvesToEntity'] = $normalize($record['resolvedInternalPath']) === $normalize($internal_path);
+      $record['entityResolvesToAlias'] = $normalize($record['resolvedAlias']) === $normalize($record['probeAlias']);
+      if (!$record['aliasResolvesToEntity'] || !$record['entityResolvesToAlias']) {
+        $record_violations[] = 'probe_alias_resolution_mismatch';
+      }
+      foreach ([
+        ['path' => $record['existingAliasExample'], 'field' => 'existingAnonymousAccess'],
+        ['path' => $record['probeAlias'], 'field' => 'probeAnonymousAccess'],
+      ] as $public_alias) {
+        try {
+          $alias_request = \Symfony\Component\HttpFoundation\Request::create(
+            'http://localhost' . $normalize($public_alias['path']),
+            'GET'
+          );
+          $alias_matched = $router->matchRequest($alias_request);
+          $alias_request->attributes->add($alias_matched);
+          $alias_access = $access_manager->checkRequest($alias_request, $anonymous, TRUE);
+          $record[$public_alias['field']] = $alias_access->isAllowed()
+            ? 'allowed'
+            : ($alias_access->isForbidden() ? 'denied' : 'neutral');
+        }
+        catch (\Symfony\Component\Routing\Exception\ResourceNotFoundException) {
+          $record[$public_alias['field']] = 'not_found';
+        }
+        if ($record[$public_alias['field']] !== 'allowed') {
+          $record_violations[] = $public_alias['field'] === 'existingAnonymousAccess'
+            ? 'existing_alias_not_anonymously_allowed'
+            : 'probe_alias_not_anonymously_allowed';
+        }
+      }
     }
     if ($record['strategy'] === 'pathauto_pattern') {
       if (!$entity_type_manager->hasDefinition('pathauto_pattern') || !\Drupal::hasService('pathauto.generator')) {
@@ -1522,7 +1865,7 @@ print json_encode($output, JSON_UNESCAPED_SLASHES);
 
 export function inspectAliasPolicies(projectRoot, environment, policies) {
   const auditablePolicies = Array.isArray(policies)
-    ? policies.filter((policy) => ['pathauto_pattern', 'editor_supplied_alias'].includes(policy?.strategy))
+    ? policies.filter((policy) => ['pathauto_pattern', 'editor_supplied_alias', 'canonical_detail_route_denied'].includes(policy?.strategy))
     : [];
   if (auditablePolicies.length === 0) {
     return { completed: true, records: [], violations: [] };
@@ -1572,12 +1915,99 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   return '';
 }
 
-function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
+function syncDirectoryYamlFiles(hostPath) {
+  const files = [];
+  const errors = [];
+  const rootRealPath = realpathSync(hostPath);
+  const pending = [{ logicalPath: hostPath, realPath: rootRealPath }];
+  const visited = new Set();
+  const startedAt = Date.now();
+  const fileLimit = 50_000;
+  const directoryLimit = 20_000;
+  while (pending.length > 0) {
+    if (Date.now() - startedAt > CUSTOM_EXTENSION_SCAN_DEADLINE_MS) {
+      errors.push(`Active config-sync scan exceeded its ${CUSTOM_EXTENSION_SCAN_DEADLINE_MS}ms deadline.`);
+      break;
+    }
+    const directory = pending.pop();
+    if (visited.has(directory.realPath)) {
+      continue;
+    }
+    visited.add(directory.realPath);
+    if (visited.size > directoryLimit) {
+      errors.push(`Active config-sync scan exceeded ${directoryLimit} directories.`);
+      break;
+    }
+    let entries = [];
+    try {
+      entries = readdirSync(directory.logicalPath, { withFileTypes: true });
+    } catch (error) {
+      errors.push(`Active config-sync directory ${directory.logicalPath} could not be read: ${error.message}`);
+      continue;
+    }
+    for (const entry of entries) {
+      const logicalPath = join(directory.logicalPath, entry.name);
+      let realPath = '';
+      let stats;
+      try {
+        realPath = realpathSync(logicalPath);
+        if (!pathIsInside(rootRealPath, realPath)) {
+          errors.push(`Active config-sync path ${logicalPath} resolves outside the sync directory.`);
+          continue;
+        }
+        stats = statSync(realPath);
+      } catch (error) {
+        errors.push(`Active config-sync path ${logicalPath} could not be resolved: ${error.message}`);
+        continue;
+      }
+      if (stats.isDirectory()) {
+        pending.push({ logicalPath, realPath });
+      } else if (stats.isFile() && /\.ya?ml$/i.test(entry.name)) {
+        if (files.length >= fileLimit) {
+          errors.push(`Active config-sync scan exceeded ${fileLimit} YAML files.`);
+          return { errors, files };
+        }
+        files.push(logicalPath);
+      }
+    }
+  }
+  return { errors, files: files.sort() };
+}
+
+export function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
-  if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
-    return { confirmed: false, directory: '', yamlFiles: [] };
+  if (!hostPath || !existsSync(hostPath)) {
+    return { activeScanErrors: ['Active config-sync directory was unavailable.'], activeYamlFiles: [], confirmed: false, directory: '', yamlFiles: [] };
   }
   const directory = relative(projectRoot, hostPath).split(sep).join('/');
+  let activeScan;
+  try {
+    const projectRealPath = realpathSync(projectRoot);
+    const hostRealPath = realpathSync(hostPath);
+    if (!pathIsInside(projectRealPath, hostRealPath)) {
+      return {
+        activeScanErrors: ['Active config-sync directory resolves outside the project root.'],
+        activeYamlFiles: [],
+        confirmed: false,
+        directory,
+        yamlFiles: []
+      };
+    }
+    if (!statSync(hostRealPath).isDirectory()) {
+      return { activeScanErrors: ['Active config-sync path is not a directory.'], activeYamlFiles: [], confirmed: false, directory, yamlFiles: [] };
+    }
+    activeScan = syncDirectoryYamlFiles(hostPath);
+  } catch (error) {
+    return {
+      activeScanErrors: [`Active config-sync directory could not be resolved: ${String(error.message).replaceAll(hostPath, directory)}`],
+      activeYamlFiles: [],
+      confirmed: false,
+      directory,
+      yamlFiles: []
+    };
+  }
+  const activeYamlFiles = activeScan.files.map((path) => relative(projectRoot, path).split(sep).join('/'));
+  const activeScanErrors = activeScan.errors.map((error) => error.replaceAll(hostPath, directory));
   try {
     const output = execFileSync('git', ['ls-files', '--', directory], {
       cwd: projectRoot,
@@ -1589,9 +2019,27 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    return { confirmed: yamlFiles.length > 0, directory, yamlFiles };
+    const trackedSet = new Set(yamlFiles);
+    const untrackedActiveYamlFiles = activeYamlFiles.filter((path) => !trackedSet.has(path));
+    return {
+      activeScanErrors,
+      activeYamlFiles,
+      allActiveYamlTracked: activeScanErrors.length === 0 && untrackedActiveYamlFiles.length === 0,
+      confirmed: yamlFiles.length > 0,
+      directory,
+      untrackedActiveYamlFiles,
+      yamlFiles
+    };
   } catch {
-    return { confirmed: false, directory, yamlFiles: [] };
+    return {
+      activeScanErrors,
+      activeYamlFiles,
+      allActiveYamlTracked: false,
+      confirmed: false,
+      directory,
+      untrackedActiveYamlFiles: activeYamlFiles,
+      yamlFiles: []
+    };
   }
 }
 
@@ -1625,19 +2073,29 @@ function yamlBoolean(value) {
   return null;
 }
 
-export function inspectTrackedCanvasTemplates(projectRoot, trackedConfigYamlFiles, trackedConfigDirectory = '') {
+export function inspectTrackedCanvasTemplates(
+  projectRoot,
+  trackedConfigYamlFiles,
+  trackedConfigDirectory = '',
+  activeConfigYamlFiles = trackedConfigYamlFiles,
+  activeScanErrors = []
+) {
   const normalizedConfigDirectory = String(trackedConfigDirectory ?? '').replaceAll('\\', '/').replace(/\/+$/, '');
   const trackedFiles = Array.isArray(trackedConfigYamlFiles)
     ? trackedConfigYamlFiles.map((path) => String(path).replaceAll('\\', '/')).filter(Boolean)
     : [];
-  const templatePaths = trackedFiles.filter((path) => {
+  const trackedFileSet = new Set(trackedFiles);
+  const activeFiles = Array.isArray(activeConfigYamlFiles)
+    ? activeConfigYamlFiles.map((path) => String(path).replaceAll('\\', '/')).filter(Boolean)
+    : [];
+  const templatePaths = activeFiles.filter((path) => {
     if (normalizedConfigDirectory && dirname(path).replaceAll('\\', '/') !== normalizedConfigDirectory) {
       return false;
     }
     return /^canvas\.content_template\..+\.ya?ml$/i.test(basename(path));
   });
   const templates = [];
-  const errors = [];
+  const errors = Array.isArray(activeScanErrors) ? [...activeScanErrors] : [];
 
   for (const path of templatePaths) {
     const absolutePath = resolve(projectRoot, path);
@@ -1651,6 +2109,7 @@ export function inspectTrackedCanvasTemplates(projectRoot, trackedConfigYamlFile
       const record = {
         configName: basename(path).replace(/\.ya?ml$/i, ''),
         path,
+        tracked: trackedFileSet.has(path),
         enabled: status === true,
         id: values.get('id') || '',
         entityType: values.get('content_entity_type_id') || '',
@@ -1678,6 +2137,7 @@ export function inspectTrackedCanvasTemplates(projectRoot, trackedConfigYamlFile
 
   return {
     completed: errors.length === 0,
+    activeConfigFileCount: activeFiles.length,
     trackedConfigFileCount: trackedFiles.length,
     matchingConfigCount: templates.length,
     templates,
@@ -1702,7 +2162,7 @@ function configStatusIsClean(result) {
   }
 }
 
-function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasPolicies = []) {
+function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasPolicies = [], sourceIdentity = {}) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
@@ -1725,6 +2185,7 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
       frontPage: '',
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
+      siteName: '',
       siteUuid: '',
       trackedConfigDirectory: '',
       trackedConfigYamlFiles: []
@@ -1733,6 +2194,9 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
   const bootstrap = runDrush(projectRoot, environment, ['status', '--field=bootstrap']);
   const uuidOutput = runDrush(projectRoot, environment, ['config:get', 'system.site', '--field=uuid']);
+  const siteName = cleanScalar(
+    runDrush(projectRoot, environment, ['config:get', 'system.site', 'name', '--format=string'])
+  );
   const frontPage = cleanScalar(
     runDrush(projectRoot, environment, ['config:get', 'system.site', 'page.front', '--format=string'])
   );
@@ -1746,15 +2210,22 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
   const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
   const canvasTemplateAudit = trackedConfig.confirmed
-    ? inspectTrackedCanvasTemplates(projectRoot, trackedConfig.yamlFiles, trackedConfig.directory)
+    ? inspectTrackedCanvasTemplates(
+        projectRoot,
+        trackedConfig.yamlFiles,
+        trackedConfig.directory,
+        trackedConfig.activeYamlFiles,
+        trackedConfig.activeScanErrors
+      )
     : {
         completed: false,
+        activeConfigFileCount: trackedConfig.activeYamlFiles.length,
         trackedConfigFileCount: trackedConfig.yamlFiles.length,
         matchingConfigCount: 0,
         templates: [],
         errors: ['Tracked Drupal config was unavailable.']
       };
-  const filesystemCustomCode = inspectCustomCode(projectRoot);
+  const filesystemCustomCode = inspectCustomCode(projectRoot, sourceIdentity);
   const customQuality = inspectCustomPhpQuality(projectRoot, filesystemCustomCode.extensions);
   const customRouteAudit = inspectCustomRouteRuntime(
     projectRoot,
@@ -1798,7 +2269,7 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
     aliasPolicyAudit,
     canvasTemplateAudit,
     configStatusClean: configStatusIsClean(configStatus),
-    configSyncTracked: trackedConfig.confirmed,
+    configSyncTracked: trackedConfig.confirmed && trackedConfig.allActiveYamlTracked === true,
     configSyncDirectory,
     customCodeInventory,
     displayPluginAudit,
@@ -1808,9 +2279,11 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
+    siteName,
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
-    trackedConfigYamlFiles: trackedConfig.yamlFiles
+    trackedConfigYamlFiles: trackedConfig.yamlFiles,
+    untrackedActiveConfigYamlFiles: trackedConfig.untrackedActiveYamlFiles ?? []
   };
 }
 
@@ -2070,9 +2543,25 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected) {
+export function titleHasDuplicatedSiteNameSuffix(title, siteName) {
+  const normalizedTitle = normalizeText(decodeEntities(title));
+  const normalizedSiteName = normalizeText(decodeEntities(siteName));
+  if (!normalizedTitle || !normalizedSiteName) {
+    return false;
+  }
+  const sitePattern = normalizedSiteName
+    .split(/\s+/)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\s+');
+  return new RegExp(`${sitePattern}\\s*(?:[|:·–—]|-)\\s*${sitePattern}$`, 'i').test(normalizedTitle);
+}
+
+async function verifyRoute(baseUrl, expected, liveSiteName) {
   const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
+  if (!normalizeText(liveSiteName)) {
+    errors.push(`${expected.targetPath} cannot verify rendered title hygiene because live system.site name is unavailable.`);
+  }
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
   }
@@ -2092,12 +2581,10 @@ async function verifyRoute(baseUrl, expected) {
     } else if (expected.expectedStatus < 200 || expected.expectedStatus >= 300) {
       errors.push(`${expected.targetPath} is a primary target route and cannot accept HTTP ${expected.expectedStatus}; expected a final 2xx response or an explicit redirect.`);
     }
-  } else if (!['public_200', 'redirect', 'private_403', 'noindex'].includes(expected.expectedBehavior)) {
+  } else if (!['public_200', 'redirect', 'noindex'].includes(expected.expectedBehavior)) {
     errors.push(`${expected.targetPath} has unsupported target-required behavior ${JSON.stringify(expected.expectedBehavior)}.`);
   } else if (expected.expectedBehavior === 'redirect' && !REDIRECT_STATUSES.has(expected.expectedStatus)) {
     errors.push(`${expected.targetPath} target-required redirect must declare an HTTP redirect status.`);
-  } else if (expected.expectedBehavior === 'private_403' && expected.expectedStatus !== 403) {
-    errors.push(`${expected.targetPath} target-required private_403 behavior must declare status 403.`);
   } else if (
     ['public_200', 'noindex'].includes(expected.expectedBehavior) &&
     (expected.expectedStatus < 200 || expected.expectedStatus >= 300)
@@ -2115,6 +2602,9 @@ async function verifyRoute(baseUrl, expected) {
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
     const actualAssets = renderedAssets(response.body, response.finalUrl);
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
+    if (titleHasDuplicatedSiteNameSuffix(actualTitle, liveSiteName)) {
+      errors.push(`${expected.targetPath} rendered title ends with the live site name ${JSON.stringify(normalizeText(liveSiteName))} twice.`);
+    }
     if (actualStatus !== expected.expectedStatus) {
       errors.push(`${expected.targetPath} returned status ${actualStatus}; expected ${expected.expectedStatus}.`);
     }
@@ -2224,6 +2714,133 @@ function packetBrowserArtifactValid(packetDir, value, { allowedScreenshots, effe
   }
 }
 
+export async function verifyPrivateRoute(baseUrl, record, inProcessRoute = null) {
+  const requestedUrl = new URL(normalizePath(record?.path).replace(/^\//, ''), new URL('/', baseUrl));
+  const errors = [];
+  let response = null;
+  let finalPath = normalizePath(record?.path);
+  const requestMethod = String(record?.requestMethod ?? '').trim().toUpperCase();
+  if (!['GET', 'HEAD'].includes(requestMethod)) {
+    const safelyVerified =
+      inProcessRoute?.accessCheckCompleted === true &&
+      inProcessRoute?.requestMatched === true &&
+      inProcessRoute?.anonymousAccess === 'denied' &&
+      inProcessRoute?.requestMethod === requestMethod;
+    if (!safelyVerified) {
+      errors.push(
+        (record?.path || '(unknown private route)') +
+        ' uses ' + (requestMethod || '(missing method)') +
+        '; the verifier refuses a state-changing HTTP request without an exact denied in-process custom-route audit.'
+      );
+    }
+    if (record?.expectedAnonymousBehavior !== 'denied_403' || Number(record?.expectedStatus) !== 403) {
+      errors.push((record?.path || '(unknown private route)') + ' unsafe-method inventory must expect denied_403/HTTP 403.');
+    }
+    return {
+      id: record?.id ?? '',
+      routeName: record?.routeName ?? '',
+      path: normalizePath(record?.path),
+      requestMethod,
+      verificationMode: 'in-process-router-access',
+      expectedAnonymousBehavior: record?.expectedAnonymousBehavior ?? '',
+      expectedStatus: Number(record?.expectedStatus),
+      expectedFinalPath: normalizePath(record?.expectedFinalPath || record?.path),
+      actualStatus: safelyVerified ? 403 : 0,
+      actualFinalPath: finalPath,
+      errors
+    };
+  }
+  try {
+    response = await requestOnce(requestedUrl, requestMethod);
+    if (record?.expectedAnonymousBehavior === 'login_redirect') {
+      const location = response.headers.location;
+      if (!REDIRECT_STATUSES.has(response.status) || !location) {
+        errors.push(`${record.path} private route expected a login redirect but returned HTTP ${response.status}.`);
+      } else {
+        const redirected = new URL(location, requestedUrl);
+        if (redirected.origin !== requestedUrl.origin) {
+          errors.push(`${record.path} private route redirected outside the live target origin.`);
+        }
+        finalPath = normalizePath(redirected.pathname);
+      }
+    } else if (record?.expectedAnonymousBehavior === 'denied_403' && response.status !== 403) {
+      errors.push(`${record.path} private route expected anonymous HTTP 403 but returned HTTP ${response.status}.`);
+    } else if (record?.expectedAnonymousBehavior === 'not_found_404' && response.status !== 404) {
+      errors.push(`${record.path} disabled private route expected HTTP 404 but returned HTTP ${response.status}.`);
+    }
+    if (Number(record?.expectedStatus) !== response.status) {
+      errors.push(`${record.path} private route returned HTTP ${response.status}; expected ${record?.expectedStatus}.`);
+    }
+    if (finalPath !== normalizePath(record?.expectedFinalPath || record?.path)) {
+      errors.push(`${record.path} private route resolved to ${finalPath}; expected ${normalizePath(record?.expectedFinalPath || record?.path)}.`);
+    }
+    if (response.status >= 200 && response.status < 300) {
+      errors.push(`${record.path} private route is anonymously reachable and cannot be counted as private inventory.`);
+    }
+  } catch (error) {
+    errors.push(`${record?.path || '(unknown private route)'} private-route verification failed: ${error.message}`);
+  }
+  return {
+    id: record?.id ?? '',
+    routeName: record?.routeName ?? '',
+    path: normalizePath(record?.path),
+    requestMethod,
+    verificationMode: 'anonymous-http',
+    expectedAnonymousBehavior: record?.expectedAnonymousBehavior ?? '',
+    expectedStatus: Number(record?.expectedStatus),
+    expectedFinalPath: normalizePath(record?.expectedFinalPath || record?.path),
+    actualStatus: response?.status ?? 0,
+    actualFinalPath: finalPath,
+    errors
+  };
+}
+
+async function verifyAliasPolicyHttp(baseUrl, policy) {
+  const checks = [];
+  const paths = policy?.strategy === 'canonical_detail_route_denied'
+    ? []
+    : [
+        { path: policy?.existingAliasExample, public: true },
+        { path: policy?.probeAlias, public: true }
+      ];
+  for (const expectation of paths) {
+    const path = normalizePath(expectation.path);
+    const errors = [];
+    let response = null;
+    try {
+      const requestedUrl = new URL(path.replace(/^\//, ''), new URL('/', baseUrl));
+      response = expectation.public
+        ? await requestFollowingRedirects(requestedUrl)
+        : await requestOnce(requestedUrl, 'GET');
+      if (expectation.public && !(response.status >= 200 && response.status < 300)) {
+        errors.push(path + ' public alias returned HTTP ' + response.status + ' instead of a successful anonymous response.');
+      }
+      if (
+        expectation.public &&
+        normalizePath(new URL(response.finalUrl).pathname) !== path
+      ) {
+        errors.push(path + ' public alias resolved to ' + normalizePath(new URL(response.finalUrl).pathname) + ' instead of the declared alias path.');
+      }
+      if (!expectation.public && response.status !== expectation.expectedStatus) {
+        errors.push(path + ' no-public-detail candidate returned HTTP ' + response.status + '; expected ' + expectation.expectedStatus + '.');
+      }
+    } catch (error) {
+      errors.push(path + ' alias-policy HTTP verification failed: ' + error.message);
+    }
+    checks.push({
+      bundle: policy?.bundle ?? '',
+      entityType: policy?.entityType ?? '',
+      errors,
+      expectedPublic: expectation.public,
+      expectedStatus: expectation.public ? 200 : expectation.expectedStatus,
+      finalPath: response?.finalUrl ? normalizePath(new URL(response.finalUrl).pathname) : '',
+      path,
+      status: response?.status ?? 0
+    });
+  }
+  return checks;
+}
+
 export function canvasAssetRuntimeErrors({ browserEvidence, packetDir, routeChecks, runtimeDefaultTheme }) {
   const errors = [];
   const checks = (Array.isArray(browserEvidence?.canvasAuthoringChecks)
@@ -2284,7 +2901,15 @@ export function canvasAssetRuntimeErrors({ browserEvidence, packetDir, routeChec
   return errors;
 }
 
-function implementationQualityErrors(runtime, readback, routeMatrix, patternMap, independentVerification) {
+function implementationQualityErrors(
+  runtime,
+  readback,
+  routeMatrix,
+  patternMap,
+  independentVerification,
+  browserEvidence,
+  sourceAudit
+) {
   const errors = [];
   const runtimeCanvas = runtime?.canvasTemplateAudit ?? {};
   const packetCanvas = readback?.implementationQuality?.canvasTemplateAudit ?? {};
@@ -2297,6 +2922,7 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
     }
     if (
       packetCanvas.completed !== true ||
+      packetCanvas.activeConfigFileCount !== runtimeCanvas.activeConfigFileCount ||
       packetCanvas.trackedConfigFileCount !== runtimeCanvas.trackedConfigFileCount ||
       packetCanvas.matchingConfigCount !== runtimeCanvas.matchingConfigCount ||
       packetCanvasTemplates.length !== runtimeCanvasTemplates.length
@@ -2309,22 +2935,23 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
       );
       if (
         !packetTemplate ||
+        packetTemplate.tracked !== template.tracked ||
         packetTemplate.enabled !== template.enabled ||
         packetTemplate.id !== template.id ||
         packetTemplate.entityType !== template.entityType ||
         packetTemplate.bundle !== template.bundle ||
         packetTemplate.viewMode !== template.viewMode
       ) {
-        errors.push(`Tracked Canvas content template ${template.configName || template.path} is missing or inaccurate in drupal-readback.json.`);
+        errors.push(`Active sync-directory Canvas content template ${template.configName || template.path} is missing or inaccurate in drupal-readback.json.`);
         continue;
       }
       const publicTarget = canvasTemplateTargetsPublicOutput(template, readback, patternMap);
       if (packetTemplate.publicTarget !== publicTarget) {
-        errors.push(`Tracked Canvas content template ${template.configName} has an inaccurate public-target disposition in drupal-readback.json.`);
+        errors.push(`Active sync-directory Canvas content template ${template.configName} has an inaccurate public-target disposition in drupal-readback.json.`);
       }
       if (canvasUnused && template.enabled === true && publicTarget) {
         errors.push(
-          `Tracked config enables Canvas content template ${template.configName} for public ${template.entityType}.${template.bundle}.${template.viewMode} while the packet declares Canvas intentionally unused; active Canvas content templates supersede theme entity templates for that target.`
+          `Active sync config enables Canvas content template ${template.configName} for public ${template.entityType}.${template.bundle}.${template.viewMode} while the packet declares Canvas intentionally unused; active Canvas content templates supersede theme entity templates for that target.`
         );
       }
     }
@@ -2387,11 +3014,44 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
       record?.machineName === extension.machineName &&
       record?.type === extension.type &&
       record?.path === extension.path &&
+      record?.infoFile === extension.infoFile &&
       record?.phpFileCount === extension.phpFileCount
     );
     if (!packetExtension) {
       errors.push(`Custom ${extension.type} ${extension.machineName} is missing from the accepted Drupal readback inventory.`);
       continue;
+    }
+    const expectedLint = sourceNameLint(
+      extension.machineName,
+      routeMatrix?.sourceBaseUrl,
+      sourceAudit?.site?.name
+    );
+    const packetLint = packetExtension.sourceNameLint ?? {};
+    const runtimeLint = extension.sourceNameLint ?? expectedLint;
+    const normalizedTokens = (values) => (Array.isArray(values) ? values : [])
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+      .sort();
+    if (
+      JSON.stringify(normalizedTokens(runtimeLint.sourceTokens)) !== JSON.stringify(expectedLint.sourceTokens) ||
+      JSON.stringify(normalizedTokens(runtimeLint.matchedTokens)) !== JSON.stringify(expectedLint.matchedTokens) ||
+      JSON.stringify(normalizedTokens(packetLint.sourceTokens)) !== JSON.stringify(expectedLint.sourceTokens) ||
+      JSON.stringify(normalizedTokens(packetLint.matchedTokens)) !== JSON.stringify(expectedLint.matchedTokens)
+    ) {
+      errors.push(`Custom ${extension.type} ${extension.machineName} source-name lint does not match the current source hostname and site name.`);
+    } else if (expectedLint.matchedTokens.length > 0) {
+      const exception = packetLint.exception ?? {};
+      if (
+        packetLint.status !== 'exception' ||
+        exception.accepted !== true ||
+        !String(exception.owner ?? '').trim() ||
+        !String(exception.rationale ?? '').trim() ||
+        !String(exception.evidence ?? '').trim()
+      ) {
+        errors.push(`Custom ${extension.type} ${extension.machineName} is source-named and lacks an accepted owner, rationale, and packet-local evidence exception.`);
+      }
+    } else if (packetLint.status !== 'pass') {
+      errors.push(`Custom ${extension.type} ${extension.machineName} source-name lint must be pass when no exact boundary token matches.`);
     }
     if (extension.phpFileCount > 0) {
       for (const kind of ['coding_standards', 'static_analysis']) {
@@ -2523,6 +3183,9 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
     if (packetRoute.requestMethod !== route.requestMethod) {
       errors.push(`Custom route ${route.name} request method ${packetRoute.requestMethod || '(missing)'} does not match the live request audit method ${route.requestMethod || '(missing)'}.`);
     }
+    if (String(packetRoute.requestContentType ?? '').trim() !== String(route.requestContentType ?? '').trim()) {
+      errors.push(`Custom route ${route.name} representative request content type does not match the live request audit.`);
+    }
     if (packetRoute.anonymousAccessDisposition !== route.anonymousAccess) {
       errors.push(`Custom route ${route.name} anonymous-access disposition ${packetRoute.anonymousAccessDisposition || '(missing)'} does not match live Drupal access ${route.anonymousAccess || '(unknown)'}.`);
     }
@@ -2540,8 +3203,36 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
       (binding.kind === 'concrete_path' && normalizePath(record?.targetPath) === normalizePath(binding.value)) ||
       (binding.kind === 'route_name' && record?.routeName === binding.value)
     );
-    if (!matrixBindingPresent) {
-      errors.push(`Custom route ${route.name} has no matching concrete-path or route-name binding in route-matrix.json.`);
+    if (route.anonymousAccess === 'allowed' && !matrixBindingPresent) {
+      errors.push(`Anonymous-allowed custom route ${route.name} has no matching public concrete-path or route-name binding in route-matrix.json.`);
+    }
+    if (route.anonymousAccess === 'denied') {
+      const privateRoute = (Array.isArray(readback?.routing?.privateRoutes) ? readback.routing.privateRoutes : [])
+        .find((record) => record?.id === packetRoute.privateRouteId);
+      if (
+        !privateRoute ||
+        privateRoute.routeName !== route.name ||
+        normalizePath(privateRoute.path) !== normalizePath(route.representativePath) ||
+        String(privateRoute.requestMethod ?? '').trim().toUpperCase() !== route.requestMethod ||
+        !['admin', 'authenticated', 'internal', 'disabled'].includes(privateRoute.classification) ||
+        !String(privateRoute.owner ?? '').trim() ||
+        !String(privateRoute.rationale ?? '').trim() ||
+        !String(privateRoute.evidence ?? '').trim() ||
+        privateRoute.accepted !== true
+      ) {
+        errors.push(`Anonymous-denied custom route ${route.name} needs an exact accepted private-route inventory binding with owner, rationale, and packet-local evidence.`);
+      }
+    }
+  }
+  for (const packetRoute of Array.isArray(packetCustom.routes) ? packetCustom.routes : []) {
+    const runtimeMatches = (Array.isArray(runtimeCustom.routes) ? runtimeCustom.routes : []).filter((route) =>
+      route?.name === packetRoute?.name &&
+      normalizePath(route?.path) === normalizePath(packetRoute?.path) &&
+      route?.extension === packetRoute?.extension &&
+      String(route?.controller ?? '') === String(packetRoute?.controller ?? '')
+    );
+    if (runtimeMatches.length !== 1) {
+      errors.push('Accepted custom route ' + (packetRoute?.name || packetRoute?.path || '(unnamed route)') + ' must match exactly one live runtime route; found ' + runtimeMatches.length + '.');
     }
   }
   for (const controller of Array.isArray(runtimeCustom.controllers) ? runtimeCustom.controllers : []) {
@@ -2567,7 +3258,7 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
 
   const packetAliasPolicies = Array.isArray(readback?.routing?.publicBundleAliasPolicies)
     ? readback.routing.publicBundleAliasPolicies.filter((policy) =>
-        ['pathauto_pattern', 'editor_supplied_alias'].includes(policy?.strategy)
+        ['pathauto_pattern', 'editor_supplied_alias', 'canonical_detail_route_denied'].includes(policy?.strategy)
       )
     : [];
   const runtimeAliases = runtime?.aliasPolicyAudit ?? {};
@@ -2578,11 +3269,14 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
     const record = (Array.isArray(runtimeAliases.records) ? runtimeAliases.records : []).find((candidate) =>
       candidate?.entityType === policy?.entityType &&
       candidate?.bundle === policy?.bundle &&
+      candidate?.strategy === policy?.strategy &&
       String(candidate?.probeEntityId ?? '') === String(policy?.probeEntityId ?? '') &&
+      String(candidate?.existingEntityId ?? '') === String(policy?.existingEntityId ?? '') &&
+      candidate?.existingAliasExample === policy?.existingAliasExample &&
       candidate?.probeAlias === policy?.probeAlias
     );
     if (!record?.passed) {
-      errors.push(`Future alias policy ${policy?.entityType || '(entity)'}.${policy?.bundle || '(bundle)'} did not live-load its probe entity, applicable pattern, and alias resolution.`);
+      errors.push(`Future detail-route policy ${policy?.entityType || '(entity)'}.${policy?.bundle || '(bundle)'} did not live-prove its alias structure or no-public-detail disposition.`);
     }
   }
   return errors;
@@ -2671,7 +3365,11 @@ export async function verifyLive({
     cwd,
     environment,
     Array.isArray(customRouteBindings) ? customRouteBindings : [],
-    Array.isArray(aliasPolicies) ? aliasPolicies : []
+    Array.isArray(aliasPolicies) ? aliasPolicies : [],
+    {
+      sourceBaseUrl: routeMatrix?.sourceBaseUrl,
+      sourceSiteName: sourceAudit?.site?.name
+    }
   );
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
   let runtimeTargetOriginMatches = false;
@@ -2721,7 +3419,8 @@ export async function verifyLive({
   const routeChecks = target && explicitTargetFetchAllowed
     ? await Promise.all(primaryRoutes.map((route) => verifyRoute(
         target.url,
-        expectedRoute(routeMatrix, route, browserEvidence)
+        expectedRoute(routeMatrix, route, browserEvidence),
+        inspectedDrupalRuntime.siteName
       )))
     : [];
   for (const route of routeChecks) {
@@ -2731,10 +3430,43 @@ export async function verifyLive({
     ? routeMatrix.targetRequiredRoutes
     : [];
   const targetRequiredRouteChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(target.url, expectedTargetRequiredRoute(route))))
+    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(
+        target.url,
+        expectedTargetRequiredRoute(route),
+        inspectedDrupalRuntime.siteName
+      )))
     : [];
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
+  }
+  const privateRoutes = Array.isArray(drupalReadback?.routing?.privateRoutes)
+    ? drupalReadback.routing.privateRoutes.filter((route) => normalizePath(route?.path))
+    : [];
+  const privateRouteChecks = target && explicitTargetFetchAllowed
+    ? await Promise.all(privateRoutes.map((route) => {
+        const inProcessRoute = (Array.isArray(inspectedDrupalRuntime?.customCodeInventory?.routes)
+          ? inspectedDrupalRuntime.customCodeInventory.routes
+          : []).find((candidate) =>
+            candidate?.name === route?.routeName &&
+            normalizePath(candidate?.representativePath) === normalizePath(route?.path) &&
+            candidate?.requestMethod === String(route?.requestMethod ?? '').trim().toUpperCase()
+          );
+        return verifyPrivateRoute(target.url, route, inProcessRoute);
+      }))
+    : [];
+  for (const route of privateRouteChecks) {
+    liveErrors.push(...route.errors);
+  }
+  const aliasHttpPolicies = Array.isArray(drupalReadback?.routing?.publicBundleAliasPolicies)
+    ? drupalReadback.routing.publicBundleAliasPolicies.filter((policy) =>
+        ['pathauto_pattern', 'editor_supplied_alias', 'canonical_detail_route_denied'].includes(policy?.strategy)
+      )
+    : [];
+  const aliasPolicyHttpChecks = target && explicitTargetFetchAllowed
+    ? (await Promise.all(aliasHttpPolicies.map((policy) => verifyAliasPolicyHttp(target.url, policy)))).flat()
+    : [];
+  for (const check of aliasPolicyHttpChecks) {
+    liveErrors.push(...check.errors);
   }
   const canvasRuntimeErrors = canvasAssetRuntimeErrors({
     browserEvidence,
@@ -2748,7 +3480,9 @@ export async function verifyLive({
     drupalReadback,
     routeMatrix,
     patternMap,
-    independentVerification
+    independentVerification,
+    browserEvidence,
+    sourceAudit
   );
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
@@ -2783,6 +3517,7 @@ export async function verifyLive({
 
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
+  const packetSiteName = normalizeText(drupalReadback?.drupal?.siteName);
   const packetDefaultTheme = String(drupalReadback?.drupal?.defaultTheme ?? '').trim();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
   const runtimeFrontPage = normalizePath(inspectedDrupalRuntime.frontPage);
@@ -2805,6 +3540,9 @@ export async function verifyLive({
   const drupalRuntimeSiteUuidMatches =
     Boolean(packetSiteUuid) &&
     packetSiteUuid === String(inspectedDrupalRuntime.siteUuid ?? '').trim().toLowerCase();
+  const drupalRuntimeSiteNameMatches =
+    Boolean(packetSiteName) &&
+    packetSiteName === normalizeText(inspectedDrupalRuntime.siteName);
   const drupalRuntimeDefaultThemeMatches =
     Boolean(packetDefaultTheme) &&
     packetDefaultTheme === String(inspectedDrupalRuntime.defaultTheme ?? '').trim();
@@ -2832,6 +3570,7 @@ export async function verifyLive({
     inspectedDrupalRuntime.confirmed === true &&
     drupalRuntimeTargetMatches &&
     drupalRuntimeSiteUuidMatches &&
+    drupalRuntimeSiteNameMatches &&
     drupalRuntimeDefaultThemeMatches &&
     drupalRuntimeFrontPageMatches &&
     drupalRuntimeConfigSyncMatches &&
@@ -2863,6 +3602,9 @@ export async function verifyLive({
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
     completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
   }
+  if (!drupalRuntimeSiteNameMatches) {
+    completionBlockedReasons.push('Current DDEV system.site name is unavailable or does not match drupal-readback.json siteName.');
+  }
   if (!drupalRuntimeDefaultThemeMatches) {
     completionBlockedReasons.push('Current DDEV system.theme:default does not match drupal-readback.json defaultTheme.');
   }
@@ -2879,7 +3621,7 @@ export async function verifyLive({
     completionBlockedReasons.push('Current DDEV config status is not clean or could not be verified.');
   }
   if (!drupalRuntimeConfigSyncTracked) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
+    completionBlockedReasons.push('Current DDEV config-sync directory must contain Git-tracked YAML and no active untracked YAML files or scan errors.');
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
@@ -2893,12 +3635,12 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
-    routeChecks: [...routeChecks, ...targetRequiredRouteChecks].map((route) => ({
+    routeChecks: [...routeChecks, ...targetRequiredRouteChecks, ...privateRouteChecks].map((route) => ({
       bodySha256: route.bodySha256 ?? '',
-      finalUrl: route.finalUrl ?? '',
+      finalUrl: route.finalUrl ?? route.actualFinalPath ?? '',
       h1: route.actualH1 ?? '',
-      path: route.targetPath,
-      status: route.finalStatus ?? 0,
+      path: route.targetPath ?? route.path,
+      status: route.finalStatus ?? route.actualStatus ?? 0,
       title: route.actualTitle ?? ''
     }))
   });
@@ -2932,6 +3674,8 @@ export async function verifyLive({
     },
     routeChecks,
     targetRequiredRouteChecks,
+    privateRouteChecks,
+    aliasPolicyHttpChecks,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
@@ -2943,6 +3687,7 @@ export async function verifyLive({
       defaultThemeMatchesPacket: drupalRuntimeDefaultThemeMatches,
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       implementationQualityValid: drupalRuntimeImplementationQualityValid,
+      siteNameMatchesPacket: drupalRuntimeSiteNameMatches,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
       targetOriginMatches: drupalRuntimeTargetMatches,
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,
