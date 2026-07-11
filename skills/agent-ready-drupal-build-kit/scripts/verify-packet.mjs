@@ -57,6 +57,24 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const ROUTE_ROLES = new Set([
+  'homepage',
+  'landing',
+  'listing',
+  'detail',
+  'taxonomy',
+  'search',
+  'form',
+  'legal',
+  'media',
+  'other'
+]);
+const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
+  'intentional_unlisted_route',
+  'dynamic_endpoint',
+  'other'
+]);
+const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -2200,6 +2218,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteKey(route?.sourcePath)).filter(Boolean);
+  const primaryRouteRoles = new Map(
+    primaryRoutes.map((route) => [normalizeRouteKey(route?.targetPath), String(route?.routeRole ?? '').trim()])
+  );
   const routeRows = arrayOrEmpty(routeMatrix?.routes);
   if (!String(routeMatrix?.sourceBaseUrl ?? '').trim() || !String(routeMatrix?.targetBaseUrl ?? '').trim()) {
     reasons.push('route-matrix.json must declare both sourceBaseUrl and targetBaseUrl.');
@@ -2224,17 +2245,19 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     primaryRoutes.some((route) =>
       !normalizeRouteKey(route?.sourcePath) ||
       !normalizeRouteKey(route?.targetPath) ||
+      !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
       numericValue(route?.sourceStatus) >= 500 ||
       numericValue(route?.targetStatus) >= 500 ||
       route?.matchesBrowserRenderedSource !== true ||
       route?.accepted !== true ||
       !routeRows.some((row) =>
         normalizeRouteKey(row?.sourcePath) === normalizeRouteKey(route?.sourcePath) &&
-        normalizeRouteKey(row?.targetPath) === normalizeRouteKey(route?.targetPath)
+        normalizeRouteKey(row?.targetPath) === normalizeRouteKey(route?.targetPath) &&
+        String(row?.routeRole ?? '').trim() === String(route?.routeRole ?? '').trim()
       )
     )
   ) {
-    reasons.push('Every primary route must have source/target paths, a matching route row, browser-rendered source binding, and acceptance.');
+    reasons.push('Every primary route must have source/target paths, a valid routeRole matching its route row, browser-rendered source binding, and acceptance.');
   }
   if (
     routeMatrix?.homepageParity?.accepted === true &&
@@ -2255,10 +2278,199 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       const directContractValid = route?.expectedRedirect === false &&
         successfulStatus(route?.targetStatus) &&
         targetFinalPath === targetPath;
-      return route?.accepted !== true || declaredServerError || (!redirectContractValid && !directContractValid);
+      return route?.accepted !== true ||
+        !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
+        declaredServerError ||
+        (!redirectContractValid && !directContractValid);
     })
   ) {
-    reasons.push('route-matrix.json route rows must be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+    reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+  }
+  const representedRouteRoles = new Set(primaryRouteRoles.values());
+  const uncoveredRouteRoles = [...new Set(routeRows.map((route) => String(route?.routeRole ?? '').trim()))]
+    .filter((role) => ROUTE_ROLES.has(role) && !representedRouteRoles.has(role));
+  if (uncoveredRouteRoles.length > 0) {
+    reasons.push(`route-matrix.json primaryRoutes must include a representative of every discovered routeRole; missing ${uncoveredRouteRoles.join(', ')}.`);
+  }
+  const frontPageRoute = routeRows.find((route) => normalizeRouteKey(route?.targetPath) === '/');
+  if (frontPageRoute && String(frontPageRoute.routeRole ?? '').trim() !== 'homepage') {
+    reasons.push('route-matrix.json must classify the target front page with routeRole homepage.');
+  }
+  const rawSourceOriginLinkExceptions = arrayOrEmpty(routeMatrix?.sourceOriginLinkExceptions);
+  const sourceOriginLinkExceptions = substantiveObjects(rawSourceOriginLinkExceptions);
+  const declaredSourceUrl = httpUrl(routeMatrix?.sourceBaseUrl);
+  const declaredTargetUrl = httpUrl(routeMatrix?.targetBaseUrl);
+  const acceptedLinkReferrerPaths = new Set([
+    ...routeRows.filter((route) => route?.accepted === true),
+    ...substantiveObjects(routeMatrix?.targetRequiredRoutes).filter((route) => route?.accepted === true)
+  ].flatMap((route) => [route?.targetPath, route?.targetFinalPath])
+    .map(normalizeRouteKey)
+    .filter(Boolean));
+  const exceptionPairs = new Set();
+  let sourceOriginExceptionInvalid = rawSourceOriginLinkExceptions.some((exception) => !isJsonObject(exception));
+  for (const exception of sourceOriginLinkExceptions) {
+    let referrerUrl = null;
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(exception?.referrer ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed exception URLs.
+    }
+    const exceptionTargetUrl = httpUrl(exception?.target);
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (exceptionTargetUrl) {
+      exceptionTargetUrl.hash = '';
+    }
+    const pairKey = referrerUrl && exceptionTargetUrl
+      ? `${referrerUrl.href}\n${exceptionTargetUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerPaths.has(normalizeRouteKey(referrerUrl?.pathname));
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.evidence);
+    if (
+      exception?.accepted !== true ||
+      !declaredSourceUrl ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !exceptionTargetUrl ||
+      exceptionTargetUrl.origin !== declaredSourceUrl.origin ||
+      !String(exception?.rationale ?? '').trim() ||
+      !String(exception?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !pairKey ||
+      exceptionPairs.has(pairKey)
+    ) {
+      sourceOriginExceptionInvalid = true;
+    }
+    if (pairKey) {
+      exceptionPairs.add(pairKey);
+    }
+  }
+  if (sourceOriginExceptionInvalid) {
+    reasons.push('route-matrix.json sourceOriginLinkExceptions must uniquely bind an accepted target-route referrer to an absolute source-origin target with rationale, named accepter, non-empty packet-local evidence, and accepted true.');
+  }
+  const rawSameOriginLinkExceptions = arrayOrEmpty(routeMatrix?.sameOriginLinkExceptions);
+  const sameOriginLinkExceptions = substantiveObjects(rawSameOriginLinkExceptions);
+  const sameOriginExceptionPairs = new Set();
+  let sameOriginExceptionInvalid = rawSameOriginLinkExceptions.some((exception) => !isJsonObject(exception));
+  for (const exception of sameOriginLinkExceptions) {
+    let referrerUrl = null;
+    let exceptionTargetUrl = null;
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(exception?.referrer ?? ''), declaredTargetUrl)
+        : null;
+      exceptionTargetUrl = declaredTargetUrl
+        ? new URL(String(exception?.target ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed exception URLs.
+    }
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (exceptionTargetUrl) {
+      exceptionTargetUrl.hash = '';
+    }
+    const pairKey = referrerUrl && exceptionTargetUrl
+      ? `${referrerUrl.href}\n${exceptionTargetUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerPaths.has(normalizeRouteKey(referrerUrl?.pathname));
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.evidence);
+    if (
+      exception?.accepted !== true ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !exceptionTargetUrl ||
+      exceptionTargetUrl.origin !== declaredTargetUrl.origin ||
+      !SAME_ORIGIN_LINK_DISPOSITIONS.has(String(exception?.disposition ?? '').trim()) ||
+      !String(exception?.rationale ?? '').trim() ||
+      !String(exception?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !pairKey ||
+      sameOriginExceptionPairs.has(pairKey)
+    ) {
+      sameOriginExceptionInvalid = true;
+    }
+    if (pairKey) {
+      sameOriginExceptionPairs.add(pairKey);
+    }
+  }
+  if (sameOriginExceptionInvalid) {
+    reasons.push('route-matrix.json sameOriginLinkExceptions must uniquely bind an accepted target-route referrer to an exact same-origin target with an allowed disposition, rationale, named accepter, non-empty packet-local evidence, and accepted true.');
+  }
+
+  const rawExpectedExternalRedirects = arrayOrEmpty(routeMatrix?.expectedExternalLinkRedirects);
+  const expectedExternalRedirects = substantiveObjects(rawExpectedExternalRedirects);
+  const expectedExternalRedirectKeys = new Set();
+  let expectedExternalRedirectInvalid = rawExpectedExternalRedirects.some((record) => !isJsonObject(record));
+  for (const record of expectedExternalRedirects) {
+    let referrerUrl = null;
+    let startUrl = null;
+    const finalUrl = httpUrl(record?.final);
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(record?.referrer ?? ''), declaredTargetUrl)
+        : null;
+      startUrl = declaredTargetUrl
+        ? new URL(String(record?.start ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed expectation URLs.
+    }
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (startUrl) {
+      startUrl.hash = '';
+    }
+    if (finalUrl) {
+      finalUrl.hash = '';
+    }
+    const finalMatch = String(record?.finalMatch ?? '').trim();
+    const expectationKey = referrerUrl && startUrl && finalUrl
+      ? `${referrerUrl.href}\n${startUrl.href}\n${finalMatch}\n${finalUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerPaths.has(normalizeRouteKey(referrerUrl?.pathname));
+    const originMatchUsesOriginOnly = finalMatch !== 'origin' || (
+      finalUrl?.pathname === '/' && !finalUrl.search && !finalUrl.hash
+    );
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, record?.evidence);
+    if (
+      record?.accepted !== true ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !startUrl ||
+      startUrl.origin !== declaredTargetUrl.origin ||
+      !finalUrl ||
+      finalUrl.origin === declaredTargetUrl.origin ||
+      !EXTERNAL_REDIRECT_FINAL_MATCHES.has(finalMatch) ||
+      !originMatchUsesOriginOnly ||
+      !String(record?.rationale ?? '').trim() ||
+      !String(record?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !expectationKey ||
+      expectedExternalRedirectKeys.has(expectationKey)
+    ) {
+      expectedExternalRedirectInvalid = true;
+    }
+    if (expectationKey) {
+      expectedExternalRedirectKeys.add(expectationKey);
+    }
+  }
+  if (expectedExternalRedirectInvalid) {
+    reasons.push('route-matrix.json expectedExternalLinkRedirects must uniquely bind an accepted target-route referrer and exact same-origin start URL to an external final origin or exact URL with rationale, named accepter, non-empty packet-local evidence, and accepted true.');
   }
   if (
     arrayOrEmpty(routeMatrix?.blockedRoutes).length > 0 ||
@@ -2271,7 +2483,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const expansion = routeMatrix?.browserFirstRouteExpansion ?? {};
   const discoveredSourceRoutes = new Set([
     ...arrayOrEmpty(expansion.browserRenderedSeedRoutes),
-    ...arrayOrEmpty(expansion.candidateRoutesFromRenderedLinks),
+    ...arrayOrEmpty(expansion.candidateRoutesFromBrowserRenderedLinks),
     ...arrayOrEmpty(expansion.candidateRoutesFromBundles),
     ...arrayOrEmpty(expansion.candidateRoutesFromMetadata),
     ...arrayOrEmpty(expansion.candidateRoutesFromAssets),
@@ -2572,6 +2784,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     !browserScreenshotsCredible ||
     publicRouteChecks.some((check) =>
       check?.accepted !== true ||
+      !ROUTE_ROLES.has(String(check?.routeRole ?? '').trim()) ||
+      (primaryRouteRoles.has(routeRecordPath(check)) &&
+        primaryRouteRoles.get(routeRecordPath(check)) !== String(check?.routeRole ?? '').trim()) ||
       check?.visualComparison?.status !== 'pass' ||
       !httpUrl(check?.sourceUrl) ||
       !httpUrl(check?.sourceFinalUrl) ||

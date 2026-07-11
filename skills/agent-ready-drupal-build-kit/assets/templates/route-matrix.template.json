@@ -6,7 +6,7 @@
   "targetBaseUrl": "",
   "browserFirstRouteExpansion": {
     "browserRenderedSeedRoutes": [],
-    "candidateRoutesFromRenderedLinks": [],
+    "candidateRoutesFromBrowserRenderedLinks": [],
     "candidateRoutesFromBundles": [],
     "candidateRoutesFromMetadata": [],
     "candidateRoutesFromAssets": [],
@@ -116,6 +116,7 @@
     {
       "sourcePath": "/",
       "targetPath": "/",
+      "routeRole": "homepage | landing | listing | detail | taxonomy | search | form | legal | media | other",
       "sourceIntent": "",
       "targetIntent": "",
       "matchesBrowserRenderedSource": false,
@@ -131,6 +132,7 @@
       "sourceTitle": "",
       "sourceH1": "",
       "targetPath": "",
+      "routeRole": "homepage | landing | listing | detail | taxonomy | search | form | legal | media | other",
       "targetStatus": null,
       "targetFinalPath": "",
       "targetTitle": "",
@@ -140,7 +142,40 @@
       "notes": ""
     }
   ],
-  "renderedLinksChecked": [],
+  "sourceOriginLinkExceptions": [
+    {
+      "referrer": "",
+      "target": "",
+      "rationale": "",
+      "accepter": "",
+      "evidence": "",
+      "accepted": false
+    }
+  ],
+  "sameOriginLinkExceptions": [
+    {
+      "referrer": "",
+      "target": "",
+      "disposition": "",
+      "rationale": "",
+      "accepter": "",
+      "evidence": "",
+      "accepted": false
+    }
+  ],
+  "expectedExternalLinkRedirects": [
+    {
+      "referrer": "",
+      "start": "",
+      "finalMatch": "",
+      "final": "",
+      "rationale": "",
+      "accepter": "",
+      "evidence": "",
+      "accepted": false
+    }
+  ],
+  "serverRenderedResponseLinksChecked": [],
   "menuAndFooterLinksChecked": [],
   "legalAndPrivacyRoutesChecked": [],
   "starterRouteCleanup": {

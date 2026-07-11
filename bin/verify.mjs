@@ -23,7 +23,9 @@ Options:
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
+const MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+const SURFACE_CHECK_CONCURRENCY = 12;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -89,6 +91,28 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function redactedUrl(value, baseUrl = undefined) {
+  try {
+    const url = baseUrl ? new URL(value, baseUrl) : new URL(value);
+    url.hash = '';
+    if (url.search) {
+      url.search = `?query-sha256=${sha256(url.search)}`;
+    }
+    return url.href;
+  } catch {
+    return '[invalid-url]';
+  }
+}
+
+function redactedPath(value, baseUrl) {
+  try {
+    const url = new URL(value, baseUrl);
+    return `${url.pathname}${url.search ? `?query-sha256=${sha256(url.search)}` : ''}`;
+  } catch {
+    return '[invalid-path]';
+  }
+}
+
 function sharedMessage(value, absolutePacketDir) {
   return String(value).replaceAll(absolutePacketDir, basename(absolutePacketDir));
 }
@@ -143,6 +167,72 @@ function tagAttributes(tag) {
 function matchingTags(html, tagName, predicate) {
   const tags = html.match(new RegExp(`<${tagName}\\b[^>]*>`, 'gi')) ?? [];
   return tags.map(tagAttributes).filter(predicate);
+}
+
+async function mapWithConcurrency(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(values[index], index);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+function serverResponseLinks(html, documentUrl, targetOrigin, sourceOrigin) {
+  const errors = [];
+  const renderedHtml = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+  let resolutionBase = documentUrl;
+  const baseHref = matchingTags(renderedHtml, 'base', (attributes) => Object.hasOwn(attributes, 'href'))[0]?.href;
+  if (baseHref !== undefined) {
+    try {
+      resolutionBase = new URL(baseHref, documentUrl).href;
+    } catch {
+      errors.push(`${redactedUrl(documentUrl)} renders an invalid <base href> value with sha256:${sha256(baseHref)}.`);
+    }
+  }
+
+  const internalLinks = [];
+  const sourceOriginLinks = [];
+  for (const attributes of [
+    ...matchingTags(renderedHtml, 'a', (candidate) => Object.hasOwn(candidate, 'href')),
+    ...matchingTags(renderedHtml, 'area', (candidate) => Object.hasOwn(candidate, 'href'))
+  ]) {
+    const href = String(attributes.href ?? '').trim();
+    if (href.startsWith('#')) {
+      continue;
+    }
+    let url;
+    try {
+      url = new URL(href, resolutionBase);
+    } catch {
+      errors.push(`${redactedUrl(documentUrl)} renders an invalid link target with sha256:${sha256(href)}.`);
+      continue;
+    }
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      continue;
+    }
+    if ((url.origin === targetOrigin || url.origin === sourceOrigin) && (url.username || url.password)) {
+      errors.push(`${redactedUrl(documentUrl)} renders a credential-bearing public link with sha256:${sha256(href)}.`);
+      continue;
+    }
+    url.hash = '';
+    if (url.origin === targetOrigin) {
+      internalLinks.push({ href, url: url.href });
+    } else if (url.origin === sourceOrigin) {
+      sourceOriginLinks.push({ href, url: url.href });
+    }
+  }
+  return { errors, internalLinks, sourceOriginLinks };
 }
 
 function renderedMetadata(html, finalUrl) {
@@ -231,7 +321,7 @@ function localTlsHost(hostname) {
   );
 }
 
-function requestOnce(url) {
+function requestOnce(url, { captureBody = 'always' } = {}) {
   return new Promise((resolveRequest, rejectRequest) => {
     const client = url.protocol === 'https:' ? https : http;
     const allowLocalCertificate = url.protocol === 'https:' && localTlsHost(url.hostname);
@@ -266,6 +356,21 @@ function requestOnce(url) {
         timeout: REQUEST_TIMEOUT_MS
       },
       (response) => {
+        const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
+        const shouldCaptureBody = captureBody === 'always' || (
+          captureBody === 'html' &&
+          (!contentType || /(?:text\/html|application\/xhtml\+xml)/.test(contentType))
+        );
+        if (!shouldCaptureBody) {
+          finish(resolveRequest, {
+            body: '',
+            headers: response.headers,
+            localTlsVerificationBypassed: allowLocalCertificate,
+            status: response.statusCode ?? 0
+          });
+          response.destroy();
+          return;
+        }
         const chunks = [];
         let size = 0;
         const declaredLength = Number(response.headers['content-length']);
@@ -303,14 +408,17 @@ function requestOnce(url) {
   });
 }
 
-async function requestFollowingRedirects(startUrl) {
+async function requestFollowingRedirects(
+  startUrl,
+  { captureBody = 'always', stopAtExternalRedirect = false } = {}
+) {
   let current = new URL(startUrl);
   const allowedOrigin = current.origin;
   const redirects = [];
   let localTlsVerificationBypassed = false;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await requestOnce(current);
+    const response = await requestOnce(current, { captureBody });
     localTlsVerificationBypassed ||= response.localTlsVerificationBypassed;
     const location = response.headers.location;
     if (REDIRECT_STATUSES.has(response.status) && location) {
@@ -319,7 +427,18 @@ async function requestFollowingRedirects(startUrl) {
       }
       const next = new URL(location, current);
       if (next.origin !== allowedOrigin) {
-        throw new Error(`Refusing cross-origin redirect from ${current.origin} to ${next.origin}.`);
+        if (stopAtExternalRedirect) {
+          redirects.push({ from: current.href, status: response.status, to: next.href });
+          return {
+            ...response,
+            externalRedirect: true,
+            finalUrl: next.href,
+            initialStatus: redirects[0]?.status ?? response.status,
+            localTlsVerificationBypassed,
+            redirects
+          };
+        }
+        throw new Error(`Refusing cross-origin redirect from ${redactedUrl(current)} to ${redactedUrl(next)}.`);
       }
       redirects.push({ from: current.href, status: response.status, to: next.href });
       current = next;
@@ -330,10 +449,373 @@ async function requestFollowingRedirects(startUrl) {
       finalUrl: current.href,
       initialStatus: redirects[0]?.status ?? response.status,
       localTlsVerificationBypassed,
+      externalRedirect: false,
       redirects
     };
   }
   throw new Error('Redirect resolution failed.');
+}
+
+async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
+  let sourceOrigin = '';
+  try {
+    sourceOrigin = parseHttpUrl(routeMatrix?.sourceBaseUrl, 'route-matrix.json sourceBaseUrl').origin;
+  } catch {
+    // Packet and live identity validation report the malformed source URL separately.
+  }
+  const declaredSameOriginPaths = new Set();
+  const declarePath = (value) => {
+    const path = normalizePath(value);
+    if (path) {
+      declaredSameOriginPaths.add(path);
+    }
+  };
+  const routeSeeds = new Map();
+  const seedErrors = [];
+  const addSeed = (path, reason) => {
+    const text = String(path ?? '').trim();
+    if (!text) {
+      return;
+    }
+    let url;
+    try {
+      url = new URL(text.replace(/^\//, ''), new URL('/', baseUrl));
+    } catch {
+      seedErrors.push(`Accepted public route value with sha256:${sha256(text)} is not a usable URL path.`);
+      return;
+    }
+    if (url.origin !== baseUrl.origin) {
+      seedErrors.push(`Accepted public route ${redactedUrl(url)} does not stay on target origin ${baseUrl.origin}.`);
+      return;
+    }
+    url.hash = '';
+    const existing = routeSeeds.get(url.href) ?? { reasons: new Set(), url };
+    existing.reasons.add(reason);
+    routeSeeds.set(url.href, existing);
+  };
+  for (const route of Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : []) {
+    if (route?.accepted === true) {
+      declarePath(route.targetPath);
+      declarePath(route.targetFinalPath);
+      addSeed(route.targetPath, 'accepted-route');
+    }
+  }
+  for (const route of Array.isArray(routeMatrix?.targetRequiredRoutes) ? routeMatrix.targetRequiredRoutes : []) {
+    if (route?.accepted === true) {
+      declarePath(route.targetPath);
+      declarePath(route.targetFinalPath);
+    }
+    if (
+      route?.accepted === true &&
+      ['public_200', 'redirect', 'noindex'].includes(String(route?.expectedPublicBehavior ?? ''))
+    ) {
+      addSeed(route.targetPath, 'target-required-route');
+    }
+  }
+
+  const routeChecks = await mapWithConcurrency(
+    [...routeSeeds.values()],
+    SURFACE_CHECK_CONCURRENCY,
+    async (seed) => {
+      const errors = [];
+      try {
+        const response = await requestFollowingRedirects(seed.url, { captureBody: 'html' });
+        if (response.status < 200 || response.status >= 300) {
+          errors.push(`${redactedPath(seed.url.href, baseUrl)} ended with HTTP ${response.status}; accepted public routes must end with a 2xx response.`);
+        }
+        if (new URL(response.finalUrl).origin !== baseUrl.origin) {
+          errors.push(`${redactedPath(seed.url.href, baseUrl)} left the target origin and resolved to ${new URL(response.finalUrl).origin}.`);
+        }
+        const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
+        const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
+          (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
+        const extracted = isHtml
+          ? serverResponseLinks(response.body, response.finalUrl, baseUrl.origin, sourceOrigin)
+          : { errors: [], internalLinks: [], sourceOriginLinks: [] };
+        errors.push(...extracted.errors);
+        return {
+          bodySha256: `sha256:${sha256(response.body)}`,
+          errors,
+          finalStatus: response.status,
+          finalUrl: response.finalUrl,
+          initialStatus: response.initialStatus,
+          internalLinks: extracted.internalLinks,
+          isHtml,
+          passed: errors.length === 0,
+          reasons: [...seed.reasons],
+          requestedUrl: seed.url.href,
+          sourceOriginLinks: extracted.sourceOriginLinks
+        };
+      } catch (error) {
+        errors.push(`${redactedPath(seed.url.href, baseUrl)} could not be fetched for server-response link inspection: ${error.message}`);
+        return {
+          errors,
+          internalLinks: [],
+          isHtml: false,
+          passed: false,
+          reasons: [...seed.reasons],
+          requestedUrl: seed.url.href,
+          sourceOriginLinks: []
+        };
+      }
+    }
+  );
+
+  const internalTargets = new Map();
+  for (const route of routeChecks) {
+    for (const link of route.internalLinks) {
+      const target = internalTargets.get(link.url) ?? { hrefs: new Set(), referrers: new Set(), url: link.url };
+      target.hrefs.add(link.href);
+      target.referrers.add(route.finalUrl || route.requestedUrl);
+      internalTargets.set(link.url, target);
+    }
+  }
+
+  const acceptedSameOriginExceptions = new Map();
+  for (const exception of Array.isArray(routeMatrix?.sameOriginLinkExceptions)
+    ? routeMatrix.sameOriginLinkExceptions
+    : []) {
+    if (exception?.accepted !== true) {
+      continue;
+    }
+    try {
+      const referrer = new URL(String(exception.referrer ?? ''), new URL('/', baseUrl));
+      const target = new URL(String(exception.target ?? ''), new URL('/', baseUrl));
+      referrer.hash = '';
+      target.hash = '';
+      if (referrer.origin !== baseUrl.origin || target.origin !== baseUrl.origin) {
+        continue;
+      }
+      acceptedSameOriginExceptions.set(`${referrer.href}\n${target.href}`, exception);
+    } catch {
+      // Packet completion validation reports malformed exceptions separately.
+    }
+  }
+
+  const expectedExternalRedirects = new Map();
+  for (const expectation of Array.isArray(routeMatrix?.expectedExternalLinkRedirects)
+    ? routeMatrix.expectedExternalLinkRedirects
+    : []) {
+    if (expectation?.accepted !== true) {
+      continue;
+    }
+    try {
+      const referrer = new URL(String(expectation.referrer ?? ''), new URL('/', baseUrl));
+      const start = new URL(String(expectation.start ?? ''), new URL('/', baseUrl));
+      const final = new URL(String(expectation.final ?? ''));
+      referrer.hash = '';
+      start.hash = '';
+      final.hash = '';
+      if (
+        referrer.origin !== baseUrl.origin ||
+        start.origin !== baseUrl.origin ||
+        final.origin === baseUrl.origin ||
+        !['exact_url', 'origin'].includes(expectation.finalMatch)
+      ) {
+        continue;
+      }
+      const key = `${referrer.href}\n${start.href}`;
+      const records = expectedExternalRedirects.get(key) ?? [];
+      records.push({ expectation, final });
+      expectedExternalRedirects.set(key, records);
+    } catch {
+      // Packet completion validation reports malformed expectations separately.
+    }
+  }
+
+  const acceptedSourceExceptions = new Map();
+  for (const exception of Array.isArray(routeMatrix?.sourceOriginLinkExceptions)
+    ? routeMatrix.sourceOriginLinkExceptions
+    : []) {
+    if (exception?.accepted !== true) {
+      continue;
+    }
+    try {
+      const referrer = new URL(String(exception.referrer ?? ''), new URL('/', baseUrl));
+      const target = new URL(String(exception.target ?? ''));
+      referrer.hash = '';
+      target.hash = '';
+      if (referrer.origin !== baseUrl.origin || target.origin !== sourceOrigin) {
+        continue;
+      }
+      acceptedSourceExceptions.set(`${referrer.href}\n${target.href}`, exception);
+    } catch {
+      // Packet completion validation reports malformed exceptions separately.
+    }
+  }
+  const sourceOriginLinkChecks = [];
+  const sourceOriginPairs = new Map();
+  for (const route of routeChecks) {
+    const referrer = route.finalUrl || route.requestedUrl;
+    for (const link of route.sourceOriginLinks) {
+      const pairKey = `${referrer}\n${link.url}`;
+      const pair = sourceOriginPairs.get(pairKey) ?? {
+        hrefs: new Set(),
+        referrer,
+        target: link.url
+      };
+      pair.hrefs.add(link.href);
+      sourceOriginPairs.set(pairKey, pair);
+    }
+  }
+  for (const [pairKey, pair] of sourceOriginPairs) {
+    const exception = acceptedSourceExceptions.get(pairKey);
+    const passed = Boolean(exception);
+    const checkErrors = passed
+      ? []
+      : [`Server-rendered response link ${redactedUrl(pair.target)} from ${redactedUrl(pair.referrer)} points back to source origin ${sourceOrigin} without an accepted per-link exception.`];
+    sourceOriginLinkChecks.push({
+      acceptedException: exception
+        ? {
+              accepter: exception.accepter,
+              evidence: exception.evidence,
+              rationaleSha256: `sha256:${sha256(String(exception.rationale ?? ''))}`
+          }
+        : null,
+      errors: checkErrors,
+      hrefCount: pair.hrefs.size,
+      hrefSha256: [...pair.hrefs].slice(0, 10).map((href) => `sha256:${sha256(href)}`),
+      passed,
+      referrer: pair.referrer,
+      target: pair.target
+    });
+  }
+
+  const errors = [
+    ...seedErrors,
+    ...routeChecks.flatMap((check) => check.errors),
+    ...sourceOriginLinkChecks.flatMap((check) => check.errors)
+  ];
+  let linkChecks = [];
+  if (internalTargets.size > MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS) {
+    errors.push(
+      `Server-rendered response HTML exposes ${internalTargets.size} unique same-origin links, exceeding the ${MAX_SERVER_RESPONSE_INTERNAL_LINK_TARGETS} safety limit; verification cannot truncate this blocking check.`
+    );
+  } else {
+    linkChecks = await mapWithConcurrency(
+      [...internalTargets.values()],
+      SURFACE_CHECK_CONCURRENCY,
+      async (target) => {
+        const targetErrors = [];
+        const hrefs = [...target.hrefs];
+        const referrers = [...target.referrers];
+        try {
+          const response = await requestFollowingRedirects(new URL(target.url), {
+            captureBody: 'never',
+            stopAtExternalRedirect: true
+          });
+          const finalUrl = new URL(response.finalUrl);
+          finalUrl.hash = '';
+          const startPathDeclared = declaredSameOriginPaths.has(normalizePath(target.url));
+          const finalPathDeclared = finalUrl.origin === baseUrl.origin &&
+            declaredSameOriginPaths.has(normalizePath(finalUrl.href));
+          const acceptedDispositions = [];
+          if (response.externalRedirect) {
+            for (const referrer of referrers) {
+              const candidates = expectedExternalRedirects.get(`${referrer}\n${target.url}`) ?? [];
+              const match = candidates.find(({ expectation, final }) =>
+                expectation.finalMatch === 'origin'
+                  ? finalUrl.origin === final.origin
+                  : finalUrl.href === final.href
+              );
+              if (!match) {
+                targetErrors.push(
+                  `Server-rendered same-origin link ${redactedUrl(target.url)} from ${redactedUrl(referrer)} redirects externally to ${redactedUrl(finalUrl)} without an exact accepted expectation.`
+                );
+              } else {
+                acceptedDispositions.push({
+                  accepter: match.expectation.accepter,
+                  disposition: 'expected_external_redirect',
+                  evidence: match.expectation.evidence,
+                  finalMatch: match.expectation.finalMatch,
+                  rationaleSha256: `sha256:${sha256(String(match.expectation.rationale ?? ''))}`,
+                  referrer: redactedUrl(referrer)
+                });
+              }
+            }
+          } else {
+            if (response.status < 200 || response.status >= 300) {
+              targetErrors.push(`Server-rendered same-origin link ${redactedUrl(target.url)} ended with HTTP ${response.status}.`);
+            }
+            if (finalUrl.origin !== baseUrl.origin) {
+              targetErrors.push(`Server-rendered same-origin link ${redactedUrl(target.url)} left the target origin.`);
+            }
+            for (const referrer of referrers) {
+              const exception = acceptedSameOriginExceptions.get(`${referrer}\n${target.url}`);
+              if ((!startPathDeclared || !finalPathDeclared) && !exception) {
+                targetErrors.push(
+                  `Server-rendered same-origin link target ${redactedUrl(target.url)} from ${redactedUrl(referrer)} is not represented by an accepted routes or targetRequiredRoutes entry and has no exact accepted disposition.`
+                );
+              } else if (exception) {
+                acceptedDispositions.push({
+                  accepter: exception.accepter,
+                  disposition: exception.disposition,
+                  evidence: exception.evidence,
+                  rationaleSha256: `sha256:${sha256(String(exception.rationale ?? ''))}`,
+                  referrer: redactedUrl(referrer)
+                });
+              }
+            }
+          }
+          return {
+            acceptedDispositions,
+            errors: targetErrors,
+            externalRedirect: response.externalRedirect,
+            finalStatus: response.status,
+            finalUrl: redactedUrl(response.finalUrl),
+            hrefCount: hrefs.length,
+            hrefSha256: hrefs.slice(0, 10).map((href) => `sha256:${sha256(href)}`),
+            initialStatus: response.initialStatus,
+            passed: targetErrors.length === 0,
+            referrerCount: referrers.length,
+            referrers: referrers.slice(0, 25).map((referrer) => redactedUrl(referrer)),
+            redirects: response.redirects.map((redirect) => ({
+              from: redactedUrl(redirect.from),
+              status: redirect.status,
+              to: redactedUrl(redirect.to)
+            })),
+            requestedUrl: redactedUrl(target.url)
+          };
+        } catch (error) {
+          targetErrors.push(`Server-rendered same-origin link ${redactedUrl(target.url)} could not be fetched: ${error.message}`);
+          return {
+            errors: targetErrors,
+            hrefCount: hrefs.length,
+            hrefSha256: hrefs.slice(0, 10).map((href) => `sha256:${sha256(href)}`),
+            passed: false,
+            referrerCount: referrers.length,
+            referrers: referrers.slice(0, 25).map((referrer) => redactedUrl(referrer)),
+            requestedUrl: redactedUrl(target.url)
+          };
+        }
+      }
+    );
+    errors.push(...linkChecks.flatMap((check) => check.errors));
+  }
+
+  return {
+    errors,
+    htmlRouteCount: routeChecks.filter((check) => check.isHtml).length,
+    linkChecks,
+    passed: errors.length === 0,
+    routeChecks: routeChecks.map(({
+      internalLinks: _internalLinks,
+      sourceOriginLinks: _sourceOriginLinks,
+      ...check
+    }) => ({
+      ...check,
+      finalUrl: check.finalUrl ? redactedUrl(check.finalUrl) : '',
+      requestedUrl: redactedUrl(check.requestedUrl)
+    })),
+    seedRouteCount: routeSeeds.size,
+    sourceOriginLinkChecks: sourceOriginLinkChecks.map((check) => ({
+      ...check,
+      referrer: redactedUrl(check.referrer),
+      target: redactedUrl(check.target)
+    })),
+    sourceOriginLinkCount: sourceOriginLinkChecks.length,
+    uniqueInternalLinkCount: internalTargets.size
+  };
 }
 
 function recursiveStringForKey(value, keys) {
@@ -911,7 +1393,7 @@ async function verifyRoute(baseUrl, expected) {
           errors.push(`${expected.targetPath} rendered canonical path ${normalizePath(actualCanonical.href)} does not match final path ${normalizePath(response.finalUrl)}.`);
         }
         if (!seo.canonicalUrl || actualMetadata.canonicalUrl !== seo.canonicalUrl) {
-          errors.push(`${expected.targetPath} rendered canonical ${JSON.stringify(actualMetadata.canonicalUrl)} does not match browser evidence ${JSON.stringify(seo.canonicalUrl)}.`);
+          errors.push(`${expected.targetPath} rendered canonical ${redactedUrl(actualMetadata.canonicalUrl)} does not match browser evidence ${redactedUrl(seo.canonicalUrl)}.`);
         }
       }
       if (seo.metaDescriptionStatus === 'present') {
@@ -932,21 +1414,56 @@ async function verifyRoute(baseUrl, expected) {
     return {
       ...expected,
       actualH1,
-      actualMetadata,
+      actualMetadata: {
+        ...actualMetadata,
+        canonicalUrl: actualMetadata.canonicalUrl ? redactedUrl(actualMetadata.canonicalUrl) : '',
+        openGraphImage: actualMetadata.openGraphImage ? redactedUrl(actualMetadata.openGraphImage) : ''
+      },
       actualTitle,
       bodySha256: `sha256:${sha256(response.body)}`,
       errors,
       finalStatus: response.status,
-      finalUrl: response.finalUrl,
+      finalUrl: redactedUrl(response.finalUrl),
       initialStatus: response.initialStatus,
       localTlsVerificationBypassed: response.localTlsVerificationBypassed,
       passed: errors.length === 0,
-      redirects: response.redirects,
-      requestedUrl: requestedUrl.href
+      redirects: response.redirects.map((redirect) => ({
+        from: redactedUrl(redirect.from),
+        status: redirect.status,
+        to: redactedUrl(redirect.to)
+      })),
+      renderedSeo: expected.renderedSeo
+        ? {
+            ...expected.renderedSeo,
+            canonicalUrl: expected.renderedSeo.canonicalUrl
+              ? redactedUrl(expected.renderedSeo.canonicalUrl)
+              : '',
+            openGraphImage: expected.renderedSeo.openGraphImage
+              ? redactedUrl(expected.renderedSeo.openGraphImage)
+              : ''
+          }
+        : null,
+      requestedUrl: redactedUrl(requestedUrl)
     };
   } catch (error) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
-    return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href };
+    return {
+      ...expected,
+      errors,
+      passed: false,
+      renderedSeo: expected.renderedSeo
+        ? {
+            ...expected.renderedSeo,
+            canonicalUrl: expected.renderedSeo.canonicalUrl
+              ? redactedUrl(expected.renderedSeo.canonicalUrl)
+              : '',
+            openGraphImage: expected.renderedSeo.openGraphImage
+              ? redactedUrl(expected.renderedSeo.openGraphImage)
+              : ''
+          }
+        : null,
+      requestedUrl: redactedUrl(requestedUrl)
+    };
   }
 }
 
@@ -1091,6 +1608,20 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  const serverRenderedResponseSurface = target && explicitTargetFetchAllowed
+    ? await inspectServerRenderedResponseSurface(target.url, routeMatrix)
+    : {
+        errors: [],
+        htmlRouteCount: 0,
+        linkChecks: [],
+        passed: false,
+        routeChecks: [],
+        seedRouteCount: 0,
+        sourceOriginLinkChecks: [],
+        sourceOriginLinkCount: 0,
+        uniqueInternalLinkCount: 0
+      };
+  liveErrors.push(...serverRenderedResponseSurface.errors);
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -1216,6 +1747,26 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
+    serverRenderedResponseSurface: {
+      linkChecks: serverRenderedResponseSurface.linkChecks.map((check) => ({
+        finalStatus: check.finalStatus ?? 0,
+        finalUrl: check.finalUrl ?? '',
+        passed: check.passed,
+        requestedUrl: check.requestedUrl
+      })),
+      routeChecks: serverRenderedResponseSurface.routeChecks.map((check) => ({
+        bodySha256: check.bodySha256 ?? '',
+        finalStatus: check.finalStatus ?? 0,
+        finalUrl: check.finalUrl ?? '',
+        passed: check.passed,
+        requestedUrl: check.requestedUrl
+      })),
+      sourceOriginLinkChecks: serverRenderedResponseSurface.sourceOriginLinkChecks.map((check) => ({
+        passed: check.passed,
+        referrer: check.referrer,
+        target: check.target
+      }))
+    },
     routeChecks: [...routeChecks, ...targetRequiredRouteChecks].map((route) => ({
       bodySha256: route.bodySha256 ?? '',
       finalUrl: route.finalUrl ?? '',
@@ -1242,27 +1793,32 @@ export async function verifyLive({
     packetDir: basename(absolutePacketDir),
     target: target
       ? {
-          declaredSourceBaseUrl: declaredSource,
-          declaredTargetBaseUrl: declaredTarget,
-          resolvedBaseUrl: target.url.href,
+          declaredSourceBaseUrl: declaredSource ? redactedUrl(declaredSource) : '',
+          declaredTargetBaseUrl: declaredTarget ? redactedUrl(declaredTarget) : '',
+          resolvedBaseUrl: redactedUrl(target.url),
           resolutionSource: target.source,
           targetFingerprint: `sha256:${sha256(targetFingerprintInput)}`
         }
       : null,
     evidenceBinding: {
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
-      targetFingerprintInputVersion: 1
+      targetFingerprintInputVersion: 2
     },
     routeChecks,
     targetRequiredRouteChecks,
+    serverRenderedResponseSurface,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
+      baseUrl: inspectedDrupalRuntime.baseUrl ? redactedUrl(inspectedDrupalRuntime.baseUrl) : '',
       configStatusClean: drupalRuntimeConfigStatusClean,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
+      frontPage: inspectedDrupalRuntime.frontPage
+        ? redactedPath(inspectedDrupalRuntime.frontPage, target?.url ?? 'http://invalid.local/')
+        : '',
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
       targetOriginMatches: drupalRuntimeTargetMatches,

@@ -148,7 +148,7 @@ function liveRouteMatrix(baseUrl) {
     targetBaseUrl: baseUrl,
     browserFirstRouteExpansion: {
       browserRenderedSeedRoutes: ['/'],
-      candidateRoutesFromRenderedLinks: [],
+      candidateRoutesFromBrowserRenderedLinks: [],
       candidateRoutesFromBundles: [],
       candidateRoutesFromMetadata: [],
       candidateRoutesFromAssets: [],
@@ -208,6 +208,7 @@ function liveRouteMatrix(baseUrl) {
       {
         sourcePath: '/',
         targetPath: '/',
+        routeRole: 'homepage',
         sourceIntent: 'Source homepage',
         targetIntent: 'Target homepage',
         matchesBrowserRenderedSource: true,
@@ -219,6 +220,7 @@ function liveRouteMatrix(baseUrl) {
       {
         sourcePath: '/',
         targetPath: '/',
+        routeRole: 'homepage',
         targetStatus: 200,
         targetFinalPath: '/',
         targetTitle: 'Target site',
@@ -1046,7 +1048,355 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.match(report.completionBlockedReasons.join(' '), /Independent verification/);
     }
   );
-  assert.equal(requestCount, 2, 'primary and target-required route checks should both fetch the declared target');
+  assert.equal(requestCount, 3, 'primary, target-required, and full rendered-surface checks should fetch the declared target');
+});
+
+test('live verifier blocks broken same-origin links present in accepted-route response HTML', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/missing') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><body><h1>Missing</h1></body></html>');
+        return;
+      }
+      if (request.url === '/large-manual.pdf') {
+        response.writeHead(200, {
+          'content-length': 6 * 1024 * 1024,
+          'content-type': 'application/pdf'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url?.startsWith('/working')) {
+        response.end('<!doctype html><html><body><h1>Working</h1></body></html>');
+        return;
+      }
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/working?mode=public#result">Working</a>
+        <a href="/working?mode=public#other">Working duplicate</a>
+        <a href="/missing">Missing</a>
+        <a href="/large-manual.pdf">Large manual</a>
+        <a href="mailto:help@example.com">Email</a>
+        <a href="https://external.example/path">External</a>
+        <template><a href="/template-only-missing">Template-only</a></template>
+        <script>const example = '<a href="/script-only-missing">Script-only</a>';</script>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-broken-response-link-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/working',
+          targetPath: '/working',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/working',
+          targetTitle: 'Working',
+          targetH1: 'Working',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Declared detail route used by the link-integrity fixture.'
+        },
+        {
+          sourcePath: '/large-manual.pdf',
+          targetPath: '/large-manual.pdf',
+          routeRole: 'media',
+          targetStatus: 200,
+          targetFinalPath: '/large-manual.pdf',
+          targetTitle: '',
+          targetH1: '',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Declared non-HTML media route used by the response-body fixture.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.serverRenderedResponseSurface.uniqueInternalLinkCount, 3);
+      const missing = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/missing'
+      );
+      assert.equal(missing?.passed, false);
+      assert.equal(missing?.finalStatus, 404);
+      assert.ok(missing?.referrers.some((url) => new URL(url).pathname === '/'));
+      const largeManual = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/large-manual.pdf'
+      );
+      assert.equal(largeManual?.passed, true, 'status-only link checks must not download large linked files');
+      const largeManualRoute = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/large-manual.pdf'
+      );
+      assert.equal(largeManualRoute?.passed, true, 'accepted non-HTML routes must not buffer large response bodies');
+      assert.equal(largeManualRoute?.isHtml, false);
+      assert.match(report.errors.join('\n'), /Server-rendered same-origin link .*\/missing.*HTTP 404/);
+      assert.doesNotMatch(JSON.stringify(report), /mode=public/);
+    }
+  );
+});
+
+test('live verifier blocks source-origin link leaks unless the exact pair has an accepted exception', async () => {
+  await withHttpServer(
+    (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="https://source.example/archive?page=1#top">Legacy source archive</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-source-origin-link-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.sourceOriginLinkExceptions = [];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const blocked = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(blocked.valid, false);
+      assert.equal(blocked.serverRenderedResponseSurface.sourceOriginLinkCount, 1);
+      assert.equal(blocked.serverRenderedResponseSurface.sourceOriginLinkChecks[0].passed, false);
+      assert.match(blocked.errors.join('\n'), /points back to source origin .* without an accepted per-link exception/);
+      assert.doesNotMatch(JSON.stringify(blocked), /page=1/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'source-link-exception.txt'), 'Approved retained source archive dependency.\n');
+      routeMatrix.sourceOriginLinkExceptions = [{
+        referrer: '/',
+        target: 'https://source.example/archive?page=1',
+        rationale: 'The source archive remains the named system of record for this public dependency.',
+        accepter: 'Content owner',
+        evidence: 'evidence/source-link-exception.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      assert.equal(accepted.serverRenderedResponseSurface.sourceOriginLinkCount, 1);
+      assert.equal(accepted.serverRenderedResponseSurface.sourceOriginLinkChecks[0].passed, true);
+      assert.equal(
+        accepted.serverRenderedResponseSurface.sourceOriginLinkChecks[0].acceptedException.accepter,
+        'Content owner'
+      );
+      assert.doesNotMatch(JSON.stringify(accepted), /page=1/);
+    }
+  );
+});
+
+test('live verifier blocks an undeclared same-origin detail link even when it returns 200', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url?.startsWith('/article/undeclared')) {
+        response.end('<!doctype html><html><body><h1>Undeclared detail</h1></body></html>');
+        return;
+      }
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/article/undeclared?preview=private-value#content">Undeclared detail</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-undeclared-detail-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const detail = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/undeclared'
+      );
+      assert.equal(detail?.finalStatus, 200);
+      assert.equal(detail?.passed, false);
+      assert.match(
+        report.errors.join('\n'),
+        /not represented by an accepted routes or targetRequiredRoutes entry.*no exact accepted disposition/
+      );
+      assert.doesNotMatch(JSON.stringify(report), /private-value/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'unlisted-detail.txt'), 'Approved dynamic detail endpoint.\n');
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.sameOriginLinkExceptions = [{
+        referrer: '/',
+        target: '/article/undeclared?preview=private-value',
+        disposition: 'dynamic_endpoint',
+        rationale: 'This runtime-generated detail endpoint is intentionally outside the static route inventory.',
+        accepter: 'Application owner',
+        evidence: 'evidence/unlisted-detail.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      assert.equal(accepted.serverRenderedResponseSurface.linkChecks[0].passed, true);
+      assert.equal(
+        accepted.serverRenderedResponseSurface.linkChecks[0].acceptedDispositions[0].disposition,
+        'dynamic_endpoint'
+      );
+      assert.doesNotMatch(JSON.stringify(accepted), /private-value/);
+    }
+  );
+});
+
+test('live verifier accepts an exact evidenced external redirect without fetching the external origin', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url?.startsWith('/donate')) {
+        response.writeHead(302, {
+          location: 'https://payments.example/checkout?session=private-final'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/donate?token=private-start">Donate</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-external-redirect-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.expectedExternalLinkRedirects = [];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const blocked = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(blocked.valid, false);
+      assert.match(blocked.errors.join('\n'), /redirects externally.*without an exact accepted expectation/);
+      assert.doesNotMatch(JSON.stringify(blocked), /private-start|private-final/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'external-redirect.txt'), 'Approved external payment provider.\n');
+      routeMatrix.expectedExternalLinkRedirects = [{
+        referrer: '/',
+        start: '/donate?token=private-start',
+        finalMatch: 'exact_url',
+        final: 'https://payments.example/checkout?session=private-final',
+        rationale: 'Donation checkout is intentionally owned by the external payment provider.',
+        accepter: 'Commerce owner',
+        evidence: 'evidence/external-redirect.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      const redirect = accepted.serverRenderedResponseSurface.linkChecks[0];
+      assert.equal(redirect.passed, true);
+      assert.equal(redirect.externalRedirect, true);
+      assert.equal(redirect.finalStatus, 302);
+      assert.equal(redirect.acceptedDispositions[0].finalMatch, 'exact_url');
+      assert.doesNotMatch(JSON.stringify(accepted), /private-start|private-final/);
+    }
+  );
+});
+
+test('live verifier checks every accepted route row, not only primary routes', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/article/example') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><body><h1>Missing article</h1></body></html>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-full-route-surface-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push({
+        sourcePath: '/article/example',
+        targetPath: '/article/example',
+        routeRole: 'detail',
+        targetStatus: 200,
+        targetFinalPath: '/article/example',
+        targetTitle: 'Example article',
+        targetH1: 'Example article',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'Representative detail route.'
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const detail = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/example'
+      );
+      assert.equal(detail?.passed, false);
+      assert.equal(detail?.finalStatus, 404);
+      assert.match(report.errors.join('\n'), /\/article\/example ended with HTTP 404/);
+    }
+  );
 });
 
 test('live route verification rejects identity mismatches and accepts a declared same-origin redirect', async () => {
@@ -1443,6 +1793,48 @@ test('completion fails closed when structured gate evidence or applicability dis
   copyTemplatePacket(canonicalPacket);
   writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
   addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+  mkdirSync(join(canonicalPacket, 'evidence'), { recursive: true });
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'source-link-exception.txt'),
+    'Approved retained source archive dependency.\n'
+  );
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'same-origin-link-exception.txt'),
+    'Approved dynamic same-origin endpoint.\n'
+  );
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'external-redirect.txt'),
+    'Approved external provider redirect.\n'
+  );
+  mutateJson(join(canonicalPacket, 'route-matrix.json'), (value) => {
+    value.sourceOriginLinkExceptions = [{
+      referrer: '/',
+      target: 'https://source.example/archive',
+      rationale: 'The source archive remains the named public system of record.',
+      accepter: 'Content owner',
+      evidence: 'evidence/source-link-exception.txt',
+      accepted: true
+    }];
+    value.sameOriginLinkExceptions = [{
+      referrer: '/',
+      target: '/dynamic-endpoint?fixture=private',
+      disposition: 'dynamic_endpoint',
+      rationale: 'The endpoint is generated dynamically and intentionally outside the static route inventory.',
+      accepter: 'Application owner',
+      evidence: 'evidence/same-origin-link-exception.txt',
+      accepted: true
+    }];
+    value.expectedExternalLinkRedirects = [{
+      referrer: '/',
+      start: '/provider-start?fixture=private',
+      finalMatch: 'origin',
+      final: 'https://provider.example',
+      rationale: 'The provider owns the external workflow.',
+      accepter: 'Integration owner',
+      evidence: 'evidence/external-redirect.txt',
+      accepted: true
+    }];
+  });
 
   const cases = [
     {
@@ -1461,7 +1853,68 @@ test('completion fails closed when structured gate evidence or applicability dis
       name: 'route-drift',
       file: 'route-matrix.json',
       expected: /classify and accept every discovered source route/i,
-      mutate: (value) => { value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy']; }
+      mutate: (value) => { value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/legacy']; }
+    },
+    {
+      name: 'route-role-coverage',
+      file: 'route-matrix.json',
+      expected: /representative of every discovered routeRole; missing detail/i,
+      mutate: (value) => {
+        value.routes.push({
+          sourcePath: '/article/example',
+          targetPath: '/article/example',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/article/example',
+          targetTitle: 'Example article',
+          targetH1: 'Example article',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Representative detail route is not included in primaryRoutes.'
+        });
+      }
+    },
+    {
+      name: 'source-origin-exception-accepter',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*named accepter/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].accepter = ''; }
+    },
+    {
+      name: 'source-origin-exception-target',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*source-origin target/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].target = 'https://unrelated.example/archive'; }
+    },
+    {
+      name: 'source-origin-exception-evidence',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*packet-local evidence/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].evidence = 'evidence/missing.txt'; }
+    },
+    {
+      name: 'same-origin-exception-disposition',
+      file: 'route-matrix.json',
+      expected: /sameOriginLinkExceptions.*allowed disposition/i,
+      mutate: (value) => { value.sameOriginLinkExceptions[0].disposition = 'blanket_allow'; }
+    },
+    {
+      name: 'same-origin-exception-evidence',
+      file: 'route-matrix.json',
+      expected: /sameOriginLinkExceptions.*packet-local evidence/i,
+      mutate: (value) => { value.sameOriginLinkExceptions[0].evidence = 'evidence/missing.txt'; }
+    },
+    {
+      name: 'external-redirect-final-match',
+      file: 'route-matrix.json',
+      expected: /expectedExternalLinkRedirects.*external final origin or exact URL/i,
+      mutate: (value) => { value.expectedExternalLinkRedirects[0].finalMatch = 'anywhere'; }
+    },
+    {
+      name: 'external-redirect-evidence',
+      file: 'route-matrix.json',
+      expected: /expectedExternalLinkRedirects.*packet-local evidence/i,
+      mutate: (value) => { value.expectedExternalLinkRedirects[0].evidence = 'evidence/missing.txt'; }
     },
     {
       name: 'target-required-route',
@@ -1656,7 +2109,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       expected: [/pass every source-route drift disposition check with evidence/i],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
-          value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+          value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/legacy'];
           value.sourceRouteDriftClassification = [{
             sourcePath: '/legacy',
             sourceStatus: 200,
