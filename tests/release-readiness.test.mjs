@@ -207,7 +207,7 @@ test('cookbook stays executable, Drush 13 compatible, and referenced from skill 
   assert.doesNotMatch(cookbook, /drush (?:role-create|role-add-perm|user-create|user-add-role|pm-enable)\b/);
   assert.doesNotMatch(cookbook, /role:perm:add[^\n]*full_html/);
   assert.doesNotMatch(cookbook, /'format' => 'full_html'/);
-  assert.doesNotMatch(cookbook, /\/Users\/|mccall/i);
+  assert.doesNotMatch(cookbook, /\/Users\/|\/home\/[a-z]/i);
 
   for (const stance of [
     'Multilingual stance',
