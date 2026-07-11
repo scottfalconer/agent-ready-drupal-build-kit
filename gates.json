@@ -106,6 +106,30 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-DETAIL-01",
+      "title": "Representative public detail routes render load-bearing fields under the declared owner",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-A11Y-01",
+      "title": "Real-browser accessibility checks have no unresolved or undispositioned handoff defects",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-FORM-01",
+      "title": "Anonymous public forms validate, reach their intended outcome, and disposition abuse protection",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-PARITY-01",
       "title": "Accepted addressable-surface parity evidence recorded",
       "phase": 6,
@@ -235,7 +259,7 @@
     },
     {
       "id": "G-SEO-01",
-      "title": "Rendered SEO/social metadata verified or blocked",
+      "title": "Rendered SEO/social metadata and exported SEO URL portability verified",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",

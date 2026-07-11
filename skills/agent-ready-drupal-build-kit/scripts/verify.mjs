@@ -24,6 +24,7 @@ Options:
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_BROWSER_REPRESENTATIVE_CONCURRENCY = 12;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -93,6 +94,22 @@ function sharedMessage(value, absolutePacketDir) {
   return String(value).replaceAll(absolutePacketDir, basename(absolutePacketDir));
 }
 
+async function mapWithConcurrency(values, limit, mapper) {
+  const items = [...values];
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
 function normalizeText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -125,6 +142,16 @@ function elementText(html, tag) {
     return '';
   }
   return normalizeText(decodeEntities(match[1].replace(/<[^>]+>/g, ' ')));
+}
+
+function renderedBodyText(html) {
+  const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
+  return normalizeText(decodeEntities(
+    body
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+  ));
 }
 
 function tagAttributes(tag) {
@@ -502,6 +529,53 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   }
 }
 
+export function exportedSeoUrlPortabilityFindings(projectRoot, trackedYamlFiles, targetBaseUrl = '') {
+  let targetOrigin = '';
+  try {
+    targetOrigin = targetBaseUrl ? new URL(targetBaseUrl).origin : '';
+  } catch {
+    // The existing target validation reports malformed URLs separately.
+  }
+  const findings = [];
+  for (const file of trackedYamlFiles) {
+    const name = basename(file);
+    if (!/^metatag\.metatag_defaults\..+\.ya?ml$/i.test(name) && !/^schema_metatag\..+\.ya?ml$/i.test(name)) {
+      continue;
+    }
+    let content = '';
+    try {
+      content = readFileSync(join(projectRoot, file), 'utf8');
+    } catch {
+      continue;
+    }
+    for (const [index, line] of content.split(/\r?\n/).entries()) {
+      for (const match of line.matchAll(/https?:\/\/[^\s'"<>]+/gi)) {
+        try {
+          const url = new URL(match[0].replace(/[),.;]+$/, ''));
+          const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+          const localHost =
+            host === 'localhost' ||
+            host === '::1' ||
+            host.endsWith('.localhost') ||
+            host.endsWith('.ddev.site') ||
+            /^127(?:\.\d{1,3}){3}$/.test(host);
+          if (localHost || (targetOrigin && url.origin === targetOrigin)) {
+            findings.push({
+              file,
+              host: url.host,
+              key: line.match(/^\s*([^:#]+):/)?.[1]?.trim() ?? '',
+              line: index + 1
+            });
+          }
+        } catch {
+          // Rendered metadata validation handles malformed public URLs.
+        }
+      }
+    }
+  }
+  return findings;
+}
+
 function configStatusIsClean(result) {
   if (!result.ok) {
     return false;
@@ -533,7 +607,8 @@ function inspectDrupalRuntime(cwd, environment) {
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
       trackedConfigDirectory: '',
-      trackedConfigYamlFiles: []
+      trackedConfigYamlFiles: [],
+      exportedSeoUrlPortabilityFindings: []
     };
   }
   const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
@@ -551,6 +626,7 @@ function inspectDrupalRuntime(cwd, environment) {
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
+  const seoUrlFindings = exportedSeoUrlPortabilityFindings(projectRoot, trackedConfig.yamlFiles, baseUrl);
   return {
     baseUrl,
     confirmed,
@@ -564,7 +640,8 @@ function inspectDrupalRuntime(cwd, environment) {
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
-    trackedConfigYamlFiles: trackedConfig.yamlFiles
+    trackedConfigYamlFiles: trackedConfig.yamlFiles,
+    exportedSeoUrlPortabilityFindings: seoUrlFindings
   };
 }
 
@@ -663,6 +740,37 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
     matchesBrowserRenderedSource: primaryRoute?.matchesBrowserRenderedSource === true,
     renderedSeo: expectedRenderedSeo(browserEvidence, targetPath),
     routeKind: 'primary',
+    statusUsesInitialResponse: record.expectedRedirect === true,
+    targetPath
+  };
+}
+
+function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence) {
+  const targetPath = normalizePath(check?.targetUrl || check?.targetFinalUrl);
+  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const declaredStatus = record.targetStatus;
+  const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
+    ? Number(declaredStatus)
+    : 200;
+  return {
+    accepted: check?.accepted === true && Boolean(record.targetPath),
+    expectedBehavior: record.expectedRedirect === true ? 'redirect' : 'public_200',
+    expectedBodySignals: check?.routeRole === 'detail'
+      ? (Array.isArray(check?.detailContentSignals?.loadBearingFields)
+          ? check.detailContentSignals.loadBearingFields
+            .filter((field) => field?.visible === true)
+            .map((field) => normalizeText(field?.targetSignal))
+            .filter(Boolean)
+          : [])
+      : [],
+    expectedFinalPath: normalizePath(record.targetFinalPath || targetPath),
+    expectedH1: normalizeText(record.targetH1 || check?.renderedSignals?.targetH1),
+    expectedStatus,
+    expectedTitle: normalizeText(record.targetTitle || check?.renderedSignals?.targetTitle),
+    identityRequired: true,
+    matchesBrowserRenderedSource: true,
+    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath),
+    routeKind: 'browser-representative',
     statusUsesInitialResponse: record.expectedRedirect === true,
     targetPath
   };
@@ -782,6 +890,16 @@ function completionEvidenceTargetErrors({
       targetOrigin
     );
   }
+  for (const [index, check] of (Array.isArray(browserEvidence?.anonymousFormChecks)
+    ? browserEvidence.anonymousFormChecks
+    : []).entries()) {
+    requiredOriginMatch(
+      errors,
+      `browser-evidence.json anonymousFormChecks[${index}].targetUrl`,
+      check?.targetUrl,
+      targetOrigin
+    );
+  }
   for (const [index, review] of (Array.isArray(blindReview?.editorExperienceReviews)
     ? blindReview.editorExperienceReviews
     : []).entries()) {
@@ -866,6 +984,7 @@ async function verifyRoute(baseUrl, expected) {
     const response = await requestFollowingRedirects(requestedUrl);
     const actualH1 = elementText(response.body, 'h1');
     const actualTitle = elementText(response.body, 'title');
+    const actualBodyText = renderedBodyText(response.body);
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
@@ -897,6 +1016,11 @@ async function verifyRoute(baseUrl, expected) {
       errors.push(
         `${expected.targetPath} title was ${JSON.stringify(actualTitle)}; expected ${JSON.stringify(expected.expectedTitle)}.`
       );
+    }
+    for (const signal of (Array.isArray(expected.expectedBodySignals) ? expected.expectedBodySignals : [])) {
+      if (!actualBodyText.toLowerCase().includes(signal.toLowerCase())) {
+        errors.push(`${expected.targetPath} is missing expected visible detail signal ${JSON.stringify(signal)}.`);
+      }
     }
     if (expected.renderedSeo) {
       const seo = expected.renderedSeo;
@@ -1091,6 +1215,27 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  const primaryRoutePaths = new Set(primaryRoutes.map((route) => normalizePath(route?.targetPath)).filter(Boolean));
+  const representativeChecksByPath = new Map();
+  for (const check of (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])) {
+    const path = normalizePath(check?.targetUrl || check?.targetFinalUrl);
+    if (path && !primaryRoutePaths.has(path) && !representativeChecksByPath.has(path)) {
+      representativeChecksByPath.set(path, check);
+    }
+  }
+  const browserRepresentativeRouteChecks = target && explicitTargetFetchAllowed
+    ? await mapWithConcurrency(
+        representativeChecksByPath.values(),
+        MAX_BROWSER_REPRESENTATIVE_CONCURRENCY,
+        (check) => verifyRoute(
+          target.url,
+          expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
+        )
+      )
+    : [];
+  for (const route of browserRepresentativeRouteChecks) {
+    liveErrors.push(...route.errors);
+  }
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -1158,6 +1303,10 @@ export async function verifyLive({
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
     packetTrackedConfigYamlFiles.length > 0 &&
     packetTrackedConfigYamlFiles.every((path) => runtimeTrackedConfigSet.has(path));
+  const runtimeSeoUrlPortabilityFindings = Array.isArray(inspectedDrupalRuntime.exportedSeoUrlPortabilityFindings)
+    ? inspectedDrupalRuntime.exportedSeoUrlPortabilityFindings
+    : [];
+  const drupalRuntimeSeoUrlsPortable = runtimeSeoUrlPortabilityFindings.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -1167,7 +1316,8 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
-    drupalRuntimeTrackedConfigReadbackMatches;
+    drupalRuntimeTrackedConfigReadbackMatches &&
+    drupalRuntimeSeoUrlsPortable;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
@@ -1210,13 +1360,16 @@ export async function verifyLive({
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
   }
+  if (!drupalRuntimeSeoUrlsPortable) {
+    completionBlockedReasons.push('Exported SEO configuration contains literal local-environment URLs; use request-aware Drupal tokens or managed media tokens.');
+  }
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
   }
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
-    routeChecks: [...routeChecks, ...targetRequiredRouteChecks].map((route) => ({
+    routeChecks: [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks].map((route) => ({
       bodySha256: route.bodySha256 ?? '',
       finalUrl: route.finalUrl ?? '',
       h1: route.actualH1 ?? '',
@@ -1255,6 +1408,7 @@ export async function verifyLive({
     },
     routeChecks,
     targetRequiredRouteChecks,
+    browserRepresentativeRouteChecks,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
@@ -1265,6 +1419,7 @@ export async function verifyLive({
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,
+      seoUrlsPortable: drupalRuntimeSeoUrlsPortable,
       targetOriginMatches: drupalRuntimeTargetMatches,
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,
       trackedConfigDirectory: runtimeTrackedConfigDirectory,

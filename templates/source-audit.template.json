@@ -17,7 +17,17 @@
   "singleSourceOrUnknownFacts": [],
   "observedPatterns": [],
   "detectedTechnologySignals": [],
-  "formsAndIntegrations": [],
+  "formsAndIntegrations": [
+    {
+      "kind": "public_submission_form | search | provider_embed | map | media | analytics | other",
+      "sourceRoute": "",
+      "purpose": "contact_message | application | registration | newsletter | survey | other",
+      "anonymousPublicUse": false,
+      "expectedOutcome": "message_delivery | submission_storage | account_creation | provider_handoff | search_results | other",
+      "evidence": "",
+      "notes": ""
+    }
+  ],
   "mediaSignals": [],
   "contentInventory": [],
   "designSignals": [],

@@ -39,6 +39,8 @@ For each behavior, record:
 - reviewer decision;
 - unresolved differences.
 
+Anonymous submission forms pass only when source purpose/outcome, modeled purpose/outcome/owner, and browser purpose/owner/outcome agree, an anonymous browser exercised invalid and valid synthetic submissions, and the configured Drupal/provider handler reached the intended outcome. `other` is explicit rather than a wildcard, and storage alone does not satisfy a message-delivery form. The form also needs evidence of a rendered honeypot/challenge, configured rate limiting/provider protection, or a documented local-only exception; no particular vendor is required.
+
 Examples:
 
 - listing filters;
@@ -57,6 +59,8 @@ Visual and content parity are part of the default build goal.
 Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a named, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a named owner accepts a specific evidence-backed count exclusion.
 
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
+
+Each collection with separate public item details also needs one representative detail-route comparison that proves visible load-bearing fields and matches the declared detail owner or carries an evidenced deviation. Every recorded public browser route needs raw route-bound axe-core output with no unresolved WCAG A/AA violations, no undispositioned WCAG-tagged incomplete nodes, and applicable keyboard, focus, accessible-name, and form-error checks.
 
 ## Minimum Parity Report Shape
 

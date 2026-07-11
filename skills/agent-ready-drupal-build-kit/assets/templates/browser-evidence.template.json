@@ -61,6 +61,53 @@
         "accepted": false,
         "evidence": ""
       },
+      "accessibilityCheck": {
+        "standard": "WCAG 2.2 AA",
+        "engine": "axe-core",
+        "engineVersion": "",
+        "executedInBrowser": false,
+        "report": "",
+        "incompleteReviewed": false,
+        "incompleteDispositions": [
+          {
+            "ruleId": "",
+            "target": [],
+            "disposition": "manual_pass | false_positive | not_applicable",
+            "rationale": "",
+            "evidence": ""
+          }
+        ],
+        "manualChecks": {
+          "keyboardNavigation": "pass | not_applicable",
+          "keyboardNavigationNotApplicableRationale": "",
+          "visibleFocus": "pass | not_applicable",
+          "visibleFocusNotApplicableRationale": "",
+          "accessibleNamesAndLabels": "pass | not_applicable",
+          "accessibleNamesAndLabelsNotApplicableRationale": "",
+          "formLabelsErrorsAndFocus": "pass | not_applicable",
+          "formLabelsErrorsAndFocusNotApplicableRationale": ""
+        },
+        "status": "pass | fail | blocked",
+        "blockers": []
+      },
+      "detailContentSignals": {
+        "contentTypeOrBundle": "",
+        "drupalOwner": "",
+        "ownerDeviation": {
+          "applies": false,
+          "rationale": "",
+          "evidence": ""
+        },
+        "loadBearingFields": [
+          {
+            "field": "",
+            "sourceSignal": "",
+            "targetSignal": "",
+            "visible": false
+          }
+        ],
+        "accepted": false
+      },
       "renderedItemCounts": [
         {
           "sourceObject": "",
@@ -72,6 +119,38 @@
         }
       ],
       "notes": "",
+      "accepted": false,
+      "blockers": []
+    }
+  ],
+  "anonymousFormChecks": [
+    {
+      "sourceRoute": "",
+      "targetUrl": "",
+      "purpose": "",
+      "drupalOwner": "",
+      "anonymousSession": false,
+      "syntheticTestData": false,
+      "invalidSubmission": {
+        "performed": false,
+        "errorsVisible": false,
+        "focusOrSummaryVerified": false
+      },
+      "validSubmission": {
+        "performed": false,
+        "successStateVisible": false
+      },
+      "outcome": {
+        "mode": "local_mail_capture | provider_delivery | drupal_submission_storage | account_created | provider_handoff | other",
+        "evidence": ""
+      },
+      "abuseProtection": {
+        "mode": "rendered_honeypot | rendered_challenge | configured_rate_limiting | provider_managed | local_only_exception",
+        "dispositionVerified": false,
+        "rationale": "",
+        "evidence": ""
+      },
+      "status": "pass | fail | blocked",
       "accepted": false,
       "blockers": []
     }

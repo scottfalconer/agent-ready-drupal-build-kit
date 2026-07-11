@@ -44,15 +44,15 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-OPERATOR-01` and `G-HANDOFF-01`: record the operator run and present only genuinely human-owned open decisions.
 - `G-TARGET-01`: identify and accept a production-equivalent target before a launch claim.
 - `G-ROUTE-01` through `G-ROUTE-06`: cover the full source boundary, browser-expanded routes, repeated-item counts, route drift, fetched target-required routes, front-page behavior, aliases, unexpected public routes, and Starter cleanup. A packet expectation that repeats a live `5xx` does not make that response acceptable.
-- `G-BROWSER-01`, `G-BROWSER-02`, and `G-EDITOR-01`: provide source/target browser evidence, first-fold brand assets, and authenticated non-admin editor tasks.
+- `G-BROWSER-01`, `G-BROWSER-02`, `G-DETAIL-01`, `G-A11Y-01`, `G-FORM-01`, and `G-EDITOR-01`: provide source/target browser evidence, first-fold brand assets, representative detail-route field rendering, raw real-browser accessibility results, anonymous public-form outcomes plus vendor-neutral abuse-protection dispositions, and authenticated non-admin editor tasks.
 - `G-PARITY-01`: accept content, media, visual/design, functional, navigation, Views/page, form/integration, redirect, and public SEO parity for every applicable addressable surface.
 - `G-CONTENT-01` and `G-CONTENT-02`: prove structured-content and collection ownership. Every declared collection row needs source/target counts, Drupal ownership, and non-admin editor add-a-row evidence; counts must match unless a named owner accepts a specific evidence-backed exclusion, and private/unreachable boundaries need evidence.
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
-- `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
+- `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, exported SEO URL portability, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.
-- `G-LAUNCH-01`: govern launch-only accessibility, performance, security/privacy, final QA, rollback, deployment, and accepted-exception evidence that the local verifier intentionally does not certify.
+- `G-LAUNCH-01`: govern formal accessibility conformance, performance, security/privacy, final QA, rollback, deployment, production form delivery/abuse controls, and accepted-exception evidence beyond the browser-detectable handoff checks.
 
 Generated files can identify a gate or record a blocked stub. They cannot clear a gate by themselves.
 

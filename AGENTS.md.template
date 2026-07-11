@@ -130,6 +130,7 @@ Complete this gate before theme polish, Canvas composition, or bulk import. A Dr
 - Do not model repeatable source objects as generic Page or Utility Page nodes, body markup, JSON blobs, Canvas-only copies, Twig arrays, or import-script data. Generic pages are acceptable only for genuinely simple standalone informational pages, and the packet must name that exception.
 - A list, grid, schedule, directory, archive, catalog, feed, or search result implies a structured content type plus a View unless the packet records a stronger Drupal-native owner such as an existing entity display or Search API-backed view.
 - For every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, produce a collection ownership ledger entry: source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and non-admin editor add-a-row evidence. Every declared ledger row must contain all three kinds of proof: reconciled counts, real Drupal ownership, and a successful editor add-a-row task. Body markup, a one-off blob field, or static cards are failed collection owners unless the packet records a genuine one-off exception. Detail pages, individual node routes, or sample items do not satisfy the collection-route gate; a source listing/archive route needs its own View, redirect, intentional-drop disposition, or documented owner decision.
+- Declare whether each collection has a separate public detail route, renders items only inside the collection, hands details to an external provider, or has no detail. A separate public detail route needs one representative source/target pair plus browser evidence that the title and every load-bearing field are visibly rendered. Its browser-observed Drupal owner must match the ledger's detail owner unless a rationale and packet-local evidence accept a specific deviation. HTTP 200 or an H1 alone is not detail-route proof.
 - For every route with repeated load-bearing items, reconcile source versus target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar items. Counts must be equal unless a named owner accepts a specific evidence-backed exclusion. An item classified as private or unreachable needs evidence of that boundary; the label alone is not a disposition. A matching route status and H1 do not prove route completeness.
 - For each recurring object, define typed fields, taxonomy vocabularies, entity references, media references, dates, links, booleans, numeric values, text fields, view modes, form displays, and editor workflow before importing content.
 - Store facts as fields. Dates, venues, categories, speakers, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationship data do not belong only in the body field.
@@ -546,6 +547,7 @@ Inside a DDEV agent shell, run the equivalent from the Drupal webroot: `cd web &
 - Preserve or explicitly disposition important source-intent aliases and redirects.
 - Apply a maintained Drupal CMS SEO recipe for public rebuilds when available, or record why it is blocked/not applicable. Map its tokens to fields the model actually has; stock tokens pointing at missing fields silently emit empty metadata.
 - Verify rendered SEO output, not only module/config presence. For one published node per public content type, fetch the anonymous page and assert a non-empty `<meta name="description">`; assert a non-empty `og:image` when the source/content type has a meaningful image. An enabled module is not evidence.
+- Keep exported SEO configuration environment-portable. Metatag and schema defaults should use request-aware Drupal tokens, entity/media tokens, or intentionally external asset URLs. Do not export literal DDEV, localhost, loopback, or current-local-target URLs merely to make local rendered checks pass.
 - Include meta title, meta description, SEO image, Open Graph/social fields, logical heading structure, and schema-supporting fields where discovery matters.
 - Use taxonomy landing pages and internal related-content links when they match the source architecture.
 - Define public search behavior, search permissions, indexing assumptions, noindex cases, and blocked production-search gaps.
@@ -567,6 +569,16 @@ Before handoff:
 - dashboard or admin listing affordances exist for editors to find and maintain content.
 
 Public visual plausibility is not enough. A polished static-looking page with no credible Drupal editing path is a failed Drupal CMS rebuild. A tidy Drupal architecture that does not visually and functionally resemble the source is also incomplete.
+
+## Anonymous Public Forms
+
+For every anonymous submission form observed on the source, record its purpose, Drupal/provider owner, and intended outcome. Preserve that purpose and outcome through the pattern map and browser check, and bind the browser result to the modeled owner; do not downgrade message delivery to submission storage. `other` is an explicit outcome that must match end to end, not a wildcard. Test the target in an anonymous browser session with synthetic data: exercise required-field errors, confirm error focus or summary behavior, submit valid data, verify the visible success state, and prove that the configured handler reached the intended outcome. A contact form that only stores a Webform submission but has no mail/provider delivery path is incomplete. A local mail-capture sink is sufficient for the local rebuild; production provider credentials remain a launch concern.
+
+Also record a vendor-neutral abuse-protection disposition. Prove a rendered honeypot or challenge, configured rate limiting, or provider-managed protection. A local-only DDEV exception may pass only with a specific rationale and packet-local evidence; it does not make the form launch-ready. Do not require a particular CAPTCHA or security vendor.
+
+## Browser Accessibility
+
+Run axe-core in the rendered browser context for every route recorded in `browser-evidence.json`, bind the raw report to that exact target route and viewport, and resolve WCAG A/AA violations before handoff. Every WCAG-tagged axe `incomplete` node must disappear in a fresh scan or have a matching rule/target disposition with rationale and packet-local evidence; `incompleteReviewed: true` alone is not proof. Also manually verify keyboard navigation, visible focus, accessible names/labels, and form label/error/focus behavior where applicable. This handoff gate catches browser-detectable defects; it does not claim a formal accessibility certification or replace a launch audit.
 
 ## Regulated Or Claim-Sensitive Content
 
@@ -611,6 +623,10 @@ Before calling the local build successful, record:
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - rendered SEO evidence for every primary route, including exactly one usable canonical, non-empty meta description, and `og:image` where applicable. Every `not_applicable` disposition needs reviewed rationale and evidence;
+- exported SEO defaults contain no literal local-environment URLs;
+- raw in-browser axe-core results and manual keyboard/focus/name checks for every browser-evidence route;
+- anonymous public-form invalid/valid submission checks with outcome-appropriate handler evidence and a vendor-neutral abuse-protection disposition;
+- representative detail-route evidence for each collection that declares a separate public detail route, including visible load-bearing fields;
 - anonymous public route checks;
 - visual parity checks for homepage, listing, detail, navigation, footer, and major responsive states;
 - functional parity checks for source-like behaviors;

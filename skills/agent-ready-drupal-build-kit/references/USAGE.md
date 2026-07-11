@@ -111,7 +111,11 @@ Before calling the local build successful, the agent must record:
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
 - composition evidence showing the target's actual route owner matches the declared owner, or a target-bound accepted deviation names the fallback, rationale, accepter, and evidence;
 - rendered SEO evidence for every primary route, including one usable canonical, a non-empty meta description, and `og:image` where applicable; each `not_applicable` disposition needs reviewed rationale and evidence;
+- environment-portable exported SEO defaults with request/entity/media tokens instead of literal DDEV, localhost, loopback, or current-target URLs;
 - anonymous public route checks;
+- raw in-browser axe-core evidence with every WCAG-tagged incomplete node resolved or dispositioned, plus keyboard, focus, accessible-name, and applicable form-error checks for every browser-evidence route;
+- anonymous public-form source/model/browser purpose, owner, and outcome alignment; invalid and valid synthetic submissions; outcome-handler proof; and a vendor-neutral abuse-protection disposition;
+- one browser-verified representative detail route with visible load-bearing fields and matching Drupal owner, or an evidenced owner deviation, for every collection that has separate public item details;
 - functional checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
 - authenticated non-admin editor add/edit form checks with clean labels, visible load-bearing fields, and create/edit permission proof;

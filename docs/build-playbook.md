@@ -232,6 +232,8 @@ Source audit and migration evidence are not normal editorial fields. `Source URL
 
 The collection ownership gate is concrete. Every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like ledger row needs the source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. Counts must be equal unless a named owner accepts a specific evidence-backed exclusion; private or unreachable items need evidence of that boundary. Detail pages, individual node routes, and sample items do not satisfy a collection route. A route-level 200/H1 check is not collection parity.
 
+The reverse is also true: a working collection does not prove its item details. Declare the detail mode for each collection. When items have separate public details, capture one representative source/target route and verify the bundle owner plus visible load-bearing fields in the browser. The observed owner must match the declared detail owner or carry an evidenced deviation. The live verifier fetches non-primary browser representatives as well as primary routes, using bounded concurrency so a large evidence set does not overload the target.
+
 The editor gate is practical: a non-admin editor must be able to add a new representative item, fill meaningful fields, save it, and see it appear in the expected public View, listing, detail route, search result, menu placement, or Canvas composition without code changes. If that cannot happen, the build has not proved Drupal ownership of the content.
 
 ## Drupal CMS Guide Best Practices
@@ -248,6 +250,7 @@ For target architecture:
 - Include SEO and social metadata where the source depends on discovery: URL aliases, meta title, meta description, SEO image, Open Graph title/description/image, heading-level strategy, schema.org-supporting fields, taxonomy landing pages, and related-content/internal-linking Views.
 - Use Drupal CMS moderation/workflow for team-edited, regulated, or claim-sensitive content. Record states such as draft, needs review, published, and unpublished, plus role permissions for create, review, publish, unpublish, and update actions.
 - Apply Drupal CMS Accessibility Tools/Editoria11y when accessibility review is in scope. Record content accessibility report status, alt text, heading structure, contrast, embed descriptions, and unresolved manual checks.
+- For local handoff, run axe-core in a real browser on every recorded public browser route and retain the raw route-bound report. Resolve WCAG A/AA violations; every WCAG-tagged incomplete node needs a matching rule/target disposition with rationale and packet-local evidence. Manually check keyboard navigation, visible focus, accessible names, and applicable form errors/focus. Formal conformance review remains a launch activity.
 - Record site settings and operations that affect handoff: site name, site email, caching/aggregation, backup strategy, update readiness, security updates, Composer-managed files, and whether updates are handled through Drupal CMS UI, Composer, hosting tools, or another chosen path.
 
 ## Regulated Product And Compliance Content
@@ -565,6 +568,14 @@ For rebuilds that need SEO preservation, record the metadata strategy:
 - blocked production SEO evidence.
 
 Do not treat readable aliases alone as SEO parity. Every primary route needs fetched rendered canonical, meta-description, and `og:image` evidence; `not_applicable` needs reviewed rationale and evidence.
+
+Rendered local URLs are expected to use the DDEV origin, but exported defaults must stay portable. Use request-aware or entity/media tokens in Metatag/schema config; literal `.ddev.site`, localhost, loopback, or current-target URLs in exported SEO config block completion.
+
+## Anonymous Public Forms
+
+Map every audited anonymous source form to a Drupal or provider owner and name its intended outcome. Preserve source purpose and expected outcome in the model, then preserve model purpose and owner in the browser check. `other` must match explicitly; it is not a wildcard. In an anonymous browser session, submit invalid synthetic data and verify visible/focused validation, then submit valid data and verify both the success state and the configured handler outcome. Contact-message forms need local mail capture or provider delivery evidence; Drupal submission storage alone is not message delivery.
+
+Record abuse protection without prescribing a vendor: prove a rendered honeypot or challenge, configured rate limiting, or provider-managed protection. A documented local-only exception needs a concrete rationale and packet-local evidence and remains a launch gap. Production credentials, retention approval, and final production hardening remain launch concerns.
 
 The default live verifier supplies target-local mechanical evidence only. Production SEO, deployment, hardening, credentials, and launch approval remain separate.
 
