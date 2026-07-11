@@ -1279,6 +1279,15 @@ test('critical same-origin rendered asset bytes are bounded, validated, and stat
       assert.equal(first.routeChecks[0].criticalAssets.manifest[0].path, 'local:/site.css?v=%7Basset-cache-buster%7D');
       assert.match(first.routeChecks[0].criticalAssets.manifest[0].sha256, /^sha256:[a-f0-9]{64}$/);
       assert.equal(first.buildState.routeManifest[0].criticalAssetManifest.length, 1);
+      assert.deepEqual(first.criticalAssetInspection, {
+        distinctRequestCount: 1,
+        totalBytes: Buffer.byteLength(stylesheet),
+        limits: {
+          requestCount: 160,
+          perAssetBytes: 20 * 1024 * 1024,
+          totalBytes: 100 * 1024 * 1024
+        }
+      });
 
       stylesheet = 'body{color:#222}';
       const second = await inspect();

@@ -2712,6 +2712,15 @@ export async function verifyLive({
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
       targetFingerprintInputVersion: 2
     },
+    criticalAssetInspection: {
+      distinctRequestCount: criticalAssetContext.cache.size,
+      totalBytes: criticalAssetContext.totalBytes,
+      limits: {
+        requestCount: MAX_CRITICAL_ASSET_REQUESTS,
+        perAssetBytes: MAX_CRITICAL_ASSET_BYTES,
+        totalBytes: MAX_CRITICAL_ASSET_TOTAL_BYTES
+      }
+    },
     routeChecks,
     targetRequiredRouteChecks,
     liveTargetValid,
