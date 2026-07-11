@@ -705,8 +705,8 @@ async function validateRequiredFiles(packetDir, gates, errors) {
 }
 
 function recordMatchesRoute(record, sourcePath, targetPath) {
-  const recordSource = normalizeRouteKey(record?.sourceRoute || record?.sourcePath);
-  const recordTarget = normalizeRouteKey(record?.targetRoute || record?.targetPath || record?.publicRoute);
+  const recordSource = normalizeRouteRequestKey(record?.sourceRoute || record?.sourcePath);
+  const recordTarget = normalizeRouteRequestKey(record?.targetRoute || record?.targetPath || record?.publicRoute);
   return (!sourcePath || recordSource === sourcePath) && (!targetPath || recordTarget === targetPath);
 }
 
@@ -780,8 +780,8 @@ async function independentStructuredGateReasons({
   const reasons = [];
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
     .map((route) => ({
-      source: normalizeRouteKey(route?.sourcePath),
-      target: normalizeRouteKey(route?.targetPath)
+      source: normalizeRouteRequestKey(route?.sourcePath),
+      target: normalizeRouteRequestKey(route?.targetPath)
     }))
     .filter((route) => route.source && route.target);
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
@@ -1171,7 +1171,7 @@ async function independentStructuredGateReasons({
   }
 
   const placeholderScan = independentVerification?.placeholderTextScan ?? {};
-  const scannedPlaceholderRoutes = new Set(arrayOrEmpty(placeholderScan.scannedRoutes).map(normalizeRouteKey));
+  const scannedPlaceholderRoutes = new Set(arrayOrEmpty(placeholderScan.scannedRoutes).map(normalizeRouteRequestKey));
   if (
     placeholderScan.status !== 'pass' ||
     arrayOrEmpty(placeholderScan.findings).length > 0 ||
@@ -1235,7 +1235,7 @@ async function independentStructuredGateReasons({
       check?.deviationRecordPresent === true &&
       independentTargetUrl &&
       deviationTargetUrl?.origin === independentTargetUrl.origin &&
-      normalizeRouteKey(deviationTargetUrl.pathname) === route.target &&
+      normalizeRouteRequestKey(deviationTargetUrl.href) === route.target &&
       String(check?.deviationRationale ?? '').trim() &&
       deviationEvidencePresent;
     if (
@@ -1923,8 +1923,8 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
 
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
     .map((route) => ({
-      source: normalizeRouteKey(route.sourcePath || route.route || route.path),
-      target: normalizeRouteKey(route.targetPath || route.sourcePath || route.route || route.path)
+      source: normalizeRouteRequestKey(route.sourcePath || route.route || route.path),
+      target: normalizeRouteRequestKey(route.targetPath || route.sourcePath || route.route || route.path)
     }))
     .filter((route) => route.target);
   const acceptedOmissions = new Map(
@@ -1935,14 +1935,14 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
         String(route.rationale ?? '').trim() &&
         arrayOrEmpty(route.evidence).length > 0
       )
-      .map((route) => [normalizeRouteKey(route.route || route.targetPath || route.sourcePath || route.path), route])
+      .map((route) => [normalizeRouteRequestKey(route.route || route.targetPath || route.sourcePath || route.path), route])
   );
 
   for (const primaryRoute of primaryRoutes) {
     const matchingReviews = routeReviews.filter((review) => {
-      const routeKey = normalizeRouteKey(review.route);
-      const targetKey = normalizeRouteKey(review.targetUrlOrArtifact);
-      const sourceKey = normalizeRouteKey(review.sourceTruthReference);
+      const routeKey = normalizeRouteRequestKey(review.route);
+      const targetKey = normalizeRouteRequestKey(review.targetUrlOrArtifact);
+      const sourceKey = normalizeRouteRequestKey(review.sourceTruthReference);
       return (
         routeKey === primaryRoute.target &&
         targetKey === primaryRoute.target &&
@@ -2097,10 +2097,14 @@ function routeRecordPath(record) {
   return normalizeRouteKey(record?.route || record?.targetPath || record?.targetUrl || record?.targetFinalUrl);
 }
 
+function routeRecordRequestKey(record) {
+  return normalizeRouteRequestKey(record?.route || record?.targetPath || record?.targetUrl || record?.targetFinalUrl);
+}
+
 function routeHasViewport(checks, route, viewport) {
   return checks.some((check) => {
     const viewportName = String(check?.viewport?.name ?? check?.viewport ?? '').trim();
-    return routeRecordPath(check) === route && viewportName === viewport;
+    return routeRecordRequestKey(check) === route && viewportName === viewport;
   });
 }
 
@@ -2780,6 +2784,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
         successfulStatus(route?.targetStatus) &&
         targetFinalPath === targetPath;
       return route?.accepted !== true ||
+        !normalizeRouteRequestKey(route?.sourcePath) ||
+        !targetPath ||
         !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
         declaredServerError ||
         (!redirectContractValid && !directContractValid);
@@ -3168,7 +3174,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   for (const route of primaryRoutes) {
     for (const viewport of ['desktop', 'mobile']) {
       if (!firstFoldRecords.some((record) =>
-        recordMatchesRoute(record, normalizeRouteKey(route.sourcePath), normalizeRouteKey(route.targetPath)) &&
+        recordMatchesRoute(record, normalizeRouteRequestKey(route.sourcePath), normalizeRouteRequestKey(route.targetPath)) &&
         record.viewport === viewport &&
         record.heroArtworkMatchesOrDispositioned === true &&
         record.logoOrLockupMatchesOrDispositioned === true &&
@@ -3177,7 +3183,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
         record.accepted === true &&
         String(record.notes ?? '').trim()
       )) {
-        reasons.push(`route-matrix.json needs accepted first-fold brand parity for ${normalizeRouteKey(route.targetPath)} at ${viewport}.`);
+        reasons.push(`route-matrix.json needs accepted first-fold brand parity for ${normalizeRouteRequestKey(route.targetPath)} at ${viewport}.`);
       }
     }
   }
@@ -3201,7 +3207,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const acceptedPageOwners = arrayOrEmpty(patternMap?.pageCompositionOwnership).filter(
     (owner) =>
       owner?.accepted === true &&
-      normalizeRouteKey(owner?.sourceRoute) &&
+      normalizeRouteRequestKey(owner?.sourceRoute) &&
       String(owner?.selectedOwner ?? '').trim() &&
       String(owner?.ownerRationale ?? '').trim() &&
       String(owner?.editorVerificationEvidence ?? '').trim()
@@ -3264,7 +3270,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       )
     )) ||
     primaryRoutes.some(
-      (route) => !acceptedPageOwners.some((owner) => normalizeRouteKey(owner.sourceRoute) === normalizeRouteKey(route.sourcePath))
+      (route) => !acceptedPageOwners.some((owner) =>
+        normalizeRouteRequestKey(owner.sourceRoute) === normalizeRouteRequestKey(route.sourcePath)
+      )
     ) ||
     !arrayOrEmpty(patternMap?.sectionOwnershipMatrix).some(
       (section) =>
@@ -3326,7 +3334,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     parityRouteChecks.length === 0 ||
     primaryRoutePaths.some(
       (route) => !parityRouteChecks.some((check) =>
-        routeRecordPath(check) === route && check?.status === 'pass' && String(check?.evidence ?? '').trim()
+        routeRecordRequestKey(check) === route && check?.status === 'pass' && String(check?.evidence ?? '').trim()
       )
     ) ||
     parityContentChecks.length === 0 ||
@@ -3379,8 +3387,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     publicRouteChecks.some((check) =>
       check?.accepted !== true ||
       !ROUTE_ROLES.has(String(check?.routeRole ?? '').trim()) ||
-      (primaryRouteRoles.has(routeRecordPath(check)) &&
-        primaryRouteRoles.get(routeRecordPath(check)) !== String(check?.routeRole ?? '').trim()) ||
+      (primaryRouteRoles.has(routeRecordRequestKey(check)) &&
+        primaryRouteRoles.get(routeRecordRequestKey(check)) !== String(check?.routeRole ?? '').trim()) ||
       check?.visualComparison?.status !== 'pass' ||
       !httpUrl(check?.sourceUrl) ||
       !httpUrl(check?.sourceFinalUrl) ||
@@ -3410,6 +3418,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('browser-evidence.json must cover every primary route at desktop and mobile with accepted source/target visual and rendered-signal evidence.');
   }
   const renderedSeoRoutes = new Set();
+  const renderedSeoRoutePaths = new Set();
   for (const check of publicRouteChecks) {
     const seo = check?.renderedSeoSignals ?? {};
     if (
@@ -3429,7 +3438,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       )) &&
       String(seo.evidence ?? '').trim()
     ) {
-      renderedSeoRoutes.add(routeRecordPath(check));
+      renderedSeoRoutes.add(routeRecordRequestKey(check));
+      renderedSeoRoutePaths.add(routeRecordPath(check));
     }
   }
   if (primaryRoutePaths.some((route) => !renderedSeoRoutes.has(route))) {
@@ -3520,7 +3530,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       (!detailOwnerMatches && !detailOwnerDeviationAccepted) ||
       (!detailOwnerConfigMatches && !detailOwnerDeviationAccepted) ||
       !fieldsVerified ||
-      !renderedSeoRoutes.has(targetDetail)
+      !renderedSeoRoutePaths.has(targetDetail)
     ) {
       reasons.push(`browser-evidence.json must prove an accepted representative detail route with visible load-bearing fields and rendered SEO for collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'}.`);
     }

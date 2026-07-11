@@ -118,8 +118,49 @@ function redactedPath(value, baseUrl) {
   }
 }
 
+function redactQueryValuesInMessage(value) {
+  return String(value).replace(
+    /((?:https?:\/\/[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/g,
+    (_match, prefix, rawQueryWithPunctuation) => {
+      const [, rawQuery, punctuation = ''] = rawQueryWithPunctuation.match(/^(.*?)([),.;:]*)$/) ?? [];
+      return rawQuery
+        ? `${prefix}?query-sha256=${sha256(`?${rawQuery}`)}${punctuation}`
+        : _match;
+    }
+  );
+}
+
+function sharedPacketDirName(absolutePacketDir) {
+  const name = basename(absolutePacketDir);
+  const queryIndex = name.indexOf('?');
+  return queryIndex === -1
+    ? name
+    : `${name.slice(0, queryIndex)}?query-sha256=${sha256(name.slice(queryIndex))}`;
+}
+
 function sharedMessage(value, absolutePacketDir) {
-  return String(value).replaceAll(absolutePacketDir, basename(absolutePacketDir));
+  const rawName = basename(absolutePacketDir);
+  const sharedName = sharedPacketDirName(absolutePacketDir);
+  return redactQueryValuesInMessage(
+    String(value)
+      .replaceAll(absolutePacketDir, sharedName)
+      .replaceAll(rawName, sharedName)
+  );
+}
+
+function sharedValue(value, absolutePacketDir) {
+  if (typeof value === 'string') {
+    return sharedMessage(value, absolutePacketDir);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => sharedValue(entry, absolutePacketDir));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, sharedValue(entry, absolutePacketDir)])
+    );
+  }
+  return value;
 }
 
 function normalizeText(value) {
@@ -1581,9 +1622,11 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
   return { source, url: parseHttpUrl(value, 'Live target URL') };
 }
 
-function matchingRouteRecord(routeMatrix, targetPath) {
+function matchingRouteRecord(routeMatrix, targetPath, exactRequest = '') {
   return (Array.isArray(routeMatrix.routes) ? routeMatrix.routes : []).find(
-    (route) => normalizePath(route?.targetPath) === targetPath
+    (route) => exactRequest
+      ? requestPathAndSearch(route?.targetPath) === exactRequest
+      : normalizePath(route?.targetPath) === targetPath
   );
 }
 
@@ -1638,8 +1681,9 @@ function expectedRenderedSeo(browserEvidence, targetPath, requestTarget = '') {
 }
 
 function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
-  const targetPath = normalizePath(primaryRoute?.targetPath || primaryRoute?.sourcePath);
-  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const requestTarget = requestPathAndSearch(primaryRoute?.targetPath || primaryRoute?.sourcePath);
+  const targetPath = normalizePath(requestTarget);
+  const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
   const homepage = targetPath === '/' ? routeMatrix.homepageParity ?? {} : {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
@@ -1649,12 +1693,14 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
     accepted: primaryRoute?.accepted === true,
     expectedBehavior: record.expectedRedirect === true ? 'redirect' : 'public_200',
     expectedFinalPath: normalizePath(record.targetFinalPath || homepage.targetFinalPath || targetPath),
+    expectedFinalRequest: requestPathAndSearch(record.targetFinalPath || homepage.targetFinalPath || requestTarget),
     expectedH1: normalizeText(record.targetH1 || homepage.targetH1),
     expectedStatus,
     expectedTitle: normalizeText(record.targetTitle || homepage.targetTitle),
     identityRequired: true,
     matchesBrowserRenderedSource: primaryRoute?.matchesBrowserRenderedSource === true,
-    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath),
+    renderedSeo: expectedRenderedSeo(browserEvidence, targetPath, requestTarget),
+    requestTarget,
     routeKind: 'primary',
     statusUsesInitialResponse: record.expectedRedirect === true,
     targetPath
@@ -2109,8 +2155,9 @@ async function verifyRoute(baseUrl, expected, liveHttpContext) {
       expected.expectedFinalRequest &&
       requestPathAndSearch(response.finalUrl) !== expected.expectedFinalRequest
     ) {
+      const stateKind = expected.routeKind === 'primary' ? 'primary' : 'representative';
       errors.push(
-        `${expected.targetPath} resolved to ${redactedPath(response.finalUrl, baseUrl)}; expected exact representative state ${redactedPath(expected.expectedFinalRequest, baseUrl)}.`
+        `${expected.targetPath} resolved to ${redactedPath(response.finalUrl, baseUrl)}; expected exact ${stateKind} state ${redactedPath(expected.expectedFinalRequest, baseUrl)}.`
       );
     }
     if (new URL(response.finalUrl).origin !== baseUrl.origin) {
@@ -2763,10 +2810,8 @@ export async function verifyLive({
     }))
   });
   const sharedPacketReport = {
-    ...packetReport,
-    packetDir: basename(absolutePacketDir),
-    errors: packetReport.errors.map((error) => sharedMessage(error, absolutePacketDir)),
-    warnings: packetReport.warnings.map((warning) => sharedMessage(warning, absolutePacketDir))
+    ...sharedValue(packetReport, absolutePacketDir),
+    packetDir: sharedPacketDirName(absolutePacketDir)
   };
 
   return {
@@ -2776,7 +2821,7 @@ export async function verifyLive({
     productionReadinessEvaluated: false,
     launchReady: false,
     verificationMode: 'live-target-and-packet',
-    packetDir: basename(absolutePacketDir),
+    packetDir: sharedPacketDirName(absolutePacketDir),
     target: target
       ? {
           declaredSourceBaseUrl: declaredSource ? redactedUrl(declaredSource) : '',
@@ -2797,7 +2842,7 @@ export async function verifyLive({
     redirectMappingConflicts: redirectMaterialization.conflicts,
     redirectMaterializationChecks,
     liveHttpBudget,
-    liveRouteBudget: liveHttpBudget,
+    liveRouteBudget: liveRouteSchedule.budget,
     liveTargetValid,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
