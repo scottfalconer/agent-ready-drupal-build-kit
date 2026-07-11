@@ -2937,7 +2937,7 @@ test('rendered internal legal and privacy links must resolve even when no legal 
   );
 });
 
-test('consent reconciliation rejects disabled or contradictory resource loads and accepts blocked optional resources', async () => {
+test('consent reconciliation rejects live violations and never promotes authored browser evidence to machine authority', async () => {
   let renderMap = true;
   await withHttpServer(
     (_request, response) => {
@@ -3008,7 +3008,11 @@ test('consent reconciliation rejects disabled or contradictory resource loads an
         targetUrl: baseUrl,
         drupalRuntime: injectedDrupalRuntime(baseUrl, { consentInventory: runtimeInventory })
       });
-      assert.equal(report.liveTargetValid, true, report.errors.join('\n'));
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
+      assert.equal(report.consentReconciliation.authoritativeBeforeConsentCapture, false);
+      assert.deepEqual(report.consentReconciliation.browserObservedUrls, []);
+      assert.deepEqual(report.consentReconciliation.authoredBrowserObservedUrls, []);
 
       runtimeInventory.applications[0].enabled = false;
       report = await verifyLive({

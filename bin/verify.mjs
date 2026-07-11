@@ -1280,11 +1280,18 @@ function verifyConsentReconciliation(declaration, runtime, routeChecks) {
 
   const serverRenderedUrls = routeChecks.flatMap((route) => route.renderedResourceUrls ?? []);
   const beforeChecks = Array.isArray(declaration?.beforeConsentChecks) ? declaration.beforeConsentChecks : [];
-  const browserObservedUrls = beforeChecks.flatMap((check) =>
+  const authoredBrowserObservedUrls = beforeChecks.flatMap((check) =>
     Array.isArray(check.observedResourceUrls) ? check.observedResourceUrls : []
   );
-  const observedUrls = [...new Set([...serverRenderedUrls, ...browserObservedUrls])];
-  for (const application of applications) {
+  // Packet browser transcripts remain useful authored evidence, but the live
+  // verifier did not observe those network requests and must not treat them as
+  // completion-authoritative. Server-rendered resources are independently
+  // observed here; optional/disabled browser-loaded resources fail closed until
+  // a verifier-owned fresh browser/network capture is implemented.
+  const observedUrls = [...new Set(serverRenderedUrls)];
+  for (const application of discoveryStatus === 'installed'
+    ? applications.filter((candidate) => String(candidate?.id ?? '').trim())
+    : []) {
     const violating = observedUrls.filter((url) =>
       (application.controlledResources ?? []).some((resource) => controlledResourceMatches(resource, url))
     );
@@ -1292,16 +1299,19 @@ function verifyConsentReconciliation(declaration, runtime, routeChecks) {
       const state = application.enabled === true ? 'before consent' : 'while its consent application is disabled';
       errors.push(`Controlled resource for ${application.id} loaded ${state}: ${violating[0]}.`);
     }
-    if (application.enabled === true && application.required === false) {
-      for (const check of beforeChecks) {
-        if (!(check.blockedApplicationIds ?? []).includes(application.id)) {
-          errors.push(`Before-consent evidence for ${normalizePath(check.route)} does not record ${application.id} as blocked.`);
-        }
-      }
+    if (
+      (application.controlledResources ?? []).length > 0 &&
+      (application.enabled !== true || application.required !== true)
+    ) {
+      errors.push(
+        `Consent application ${application.id} requires verifier-owned fresh browser/network capture before G-PRIVACY-01 can pass; packet-authored before-consent URLs and blocked IDs are non-authoritative.`
+      );
     }
   }
   return {
-    browserObservedUrls,
+    authoredBrowserObservedUrls,
+    authoritativeBeforeConsentCapture: false,
+    browserObservedUrls: [],
     errors,
     passed: errors.length === 0,
     runtimeInventory,
