@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,6 +61,7 @@ function captureFixture(stateFingerprint, mutate = () => {}) {
     resultStateFingerprint: stateFingerprint,
     contract,
     browser: { executable: 'fixture', product: 'Fixture' },
+    primaryRoutes: ['/'],
     routes,
     errors: []
   };
@@ -103,19 +104,78 @@ test('actual config, theme, shared display, navigation, and menu-link changes tr
     ] },
     codeManifest: { entries: [
       ...base.codeManifest.entries,
-      { path: 'web/themes/custom/site/templates/page.html.twig', sha256: state('9'), size: 10 }
+      { path: 'docroot/themes/custom/site/templates/page.html.twig', sha256: state('9'), size: 10 },
+      { path: 'themes/custom/root_theme/root_theme.info.yml', sha256: state('b'), size: 10 },
+      { path: 'web/themes/contrib/contrib_theme/contrib_theme.info.yml', sha256: state('c'), size: 10 },
+      { path: 'web/themes/custom/site/templates/page.html.twig', sha256: state('d'), size: 10 }
     ] },
     entityInventory: { types: { menu_link_content: { fingerprint: state('a') } } }
   };
   const impact = globalChromeImpact(base, result);
   assert.equal(impact.triggered, true);
   assert.equal(impact.triggerConfigPaths.length, 5);
-  assert.deepEqual(impact.triggerCodePaths, ['web/themes/custom/site/templates/page.html.twig']);
+  assert.deepEqual(impact.triggerCodePaths, [
+    'docroot/themes/custom/site/templates/page.html.twig',
+    'themes/custom/root_theme/root_theme.info.yml',
+    'web/themes/contrib/contrib_theme/contrib_theme.info.yml',
+    'web/themes/custom/site/templates/page.html.twig'
+  ]);
+  assert.deepEqual(impact.triggerDependencyPaths, []);
   assert.equal(impact.menuLinkContentChanged, true);
   assert.equal(globalChromeImpact(
     { configManifest: { entries: [] }, codeManifest: { entries: [] }, entityInventory: { types: {} } },
     { configManifest: { entries: [] }, codeManifest: { entries: [] }, entityInventory: result.entityInventory }
   ).menuLinkContentChanged, true);
+
+  const dependencyImpact = globalChromeImpact(base, {
+    ...base,
+    codeManifest: { entries: [{ path: 'composer.lock', sha256: state('e'), size: 11 }] }
+  });
+  assert.equal(dependencyImpact.triggered, true);
+  assert.deepEqual(dependencyImpact.triggerDependencyPaths, ['composer.lock']);
+});
+
+function rawCaptureFixture() {
+  const finalized = captureFixture(state('f'));
+  const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(128)]).toString('base64');
+  const raw = { ...finalized };
+  delete raw.captureFingerprint;
+  delete raw.resultStateFingerprint;
+  raw.routes = raw.routes.map((route) => ({
+    ...route,
+    screenshot: {
+      base64: png,
+      width: route.screenshot.width,
+      height: route.screenshot.height,
+      clipped: false
+    }
+  }));
+  return raw;
+}
+
+test('finalization fails before writing for incomplete captures and symlinked evidence ancestors', () => {
+  const incompleteRoot = mkdtempSync(join(tmpdir(), 'global-chrome-incomplete-'));
+  const incompletePacket = join(incompleteRoot, 'review-packet');
+  mkdirSync(incompletePacket, { recursive: true });
+  const incomplete = rawCaptureFixture();
+  incomplete.routes = incomplete.routes.filter((route) => route.viewport.name === 'desktop');
+  assert.throws(
+    () => finalizeGlobalChromeCapture({ capture: incomplete, packetDir: incompletePacket, stateFingerprint: state('f') }),
+    /incomplete.*mobile/i
+  );
+  assert.equal(existsSync(join(incompletePacket, 'evidence')), false);
+
+  const symlinkRoot = mkdtempSync(join(tmpdir(), 'global-chrome-symlink-'));
+  const symlinkPacket = join(symlinkRoot, 'review-packet');
+  const outside = join(symlinkRoot, 'outside');
+  mkdirSync(symlinkPacket, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, join(symlinkPacket, 'evidence'));
+  assert.throws(
+    () => finalizeGlobalChromeCapture({ capture: rawCaptureFixture(), packetDir: symlinkPacket, stateFingerprint: state('f') }),
+    /symbolic link/i
+  );
+  assert.equal(existsSync(join(outside, 'lifecycle')), false);
 });
 
 test('CDP pipe captures desktop/mobile screenshots and computed signals without a browser-driver dependency', {

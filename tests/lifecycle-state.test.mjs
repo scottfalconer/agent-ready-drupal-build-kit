@@ -130,6 +130,7 @@ function globalChromeCapture(buildState, overrides = {}) {
     resultStateFingerprint: buildState.fingerprint,
     contract,
     browser: { executable: 'fixture-chrome', product: 'Fixture Chrome' },
+    primaryRoutes: [...new Set((buildState.routeManifest ?? []).map((route) => route.path))].sort(),
     routes,
     errors: [],
     ...overrides
@@ -285,6 +286,7 @@ test('runtime manifests bind portable code intrinsically and machine-local secre
   const root = mkdtempSync(join(tmpdir(), 'site-state-code-'));
   for (const directory of [
     'web/themes/custom/fixture',
+    'web/themes/contrib/contrib_fixture',
     'web/modules/custom/example',
     'web/modules/custom/example/contrib',
     'web/modules/custom/example/evidence',
@@ -347,6 +349,7 @@ test('runtime manifests bind portable code intrinsically and machine-local secre
   writeFileSync(join(root, 'package.json'), '{"scripts":{"build":"vite build"}}\n');
   writeFileSync(join(root, 'vite.config.mjs'), 'export default {};\n');
   writeFileSync(join(root, 'web/themes/custom/fixture/fixture.info.yml'), 'name: Fixture\n');
+  writeFileSync(join(root, 'web/themes/contrib/contrib_fixture/contrib_fixture.info.yml'), 'name: Contrib fixture\n');
   writeFileSync(join(root, 'web/modules/custom/example/example.info.yml'), 'name: Example\n');
   writeFileSync(join(root, 'web/modules/custom/example/contrib/helper.php'), '<?php\n');
   writeFileSync(join(root, 'web/modules/custom/example/evidence/logic.php'), '<?php\n');
@@ -386,6 +389,7 @@ test('runtime manifests bind portable code intrinsically and machine-local secre
     'web/modules/custom/example/files/schema.yml',
     'web/sites/default/services.yml',
     'web/sites/default/settings.php',
+    'web/themes/contrib/contrib_fixture/contrib_fixture.info.yml',
     'web/themes/custom/fixture/fixture.info.yml'
   ]);
   assert.equal(manifest.environmentBinding.entryCount, 3);

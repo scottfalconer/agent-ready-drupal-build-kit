@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
@@ -19,7 +19,8 @@ const FIXED_THRESHOLDS = Object.freeze({
   minimumPageHeightRatio: 0.65
 });
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
-const CODE_GLOBAL_RE = /(?:^|\/)web\/themes\/(?:custom|contrib)\//i;
+const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
+const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
 
 function normalizeRoute(value) {
   const text = String(value ?? '').trim();
@@ -30,7 +31,38 @@ function normalizeRoute(value) {
 
 function inside(parent, child) {
   const fromParent = relative(parent, child);
-  return fromParent === '' || (fromParent !== '..' && !fromParent.startsWith(`..${sep}`));
+  return fromParent === '' || (
+    fromParent !== '..' &&
+    !fromParent.startsWith(`..${sep}`) &&
+    !isAbsolute(fromParent)
+  );
+}
+
+function assertSafeDirectoryChain(root, target, label) {
+  const requestedRoot = resolve(root);
+  const requestedTarget = resolve(target);
+  if (!existsSync(requestedRoot) || lstatSync(requestedRoot).isSymbolicLink() || !lstatSync(requestedRoot).isDirectory()) {
+    throw new Error(`${label} root must be a real directory, not a file or symbolic link.`);
+  }
+  if (!inside(requestedRoot, requestedTarget)) {
+    throw new Error(`${label} must remain inside the review packet.`);
+  }
+  const realRoot = realpathSync(requestedRoot);
+  let current = requestedRoot;
+  for (const segment of relative(requestedRoot, requestedTarget).split(sep).filter(Boolean)) {
+    current = join(current, segment);
+    if (!existsSync(current)) continue;
+    const metadata = lstatSync(current);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory() || !inside(realRoot, realpathSync(current))) {
+      throw new Error(`${label} must not traverse a file or symbolic link: ${current}`);
+    }
+  }
+}
+
+function ensureSafeDirectory(root, target, label) {
+  assertSafeDirectoryChain(root, target, label);
+  mkdirSync(target, { recursive: true });
+  assertSafeDirectoryChain(root, target, label);
 }
 
 function normalizedSelectors(value) {
@@ -405,6 +437,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       targetOrigin: base.origin,
       contract: normalizedContract,
       browser: { executable: '', product: '' },
+      primaryRoutes: routes,
       routes: [],
       errors: ['No Chrome/Chromium executable was found. Set CHROME_PATH or install Chrome/Chromium.']
     };
@@ -419,6 +452,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       targetOrigin: base.origin,
       contract: normalizedContract,
       browser: { executable: basename(executable), product: '' },
+      primaryRoutes: routes,
       routes: [],
       errors: ['No primary routes were available for global chrome capture.']
     };
@@ -494,6 +528,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     targetOrigin: base.origin,
     contract: normalizedContract,
     browser: { executable: basename(executable), product },
+    primaryRoutes: routes,
     routes: captured,
     errors
   };
@@ -505,14 +540,53 @@ function captureFingerprintValue(capture) {
   return sha256(value);
 }
 
+function captureCoverage(capture) {
+  const primaryRoutes = [...new Set((Array.isArray(capture?.primaryRoutes) ? capture.primaryRoutes : [])
+    .map(normalizeRoute))].sort();
+  if (primaryRoutes.length === 0) {
+    throw new Error('Global chrome capture must identify every expected primary route.');
+  }
+  const contract = normalizeGlobalChromeContract(capture?.contract);
+  if (contract.fingerprint !== capture?.contract?.fingerprint) {
+    throw new Error('Global chrome capture contract fingerprint is invalid.');
+  }
+  const expected = new Set();
+  for (const path of primaryRoutes) {
+    for (const viewport of contract.viewports) expected.add(`${path}\0${viewport.name}`);
+  }
+  const observed = new Set();
+  for (const route of Array.isArray(capture?.routes) ? capture.routes : []) {
+    const path = normalizeRoute(route?.path);
+    const viewport = String(route?.viewport?.name ?? '');
+    if (!contract.viewports.some((candidate) => candidate.name === viewport)) {
+      throw new Error(`Global chrome ${path} has an unsupported viewport.`);
+    }
+    const key = `${path}\0${viewport}`;
+    if (observed.has(key)) throw new Error(`Global chrome capture duplicates ${path} ${viewport}.`);
+    if (!expected.has(key)) throw new Error(`Global chrome capture contains unexpected ${path} ${viewport}.`);
+    observed.add(key);
+  }
+  const missing = [...expected].filter((key) => !observed.has(key));
+  if (missing.length > 0) {
+    throw new Error(`Global chrome capture is incomplete; missing ${missing.map((key) => key.replace('\0', ' ')).join(', ')}.`);
+  }
+  return { contract, primaryRoutes, expected, observed };
+}
+
 export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerprint } = {}) {
   const packet = resolve(packetDir);
   const state = String(stateFingerprint ?? '').trim();
   if (!HASH_RE.test(state)) throw new Error('Global chrome capture requires the exact result-state fingerprint.');
-  const finalizedRoutes = [];
+  if (capture?.status !== 'captured' || capture?.authoritative !== true) {
+    throw new Error(`Executable global chrome capture is unavailable: ${(capture?.errors ?? []).join(' ') || capture?.status || 'missing'}`);
+  }
+  captureCoverage(capture);
+  const plans = [];
   for (const route of Array.isArray(capture?.routes) ? capture.routes : []) {
     const encoded = String(route?.screenshot?.base64 ?? '');
-    if (!encoded) continue;
+    if (!encoded) {
+      throw new Error(`Global chrome ${route.path} ${route.viewport?.name} lacks screenshot bytes.`);
+    }
     const bytes = Buffer.from(encoded, 'base64');
     if (bytes.length < 100 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
       throw new Error(`Global chrome ${route.path} ${route.viewport?.name} capture is not a PNG screenshot.`);
@@ -520,9 +594,18 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
     const digest = sha256(bytes);
     const routeKey = sha256(`${route.path}\0${route.viewport?.name}`).slice(7, 23);
     const directory = join(packet, 'evidence', 'lifecycle', 'chrome', 'runs', state.slice(7, 23));
-    mkdirSync(directory, { recursive: true });
     const path = join(directory, `${route.viewport.name}-${routeKey}-${digest.slice(7, 23)}.png`);
+    plans.push({ bytes, digest, directory, path, route });
+  }
+  const finalizedRoutes = [];
+  for (const plan of plans) {
+    ensureSafeDirectory(packet, plan.directory, 'Global chrome screenshot directory');
+    const { bytes, digest, path, route } = plan;
     if (existsSync(path)) {
+      const metadata = lstatSync(path);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || !inside(realpathSync(packet), realpathSync(path))) {
+        throw new Error(`Existing global chrome screenshot must be a packet-local regular file: ${path}`);
+      }
       if (!readFileSync(path).equals(bytes)) throw new Error(`Existing global chrome screenshot bytes differ: ${path}`);
     } else {
       writeFileSync(path, bytes, { flag: 'wx' });
@@ -563,21 +646,14 @@ export function validateGlobalChromeCapture(capture, { stateFingerprint = '', re
     throw new Error('Global chrome capture does not match the exact result-state fingerprint.');
   }
   if (capture.status === 'captured') {
-    const contract = normalizeGlobalChromeContract(capture.contract);
-    if (contract.fingerprint !== capture.contract?.fingerprint) throw new Error('Global chrome capture contract fingerprint is invalid.');
-    const keys = new Set();
+    captureCoverage(capture);
     for (const route of capture.routes ?? []) {
       const path = normalizeRoute(route.path);
-      if (!['desktop', 'mobile'].includes(route.viewport?.name)) throw new Error(`Global chrome ${path} has an unsupported viewport.`);
-      const key = `${path}\0${route.viewport.name}`;
-      if (keys.has(key)) throw new Error(`Global chrome capture duplicates ${path} ${route.viewport.name}.`);
-      keys.add(key);
       if (!route.signals || !HASH_RE.test(route.screenshot?.sha256) || !String(route.screenshot?.path ?? '').trim() ||
           !Number.isSafeInteger(route.screenshot?.size) || route.screenshot.size <= 0) {
         throw new Error(`Global chrome ${path} ${route.viewport.name} lacks computed signals or screenshot evidence.`);
       }
     }
-    if (keys.size === 0) throw new Error('Global chrome capture contains no primary-route viewport captures.');
   }
   if (!HASH_RE.test(capture.captureFingerprint) || captureFingerprintValue(capture) !== capture.captureFingerprint) {
     throw new Error('Global chrome capture fingerprint is invalid.');
@@ -685,10 +761,12 @@ export function globalChromeImpact(baseBuildState, resultBuildState) {
   const menuAfter = resultBuildState?.entityInventory?.types?.menu_link_content?.fingerprint ?? '';
   const triggerConfigPaths = changedConfigPaths.filter((path) => CONFIG_GLOBAL_RE.test(path));
   const triggerCodePaths = changedCodePaths.filter((path) => CODE_GLOBAL_RE.test(path));
+  const triggerDependencyPaths = changedCodePaths.filter((path) => DEPENDENCY_GLOBAL_RE.test(path));
   const menuLinkContentChanged = menuBefore !== menuAfter;
   const reasons = [
     ...triggerConfigPaths.map((path) => `config:${path}`),
     ...triggerCodePaths.map((path) => `theme-code:${path}`),
+    ...triggerDependencyPaths.map((path) => `theme-dependency-conservative:${path}`),
     ...(menuLinkContentChanged ? ['entity:menu_link_content'] : [])
   ];
   return {
@@ -697,6 +775,7 @@ export function globalChromeImpact(baseBuildState, resultBuildState) {
     changedCodePaths,
     triggerConfigPaths,
     triggerCodePaths,
+    triggerDependencyPaths,
     menuLinkContentChanged,
     reasons
   };

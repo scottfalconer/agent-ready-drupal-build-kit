@@ -254,6 +254,7 @@ const RUNTIME_CODE_PATHS = Object.freeze([
   '.gitlab',
   'web/modules/custom',
   'web/themes/custom',
+  'web/themes/contrib',
   'web/profiles/custom',
   'web/sites',
   'web/.htaccess',
@@ -263,6 +264,7 @@ const RUNTIME_CODE_PATHS = Object.freeze([
   'web/update.php',
   'docroot/modules/custom',
   'docroot/themes/custom',
+  'docroot/themes/contrib',
   'docroot/profiles/custom',
   'docroot/sites',
   'docroot/.htaccess',
@@ -272,6 +274,7 @@ const RUNTIME_CODE_PATHS = Object.freeze([
   'docroot/update.php',
   'modules/custom',
   'themes/custom',
+  'themes/contrib',
   'profiles/custom',
   'sites',
   '.htaccess',
@@ -401,7 +404,7 @@ function exactRuntimeExclusion(path) {
     normalized.startsWith('.ddev/.homeadditions/') ||
     /(?:^|\/)node_modules(?:\/|$)/.test(normalized) ||
     /^(?:web|docroot)\/core(?:\/|$)/.test(normalized) ||
-    /^(?:web|docroot)\/(?:modules|themes|profiles)\/contrib(?:\/|$)/.test(normalized) ||
+    /^(?:web|docroot)\/(?:modules|profiles)\/contrib(?:\/|$)/.test(normalized) ||
     /^(?:(?:web|docroot)\/)?sites\/[^/]+\/(?:files|private)(?:\/|$)/.test(normalized)
   );
 }
