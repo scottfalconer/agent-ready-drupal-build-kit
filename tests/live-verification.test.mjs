@@ -1350,6 +1350,56 @@ test('live verifier accepts an exact evidenced external redirect without fetchin
   );
 });
 
+test('live verifier rejects credential-bearing same-origin and external redirects without leaking userinfo', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/same-origin-credential') {
+        response.writeHead(302, {
+          location: `http://private-user:same-origin-secret@${request.headers.host}/working`
+        });
+        response.end();
+        return;
+      }
+      if (request.url === '/external-credential') {
+        response.writeHead(302, {
+          location: 'https://external-user:external-secret@payments.example/checkout'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/same-origin-credential">Same-origin credential redirect</a>
+        <a href="/external-credential">External credential redirect</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-credential-redirects-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      assert.equal(report.serverRenderedResponseSurface.linkChecks.length, 2);
+      assert.ok(report.serverRenderedResponseSurface.linkChecks.every((check) => check.passed === false));
+      assert.match(report.errors.join('\n'), /Refusing credential-bearing redirect/);
+      assert.doesNotMatch(
+        JSON.stringify(report),
+        /private-user|same-origin-secret|external-user|external-secret/
+      );
+    }
+  );
+});
+
 test('live verifier checks every accepted route row, not only primary routes', async () => {
   await withHttpServer(
     (request, response) => {
@@ -1395,6 +1445,80 @@ test('live verifier checks every accepted route row, not only primary routes', a
       assert.equal(detail?.passed, false);
       assert.equal(detail?.finalStatus, 404);
       assert.match(report.errors.join('\n'), /\/article\/example ended with HTTP 404/);
+      assert.match(detail?.errors.join('\n') ?? '', /returned status 404; expected 200/);
+    }
+  );
+});
+
+test('live verifier enforces redirect and final-path contracts for every accepted route row', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/article/example') {
+        response.writeHead(302, { location: '/' });
+        response.end();
+        return;
+      }
+      if (request.url === '/expected-alias') {
+        response.writeHead(302, { location: '/wrong-final' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-route-contracts-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/article/example',
+          targetPath: '/article/example',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/article/example',
+          targetTitle: 'Example article',
+          targetH1: 'Example article',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'The detail route must remain a direct response.'
+        },
+        {
+          sourcePath: '/expected-alias',
+          targetPath: '/expected-alias',
+          routeRole: 'other',
+          targetStatus: 302,
+          targetFinalPath: '/expected-final',
+          targetTitle: 'Expected destination',
+          targetH1: 'Expected destination',
+          expectedRedirect: true,
+          accepted: true,
+          notes: 'The alias must retain its declared destination.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const direct = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/example'
+      );
+      const alias = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/expected-alias'
+      );
+      assert.equal(direct?.passed, false);
+      assert.match(direct?.errors.join('\n') ?? '', /declares a direct response but the live response redirected/);
+      assert.match(direct?.errors.join('\n') ?? '', /resolved to \/; expected \/article\/example/);
+      assert.equal(alias?.passed, false);
+      assert.match(alias?.errors.join('\n') ?? '', /resolved to \/wrong-final; expected \/expected-final/);
     }
   );
 });
@@ -1854,6 +1978,24 @@ test('completion fails closed when structured gate evidence or applicability dis
       file: 'route-matrix.json',
       expected: /classify and accept every discovered source route/i,
       mutate: (value) => { value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/legacy']; }
+    },
+    {
+      name: 'legacy-rendered-link-route-drift',
+      file: 'route-matrix.json',
+      expected: /classify and accept every discovered source route/i,
+      mutate: (value) => {
+        delete value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks;
+        value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+      }
+    },
+    {
+      name: 'conflicting-rendered-link-route-declarations',
+      file: 'route-matrix.json',
+      expected: /candidateRoutesFromRenderedLinks and candidateRoutesFromBrowserRenderedLinks declarations must describe the same discovered routes/i,
+      mutate: (value) => {
+        value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+        value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/current'];
+      }
     },
     {
       name: 'route-role-coverage',

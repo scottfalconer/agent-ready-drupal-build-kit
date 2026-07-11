@@ -2481,9 +2481,27 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const expansion = routeMatrix?.browserFirstRouteExpansion ?? {};
+  const legacyRenderedLinkRoutes = [...new Set(arrayOrEmpty(expansion.candidateRoutesFromRenderedLinks)
+    .map(routeLikeValue)
+    .filter(Boolean))];
+  const browserRenderedLinkRoutes = [...new Set(arrayOrEmpty(expansion.candidateRoutesFromBrowserRenderedLinks)
+    .map(routeLikeValue)
+    .filter(Boolean))];
+  if (
+    Object.hasOwn(expansion, 'candidateRoutesFromRenderedLinks') &&
+    Object.hasOwn(expansion, 'candidateRoutesFromBrowserRenderedLinks') &&
+    (
+      legacyRenderedLinkRoutes.length !== browserRenderedLinkRoutes.length ||
+      [...legacyRenderedLinkRoutes].sort().join('\n') !==
+        [...browserRenderedLinkRoutes].sort().join('\n')
+    )
+  ) {
+    reasons.push('route-matrix.json legacy candidateRoutesFromRenderedLinks and candidateRoutesFromBrowserRenderedLinks declarations must describe the same discovered routes when both are present.');
+  }
   const discoveredSourceRoutes = new Set([
     ...arrayOrEmpty(expansion.browserRenderedSeedRoutes),
-    ...arrayOrEmpty(expansion.candidateRoutesFromBrowserRenderedLinks),
+    ...legacyRenderedLinkRoutes,
+    ...browserRenderedLinkRoutes,
     ...arrayOrEmpty(expansion.candidateRoutesFromBundles),
     ...arrayOrEmpty(expansion.candidateRoutesFromMetadata),
     ...arrayOrEmpty(expansion.candidateRoutesFromAssets),

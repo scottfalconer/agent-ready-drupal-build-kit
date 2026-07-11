@@ -94,6 +94,8 @@ function sha256(value) {
 function redactedUrl(value, baseUrl = undefined) {
   try {
     const url = baseUrl ? new URL(value, baseUrl) : new URL(value);
+    url.username = '';
+    url.password = '';
     url.hash = '';
     if (url.search) {
       url.search = `?query-sha256=${sha256(url.search)}`;
@@ -413,6 +415,9 @@ async function requestFollowingRedirects(
   { captureBody = 'always', stopAtExternalRedirect = false } = {}
 ) {
   let current = new URL(startUrl);
+  if (current.username || current.password) {
+    throw new Error(`Refusing credential-bearing request URL ${redactedUrl(current)}.`);
+  }
   const allowedOrigin = current.origin;
   const redirects = [];
   let localTlsVerificationBypassed = false;
@@ -426,6 +431,9 @@ async function requestFollowingRedirects(
         throw new Error(`Too many redirects (more than ${MAX_REDIRECTS}).`);
       }
       const next = new URL(location, current);
+      if (next.username || next.password) {
+        throw new Error(`Refusing credential-bearing redirect from ${redactedUrl(current)} to ${redactedUrl(next)}.`);
+      }
       if (next.origin !== allowedOrigin) {
         if (stopAtExternalRedirect) {
           redirects.push({ from: current.href, status: response.status, to: next.href });
@@ -472,7 +480,7 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
   };
   const routeSeeds = new Map();
   const seedErrors = [];
-  const addSeed = (path, reason) => {
+  const addSeed = (path, reason, contract = null) => {
     const text = String(path ?? '').trim();
     if (!text) {
       return;
@@ -489,7 +497,10 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       return;
     }
     url.hash = '';
-    const existing = routeSeeds.get(url.href) ?? { reasons: new Set(), url };
+    const existing = routeSeeds.get(url.href) ?? { contracts: [], reasons: new Set(), url };
+    if (contract) {
+      existing.contracts.push(contract);
+    }
     existing.reasons.add(reason);
     routeSeeds.set(url.href, existing);
   };
@@ -497,7 +508,12 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
     if (route?.accepted === true) {
       declarePath(route.targetPath);
       declarePath(route.targetFinalPath);
-      addSeed(route.targetPath, 'accepted-route');
+      addSeed(route.targetPath, 'accepted-route', {
+        expectedFinalPath: normalizePath(route.targetFinalPath || route.targetPath),
+        expectedRedirect: route.expectedRedirect === true,
+        expectedStatus: Number(route.targetStatus),
+        kind: 'accepted route'
+      });
     }
   }
   for (const route of Array.isArray(routeMatrix?.targetRequiredRoutes) ? routeMatrix.targetRequiredRoutes : []) {
@@ -509,7 +525,12 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
       route?.accepted === true &&
       ['public_200', 'redirect', 'noindex'].includes(String(route?.expectedPublicBehavior ?? ''))
     ) {
-      addSeed(route.targetPath, 'target-required-route');
+      addSeed(route.targetPath, 'target-required-route', {
+        expectedFinalPath: normalizePath(route.targetFinalPath || route.targetPath),
+        expectedRedirect: route.expectedPublicBehavior === 'redirect',
+        expectedStatus: Number(route.targetStatus),
+        kind: 'target-required route'
+      });
     }
   }
 
@@ -525,6 +546,23 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix) {
         }
         if (new URL(response.finalUrl).origin !== baseUrl.origin) {
           errors.push(`${redactedPath(seed.url.href, baseUrl)} left the target origin and resolved to ${new URL(response.finalUrl).origin}.`);
+        }
+        for (const contract of seed.contracts) {
+          const routeLabel = `${contract.kind} ${redactedPath(seed.url.href, baseUrl)}`;
+          const actualStatus = contract.expectedRedirect ? response.initialStatus : response.status;
+          if (!Number.isFinite(contract.expectedStatus) || actualStatus !== contract.expectedStatus) {
+            errors.push(`${routeLabel} returned status ${actualStatus}; expected ${contract.expectedStatus}.`);
+          }
+          if (contract.expectedRedirect && response.redirects.length === 0) {
+            errors.push(`${routeLabel} declares a redirect but the live response did not follow a redirect.`);
+          }
+          if (!contract.expectedRedirect && response.redirects.length > 0) {
+            errors.push(`${routeLabel} declares a direct response but the live response redirected.`);
+          }
+          const actualFinalPath = normalizePath(response.finalUrl);
+          if (actualFinalPath !== contract.expectedFinalPath) {
+            errors.push(`${routeLabel} resolved to ${actualFinalPath}; expected ${contract.expectedFinalPath}.`);
+          }
         }
         const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
         const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
