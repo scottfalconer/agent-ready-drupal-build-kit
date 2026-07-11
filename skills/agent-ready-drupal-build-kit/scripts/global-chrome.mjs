@@ -213,6 +213,49 @@ class CdpPipe {
   }
 }
 
+function signalBrowserProcessGroup(child, signal) {
+  try {
+    if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // The process group already exited.
+  }
+}
+
+async function shutdownBrowser(child) {
+  if (!child) return true;
+  if (
+    child.exitCode !== null &&
+    child.stdio.every((stream) => !stream || stream.destroyed)
+  ) return true;
+  let closed = false;
+  const closedPromise = new Promise((resolvePromise) => child.once('close', () => {
+    closed = true;
+    resolvePromise();
+  }));
+  signalBrowserProcessGroup(child, 'SIGTERM');
+  await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))]);
+  // Chrome may let its parent exit before profile-writing descendants. Kill the
+  // isolated process group as a final bounded cleanup step, then give file
+  // handles a moment to close before removing the ephemeral profile.
+  signalBrowserProcessGroup(child, 'SIGKILL');
+  if (!closed) await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))]);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  return closed || child.stdio.every((stream) => !stream || stream.destroyed);
+}
+
+function removeBrowserProfile(profile, warnings) {
+  try {
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (error) {
+    warnings.push(`Browser profile cleanup was deferred after browser shutdown: ${error.message}`);
+    const retry = setTimeout(() => {
+      try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {}
+    }, 1000);
+    retry.unref();
+  }
+}
+
 function collectorExpression(contract, mobile) {
   const source = async ({ dynamicRegionSelectors, mobileViewport }) => {
     const visible = (element) => {
@@ -480,7 +523,10 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
   // The verifier is restricted to the current local DDEV target; local routers may use a custom TLD and development CA.
   args.unshift('--ignore-certificate-errors');
   if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
-  const child = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  const child = spawn(executable, args, {
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
+  });
   const stderr = [];
   child.stderr.on('data', (chunk) => {
     if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
@@ -488,6 +534,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
   const cdp = new CdpPipe(child);
   const captured = [];
   const errors = [];
+  const warnings = [];
   let product = '';
   try {
     const version = await cdp.send('Browser.getVersion');
@@ -513,21 +560,8 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
   } catch (error) {
     errors.push(error.message);
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-      child.kill('SIGTERM');
-      await Promise.race([exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
-      if (child.exitCode === null && child.signalCode === null) {
-        const killed = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-        child.kill('SIGKILL');
-        await Promise.race([killed, new Promise((resolvePromise) => setTimeout(resolvePromise, 500))]);
-      }
-    }
-    try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    } catch (error) {
-      errors.push(`Browser profile cleanup failed: ${error.message}`);
-    }
+    if (!(await shutdownBrowser(child))) errors.push('Headless browser process group did not close after bounded shutdown.');
+    removeBrowserProfile(profile, warnings);
   }
   if (captured.length !== routes.length * VIEWPORTS.length && stderr.length) {
     errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
@@ -543,7 +577,8 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     browser: { executable: basename(executable), product },
     primaryRoutes: routes,
     routes: captured,
-    errors
+    errors,
+    warnings
   };
 }
 
@@ -695,7 +730,10 @@ export async function captureBeforeConsentNetwork({
   ];
   args.unshift('--ignore-certificate-errors');
   if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
-  const child = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  const child = spawn(executable, args, {
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
+  });
   const stderr = [];
   child.stderr.on('data', (chunk) => {
     if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
@@ -703,6 +741,7 @@ export async function captureBeforeConsentNetwork({
   const cdp = new CdpPipe(child);
   const captured = [];
   const errors = [];
+  const warnings = [];
   let product = '';
   try {
     const version = await cdp.send('Browser.getVersion');
@@ -717,17 +756,8 @@ export async function captureBeforeConsentNetwork({
   } catch (error) {
     errors.push(error.message);
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-      child.kill('SIGTERM');
-      await Promise.race([exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    }
-    try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    } catch (error) {
-      errors.push(`Browser profile cleanup failed: ${error.message}`);
-    }
+    if (!(await shutdownBrowser(child))) errors.push('Headless browser process group did not close after bounded shutdown.');
+    removeBrowserProfile(profile, warnings);
   }
   if (captured.length !== routes.length && stderr.length) {
     errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
@@ -742,7 +772,8 @@ export async function captureBeforeConsentNetwork({
     browser: { executable: basename(executable), product },
     primaryRoutes: routes,
     routes: captured,
-    errors
+    errors,
+    warnings
   };
 }
 
