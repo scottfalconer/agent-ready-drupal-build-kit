@@ -77,6 +77,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-CANVAS-01': 'canvasComponentFidelity',
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
+  'G-SURFACE-01': 'liveDrupalSurfaceReconciliation',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -2663,6 +2664,74 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     )
   ) {
     reasons.push('browser-evidence.json must include an accepted passing non-admin editor workflow with no blockers.');
+  }
+
+  const surfaceReconciliation = drupalReadback?.liveSurfaceReconciliation ?? {};
+  const surfaceDeclarations = arrayOrEmpty(surfaceReconciliation.declarations);
+  const surfaceExclusions = arrayOrEmpty(surfaceReconciliation.exclusions);
+  const surfaceKeys = [...surfaceDeclarations, ...surfaceExclusions]
+    .map((record) => String(record?.key ?? '').trim())
+    .filter(Boolean);
+  let surfaceReconciliationReady =
+    surfaceReconciliation.schemaVersion === 'public-kit.live-surface-reconciliation.1' &&
+    HASH_RE.test(String(surfaceReconciliation.inventoryFingerprint ?? '')) &&
+    isJsonObject(surfaceReconciliation.countsByKind) &&
+    Object.keys(surfaceReconciliation.countsByKind).length > 0 &&
+    Object.entries(surfaceReconciliation.countsByKind).every(([kind, count]) =>
+      /^[a-z][a-z0-9_]*$/.test(kind) && Number.isSafeInteger(Number(count)) && Number(count) >= 0
+    ) &&
+    surfaceReconciliation.reconciliationComplete === true &&
+    arrayOrEmpty(surfaceReconciliation.blockers).length === 0 &&
+    surfaceKeys.length > 0 &&
+    surfaceKeys.length === new Set(surfaceKeys).size;
+  for (const declaration of surfaceDeclarations) {
+    const references = arrayOrEmpty(declaration?.packetReferences);
+    if (
+      !String(declaration?.key ?? '').trim() ||
+      !String(declaration?.kind ?? '').trim() ||
+      references.length === 0
+    ) {
+      surfaceReconciliationReady = false;
+      continue;
+    }
+    for (const reference of references) {
+      const text = String(reference ?? '').trim();
+      const hashIndex = text.indexOf('#');
+      const artifact = hashIndex === -1 ? '' : text.slice(0, hashIndex);
+      const fragment = hashIndex === -1 ? '' : text.slice(hashIndex + 1);
+      const artifactPath = artifact
+        ? resolveReviewEvidencePath(packetDir, packetDir, artifact)
+        : '';
+      if (
+        !fragment ||
+        (artifact === 'drupal-readback.json' && fragment.startsWith('liveSurfaceReconciliation')) ||
+        !artifactPath ||
+        !(await nonEmptyPacketEvidence(packetDir, artifact, packetDir))
+      ) {
+        surfaceReconciliationReady = false;
+      }
+    }
+  }
+  for (const exclusion of surfaceExclusions) {
+    const evidence = arrayOrEmpty(exclusion?.evidence);
+    if (
+      !String(exclusion?.key ?? '').trim() ||
+      !String(exclusion?.kind ?? '').trim() ||
+      !String(exclusion?.owner ?? '').trim() ||
+      !String(exclusion?.rationale ?? '').trim() ||
+      evidence.length === 0
+    ) {
+      surfaceReconciliationReady = false;
+      continue;
+    }
+    for (const reference of evidence) {
+      if (!String(reference ?? '').startsWith('evidence/') || !(await nonEmptyPacketEvidence(packetDir, reference))) {
+        surfaceReconciliationReady = false;
+      }
+    }
+  }
+  if (!surfaceReconciliationReady) {
+    reasons.push('drupal-readback.json liveSurfaceReconciliation must contain a fingerprint-bound exact census with unique declarations or named evidence-backed exclusions.');
   }
 
   const drupalCommands = arrayOrEmpty(drupalReadback?.commands).map((command) => String(command));

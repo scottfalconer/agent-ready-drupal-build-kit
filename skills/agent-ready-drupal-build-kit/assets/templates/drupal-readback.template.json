@@ -41,6 +41,15 @@
     "items": []
   },
   "views": [],
+  "liveSurfaceReconciliation": {
+    "schemaVersion": "public-kit.live-surface-reconciliation.1",
+    "inventoryFingerprint": "",
+    "countsByKind": {},
+    "declarations": [],
+    "exclusions": [],
+    "reconciliationComplete": false,
+    "blockers": []
+  },
   "workflows": [],
   "rolesAndPermissionsNotes": [],
   "readbackComplete": false,
