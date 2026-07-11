@@ -8,6 +8,7 @@
     "scoped-gap-list.md",
     "open-decisions.md",
     "off-road-inventory.md",
+    "reproduction-evidence.json",
     "maintainer-review.md",
     "operator-run.md",
     "production-target.md",
@@ -191,6 +192,14 @@
       "phase": 6,
       "evidenceFile": "off-road-inventory.md",
       "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-REPRO-01",
+      "title": "Drupal build reproduced from immutable inputs in a disposable environment",
+      "phase": 6,
+      "evidenceFile": "reproduction-evidence.json",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

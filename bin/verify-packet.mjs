@@ -80,6 +80,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
+  'G-REPRO-01': 'disposableReproduction',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -362,6 +363,309 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   } catch {
     return false;
   }
+}
+
+async function packetEvidenceSha256(packetDir, reference, evidenceDir) {
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
+  if (!evidencePath) {
+    return '';
+  }
+  try {
+    const evidenceStat = await stat(evidencePath);
+    if (!evidenceStat.isFile() || evidenceStat.size === 0) {
+      return '';
+    }
+    return `sha256:${createHash('sha256').update(await readFile(evidencePath)).digest('hex')}`;
+  } catch {
+    return '';
+  }
+}
+
+async function allPacketEvidencePresent(packetDir, references, evidenceDir) {
+  const values = arrayOrEmpty(references);
+  if (values.length === 0) {
+    return false;
+  }
+  const results = await Promise.all(
+    values.map((reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir))
+  );
+  return results.every(Boolean);
+}
+
+function hasDeveloperMachinePath(value) {
+  return /(?:^|[\s"'=])(?:\/Users\/[^/\s]+|\/home\/[^/\s]+|[a-z]:\\Users\\[^\\\s]+|\/private\/(?:tmp|var)\/)/i.test(
+    String(value ?? '')
+  );
+}
+
+function portableInputSource(value) {
+  const text = String(value ?? '').trim();
+  if (!text || hasDeveloperMachinePath(text)) {
+    return false;
+  }
+  if (httpUrl(text)) {
+    return true;
+  }
+  return !isAbsolute(text) && !text.split(/[\\/]+/).includes('..');
+}
+
+async function reproductionGateReasons(packetDir, reproductionEvidence, routeMatrix) {
+  const reasons = [];
+  const evidenceDir = join(packetDir, 'evidence', 'reproduction');
+  const workingSite = httpUrl(reproductionEvidence?.site);
+  const packetTarget = httpUrl(routeMatrix?.targetBaseUrl);
+  if (
+    reproductionEvidence?.schemaVersion !== 'public-kit.reproduction-evidence.1' ||
+    !workingSite ||
+    !packetTarget ||
+    workingSite.origin !== packetTarget.origin ||
+    isoTimestamp(reproductionEvidence?.checkedAt) === null ||
+    !String(reproductionEvidence?.reviewer ?? '').trim() ||
+    reproductionEvidence?.accepted !== true ||
+    arrayOrEmpty(reproductionEvidence?.blockers).length > 0
+  ) {
+    reasons.push('reproduction-evidence.json must identify the packet target and contain a reviewed, accepted G-REPRO-01 run with no blockers.');
+  }
+
+  const cleanInstall = reproductionEvidence?.cleanInstallConfigImport ?? {};
+  if (
+    reproductionEvidence?.reproductionMode !== 'clean_install_config_import' ||
+    cleanInstall.freshDrupalInstall !== true ||
+    cleanInstall.databaseSnapshotUsed !== false ||
+    cleanInstall.dependencyInstallCompleted !== true ||
+    cleanInstall.provisioningCompleted !== true ||
+    cleanInstall.trackedConfigImported !== true ||
+    cleanInstall.canonicalContentRestored !== true ||
+    cleanInstall.managedFilesRestored !== true ||
+    !(await allPacketEvidencePresent(packetDir, cleanInstall.evidence, evidenceDir))
+  ) {
+    reasons.push('G-REPRO-01 requires a true clean install/config import; database snapshot restoration is recovery evidence, not clean reproduction.');
+  }
+
+  const disposable = reproductionEvidence?.disposableEnvironment ?? {};
+  const disposableTarget = httpUrl(disposable.targetBaseUrl);
+  if (
+    !String(disposable.identity ?? '').trim() ||
+    !disposableTarget ||
+    (workingSite && disposableTarget.origin === workingSite.origin) ||
+    disposable.createdForThisRun !== true ||
+    disposable.isolatedFromWorkingTarget !== true ||
+    disposable.workingTargetUsed !== false ||
+    !['destroyed', 'retained_for_review'].includes(disposable.lifecycleDisposition) ||
+    !(await allPacketEvidencePresent(packetDir, disposable.evidence, evidenceDir))
+  ) {
+    reasons.push('reproduction-evidence.json must bind the run to an isolated disposable target with a different origin and prove the working target was not used.');
+  }
+
+  const requiredInputKinds = new Set([
+    'dependency_lock',
+    'provisioning_definition',
+    'tracked_config_manifest',
+    'canonical_content',
+    'managed_files'
+  ]);
+  const immutableInputs = substantiveObjects(reproductionEvidence?.immutableInputs);
+  const inputKinds = immutableInputs.map((input) => input.kind);
+  const uniqueInputKinds = new Set(inputKinds);
+  let immutableInputsValid =
+    immutableInputs.length === requiredInputKinds.size &&
+    uniqueInputKinds.size === requiredInputKinds.size &&
+    [...requiredInputKinds].every((kind) => uniqueInputKinds.has(kind));
+  for (const input of immutableInputs) {
+    const references = arrayOrEmpty(input.evidence);
+    const firstEvidenceHash = references.length > 0
+      ? await packetEvidenceSha256(packetDir, references[0], evidenceDir)
+      : '';
+    immutableInputsValid &&=
+      requiredInputKinds.has(input.kind) &&
+      Boolean(String(input.name ?? '').trim()) &&
+      portableInputSource(input.source) &&
+      HASH_RE.test(String(input.sha256 ?? '')) &&
+      input.immutable === true &&
+      firstEvidenceHash === input.sha256 &&
+      await allPacketEvidencePresent(packetDir, references, evidenceDir);
+  }
+  if (!immutableInputsValid) {
+    reasons.push('reproduction-evidence.json must bind all five portable immutable inputs to existing packet-local bytes and SHA-256 digests.');
+  }
+  const inputByKind = new Map(immutableInputs.map((input) => [input.kind, input]));
+
+  const phaseOperations = new Map([
+    ['dependency_install', 'install_declared_dependencies'],
+    ['provision_drupal', 'clean_install'],
+    ['config_import', 'import_tracked_config'],
+    ['content_restore', 'restore_canonical_content'],
+    ['files_restore', 'restore_managed_files'],
+    ['final_readback', 'verify_reproduced_target']
+  ]);
+  const transcript = reproductionEvidence?.transcript ?? {};
+  const commands = substantiveObjects(transcript.commands);
+  const commandPhases = new Set(commands.map((command) => command.phase));
+  let transcriptValid =
+    transcript.format === 'public-kit.reproduction-transcript.1' &&
+    transcript.packetCommandsExecutedByVerifier === false &&
+    commands.length === phaseOperations.size &&
+    commandPhases.size === phaseOperations.size &&
+    [...phaseOperations.keys()].every((phase) => commandPhases.has(phase));
+  for (const command of commands) {
+    const startedAt = isoTimestamp(command.startedAt);
+    const finishedAt = isoTimestamp(command.finishedAt);
+    const stderrEvidence = arrayOrEmpty(command.stderrEvidence);
+    transcriptValid &&=
+      phaseOperations.get(command.phase) === command.operation &&
+      Boolean(String(command.command ?? '').trim()) &&
+      !hasDeveloperMachinePath(command.command) &&
+      command.exitCode === 0 &&
+      startedAt !== null &&
+      finishedAt !== null &&
+      finishedAt >= startedAt &&
+      await allPacketEvidencePresent(packetDir, command.stdoutEvidence, evidenceDir) &&
+      (stderrEvidence.length === 0 || await allPacketEvidencePresent(packetDir, stderrEvidence, evidenceDir));
+  }
+  if (!transcriptValid) {
+    reasons.push('reproduction-evidence.json must contain a complete successful six-phase transcript; verifier treats command strings as inert evidence and never executes them.');
+  }
+
+  const mechanisms = reproductionEvidence?.restorationMechanisms ?? {};
+  const contentMechanism = mechanisms.content ?? {};
+  const filesMechanism = mechanisms.managedFiles ?? {};
+  if (
+    !String(contentMechanism.mechanism ?? '').trim() ||
+    /snapshot|database\s+dump|sql\s+restore/i.test(String(contentMechanism.mechanism ?? '')) ||
+    contentMechanism.inputKind !== 'canonical_content' ||
+    contentMechanism.inputSha256 !== inputByKind.get('canonical_content')?.sha256 ||
+    !/source.?key|uuid/i.test(String(contentMechanism.stableIdentityStrategy ?? '')) ||
+    !(await allPacketEvidencePresent(packetDir, contentMechanism.evidence, evidenceDir)) ||
+    !String(filesMechanism.mechanism ?? '').trim() ||
+    filesMechanism.inputKind !== 'managed_files' ||
+    filesMechanism.inputSha256 !== inputByKind.get('managed_files')?.sha256 ||
+    !(await allPacketEvidencePresent(packetDir, filesMechanism.evidence, evidenceDir))
+  ) {
+    reasons.push('reproduction-evidence.json must declare evidenced canonical content and managed-file restore/import mechanisms bound to immutable inputs.');
+  }
+
+  const untouched = reproductionEvidence?.workingTargetUntouched ?? {};
+  const beforeIdentity = untouched.beforeIdentity ?? {};
+  const afterIdentity = untouched.afterIdentity ?? {};
+  const beforeReferences = arrayOrEmpty(beforeIdentity.evidence);
+  const afterReferences = arrayOrEmpty(afterIdentity.evidence);
+  const beforeEvidenceHash = beforeReferences.length > 0
+    ? await packetEvidenceSha256(packetDir, beforeReferences[0], evidenceDir)
+    : '';
+  const afterEvidenceHash = afterReferences.length > 0
+    ? await packetEvidenceSha256(packetDir, afterReferences[0], evidenceDir)
+    : '';
+  const untouchedTarget = httpUrl(untouched.workingTargetBaseUrl);
+  if (
+    !untouchedTarget ||
+    !workingSite ||
+    untouchedTarget.origin !== workingSite.origin ||
+    untouched.workingTargetUsedDuringReproduction !== false ||
+    untouched.identitiesMatch !== true ||
+    !HASH_RE.test(String(beforeIdentity.sha256 ?? '')) ||
+    beforeIdentity.sha256 !== afterIdentity.sha256 ||
+    beforeEvidenceHash !== beforeIdentity.sha256 ||
+    afterEvidenceHash !== afterIdentity.sha256 ||
+    !(await allPacketEvidencePresent(packetDir, beforeReferences, evidenceDir)) ||
+    !(await allPacketEvidencePresent(packetDir, afterReferences, evidenceDir)) ||
+    !(await allPacketEvidencePresent(packetDir, untouched.evidence, evidenceDir))
+  ) {
+    reasons.push('reproduction-evidence.json must prove the working target identity is byte-identical before and after and was never used by reproduction.');
+  }
+
+  const readback = reproductionEvidence?.finalReadback ?? {};
+  const readbackTarget = httpUrl(readback.targetBaseUrl);
+  const siteIdentity = readback.siteIdentity ?? {};
+  const entityIdentifiers = substantiveObjects(readback.entityIdentifiers);
+  const counts = substantiveObjects(readback.counts);
+  const configManifest = readback.configManifest ?? {};
+  const configHashes = substantiveObjects(readback.configHashes);
+  const fileHashes = substantiveObjects(readback.managedFileHashes);
+  const routes = substantiveObjects(readback.routes);
+  const configManifestEvidence = arrayOrEmpty(configManifest.evidence);
+  const configManifestEvidenceHash = configManifestEvidence.length > 0
+    ? await packetEvidenceSha256(packetDir, configManifestEvidence[0], evidenceDir)
+    : '';
+  let readbackValid =
+    Boolean(readbackTarget) &&
+    Boolean(disposableTarget) &&
+    readbackTarget?.origin === disposableTarget?.origin &&
+    Boolean(String(siteIdentity.expectedSiteUuid ?? '').trim()) &&
+    siteIdentity.expectedSiteUuid === siteIdentity.actualSiteUuid &&
+    siteIdentity.match === true &&
+    await allPacketEvidencePresent(packetDir, siteIdentity.evidence, evidenceDir) &&
+    entityIdentifiers.length > 0 &&
+    counts.length > 0 &&
+    HASH_RE.test(String(configManifest.expectedSha256 ?? '')) &&
+    configManifest.expectedSha256 === inputByKind.get('tracked_config_manifest')?.sha256 &&
+    configManifest.expectedSha256 === configManifest.actualSha256 &&
+    configManifestEvidenceHash === configManifest.actualSha256 &&
+    configManifest.match === true &&
+    await allPacketEvidencePresent(packetDir, configManifestEvidence, evidenceDir) &&
+    configHashes.length > 0 &&
+    fileHashes.length > 0 &&
+    routes.length > 0 &&
+    routes.some((route) => normalizeRouteKey(route.path) === '/') &&
+    await allPacketEvidencePresent(packetDir, readback.evidence, evidenceDir);
+  for (const entity of entityIdentifiers) {
+    readbackValid &&=
+      Boolean(String(entity.entityType ?? '').trim()) &&
+      Boolean(String(entity.bundle ?? '').trim()) &&
+      /source.?key|uuid/i.test(String(entity.stableIdentity ?? '')) &&
+      Boolean(String(entity.expectedIdentifier ?? '').trim()) &&
+      entity.expectedIdentifier === entity.actualIdentifier &&
+      entity.match === true &&
+      await allPacketEvidencePresent(packetDir, entity.evidence, evidenceDir);
+  }
+  for (const count of counts) {
+    readbackValid &&=
+      Boolean(String(count.scope ?? '').trim()) &&
+      Number.isSafeInteger(count.expected) &&
+      count.expected >= 0 &&
+      count.expected === count.actual &&
+      count.match === true &&
+      await allPacketEvidencePresent(packetDir, count.evidence, evidenceDir);
+  }
+  for (const config of configHashes) {
+    const configEvidence = arrayOrEmpty(config.evidence);
+    const configEvidenceHash = configEvidence.length > 0
+      ? await packetEvidenceSha256(packetDir, configEvidence[0], evidenceDir)
+      : '';
+    readbackValid &&=
+      Boolean(String(config.configName ?? '').trim()) &&
+      HASH_RE.test(String(config.expectedSha256 ?? '')) &&
+      config.expectedSha256 === config.actualSha256 &&
+      configEvidenceHash === config.actualSha256 &&
+      config.match === true &&
+      await allPacketEvidencePresent(packetDir, configEvidence, evidenceDir);
+  }
+  for (const file of fileHashes) {
+    const fileEvidence = arrayOrEmpty(file.evidence);
+    const fileEvidenceHash = fileEvidence.length > 0
+      ? await packetEvidenceSha256(packetDir, fileEvidence[0], evidenceDir)
+      : '';
+    readbackValid &&=
+      Boolean(String(file.uri ?? '').trim()) &&
+      HASH_RE.test(String(file.expectedSha256 ?? '')) &&
+      file.expectedSha256 === file.actualSha256 &&
+      fileEvidenceHash === file.actualSha256 &&
+      file.match === true &&
+      await allPacketEvidencePresent(packetDir, fileEvidence, evidenceDir);
+  }
+  for (const route of routes) {
+    readbackValid &&=
+      Boolean(normalizeRouteKey(route.path)) &&
+      successfulStatus(route.expectedStatus) &&
+      route.expectedStatus === route.actualStatus &&
+      normalizeRouteKey(route.expectedFinalPath) === normalizeRouteKey(route.actualFinalPath) &&
+      route.match === true &&
+      await allPacketEvidencePresent(packetDir, route.evidence, evidenceDir);
+  }
+  if (!readbackValid) {
+    reasons.push('reproduction-evidence.json final readback must match stable entity IDs, counts, config hashes, managed-file hashes, site identity, and public routes on the disposable target.');
+  }
+
+  return reasons;
 }
 
 function safeImageDimensions(width, height) {
@@ -2184,9 +2488,11 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     independentVerification,
     parityReport,
     patternMap,
+    reproductionEvidence,
     routeMatrix,
     sourceAudit
   } = records;
+  reasons.push(...await reproductionGateReasons(packetDir, reproductionEvidence, routeMatrix));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -2714,6 +3020,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const completionTimestamps = [
+    ['reproduction-evidence.json', reproductionEvidence?.checkedAt],
     ['source-audit.json', sourceAudit?.checkedAt],
     ['pattern-map.json', patternMap?.checkedAt],
     ['route-matrix.json', routeMatrix?.checkedAt],
@@ -2757,6 +3064,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     await validateRequiredFiles(packetDir, gates, errors);
   }
 
+  const reproductionEvidence = await readJson(join(packetDir, 'reproduction-evidence.json'), []);
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
@@ -2796,6 +3104,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     independentVerification,
     parityReport,
     patternMap,
+    reproductionEvidence,
     routeMatrix,
     sourceAudit
   });

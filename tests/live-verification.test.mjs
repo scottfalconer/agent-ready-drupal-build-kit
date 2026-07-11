@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -46,6 +47,10 @@ function mutateJson(path, mutate) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
   mutate(value);
   writeJson(path, value);
+}
+
+function fileSha256(path) {
+  return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
 }
 
 function crc32(buffer) {
@@ -997,6 +1002,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.blockers = [];
   writeJson(readbackPath, readback);
 
+  addQualifyingReproductionEvidence(packetDir, targetBaseUrl);
+
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
@@ -1008,6 +1015,234 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+}
+
+function addQualifyingReproductionEvidence(packetDir, targetBaseUrl) {
+  const evidenceDir = join(packetDir, 'evidence', 'reproduction');
+  mkdirSync(evidenceDir, { recursive: true });
+  const evidenceFiles = {
+    run: 'run-log.json',
+    environment: 'disposable-environment.json',
+    dependency: 'input-dependency-lock.json',
+    provisioning: 'input-provisioning.json',
+    config: 'input-config-manifest.json',
+    content: 'input-content.json',
+    files: 'input-files-manifest.json',
+    workingBefore: 'working-target-before.json',
+    workingAfter: 'working-target-after.json',
+    readback: 'final-readback.json',
+    configObject: 'system.site.yml',
+    managedFile: 'fixture.txt'
+  };
+  writeJson(join(evidenceDir, evidenceFiles.run), {
+    transcript: 'fixture reproduction commands completed',
+    result: 'pass'
+  });
+  writeJson(join(evidenceDir, evidenceFiles.environment), {
+    identity: 'fixture-reproduction-target',
+    targetBaseUrl: 'https://repro-target.example',
+    isolated: true
+  });
+  writeJson(join(evidenceDir, evidenceFiles.dependency), {
+    source: 'composer.lock',
+    packages: [{ name: 'drupal/core-recommended', version: '11.3.11' }]
+  });
+  writeJson(join(evidenceDir, evidenceFiles.provisioning), {
+    source: '.ddev/config.yaml',
+    runtime: 'DDEV Drupal 11'
+  });
+  writeJson(join(evidenceDir, evidenceFiles.config), {
+    source: 'config/sync-manifest.json',
+    config: ['system.site', 'system.theme']
+  });
+  writeJson(join(evidenceDir, evidenceFiles.content), {
+    source: 'content/reproduction.json',
+    entities: [{ sourceKey: 'fixture:homepage', uuid: testSiteUuid }]
+  });
+  writeFileSync(join(evidenceDir, evidenceFiles.configObject), `uuid: ${testSiteUuid}\nname: Fixture rebuild\n`);
+  writeFileSync(join(evidenceDir, evidenceFiles.managedFile), 'fixture managed file\n');
+  const managedFileSha256 = fileSha256(join(evidenceDir, evidenceFiles.managedFile));
+  writeJson(join(evidenceDir, evidenceFiles.files), {
+    source: 'files/manifest.json',
+    files: [{ uri: 'public://fixture.txt', sha256: managedFileSha256 }]
+  });
+  const workingIdentity = {
+    targetBaseUrl,
+    siteUuid: testSiteUuid,
+    configManifestSha256: `sha256:${'c'.repeat(64)}`
+  };
+  writeJson(join(evidenceDir, evidenceFiles.workingBefore), workingIdentity);
+  writeJson(join(evidenceDir, evidenceFiles.workingAfter), workingIdentity);
+  writeJson(join(evidenceDir, evidenceFiles.readback), {
+    targetBaseUrl: 'https://repro-target.example',
+    siteUuid: testSiteUuid,
+    route: '/',
+    status: 200
+  });
+
+  const input = (kind, name, source, evidence) => ({
+    kind,
+    name,
+    source,
+    sha256: fileSha256(join(evidenceDir, evidence)),
+    immutable: true,
+    evidence: [evidence]
+  });
+  const inputs = [
+    input('dependency_lock', 'Composer dependency lock', 'composer.lock', evidenceFiles.dependency),
+    input('provisioning_definition', 'DDEV provisioning definition', '.ddev/config.yaml', evidenceFiles.provisioning),
+    input('tracked_config_manifest', 'Tracked config manifest', 'config/sync-manifest.json', evidenceFiles.config),
+    input('canonical_content', 'Canonical content import', 'content/reproduction.json', evidenceFiles.content),
+    input('managed_files', 'Managed files manifest', 'files/manifest.json', evidenceFiles.files)
+  ];
+  const inputByKind = new Map(inputs.map((record) => [record.kind, record]));
+  const commands = [
+    ['dependency_install', 'install_declared_dependencies', 'ddev composer install --no-interaction'],
+    ['provision_drupal', 'clean_install', 'ddev drush site:install --yes'],
+    ['config_import', 'import_tracked_config', 'ddev drush config:import --yes'],
+    ['content_restore', 'restore_canonical_content', 'ddev drush migrate:import canonical_content'],
+    ['files_restore', 'restore_managed_files', 'ddev exec node scripts/restore-files.mjs'],
+    ['final_readback', 'verify_reproduced_target', 'ddev drush status']
+  ].map(([phase, operation, command]) => ({
+    phase,
+    operation,
+    command,
+    exitCode: 0,
+    startedAt: testCheckedAt,
+    finishedAt: testCheckedAt,
+    stdoutEvidence: [evidenceFiles.run],
+    stderrEvidence: []
+  }));
+  const workingIdentitySha256 = fileSha256(join(evidenceDir, evidenceFiles.workingBefore));
+  const configObjectSha256 = fileSha256(join(evidenceDir, evidenceFiles.configObject));
+  writeJson(join(packetDir, 'reproduction-evidence.json'), {
+    schemaVersion: 'public-kit.reproduction-evidence.1',
+    site: targetBaseUrl,
+    checkedAt: testCheckedAt,
+    reviewer: 'Fixture Reproduction Reviewer',
+    reproductionMode: 'clean_install_config_import',
+    cleanInstallConfigImport: {
+      freshDrupalInstall: true,
+      databaseSnapshotUsed: false,
+      dependencyInstallCompleted: true,
+      provisioningCompleted: true,
+      trackedConfigImported: true,
+      canonicalContentRestored: true,
+      managedFilesRestored: true,
+      evidence: [evidenceFiles.run]
+    },
+    disposableEnvironment: {
+      identity: 'fixture-reproduction-target',
+      targetBaseUrl: 'https://repro-target.example',
+      createdForThisRun: true,
+      isolatedFromWorkingTarget: true,
+      workingTargetUsed: false,
+      lifecycleDisposition: 'destroyed',
+      evidence: [evidenceFiles.environment]
+    },
+    immutableInputs: inputs,
+    transcript: {
+      format: 'public-kit.reproduction-transcript.1',
+      packetCommandsExecutedByVerifier: false,
+      commands
+    },
+    restorationMechanisms: {
+      content: {
+        mechanism: 'Source-keyed migration import',
+        inputKind: 'canonical_content',
+        inputSha256: inputByKind.get('canonical_content').sha256,
+        stableIdentityStrategy: 'source keys and UUIDs',
+        evidence: [evidenceFiles.content]
+      },
+      managedFiles: {
+        mechanism: 'Manifest-verified managed file copy',
+        inputKind: 'managed_files',
+        inputSha256: inputByKind.get('managed_files').sha256,
+        evidence: [evidenceFiles.files]
+      }
+    },
+    workingTargetUntouched: {
+      workingTargetBaseUrl: targetBaseUrl,
+      workingTargetUsedDuringReproduction: false,
+      beforeIdentity: {
+        sha256: workingIdentitySha256,
+        evidence: [evidenceFiles.workingBefore]
+      },
+      afterIdentity: {
+        sha256: workingIdentitySha256,
+        evidence: [evidenceFiles.workingAfter]
+      },
+      identitiesMatch: true,
+      evidence: [evidenceFiles.run]
+    },
+    finalReadback: {
+      targetBaseUrl: 'https://repro-target.example',
+      siteIdentity: {
+        expectedSiteUuid: testSiteUuid,
+        actualSiteUuid: testSiteUuid,
+        match: true,
+        evidence: [evidenceFiles.readback]
+      },
+      entityIdentifiers: [
+        {
+          entityType: 'node',
+          bundle: 'page',
+          stableIdentity: 'source_key',
+          expectedIdentifier: 'fixture:homepage',
+          actualIdentifier: 'fixture:homepage',
+          match: true,
+          evidence: [evidenceFiles.readback]
+        }
+      ],
+      counts: [
+        {
+          scope: 'node.page',
+          expected: 1,
+          actual: 1,
+          match: true,
+          evidence: [evidenceFiles.readback]
+        }
+      ],
+      configManifest: {
+        expectedSha256: inputByKind.get('tracked_config_manifest').sha256,
+        actualSha256: inputByKind.get('tracked_config_manifest').sha256,
+        match: true,
+        evidence: [evidenceFiles.config]
+      },
+      configHashes: [
+        {
+          configName: 'system.site',
+          expectedSha256: configObjectSha256,
+          actualSha256: configObjectSha256,
+          match: true,
+          evidence: [evidenceFiles.configObject]
+        }
+      ],
+      managedFileHashes: [
+        {
+          uri: 'public://fixture.txt',
+          expectedSha256: managedFileSha256,
+          actualSha256: managedFileSha256,
+          match: true,
+          evidence: [evidenceFiles.managedFile]
+        }
+      ],
+      routes: [
+        {
+          path: '/',
+          expectedStatus: 200,
+          actualStatus: 200,
+          expectedFinalPath: '/',
+          actualFinalPath: '/',
+          match: true,
+          evidence: [evidenceFiles.readback]
+        }
+      ],
+      evidence: [evidenceFiles.readback]
+    },
+    accepted: true,
+    blockers: []
+  });
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -1905,6 +2140,7 @@ test('a coherent but stale packet cannot authorize current local completion', as
 
   const staleCheckedAt = '2020-01-01T00:00:00Z';
   for (const file of [
+    'reproduction-evidence.json',
     'source-audit.json',
     'pattern-map.json',
     'route-matrix.json',
@@ -1924,6 +2160,144 @@ test('a coherent but stale packet cannot authorize current local completion', as
     report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
     /newest completion evidence is older than seven days/i
   );
+});
+
+test('G-REPRO-01 fails closed when disposable clean-reproduction proof is incomplete', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'reproduction-gate-fail-closed-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    true,
+    JSON.stringify(canonicalReport.completionEvidence, null, 2)
+  );
+
+  const cases = [
+    {
+      name: 'snapshot-is-not-clean-install',
+      expected: /true clean install\/config import.*snapshot restoration.*recovery evidence/i,
+      mutate: (reproduction) => {
+        reproduction.reproductionMode = 'snapshot_restore';
+        reproduction.cleanInstallConfigImport.freshDrupalInstall = false;
+        reproduction.cleanInstallConfigImport.databaseSnapshotUsed = true;
+      }
+    },
+    {
+      name: 'working-target-is-not-disposable',
+      expected: /isolated disposable target.*working target was not used/i,
+      mutate: (reproduction) => {
+        reproduction.disposableEnvironment.targetBaseUrl = 'https://target.example';
+        reproduction.disposableEnvironment.workingTargetUsed = true;
+      }
+    },
+    {
+      name: 'machine-local-input',
+      expected: /five portable immutable inputs.*SHA-256 digests/i,
+      mutate: (reproduction) => {
+        reproduction.immutableInputs[0].source = '/Users/example/dev/site/composer.lock';
+      }
+    },
+    {
+      name: 'input-digest-mismatch',
+      expected: /five portable immutable inputs.*SHA-256 digests/i,
+      mutate: (reproduction) => {
+        reproduction.immutableInputs[0].sha256 = `sha256:${'0'.repeat(64)}`;
+      }
+    },
+    {
+      name: 'incomplete-command-transcript',
+      expected: /complete successful six-phase transcript.*never executes/i,
+      mutate: (reproduction) => {
+        reproduction.transcript.commands = reproduction.transcript.commands
+          .filter((command) => command.phase !== 'config_import');
+      }
+    },
+    {
+      name: 'snapshot-content-restore',
+      expected: /canonical content and managed-file restore\/import mechanisms/i,
+      mutate: (reproduction) => {
+        reproduction.restorationMechanisms.content.mechanism = 'Database snapshot restore';
+      }
+    },
+    {
+      name: 'working-target-changed',
+      expected: /working target identity is byte-identical.*never used/i,
+      mutate: (reproduction) => {
+        reproduction.workingTargetUntouched.afterIdentity.sha256 = `sha256:${'0'.repeat(64)}`;
+      }
+    },
+    {
+      name: 'stable-identifier-mismatch',
+      expected: /final readback must match stable entity IDs/i,
+      mutate: (reproduction) => {
+        reproduction.finalReadback.entityIdentifiers[0].actualIdentifier = 'fixture:different';
+      }
+    },
+    {
+      name: 'count-mismatch',
+      expected: /final readback must match.*counts/i,
+      mutate: (reproduction) => {
+        reproduction.finalReadback.counts[0].actual = 2;
+      }
+    },
+    {
+      name: 'config-mismatch',
+      expected: /final readback must match.*config hashes/i,
+      mutate: (reproduction) => {
+        reproduction.finalReadback.configHashes[0].actualSha256 = `sha256:${'0'.repeat(64)}`;
+      }
+    },
+    {
+      name: 'managed-file-mismatch',
+      expected: /final readback must match.*managed-file hashes/i,
+      mutate: (reproduction) => {
+        reproduction.finalReadback.managedFileHashes[0].actualSha256 = `sha256:${'0'.repeat(64)}`;
+      }
+    },
+    {
+      name: 'route-mismatch',
+      expected: /final readback must match.*public routes/i,
+      mutate: (reproduction) => {
+        reproduction.finalReadback.routes[0].actualStatus = 404;
+      }
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'reproduction-evidence.json'), mutate);
+
+    const report = await validatePacket({ packetDir });
+
+    assert.equal(report.valid, true, `${name}: ${report.errors.join('\n')}`);
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+});
+
+test('reproduction verifier treats packet command strings as inert transcript data', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'reproduction-transcript-inert-'));
+  const packetDir = join(temp, 'review-packet');
+  const sentinel = join(repoRoot, 'verifier-must-not-run');
+  assert.equal(existsSync(sentinel), false);
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'reproduction-evidence.json'), (reproduction) => {
+    reproduction.transcript.commands[0].command =
+      'ddev composer install --no-interaction && touch verifier-must-not-run';
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.equal(report.completionEvidence.packetSupportsCompletion, true);
+  assert.equal(existsSync(sentinel), false, 'packet-provided transcript command must never execute');
 });
 
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {

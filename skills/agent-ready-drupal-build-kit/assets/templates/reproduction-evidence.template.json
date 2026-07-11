@@ -1,0 +1,148 @@
+{
+  "schemaVersion": "public-kit.reproduction-evidence.1",
+  "site": "",
+  "checkedAt": "",
+  "reviewer": "",
+  "reproductionMode": "clean_install_config_import | snapshot_restore",
+  "cleanInstallConfigImport": {
+    "freshDrupalInstall": false,
+    "databaseSnapshotUsed": true,
+    "dependencyInstallCompleted": false,
+    "provisioningCompleted": false,
+    "trackedConfigImported": false,
+    "canonicalContentRestored": false,
+    "managedFilesRestored": false,
+    "evidence": []
+  },
+  "disposableEnvironment": {
+    "identity": "",
+    "targetBaseUrl": "",
+    "createdForThisRun": false,
+    "isolatedFromWorkingTarget": false,
+    "workingTargetUsed": true,
+    "lifecycleDisposition": "destroyed | retained_for_review",
+    "evidence": []
+  },
+  "immutableInputs": [
+    {
+      "kind": "dependency_lock | provisioning_definition | tracked_config_manifest | canonical_content | managed_files",
+      "name": "",
+      "source": "",
+      "sha256": "",
+      "immutable": false,
+      "evidence": []
+    }
+  ],
+  "transcript": {
+    "format": "public-kit.reproduction-transcript.1",
+    "packetCommandsExecutedByVerifier": false,
+    "commands": [
+      {
+        "phase": "dependency_install | provision_drupal | config_import | content_restore | files_restore | final_readback",
+        "operation": "",
+        "command": "",
+        "exitCode": null,
+        "startedAt": "",
+        "finishedAt": "",
+        "stdoutEvidence": [],
+        "stderrEvidence": []
+      }
+    ]
+  },
+  "restorationMechanisms": {
+    "content": {
+      "mechanism": "",
+      "inputKind": "canonical_content",
+      "inputSha256": "",
+      "stableIdentityStrategy": "",
+      "evidence": []
+    },
+    "managedFiles": {
+      "mechanism": "",
+      "inputKind": "managed_files",
+      "inputSha256": "",
+      "evidence": []
+    }
+  },
+  "workingTargetUntouched": {
+    "workingTargetBaseUrl": "",
+    "workingTargetUsedDuringReproduction": true,
+    "beforeIdentity": {
+      "sha256": "",
+      "evidence": []
+    },
+    "afterIdentity": {
+      "sha256": "",
+      "evidence": []
+    },
+    "identitiesMatch": false,
+    "evidence": []
+  },
+  "finalReadback": {
+    "targetBaseUrl": "",
+    "siteIdentity": {
+      "expectedSiteUuid": "",
+      "actualSiteUuid": "",
+      "match": false,
+      "evidence": []
+    },
+    "entityIdentifiers": [
+      {
+        "entityType": "",
+        "bundle": "",
+        "stableIdentity": "",
+        "expectedIdentifier": "",
+        "actualIdentifier": "",
+        "match": false,
+        "evidence": []
+      }
+    ],
+    "counts": [
+      {
+        "scope": "",
+        "expected": 0,
+        "actual": 0,
+        "match": false,
+        "evidence": []
+      }
+    ],
+    "configManifest": {
+      "expectedSha256": "",
+      "actualSha256": "",
+      "match": false,
+      "evidence": []
+    },
+    "configHashes": [
+      {
+        "configName": "",
+        "expectedSha256": "",
+        "actualSha256": "",
+        "match": false,
+        "evidence": []
+      }
+    ],
+    "managedFileHashes": [
+      {
+        "uri": "",
+        "expectedSha256": "",
+        "actualSha256": "",
+        "match": false,
+        "evidence": []
+      }
+    ],
+    "routes": [
+      {
+        "path": "",
+        "expectedStatus": null,
+        "actualStatus": null,
+        "expectedFinalPath": "",
+        "actualFinalPath": "",
+        "match": false,
+        "evidence": []
+      }
+    ],
+    "evidence": []
+  },
+  "accepted": false,
+  "blockers": []
+}

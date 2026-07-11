@@ -182,6 +182,28 @@ A clean install plus `drush config:import` into a disposable target is stronger 
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
 
+## Reproduce In A Disposable Environment
+
+`G-REPRO-01` turns clean reproduction into a local-handoff gate. Create an isolated disposable runtime from the same project source; it is verification infrastructure, not a second maintained Drupal delivery project. Leave the working target running and untouched.
+
+Record `review-packet/reproduction-evidence.json` plus raw artifacts under `review-packet/evidence/reproduction/`. The required sequence is:
+
+1. Capture the working target identity before reproduction.
+2. Digest-bind packet-local copies or manifests for the dependency lock, provisioning definition, tracked config, canonical content, and managed files.
+3. Install declared dependencies and provision a fresh Drupal install in the disposable target.
+4. Import the exact tracked configuration.
+5. Restore/import content through a declared source-key or UUID mechanism and restore managed files through a declared manifest/archive mechanism.
+6. Read back the site UUID, stable entity identifiers, counts, config-manifest/config-object hashes, managed-file hashes, and public routes.
+7. Capture the working target identity again and prove the before/after identity bytes match.
+
+For every immutable input and working-target identity record, `sha256` is computed from the exact bytes of its first packet-local `evidence` file. Input sources must be project-relative or credential-free URLs backed by those captured bytes and digests; developer-home paths, temp paths, missing artifacts, parent traversal, and mutable undigested inputs fail.
+
+The final config-manifest, representative config-object, and managed-file `actualSha256` values are also computed from each record's first evidence file. This makes the verifier compare captured output bytes rather than trusting a copied expected hash.
+
+The transcript is data, not an execution API. It records the dependency-install, provision, config-import, content-restore, files-restore, and final-readback commands and their exit/timestamp/evidence records. The verifier parses this schema and never shells out to a command supplied by the packet.
+
+A database snapshot can prove recovery, but it cannot prove construction from source. Record it as `snapshot_restore`; only a fresh `clean_install_config_import` run with `databaseSnapshotUsed: false` clears `G-REPRO-01`.
+
 ## SEO Is Rendered Output, Not Enabled Modules
 
 For public-facing rebuilds, SEO and social metadata are part of public behavior. Prefer the maintained Drupal CMS SEO recipe or configured contrib path when available, then map tokens and defaults to fields the target model actually has.

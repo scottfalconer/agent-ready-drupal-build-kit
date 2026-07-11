@@ -195,6 +195,21 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 - Run Starter and route drift cleanup before handoff. Check `/home`, `/page/1`, `/privacy-policy`, raw `/node/*` routes, starter Canvas pages, stale menu/footer links, unpublished starter pages, duplicate aliases, and aliases that normalize to the wrong final URL. Remove, redirect, publish, or explicitly block each one.
 - For analytics, click tracking, collection, or provider callbacks, prefer documented no-op/local-only stubs. Do not log raw payloads by default. If a custom endpoint is unavoidable, validate the event shape, avoid secret/private data, mark it local-only unless production requirements are known, and record the production integration as a scoped gap.
 
+### Disposable Reproduction Gate
+
+Before local completion, reproduce the Drupal build from declared immutable inputs in an isolated disposable environment. The disposable runtime is verification infrastructure created from the same project source, not a second maintained delivery project. Never reinstall, import, restore, or mutate the working target to earn this gate.
+
+- Record `review-packet/reproduction-evidence.json` and raw inputs, transcripts, identity manifests, and readbacks under `review-packet/evidence/reproduction/`.
+- Declare and digest-bind five input classes: dependency lock, provisioning definition, tracked-config manifest, canonical content input, and managed-files input. Each `sha256` is the SHA-256 of the first packet-local evidence file named by that input. Reject missing bytes, parent traversal, developer-home/temp paths, mutable inputs, and inputs without a digest.
+- Install dependencies, provision a fresh Drupal install, import the exact tracked configuration, restore/import canonical content through a stable source-key or UUID mechanism, and restore managed files through the declared mechanism.
+- Treat a database snapshot restore as recovery evidence only. It may be recorded as `snapshot_restore`, but `G-REPRO-01` passes only `clean_install_config_import` with `databaseSnapshotUsed: false`.
+- Record the six transcript phases: dependency install, Drupal provision, config import, content restore, files restore, and final readback. Transcript command strings are inert evidence. The kit verifier must never evaluate or execute packet-provided commands.
+- Capture byte-identical working-target identity evidence before and after reproduction and declare that the working target was not used.
+- On the disposable target, compare the expected and actual Drupal site UUID, stable entity identifiers, entity counts, overall config-manifest digest, representative config hashes, managed-file hashes, and public route status/final paths. Every row needs packet-local evidence.
+- Bind `finalReadback.configManifest.actualSha256`, every representative `configHashes[].actualSha256`, and every `managedFileHashes[].actualSha256` to the exact bytes of that record's first packet-local evidence file.
+
+`G-REPRO-01` fails closed when the run is a snapshot restore, the disposable/working boundary is missing, an input is local/mutable/unbound, a transcript phase failed or is absent, content/files lack a declared mechanism, working-target identity changed, or any final readback differs.
+
 ### Phase 3: Durable Intent
 
 - For every major architectural decision, content type, View, workflow, integration boundary, custom controller, or recipe/overlay decision, append a durable intent record.
@@ -293,7 +308,7 @@ This command binds the packet to the identified live target and the current DDEV
 
 Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
-Completion packet readiness is semantic, not a file-presence check. Source audit, pattern map, field-output matrix, parity, browser/editor evidence, Drupal readback, operator run, recipe decision, scoped gaps, open decisions, off-road inventory, durable intent, and maintainer verdict must contain run-specific accepted evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Launch checklist and production-target records remain required handoff boundaries, but they do not by themselves authorize or block the narrower complete-local-rebuild claim.
+Completion packet readiness is semantic, not a file-presence check. Source audit, pattern map, field-output matrix, disposable reproduction evidence, parity, browser/editor evidence, Drupal readback, operator run, recipe decision, scoped gaps, open decisions, off-road inventory, durable intent, and maintainer verdict must contain run-specific accepted evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Launch checklist and production-target records remain required handoff boundaries, but they do not by themselves authorize or block the narrower complete-local-rebuild claim.
 
 For explicit structural lint only, run `node [KIT_LOCAL_PATH]/scripts/verify-packet.mjs --packet review-packet` or add `--packet-only` to the default verifier. Packet-only success can never authorize a complete rebuild claim.
 
@@ -726,4 +741,5 @@ Gate records, either accepted evidence or blocked stubs:
 - packet verifier report under `evidence/packet-verification.json`;
 - Drupal readback;
 - field-output matrix;
+- disposable clean-install reproduction evidence;
 - launch checklist.
