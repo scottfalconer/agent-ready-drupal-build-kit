@@ -18,6 +18,7 @@
     "blind-adversarial-review.json",
     "drupal-readback.json",
     "field-output-matrix.json",
+    "source-origin-dependence.json",
     "launch-checklist.md"
   ],
   "generatedEvidenceFiles": [
@@ -166,6 +167,14 @@
       "title": "Active config matches a non-empty tracked config sync directory",
       "phase": 2,
       "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-ASSET-01",
+      "title": "Source-origin dependence measured, localized, or dispositioned",
+      "phase": 2,
+      "evidenceFile": "source-origin-dependence.json",
       "checkedBy": "verify-script",
       "blocking": "handoff"
     },

@@ -485,6 +485,14 @@ When media is usable, import or stage it into Drupal-managed file storage, refer
 
 URL/image fields can be useful evidence carriers, but they should not silently replace a real Drupal media strategy.
 
+## Source-Origin Dependence
+
+The provider boundary covers genuine third-party transactional systems: payments, ticketing, document-management portals, CRM/form backends, and similar services the source site itself only links into. First-party downloadable assets served from the source origin or its CDN — PDFs, documents, images, audio, and video files — default to in-scope file migration, not a provider boundary. Applying a provider-boundary exception to the source site's own files is a modeling failure.
+
+At import time, produce `review-packet/source-origin-dependence.json` from the installed template. Scan every stored file, media, and link field table and every stored body/text field (for example via `drush sqlq` count queries) for URLs on the declared `sourceBaseUrl` and the asset hosts recorded in `source-audit.json` `sourceAssetHosts`. Localize files into Drupal-managed storage, rewrite remaining hrefs (prefer entity/UUID-based linking over raw source aliases), add redirects, or record an explicit external-asset strategy accepted by a named owner. This is one report produced once at import time; the default verifier re-runs the same table/column counts against the live database at packet time, so the numbers must stay true, not merely recorded.
+
+Gate `G-ASSET-01` fails closed when a load-bearing field is mostly source-origin URLs without an accepted strategy, when a configured file/media field on a declared collection stores zero rows, when a fetched primary route renders links or assets that point back at the source origin, or when rendered text matches declared stub/archive boilerplate without a named per-route accepted exclusion in `scoped-gap-list.md`. As an informal build-time self-check, a target page whose visible text is dramatically shorter than the browser-rendered source page usually signals unmigrated content.
+
 ## Content Field Formats
 
 Text fields often need both value and format. Do not import formatted text without an explicit text format decision.

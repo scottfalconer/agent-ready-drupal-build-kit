@@ -997,6 +997,37 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.blockers = [];
   writeJson(readbackPath, readback);
 
+  const dependencePath = join(packetDir, 'source-origin-dependence.json');
+  const dependence = JSON.parse(readFileSync(dependencePath, 'utf8'));
+  dependence.site = targetBaseUrl;
+  dependence.checkedAt = testCheckedAt;
+  dependence.sourceBaseUrl = sourceBaseUrl;
+  dependence.knownSourceAssetHosts = [];
+  dependence.storedFieldScans = [
+    {
+      entityType: 'node',
+      bundle: 'page',
+      field: 'body',
+      fieldKind: 'formatted_text',
+      loadBearing: true,
+      table: 'node__body',
+      column: 'body_value',
+      totalRows: 1,
+      sourceOriginRows: 0,
+      sampleSourceOriginValues: [],
+      disposition: 'none_found',
+      notes: 'The imported homepage body stores no source-origin URLs.'
+    }
+  ];
+  dependence.externalAssetStrategies = [];
+  dependence.stubBoilerplateScan = {
+    scanStrategy: 'all_imported_routes',
+    scannedRoutes: ['/'],
+    boilerplatePatterns: ['open the original public resource', 'archived copy of this page'],
+    findings: []
+  };
+  writeJson(dependencePath, dependence);
+
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
@@ -1377,7 +1408,9 @@ const outputs = new Map([
   ['config:get system.site --field=uuid', '${testSiteUuid}'],
   ['config:get system.site page.front --format=string', '/'],
   ['status --field=config-sync', '../config/sync'],
-  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]']
+  ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]'],
+  ['sqlq SELECT COUNT(*) FROM node__body', process.env.FAKE_DDEV_DB_MISMATCH === '1' ? '5' : '1'],
+  ["sqlq SELECT COUNT(*) FROM node__body WHERE body_value LIKE '%source.example%'", '0']
 ]);
 if (!outputs.has(command)) {
   process.stderr.write('Unexpected fake Drush command: ' + command + '\\n');
@@ -1422,7 +1455,22 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
+      assert.equal(cleanReport.sourceOriginDependence.storedFieldScansReverified, true);
+      assert.equal(cleanReport.sourceOriginDependence.storedFieldScanChecks[0].verified, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
+
+      const mismatchResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_DB_MISMATCH: '1' }
+      });
+      assert.equal(mismatchResult.status, 2, mismatchResult.stderr);
+      const mismatchReport = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
+      assert.equal(mismatchReport.valid, true, mismatchReport.errors.join('\n'));
+      assert.equal(mismatchReport.sourceOriginDependence.storedFieldScansReverified, false);
+      assert.equal(mismatchReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        mismatchReport.completionBlockedReasons.join('\n'),
+        /stored-field scan counts were not re-verified against the live Drupal database/i
+      );
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
@@ -1794,6 +1842,212 @@ test('self-authored count and exclusion dispositions cannot hide collection shor
   }
 });
 
+test('source-origin dependence evidence fails closed on hotlinks, empty asset fields, and stub findings', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'source-origin-regressions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'load-bearing-hotlinked-field-without-strategy',
+      expected: /more than 10% source-origin URLs.*named owner/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.storedFieldScans.push({
+          entityType: 'node',
+          bundle: 'document',
+          field: 'field_document_link',
+          fieldKind: 'link',
+          loadBearing: true,
+          table: 'node__field_document_link',
+          column: 'field_document_link_uri',
+          totalRows: 561,
+          sourceOriginRows: 561,
+          sampleSourceOriginValues: ['https://source.example/files/report.pdf'],
+          disposition: 'external_asset_strategy_accepted',
+          notes: 'Every document link still points at the source origin.'
+        });
+      })
+    },
+    {
+      name: 'remaining-source-origin-rows-without-accepted-disposition',
+      expected: /still stores 1 source-origin URL row/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.storedFieldScans[0].totalRows = 20;
+        value.storedFieldScans[0].sourceOriginRows = 1;
+      })
+    },
+    {
+      name: 'configured-but-empty-file-field-on-declared-collection',
+      expected: /configured-but-empty file field on declared collection bundle document.*falsification evidence/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+          value.structuredContentModel.collectionScope = {
+            reviewed: true,
+            applies: true,
+            reason: 'The source has a document archive collection.'
+          };
+          value.structuredContentModel.collectionOwnershipLedger = [{
+            sourceRoute: '/',
+            collectionPattern: 'archive',
+            sourceObject: 'document',
+            sourceItemCount: 561,
+            drupalEntityType: 'node',
+            contentTypeOrBundle: 'document',
+            requiredFields: ['title', 'field_document_file'],
+            collectionOwner: 'view',
+            viewDisplayOrConfig: 'views.view.documents',
+            detailRouteOwner: 'entity_view_display',
+            editorAddRowEvidence: 'editor-task.json',
+            exceptionRationale: '',
+            accepted: true,
+            notes: 'Documents are Drupal-owned.'
+          }];
+        });
+        mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+          value.storedFieldScans.push({
+            entityType: 'node',
+            bundle: 'document',
+            field: 'field_document_file',
+            fieldKind: 'file',
+            loadBearing: true,
+            table: 'node__field_document_file',
+            column: 'field_document_file_target_id',
+            totalRows: 0,
+            sourceOriginRows: 0,
+            sampleSourceOriginValues: [],
+            disposition: 'none_found',
+            notes: 'The configured file field has no rows.'
+          });
+        });
+      }
+    },
+    {
+      name: 'missing-stored-field-scan-coverage',
+      expected: /needs a storedFieldScans entry for node\.page\.body/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.storedFieldScans = [];
+      })
+    },
+    {
+      name: 'stub-finding-without-named-acceptance',
+      expected: /stub finding for \/archive must be a named accepted stub treatment/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.stubBoilerplateScan.findings = [{
+          route: '/archive',
+          matchedPattern: 'open the original public resource',
+          treatment: 'stub_accepted',
+          acceptedBy: '',
+          rationale: '',
+          scopedGapListEntry: ''
+        }];
+      })
+    },
+    {
+      name: 'stub-scan-missing-primary-route-coverage',
+      expected: /coverage of every primary target route/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-origin-dependence.json'), (value) => {
+        value.stubBoilerplateScan.scannedRoutes = [];
+      })
+    },
+    {
+      name: 'source-audit-asset-host-not-declared',
+      expected: /must include every asset host recorded in source-audit\.json/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'source-audit.json'), (value) => {
+        value.sourceAssetHosts = ['cdn.source.example'];
+      })
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutate(packetDir);
+
+    const report = await validatePacket({ packetDir });
+
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+});
+
+test('live verifier hard-flags rendered source-origin references and unaccepted stub boilerplate', async () => {
+  let scenario = 'hotlinked';
+  await withHttpServer(
+    (request, response) => {
+      const origin = `http://${request.headers.host}`;
+      const body = scenario === 'hotlinked'
+        ? '<p>Open the original public resource.</p><a href="https://source.example/files/annual-report.pdf">Annual report</a>'
+        : '<p>Local rebuilt content.</p><a href="/files/annual-report.pdf">Annual report</a>';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title><link rel="canonical" href="${origin}/"><meta name="description" content="Fixture homepage description."></head><body><h1>Target home</h1>${body}</body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-source-origin-'));
+      const canonicalPacket = join(temp, 'canonical');
+      copyTemplatePacket(canonicalPacket);
+      writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(canonicalPacket, baseUrl);
+
+      const hotlinkedPacket = join(temp, 'hotlinked');
+      cpSync(canonicalPacket, hotlinkedPacket, { recursive: true });
+      const hotlinkedReport = await verifyLive({
+        packetDir: hotlinkedPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(hotlinkedReport.valid, false);
+      assert.equal(hotlinkedReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(hotlinkedReport.errors.join('\n'), /reference\(s\) to the declared source origin/);
+      assert.match(hotlinkedReport.errors.join('\n'), /stub\/archive boilerplate/);
+
+      const acceptedPacket = join(temp, 'accepted');
+      cpSync(canonicalPacket, acceptedPacket, { recursive: true });
+      mutateJson(join(acceptedPacket, 'source-origin-dependence.json'), (value) => {
+        value.externalAssetStrategies = [{
+          appliesToFields: [],
+          appliesToRenderedRoutes: ['/'],
+          acceptedBy: 'Example Owner',
+          rationale: 'The report archive stays on the source host until the owner migrates it.',
+          evidence: 'evidence/blind-adversarial-review/editor-task.json'
+        }];
+        value.stubBoilerplateScan.findings = [{
+          route: '/',
+          matchedPattern: 'open the original public resource',
+          treatment: 'stub_accepted',
+          acceptedBy: 'Example Owner',
+          rationale: 'The owner accepted a stub treatment for this route.',
+          scopedGapListEntry: 'GAP-STUB-001'
+        }];
+      });
+      const acceptedReport = await verifyLive({
+        packetDir: acceptedPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(acceptedReport.valid, true, acceptedReport.errors.join('\n'));
+      assert.doesNotMatch(acceptedReport.errors.join('\n'), /declared source origin/);
+
+      scenario = 'local';
+      const localPacket = join(temp, 'local');
+      cpSync(canonicalPacket, localPacket, { recursive: true });
+      const localReport = await verifyLive({
+        packetDir: localPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(localReport.valid, true, localReport.errors.join('\n'));
+    }
+  );
+});
+
 test('completion evidence uses exact Drupal identities and explicit SEO applicability', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'exact-identity-regressions-'));
   const canonicalPacket = join(temp, 'canonical');
@@ -1913,7 +2167,8 @@ test('a coherent but stale packet cannot authorize current local completion', as
     'independent-verification.json',
     'blind-adversarial-review.json',
     'drupal-readback.json',
-    'field-output-matrix.json'
+    'field-output-matrix.json',
+    'source-origin-dependence.json'
   ]) {
     mutateJson(join(packetDir, file), (value) => { value.checkedAt = staleCheckedAt; });
   }
@@ -2339,6 +2594,12 @@ test('every completion-bearing packet artifact is bound to the inspected source 
         ['source-audit.json', /source-audit\.json site\.baseUrl origin/, (value) => {
           value.site.baseUrl = 'https://wrong-source.example/';
         }],
+        ['source-origin-dependence-source.json', /source-origin-dependence\.json sourceBaseUrl origin/, (value) => {
+          value.sourceBaseUrl = 'https://wrong-source.example/';
+        }, 'source-origin-dependence.json'],
+        ['source-origin-dependence-site.json', /source-origin-dependence\.json site origin/, (value) => {
+          value.site = 'https://stale-target.example/';
+        }, 'source-origin-dependence.json'],
         ['independent-admin.json', /target\.adminUrl origin/, (value) => {
           value.target.adminUrl = 'https://stale-target.example/admin';
         }, 'independent-verification.json'],

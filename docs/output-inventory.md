@@ -28,6 +28,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `blind-adversarial-review.json`
 - `drupal-readback.json`
 - `field-output-matrix.json`
+- `source-origin-dependence.json`
 - `launch-checklist.md`
 
 ## Generated Verifier Evidence
@@ -49,6 +50,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `G-CONTENT-01` and `G-CONTENT-02`: prove structured-content and collection ownership. Every declared collection row needs source/target counts, Drupal ownership, and non-admin editor add-a-row evidence; counts must match unless a named owner accepts a specific evidence-backed exclusion, and private/unreachable boundaries need evidence.
 - `G-COMPOSITION-01`, `G-COMPOSITION-02`, and `G-CANVAS-01`: declare each flexible page's authoring owner and prove the actual target owner/component model matches, or record a target-bound accepted deviation with named acceptance and evidence.
 - `G-RECIPE-01` and `G-CONFIG-01`: record the installed substrate and bounded Recipe decisions, then independently prove active config matches a non-empty current sync directory containing real Git-tracked YAML without drift.
+- `G-ASSET-01`: measure and disposition source-origin dependence. Stored file/media/link/text fields are scanned for `sourceBaseUrl` and recorded asset-host URLs at import time, and the verifier re-runs the same counts against the live database at packet time. A load-bearing field that is mostly source-origin URLs needs a named-owner external-asset strategy; a configured-but-empty file/media field on a declared collection, a rendered primary-route link or asset pointing back at the source origin, or unaccepted stub/archive boilerplate blocks completion.
 - `G-INTENT-01`, `G-FIELD-01`, `G-OFFROAD-01`, and `G-SEO-01`: validate durable intent, field-to-output behavior, rendered SEO, raw embeds, custom/off-road work, and any local-only destructive cleanup. Every custom/repeating public bundle needs a non-admin workflow; every load-bearing/anonymous-output field needs falsification; rendered SEO `not_applicable` needs reviewed rationale and evidence.
 - `G-VERIFY-01`, `G-VERIFY-02`, and `G-BLIND-01`: retain independent mechanical, live-target, and blind product-review evidence.
 - `G-MAINTAINER-01`: record the named maintainer verdict required by the local handoff bar.

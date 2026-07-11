@@ -57,6 +57,18 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const MAX_SOURCE_ORIGIN_URL_RATIO = 0.1;
+const SOURCE_ORIGIN_FIELD_KINDS = new Set(['file', 'media', 'link', 'formatted_text']);
+const SOURCE_ORIGIN_DISPOSITIONS = new Set([
+  'none_found',
+  'localized',
+  'rewritten',
+  'redirected',
+  'external_asset_strategy_accepted'
+]);
+const STUB_SCAN_STRATEGIES = new Set(['all_imported_routes', 'per_bundle_sample']);
+const SQL_IDENTIFIER_RE = /^[a-z0-9_]+$/i;
+const ASSET_HOST_RE = /^[a-z0-9][a-z0-9.-]*$/i;
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -77,6 +89,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-CANVAS-01': 'canvasComponentFidelity',
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
+  'G-ASSET-01': 'sourceOriginDependence',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -2140,6 +2153,152 @@ async function markdownCompletionReadiness(packetDir) {
   return reasons;
 }
 
+function fieldScanKey(entityType, bundle, field) {
+  return [entityType, bundle, field]
+    .map((part) => String(part ?? '').trim().toLowerCase())
+    .join('.');
+}
+
+async function sourceOriginDependenceReasons(packetDir, records) {
+  const { fieldOutputMatrix, patternMap, routeMatrix, sourceAudit, sourceOriginDependence } = records;
+  const reasons = [];
+  const report = sourceOriginDependence;
+
+  const declaredSource = httpUrl(routeMatrix?.sourceBaseUrl);
+  const reportSource = httpUrl(report?.sourceBaseUrl);
+  if (!reportSource || !declaredSource || reportSource.origin !== declaredSource.origin) {
+    reasons.push('source-origin-dependence.json must declare the same sourceBaseUrl origin as route-matrix.json.');
+  }
+  const declaredTarget = httpUrl(routeMatrix?.targetBaseUrl);
+  const reportSite = httpUrl(report?.site);
+  if (!reportSite || !declaredTarget || reportSite.origin !== declaredTarget.origin) {
+    reasons.push('source-origin-dependence.json must bind site to the declared route-matrix.json targetBaseUrl origin.');
+  }
+
+  const knownHosts = arrayOrEmpty(report?.knownSourceAssetHosts).map((host) => String(host ?? '').trim().toLowerCase());
+  if (knownHosts.some((host) => !ASSET_HOST_RE.test(host))) {
+    reasons.push('source-origin-dependence.json knownSourceAssetHosts must contain bare hostnames only.');
+  }
+  const auditHosts = arrayOrEmpty(sourceAudit?.sourceAssetHosts)
+    .map((host) => String(host ?? '').trim().toLowerCase())
+    .filter(Boolean);
+  if (auditHosts.some((host) => !knownHosts.includes(host))) {
+    reasons.push('source-origin-dependence.json knownSourceAssetHosts must include every asset host recorded in source-audit.json sourceAssetHosts.');
+  }
+
+  const strategies = substantiveObjects(report?.externalAssetStrategies);
+  for (const [index, strategy] of strategies.entries()) {
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, strategy.evidence);
+    if (
+      !String(strategy.acceptedBy ?? '').trim() ||
+      !String(strategy.rationale ?? '').trim() ||
+      !evidencePresent ||
+      (arrayOrEmpty(strategy.appliesToFields).length === 0 && arrayOrEmpty(strategy.appliesToRenderedRoutes).length === 0)
+    ) {
+      reasons.push(`source-origin-dependence.json externalAssetStrategies[${index}] requires a named acceptedBy, rationale, packet-local evidence, and an explicit field or rendered-route scope.`);
+    }
+  }
+  const acceptedStrategyFieldKeys = new Set(
+    strategies
+      .filter((strategy) => String(strategy.acceptedBy ?? '').trim() && String(strategy.rationale ?? '').trim())
+      .flatMap((strategy) => arrayOrEmpty(strategy.appliesToFields))
+      .map((key) => String(key ?? '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const declaredCollectionBundles = new Set(
+    substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+      .filter((row) => row?.accepted === true)
+      .map((row) => identityKey(row.contentTypeOrBundle))
+      .filter(Boolean)
+  );
+  const scans = substantiveObjects(report?.storedFieldScans);
+  const scannedFieldKeys = new Set();
+  for (const scan of scans) {
+    const key = fieldScanKey(scan.entityType, scan.bundle, scan.field);
+    scannedFieldKeys.add(key);
+    const totalRows = numericValue(scan.totalRows);
+    const sourceOriginRows = numericValue(scan.sourceOriginRows);
+    if (
+      !String(scan.entityType ?? '').trim() ||
+      !String(scan.bundle ?? '').trim() ||
+      !String(scan.field ?? '').trim() ||
+      !SOURCE_ORIGIN_FIELD_KINDS.has(scan.fieldKind) ||
+      typeof scan.loadBearing !== 'boolean' ||
+      !SQL_IDENTIFIER_RE.test(String(scan.table ?? '')) ||
+      !SQL_IDENTIFIER_RE.test(String(scan.column ?? '')) ||
+      totalRows === null ||
+      sourceOriginRows === null ||
+      sourceOriginRows < 0 ||
+      sourceOriginRows > totalRows ||
+      !SOURCE_ORIGIN_DISPOSITIONS.has(scan.disposition)
+    ) {
+      reasons.push(`source-origin-dependence.json storedFieldScans entry ${key} must declare entity/bundle/field, a supported fieldKind, loadBearing, a real table and column, consistent counts, and a supported disposition.`);
+      continue;
+    }
+    if (sourceOriginRows > 0 && scan.disposition !== 'external_asset_strategy_accepted') {
+      reasons.push(`source-origin-dependence.json ${key} still stores ${sourceOriginRows} source-origin URL row(s); remaining source-origin values must be localized, rewritten, redirected, or explicitly dispositioned external_asset_strategy_accepted.`);
+    }
+    if (
+      scan.loadBearing === true &&
+      totalRows > 0 &&
+      sourceOriginRows / totalRows > MAX_SOURCE_ORIGIN_URL_RATIO &&
+      !acceptedStrategyFieldKeys.has(key)
+    ) {
+      reasons.push(`source-origin-dependence.json ${key} is a load-bearing field whose stored values are more than ${Math.round(MAX_SOURCE_ORIGIN_URL_RATIO * 100)}% source-origin URLs; completion requires an external-asset strategy accepted by a named owner covering that field.`);
+    }
+    if (['file', 'media'].includes(scan.fieldKind) && totalRows === 0 && declaredCollectionBundles.has(identityKey(scan.bundle))) {
+      reasons.push(`source-origin-dependence.json ${key} is a configured-but-empty ${scan.fieldKind} field on declared collection bundle ${scan.bundle}; that is falsification evidence that the collection's assets were never migrated.`);
+    }
+  }
+
+  for (const bundle of arrayOrEmpty(fieldOutputMatrix?.bundles)) {
+    for (const field of arrayOrEmpty(bundle?.fields)) {
+      if (!/file|image|media|link|text/i.test(String(field?.fieldType ?? ''))) {
+        continue;
+      }
+      const key = fieldScanKey(bundle?.entityType, bundle?.bundle, field?.machineName);
+      if (!scannedFieldKeys.has(key)) {
+        reasons.push(`source-origin-dependence.json needs a storedFieldScans entry for ${key}; every file, media, link, and text field in field-output-matrix.json needs a source-origin scan.`);
+      }
+    }
+  }
+
+  const stubScan = report?.stubBoilerplateScan ?? {};
+  const scannedStubRoutes = new Set(arrayOrEmpty(stubScan.scannedRoutes).map(normalizeRouteKey));
+  const primaryTargetRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
+    .map((route) => normalizeRouteKey(route?.targetPath))
+    .filter(Boolean);
+  const stubPatterns = arrayOrEmpty(stubScan.boilerplatePatterns).map((pattern) => String(pattern ?? '').trim()).filter(Boolean);
+  if (
+    !STUB_SCAN_STRATEGIES.has(stubScan.scanStrategy) ||
+    stubPatterns.length === 0 ||
+    primaryTargetRoutes.some((route) => !scannedStubRoutes.has(route))
+  ) {
+    reasons.push('source-origin-dependence.json stubBoilerplateScan must declare a scan strategy, concrete boilerplate patterns, and coverage of every primary target route.');
+  }
+  let scopedGapListText = '';
+  try {
+    scopedGapListText = await readFile(join(packetDir, 'scoped-gap-list.md'), 'utf8');
+  } catch {
+    // The missing-required-file check reports an absent gap list separately.
+  }
+  for (const finding of substantiveObjects(stubScan.findings)) {
+    const route = normalizeRouteKey(finding.route);
+    if (
+      !route ||
+      finding.treatment !== 'stub_accepted' ||
+      !String(finding.acceptedBy ?? '').trim() ||
+      !String(finding.rationale ?? '').trim() ||
+      !scopedGapListText.includes(route)
+    ) {
+      reasons.push(`source-origin-dependence.json stub finding for ${route || '(missing route)'} must be a named accepted stub treatment recorded as a per-route exclusion in scoped-gap-list.md.`);
+    }
+  }
+
+  return reasons;
+}
+
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
   if (!gates) {
@@ -2185,8 +2344,16 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     parityReport,
     patternMap,
     routeMatrix,
-    sourceAudit
+    sourceAudit,
+    sourceOriginDependence
   } = records;
+  reasons.push(...await sourceOriginDependenceReasons(packetDir, {
+    fieldOutputMatrix,
+    patternMap,
+    routeMatrix,
+    sourceAudit,
+    sourceOriginDependence
+  }));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -2722,7 +2889,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     ['independent-verification.json', independentVerification?.checkedAt],
     ['blind-adversarial-review.json', blindAdversarialReview?.checkedAt],
     ['drupal-readback.json', drupalReadback?.checkedAt],
-    ['field-output-matrix.json', fieldOutputMatrix?.checkedAt]
+    ['field-output-matrix.json', fieldOutputMatrix?.checkedAt],
+    ['source-origin-dependence.json', sourceOriginDependence?.checkedAt]
   ];
   const invalidTimestampFiles = completionTimestamps.filter(([, value]) => isoTimestamp(value) === null).map(([file]) => file);
   const parsedTimestamps = completionTimestamps.map(([, value]) => isoTimestamp(value)).filter((value) => value !== null);
@@ -2766,6 +2934,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
+  const sourceOriginDependence = await readJson(join(packetDir, 'source-origin-dependence.json'), []);
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
   const independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
@@ -2797,7 +2966,8 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     parityReport,
     patternMap,
     routeMatrix,
-    sourceAudit
+    sourceAudit,
+    sourceOriginDependence
   });
 
   return {

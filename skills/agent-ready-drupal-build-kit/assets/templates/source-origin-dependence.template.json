@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "public-kit.source-origin-dependence.1",
+  "site": "",
+  "checkedAt": "",
+  "sourceBaseUrl": "",
+  "knownSourceAssetHosts": [],
+  "storedFieldScans": [
+    {
+      "entityType": "node",
+      "bundle": "",
+      "field": "",
+      "fieldKind": "file | media | link | formatted_text",
+      "loadBearing": false,
+      "table": "",
+      "column": "",
+      "totalRows": null,
+      "sourceOriginRows": null,
+      "sampleSourceOriginValues": [],
+      "disposition": "none_found | localized | rewritten | redirected | external_asset_strategy_accepted",
+      "notes": ""
+    }
+  ],
+  "externalAssetStrategies": [
+    {
+      "appliesToFields": [],
+      "appliesToRenderedRoutes": [],
+      "acceptedBy": "",
+      "rationale": "",
+      "evidence": ""
+    }
+  ],
+  "stubBoilerplateScan": {
+    "scanStrategy": "all_imported_routes | per_bundle_sample",
+    "scannedRoutes": [],
+    "boilerplatePatterns": [],
+    "findings": [
+      {
+        "route": "",
+        "matchedPattern": "",
+        "treatment": "stub_accepted | content_migrated | route_dropped",
+        "acceptedBy": "",
+        "rationale": "",
+        "scopedGapListEntry": ""
+      }
+    ]
+  },
+  "evidenceScope": "Source-origin dependence measured from stored Drupal fields at import time and re-verified mechanically against the live target at packet time."
+}

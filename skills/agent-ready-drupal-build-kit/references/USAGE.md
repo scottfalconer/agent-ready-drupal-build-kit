@@ -75,6 +75,7 @@ drupal-project/
       blind-adversarial-review.json
       drupal-readback.json
       field-output-matrix.json
+      source-origin-dependence.json
       launch-checklist.md
       evidence/
         independent-verification/
@@ -107,6 +108,7 @@ Before calling the local build successful, the agent must record:
 - live-verification.json from `node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet`, with a zero exit code, matching current DDEV target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status, plus `completeLocalRebuildClaimAllowed: true` before any complete local rebuild claim;
 - unfiltered Drupal readback for the `system.site` UUID, front page, config sync directory, all nodes including unpublished/default content, all aliases including duplicates, menus/menu links, Canvas pages when available, media counts, themes, and config status;
 - field-to-output matrix showing which editor fields affect anonymous public output and which are editor-only metadata;
+- a source-origin dependence report proving stored file, media, link, and body fields do not hotlink or link back to the source origin, with any remaining dependence covered by a named-owner external-asset strategy and any stub-treated route named as an accepted exclusion;
 - a usable non-admin editor workflow for every custom public bundle and every bundle that owns repeating public content, plus falsification checks for every load-bearing field and every field claimed to affect anonymous output;
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
 - composition evidence showing the target's actual route owner matches the declared owner, or a target-bound accepted deviation names the fallback, rationale, accepter, and evidence;

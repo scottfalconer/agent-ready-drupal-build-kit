@@ -56,6 +56,8 @@ Visual and content parity are part of the default build goal.
 
 Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a named, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a named owner accepts a specific evidence-backed count exclusion.
 
+A route that resolves is not content that migrated. A target page whose primary call to action points back at the source origin, whose files or media hotlink the source origin, or whose body is stub/archive boilerplate fails content parity unless `source-origin-dependence.json` records an accepted external-asset strategy or a named per-route stub exclusion in `scoped-gap-list.md`.
+
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
 
 ## Minimum Parity Report Shape

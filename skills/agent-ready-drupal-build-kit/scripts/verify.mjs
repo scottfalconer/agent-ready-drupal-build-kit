@@ -26,6 +26,8 @@ const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const ASSET_HOST_RE = /^[a-z0-9][a-z0-9.-]*$/i;
+const SQL_IDENTIFIER_RE = /^[a-z0-9_]+$/i;
 
 class UsageError extends Error {}
 
@@ -591,6 +593,101 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
   return { source, url: parseHttpUrl(value, 'Live target URL') };
 }
 
+function sourceOriginDependenceContext(declaredSourceBaseUrl, report) {
+  const hosts = new Set();
+  try {
+    hosts.add(new URL(declaredSourceBaseUrl).hostname.toLowerCase());
+  } catch {
+    // A missing or invalid sourceBaseUrl is reported as its own live error.
+  }
+  for (const host of Array.isArray(report?.knownSourceAssetHosts) ? report.knownSourceAssetHosts : []) {
+    const text = String(host ?? '').trim().toLowerCase();
+    if (ASSET_HOST_RE.test(text)) {
+      hosts.add(text);
+    }
+  }
+  const strategies = Array.isArray(report?.externalAssetStrategies) ? report.externalAssetStrategies : [];
+  const acceptedRenderedRoutes = new Set(
+    strategies
+      .filter((strategy) => String(strategy?.acceptedBy ?? '').trim() && String(strategy?.rationale ?? '').trim())
+      .flatMap((strategy) => (Array.isArray(strategy?.appliesToRenderedRoutes) ? strategy.appliesToRenderedRoutes : []))
+      .map(normalizePath)
+      .filter(Boolean)
+  );
+  const stubScan = report?.stubBoilerplateScan ?? {};
+  const stubPatterns = (Array.isArray(stubScan?.boilerplatePatterns) ? stubScan.boilerplatePatterns : [])
+    .map((pattern) => normalizeText(pattern).toLowerCase())
+    .filter(Boolean);
+  const acceptedStubRoutes = new Set(
+    (Array.isArray(stubScan?.findings) ? stubScan.findings : [])
+      .filter((finding) => finding?.treatment === 'stub_accepted' && String(finding?.acceptedBy ?? '').trim())
+      .map((finding) => normalizePath(finding?.route))
+      .filter(Boolean)
+  );
+  return { acceptedRenderedRoutes, acceptedStubRoutes, hosts, stubPatterns };
+}
+
+function sourceOriginReferences(html, baseUrl, hosts) {
+  if (hosts.size === 0) {
+    return [];
+  }
+  const references = [];
+  for (const match of html.matchAll(/(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const value = decodeEntities(match[1] ?? match[2] ?? '').trim();
+    if (!value) {
+      continue;
+    }
+    try {
+      const url = new URL(value, baseUrl);
+      if (['http:', 'https:'].includes(url.protocol) && hosts.has(url.hostname.toLowerCase())) {
+        references.push(url.href);
+      }
+    } catch {
+      // Unresolvable attribute values cannot reference the source origin.
+    }
+  }
+  return references;
+}
+
+function reverifyStoredFieldScans(cwd, environment, scans, hosts) {
+  const projectRoot = findDrupalDdevRoot(cwd);
+  const checks = [];
+  for (const scan of scans) {
+    const table = String(scan?.table ?? '').trim();
+    const column = String(scan?.column ?? '').trim();
+    const check = {
+      column,
+      declaredSourceOriginRows: Number(scan?.sourceOriginRows),
+      declaredTotalRows: Number(scan?.totalRows),
+      table,
+      verified: false
+    };
+    checks.push(check);
+    if (
+      !projectRoot ||
+      hosts.length === 0 ||
+      !SQL_IDENTIFIER_RE.test(table) ||
+      !SQL_IDENTIFIER_RE.test(column) ||
+      !hosts.every((host) => ASSET_HOST_RE.test(host))
+    ) {
+      continue;
+    }
+    const total = runDrushResult(projectRoot, environment, ['sqlq', `SELECT COUNT(*) FROM ${table}`]);
+    const condition = hosts.map((host) => `${column} LIKE '%${host}%'`).join(' OR ');
+    const matched = runDrushResult(projectRoot, environment, ['sqlq', `SELECT COUNT(*) FROM ${table} WHERE ${condition}`]);
+    const totalCount = total.ok && total.output.trim() !== '' ? Number(total.output.trim()) : NaN;
+    const matchedCount = matched.ok && matched.output.trim() !== '' ? Number(matched.output.trim()) : NaN;
+    check.actualTotalRows = Number.isFinite(totalCount) ? totalCount : null;
+    check.actualSourceOriginRows = Number.isFinite(matchedCount) ? matchedCount : null;
+    check.verified =
+      Number.isFinite(totalCount) &&
+      Number.isFinite(matchedCount) &&
+      totalCount === check.declaredTotalRows &&
+      matchedCount === check.declaredSourceOriginRows;
+  }
+  return checks;
+}
+
 function matchingRouteRecord(routeMatrix, targetPath) {
   return (Array.isArray(routeMatrix.routes) ? routeMatrix.routes : []).find(
     (route) => normalizePath(route?.targetPath) === targetPath
@@ -719,6 +816,7 @@ function completionEvidenceTargetErrors({
   parityReport,
   patternMap,
   sourceAudit,
+  sourceOriginDependence,
   sourceUrl,
   targetUrl
 }) {
@@ -727,6 +825,8 @@ function completionEvidenceTargetErrors({
   const sourceOrigin = sourceUrl.origin;
   requiredOriginMatch(errors, 'source-audit.json site.baseUrl', sourceAudit?.site?.baseUrl, sourceOrigin);
   requiredOriginMatch(errors, 'pattern-map.json sourceSite', patternMap?.sourceSite, sourceOrigin);
+  requiredOriginMatch(errors, 'source-origin-dependence.json sourceBaseUrl', sourceOriginDependence?.sourceBaseUrl, sourceOrigin);
+  requiredOriginMatch(errors, 'source-origin-dependence.json site', sourceOriginDependence?.site, targetOrigin);
   requiredOriginMatch(errors, 'field-output-matrix.json site', fieldOutputMatrix?.site, targetOrigin);
   requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
@@ -824,7 +924,7 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected) {
+async function verifyRoute(baseUrl, expected, sourceDependence = null) {
   const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
   if (!expected.accepted) {
@@ -929,6 +1029,17 @@ async function verifyRoute(baseUrl, expected) {
         }
       }
     }
+    if (sourceDependence && expected.routeKind === 'primary') {
+      const renderedSourceReferences = sourceOriginReferences(response.body, response.finalUrl, sourceDependence.hosts);
+      if (renderedSourceReferences.length > 0 && !sourceDependence.acceptedRenderedRoutes.has(expected.targetPath)) {
+        errors.push(`${expected.targetPath} renders ${renderedSourceReferences.length} link or asset reference(s) to the declared source origin (first: ${renderedSourceReferences[0]}); localize the asset or record a named accepted external-asset strategy for this route.`);
+      }
+      const renderedText = normalizeText(decodeEntities(response.body.replace(/<[^>]+>/g, ' '))).toLowerCase();
+      const matchedStubPattern = sourceDependence.stubPatterns.find((pattern) => renderedText.includes(pattern));
+      if (matchedStubPattern && !sourceDependence.acceptedStubRoutes.has(expected.targetPath)) {
+        errors.push(`${expected.targetPath} rendered text matches stub/archive boilerplate ${JSON.stringify(matchedStubPattern)} without a named per-route accepted stub exclusion.`);
+      }
+    }
     return {
       ...expected,
       actualH1,
@@ -977,6 +1088,7 @@ export async function verifyLive({
   let parityReport = null;
   let patternMap = null;
   let sourceAudit = null;
+  let sourceOriginDependence = null;
   try {
     independentVerification = JSON.parse(
       await readFile(join(absolutePacketDir, 'independent-verification.json'), 'utf8')
@@ -1001,6 +1113,9 @@ export async function verifyLive({
     );
     sourceAudit = JSON.parse(
       await readFile(join(absolutePacketDir, 'source-audit.json'), 'utf8')
+    );
+    sourceOriginDependence = JSON.parse(
+      await readFile(join(absolutePacketDir, 'source-origin-dependence.json'), 'utf8')
     );
   } catch {
     // Packet validation already records malformed or missing required JSON.
@@ -1073,10 +1188,12 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
+  const sourceDependence = sourceOriginDependenceContext(declaredSource, sourceOriginDependence);
   const routeChecks = target && explicitTargetFetchAllowed
     ? await Promise.all(primaryRoutes.map((route) => verifyRoute(
         target.url,
-        expectedRoute(routeMatrix, route, browserEvidence)
+        expectedRoute(routeMatrix, route, browserEvidence),
+        sourceDependence
       )))
     : [];
   for (const route of routeChecks) {
@@ -1109,6 +1226,7 @@ export async function verifyLive({
           parityReport,
           patternMap,
           sourceAudit,
+          sourceOriginDependence,
           sourceUrl,
           targetUrl: target.url
         })
@@ -1168,11 +1286,23 @@ export async function verifyLive({
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
     drupalRuntimeTrackedConfigReadbackMatches;
+  const storedFieldScans = (Array.isArray(sourceOriginDependence?.storedFieldScans)
+    ? sourceOriginDependence.storedFieldScans
+    : []).filter((scan) => scan && typeof scan === 'object');
+  const storedFieldScanChecks = runtimeWasInjected
+    ? []
+    : reverifyStoredFieldScans(cwd, environment, storedFieldScans, [...sourceDependence.hosts]);
+  const storedFieldScansReverified =
+    storedFieldScans.length === 0 ||
+    (!runtimeWasInjected &&
+      storedFieldScanChecks.length === storedFieldScans.length &&
+      storedFieldScanChecks.every((check) => check.verified));
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
     packetSupportsCompletion &&
-    drupalRuntimeSupportsCompletion;
+    drupalRuntimeSupportsCompletion &&
+    storedFieldScansReverified;
   const completionBlockedReasons = [];
   if (!packetReport.valid) {
     completionBlockedReasons.push('Packet validation failed.');
@@ -1212,6 +1342,9 @@ export async function verifyLive({
   }
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
+  }
+  if (!storedFieldScansReverified) {
+    completionBlockedReasons.push('source-origin-dependence.json stored-field scan counts were not re-verified against the live Drupal database.');
   }
 
   const targetFingerprintInput = JSON.stringify({
@@ -1256,6 +1389,11 @@ export async function verifyLive({
     routeChecks,
     targetRequiredRouteChecks,
     liveTargetValid,
+    sourceOriginDependence: {
+      declaredSourceHosts: [...sourceDependence.hosts],
+      storedFieldScanChecks,
+      storedFieldScansReverified
+    },
     drupalRuntime: {
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
