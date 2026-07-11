@@ -479,10 +479,24 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   return '';
 }
 
+function gitCommitTouchesDirectory(projectRoot, directory) {
+  try {
+    const output = execFileSync('git', ['log', '-1', '--format=%H', '--', directory], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000
+    });
+    return output.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
-    return { confirmed: false, directory: '', yamlFiles: [] };
+    return { committed: false, confirmed: false, directory: '', yamlFiles: [] };
   }
   const directory = relative(projectRoot, hostPath).split(sep).join('/');
   try {
@@ -496,9 +510,10 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    return { confirmed: yamlFiles.length > 0, directory, yamlFiles };
+    const committed = yamlFiles.length > 0 && gitCommitTouchesDirectory(projectRoot, directory);
+    return { committed, confirmed: yamlFiles.length > 0 && committed, directory, yamlFiles };
   } catch {
-    return { confirmed: false, directory, yamlFiles: [] };
+    return { committed: false, confirmed: false, directory, yamlFiles: [] };
   }
 }
 
@@ -526,6 +541,7 @@ function inspectDrupalRuntime(cwd, environment) {
       baseUrl: '',
       confirmed: false,
       configStatusClean: false,
+      configSyncCommitted: false,
       configSyncTracked: false,
       configSyncDirectory: '',
       frontPage: '',
@@ -555,6 +571,7 @@ function inspectDrupalRuntime(cwd, environment) {
     baseUrl,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
+    configSyncCommitted: trackedConfig.committed,
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
     drupalRoot,
@@ -1153,6 +1170,9 @@ export async function verifyLive({
   const drupalRuntimeConfigSyncTracked =
     inspectedDrupalRuntime.configSyncTracked === true &&
     runtimeTrackedConfigYamlFiles.length > 0;
+  const drupalRuntimeConfigSyncStagedOnly =
+    inspectedDrupalRuntime.configSyncCommitted === false &&
+    runtimeTrackedConfigYamlFiles.length > 0;
   const drupalRuntimeTrackedConfigReadbackMatches =
     Boolean(packetTrackedConfigDirectory) &&
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
@@ -1205,7 +1225,11 @@ export async function verifyLive({
     completionBlockedReasons.push('Current DDEV config status is not clean or could not be verified.');
   }
   if (!drupalRuntimeConfigSyncTracked) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
+    completionBlockedReasons.push(
+      drupalRuntimeConfigSyncStagedOnly
+        ? 'Current DDEV config-sync YAML is staged but never committed; the repository has no commit touching the active config sync directory.'
+        : 'Current DDEV config-sync directory does not contain real Git-tracked YAML files.'
+    );
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
@@ -1260,6 +1284,7 @@ export async function verifyLive({
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
       configStatusClean: drupalRuntimeConfigStatusClean,
+      configSyncCommitted: inspectedDrupalRuntime.configSyncCommitted === true,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,

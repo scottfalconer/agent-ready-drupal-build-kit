@@ -262,6 +262,7 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     baseUrl,
     confirmed: true,
     configStatusClean: true,
+    configSyncCommitted: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
     frontPage: '/',
@@ -1336,7 +1337,7 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
   );
 });
 
-test('CLI discovers the DDEV Drupal runtime and requires clean status plus real Git-tracked config YAML', async () => {
+test('CLI discovers the DDEV Drupal runtime and requires clean status plus committed Git-tracked config YAML', async () => {
   let liveBaseUrl = '';
   await withHttpServer(
     (_request, response) => {
@@ -1412,6 +1413,30 @@ process.stdout.write(outputs.get(command) + '\\n');
       execFileSync('git', ['init', '-q'], { cwd: targetRoot });
       execFileSync('git', ['add', 'config/sync/system.site.yml', 'config/sync/system.theme.yml'], { cwd: targetRoot });
 
+      const stagedOnlyResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
+      assert.equal(stagedOnlyResult.status, 2, stagedOnlyResult.stderr);
+      const stagedOnlyReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(stagedOnlyReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(stagedOnlyReport.drupalRuntime.configSyncCommitted, false);
+      assert.equal(stagedOnlyReport.drupalRuntime.configSyncTracked, false);
+      assert.match(
+        stagedOnlyReport.completionBlockedReasons.join('\n'),
+        /staged but never committed.*no commit touching the active config sync directory/i
+      );
+
+      execFileSync(
+        'git',
+        [
+          '-c', 'user.name=Fixture Committer',
+          '-c', 'user.email=fixture@example.gov',
+          '-c', 'commit.gpgsign=false',
+          'commit', '-q', '--no-verify', '-m', 'Export site config'
+        ],
+        { cwd: targetRoot }
+      );
+
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(cleanResult.status, 0, cleanResult.stderr);
       assert.match(cleanResult.stdout, /complete local rebuild claim authorized/);
@@ -1420,6 +1445,7 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.mode, 'ddev-host');
       assert.equal(cleanReport.drupalRuntime.siteUuidMatchesPacket, true);
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
+      assert.equal(cleanReport.drupalRuntime.configSyncCommitted, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);

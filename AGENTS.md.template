@@ -313,7 +313,7 @@ Each loop must:
 2. Verify the slice with the strongest available evidence: command success, Drupal readback, anonymous public route checks, browser-rendered public checks, and authenticated editor form checks where relevant.
 3. Self-review against the review bar: Drupal CMS primitives, content/media completeness, visual design, public behavior, editor experience, durable intent, and scoped gaps.
 4. Fix the highest-impact gaps before moving to lower-value polish.
-5. Update `review-packet/` with new evidence, decisions, and blockers.
+5. Update `review-packet/` with new evidence, decisions, and blockers. Commit each coherent slice — code plus exported config — with a descriptive message; the verifier rejects exported config that has never been committed.
 6. Before final handoff, run the independent verification pass. Fix agent-resolvable failures; record genuine external blockers and leave completion blocked.
 7. Run the blind adversarial review pass. Fix agent-resolvable failures; an external blocker does not count as route coverage and leaves completion blocked.
 8. Run the installed skill's default live verifier. Fix failures or hand back a blocked result. Packet-only lint is diagnostic and cannot close the rebuild.
