@@ -20,6 +20,7 @@
     "parity-report.json",
     "route-matrix.json",
     "browser-evidence.json",
+    "next-cycle-verification.json",
     "independent-verification.json",
     "blind-adversarial-review.json",
     "drupal-readback.json",
@@ -366,6 +367,14 @@
       "title": "Authenticated non-admin editor browser tasks verified",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-EDITOR-02",
+      "title": "Next-cycle non-admin editorial workflow verified or proven not applicable",
+      "phase": 6,
+      "evidenceFile": "next-cycle-verification.json",
       "checkedBy": "verifier",
       "blocking": "handoff"
     },
