@@ -195,7 +195,7 @@ test('cookbook stays executable, Drush 13 compatible, and referenced from skill 
     /local_tasks_block/,
     /title_prefix/,
     /CacheableResponse/,
-    /url\.path/,
+    /\['#cache'\]\['contexts'\]\[\]\s*=\s*'route'/,
     /results_lifespan/,
     /node_preview/,
     /metatag_views/,
@@ -207,6 +207,11 @@ test('cookbook stays executable, Drush 13 compatible, and referenced from skill 
   assert.doesNotMatch(cookbook, /drush (?:role-create|role-add-perm|user-create|user-add-role|pm-enable)\b/);
   assert.doesNotMatch(cookbook, /role:perm:add[^\n]*full_html/);
   assert.doesNotMatch(cookbook, /'format' => 'full_html'/);
+  assert.doesNotMatch(cookbook, /user_load_by_name\s*\(/);
+  assert.doesNotMatch(cookbook, /ddev composer require[^\n]*(?:\s-W\b|--with-all-dependencies)/);
+  assert.doesNotMatch(cookbook, /str_starts_with\(\\Drupal::service\('path\.current'\)/);
+  assert.match(cookbook, /get the human owner's approval before running `composer require`/);
+  assert.match(cookbook, /<TARGET_COMPATIBLE_CONSTRAINT>/);
   assert.doesNotMatch(cookbook, /\/Users\/|\/home\/[a-z]/i);
 
   for (const stance of [

@@ -4,6 +4,8 @@ This cookbook turns the kit's requirements into copy-paste Drupal moves. The con
 
 Commands use Drush 13 syntax in the host-side `ddev drush` form. Inside a `ddev codex`, `ddev claude`, or `ddev opencode` session, run `drush` directly. Replace `example-city.ddev.site`, `example.gov`, the `event` bundle, the `example_theme` theme, and the `news_listing` view with the target's real names. Machine names for workflows, text formats, and bundles vary per target: discover them from the running site before granting or importing, and never assume the ids in these examples exist.
 
+Commands that change Composer dependencies are not pre-authorized by this cookbook. Discover the installed capability and compatible package constraint first, record the decision, and get the human owner's approval before running `composer require` or enabling a new module. Do not use a broad dependency-update flag as a copy-paste default.
+
 Stance-type dispositions (multilingual scope, caching/performance budget, update strategy, 404-page quality) are not cookbook material: record each as a row in `review-packet/scoped-gap-list.md`.
 
 ## Seed the Non-Admin Editor Role and User
@@ -78,7 +80,13 @@ If the source markup needs tags the filtered format strips (tables, figure/figca
 Imported entities need a named, non-anonymous author. Content created by import scripts defaults to the executing user; anonymous-owned content breaks "edit own" permissions and revision attribution. Load the seeded editor (or a dedicated import user) and set `uid` explicitly:
 
 ```php
-$author = user_load_by_name('editor');
+$users = \Drupal::entityTypeManager()
+  ->getStorage('user')
+  ->loadByProperties(['name' => 'editor']);
+$author = reset($users);
+if (!$author) {
+  throw new \RuntimeException('The editor import account does not exist.');
+}
 $node = \Drupal\node\Entity\Node::create([
   'type' => 'event',
   'title' => $sourceTitle,
@@ -104,7 +112,7 @@ $media = \Drupal\media\Entity\Media::create([
 ]);
 ```
 
-Give every custom bundle a Pathauto pattern so editor-created content gets readable routes instead of `/node/{id}`. One pattern per bundle, exported as config:
+Give every addressable public-detail bundle a Pathauto pattern (or another explicit editor-owned alias policy) so editor-created content gets readable routes instead of `/node/{id}`. Row-only, embedded, internal, and no-public-detail bundles do not need invented canonical aliases. One Pathauto pattern per addressable bundle, exported as config:
 
 ```yaml
 # config/sync/pathauto.pattern.event_content.yml
@@ -215,12 +223,13 @@ $response->getCacheableMetadata()->addCacheTags(['node_list:event']);
 return $response;
 ```
 
-Preprocess variables derived from the current path or route must bubble the matching cache context, or the first cached page wins for every path:
+Preprocess variables derived from the current route must bubble the matching cache context, or the first cached page can win for later routes. Prefer structural route, entity, menu, or taxonomy state over alias parsing:
 
 ```php
 function example_theme_preprocess_page(array &$variables): void {
-  $variables['in_news_section'] = str_starts_with(\Drupal::service('path.current')->getPath(), '/news');
-  $variables['#cache']['contexts'][] = 'url.path';
+  $route_name = \Drupal::routeMatch()->getRouteName();
+  $variables['is_news_listing'] = $route_name === 'view.news_listing.page_1';
+  $variables['#cache']['contexts'][] = 'route';
 }
 ```
 
@@ -241,24 +250,35 @@ Two APIs that read as if they do what the build needs, and do not:
 - `\Drupal::service('path.current')->getPath()` returns the internal path (`/node/42`), not the alias (`/events/summer-concert`). Logic that string-matches it against alias patterns never fires. Use `\Drupal::service('path_alias.manager')->getAliasByPath($path)` when the alias is genuinely needed — and prefer structural signals (route name, bundle, menu placement) over any path string matching.
 - On the node preview route (`entity.node.preview`), the route parameter is named `node_preview`, and `\Drupal::routeMatch()->getParameter('node')` returns nothing. Route parameters are not guaranteed to be upcast entity objects on every route; guard with `$node instanceof \Drupal\node\NodeInterface` before calling entity methods, or previews crash while saved pages work.
 
-## Route-Level SEO Text via Metatag
+## Prefer Config-Owned Route SEO
 
-Route-specific SEO copy — meta descriptions, titles, `og:image` — is Metatag configuration, never `.theme` hooks. SEO copy hardcoded in `hook_preprocess_html()` is invisible to editors, unexported, and unreviewable:
+When the project uses Metatag, prefer its exported configuration for route-specific descriptions, titles, and `og:image`. SEO copy hardcoded in `hook_preprocess_html()` is usually invisible to editors and harder to review. Other cache-correct render-metadata implementations can be valid when the target deliberately chooses and documents them.
+
+Discover whether Metatag and its Views integration are already installed before proposing a dependency change:
 
 ```bash
-ddev composer require drupal/metatag -W
+ddev composer show drupal/metatag 2>/dev/null || true
+ddev drush pm:list --type=module --format=list | grep -E '^(metatag|metatag_views)$' || true
+```
+
+If the capability is missing and the audited routes need it, record the package choice in `review-packet/open-decisions.md`, inspect compatible releases with `ddev composer show drupal/metatag --all`, and ask the human owner to approve the dependency change. Only after approval, replace the placeholder with a target-compatible constraint and run the narrow install:
+
+```bash
+ddev composer require 'drupal/metatag:<TARGET_COMPATIBLE_CONSTRAINT>'
 ddev drush en metatag metatag_views -y
 ```
+
+If Composer reports that locked transitive dependencies must change, stop and present that expanded update for approval rather than adding a broad update flag automatically.
 
 Set per-bundle defaults at `/admin/config/search/metatag` using tokens (`[node:summary]`, `[node:field_image:entity:url]`); each exports as `metatag.metatag_defaults.node__event.yml`. For Views routes (listings, search pages), `metatag_views` adds a metatag section to the view itself, so the listing's description is config too. Verify by fetching the rendered route, as the playbook's SEO section requires — enabled modules are not evidence.
 
 ## Sub-Site and Section Branding
 
-When source sections carry their own branding (a parks sub-site header, a library section logo), model the section explicitly. Never derive it in theme code by string-matching the current alias — aliases change, and `path.current` does not return them anyway.
+When source sections carry their own branding (a parks sub-site header, a library section logo), model the section explicitly. Avoid deriving it in theme code by string-matching the current alias — aliases change, and `path.current` does not return them anyway.
 
-The recipe: one menu entity per section, a branding block referencing a media entity, and exported block visibility.
+A common implementation is a section menu, a branding block referencing a media entity, and exported block visibility. A hierarchical shared menu or taxonomy-backed section model can be cleaner when it matches the source and editor workflow; choose one explicit owner instead of mandating one menu per section.
 
-1. Create a menu per section (config entity, exportable):
+1. If separate menus are the chosen model, create one config entity per section:
 
 ```yaml
 # config/sync/system.menu.parks.yml
