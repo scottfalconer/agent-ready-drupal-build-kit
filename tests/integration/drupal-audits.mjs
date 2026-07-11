@@ -3,7 +3,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { inspectCustomCode, inspectCustomRouteRuntime } from '../../bin/verify.mjs';
+import {
+  inspectCustomCode,
+  inspectCustomConfigSchema,
+  inspectCustomRouteRuntime
+} from '../../bin/verify.mjs';
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -50,18 +54,29 @@ const audit = inspectCustomRouteRuntime(
   inventory.extensions,
   bindings
 );
+const configSchemaAudit = inspectCustomConfigSchema(projectRoot, process.env, inventory.extensions);
 
 const result = {
   projectRoot,
   inventoryCompleted: inventory.completed,
   inventoryErrors: inventory.errors,
   extensionCount: inventory.extensions.length,
+  behaviorFindingCount: inventory.behaviorFindings.length,
+  behaviorFindings: inventory.behaviorFindings,
+  configSchemaAuditCompleted: configSchemaAudit.completed,
+  configSchemaViolations: configSchemaAudit.violations,
   filesystemRouteCount: inventory.routes.length,
   routeAuditCompleted: audit.completed,
   auditedRouteCount: audit.routes.length,
   routeAuditViolations: audit.violations
 };
 process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-if (!inventory.completed || !audit.completed || audit.violations.length > 0) {
+if (
+  !inventory.completed ||
+  !audit.completed ||
+  audit.violations.length > 0 ||
+  !configSchemaAudit.completed ||
+  configSchemaAudit.violations.length > 0
+) {
   process.exitCode = 1;
 }

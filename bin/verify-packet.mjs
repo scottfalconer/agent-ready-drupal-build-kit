@@ -78,6 +78,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
   'G-DRUPAL-01': 'drupalImplementationQuality',
+  'G-CODE-01': 'customCodeQuality',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -87,6 +88,16 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-EDITOR-01': 'editorWorkflow',
   'G-SEO-01': 'renderedSeo'
 });
+
+const CUSTOM_CODE_TEST_COVERAGE = new Set([
+  'anonymous_access',
+  'anonymous_output',
+  'access_control',
+  'identity_change',
+  'output_mutation',
+  'cacheability_dependencies',
+  'cache_invalidation'
+]);
 
 class UsageError extends Error {}
 
@@ -403,6 +414,17 @@ function customSolutionLadderInvalid(ladder) {
     !timestampIsFresh(decision.acceptedAt) ||
     !String(decision.evidence ?? '').trim() ||
     decision.accepted !== true;
+  const rawRequiredTestCoverage = arrayOrEmpty(ladder?.requiredTestCoverage);
+  const requiredTestCoverage = rawRequiredTestCoverage
+    .map((coverage) => String(coverage).trim())
+    .filter(Boolean);
+  const loadBearingInvalid = typeof ladder?.loadBearing !== 'boolean' ||
+    !String(ladder?.loadBearingRationale ?? '').trim() ||
+    rawRequiredTestCoverage.length !== requiredTestCoverage.length ||
+    new Set(requiredTestCoverage).size !== requiredTestCoverage.length ||
+    requiredTestCoverage.some((coverage) => !CUSTOM_CODE_TEST_COVERAGE.has(coverage)) ||
+    (ladder?.loadBearing === true && requiredTestCoverage.length === 0) ||
+    (ladder?.loadBearing === false && requiredTestCoverage.length > 0);
   return !/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/.test(String(ladder?.capabilityId ?? '')) ||
     !String(ladder?.need ?? '').trim() ||
     acceptanceCriteria.length === 0 ||
@@ -416,7 +438,8 @@ function customSolutionLadderInvalid(ladder) {
     installedInvalid ||
     recipesInvalid ||
     contribInvalid ||
-    decisionInvalid;
+    decisionInvalid ||
+    loadBearingInvalid;
 }
 
 function canvasTargetKey(entityType, bundle, viewMode) {
@@ -3269,6 +3292,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const customRouteNamesUnique = new Set(customRouteNames).size === customRouteNames.length;
   const customControllers = substantiveObjects(customInventory.controllers);
   const customTests = arrayOrEmpty(customInventory.tests).map((path) => String(path).trim()).filter(Boolean);
+  const customTestFiles = substantiveObjects(customInventory.testFiles);
+  const behaviorTests = substantiveObjects(customInventory.behaviorTests);
+  const behaviorFindings = substantiveObjects(customInventory.behaviorFindings);
   const themeExtensions = customExtensions.filter((extension) => extension?.type === 'theme');
   const themeOwnershipFindings = substantiveObjects(customInventory.themeOwnershipFindings);
   const invalidSourceNameLintExtensions = new Set();
@@ -3480,6 +3506,137 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   if (pendingThemeRemediations.length > 0) {
     reasons.push(`Custom theme ownership findings marked replace_with_drupal_owner are pending remediation and block completion until the runtime scan no longer finds them: ${pendingThemeRemediations.map((finding) => finding?.id || '(unnamed finding)').join(', ')}.`);
   }
+
+  const behaviorFindingIds = new Set();
+  let invalidBehaviorFinding = false;
+  for (const finding of behaviorFindings) {
+    const duplicate = behaviorFindingIds.has(finding?.id);
+    behaviorFindingIds.add(finding?.id);
+    const extension = customExtensions.find((candidate) => candidate?.machineName === finding?.extension);
+    const ladder = substantiveObjects(extension?.solutionLadders).find((candidate) =>
+      candidate?.capabilityId === finding?.capabilityId
+    );
+    const sourceBinding = sourceSurfaceBinding(
+      finding?.extension,
+      finding?.file,
+      finding?.capabilityId,
+      finding?.sourceSurfaceIds
+    );
+    const expectedCoverage = {
+      bare_media_file_image_render_array: [
+        'anonymous_output',
+        'access_control',
+        'cacheability_dependencies',
+        'cache_invalidation'
+      ],
+      mutable_alias_identity: ['anonymous_output', 'identity_change'],
+      mutable_media_name_identity: ['anonymous_output', 'identity_change'],
+      mutable_request_path_identity: ['anonymous_output', 'identity_change'],
+      mutable_title_identity: ['anonymous_output', 'identity_change']
+    }[finding?.kind];
+    const coverage = normalizedStringArray(finding?.requiredTestCoverage);
+    const disposition = finding?.disposition;
+    const owner = finding?.drupalOwner;
+    const ownerMatchesDisposition =
+      (disposition === 'replace_with_drupal_owner' && !['custom_exception', 'not_applicable'].includes(owner)) ||
+      (disposition === 'accepted_custom_exception' && owner === 'custom_exception') ||
+      (disposition === 'false_positive' && owner === 'not_applicable');
+    if (
+      duplicate ||
+      !/^CODE-[a-f0-9]{16}$/.test(String(finding?.id ?? '')) ||
+      !extension ||
+      !ladder ||
+      !sourceBinding.valid ||
+      !expectedCoverage ||
+      JSON.stringify(coverage) !== JSON.stringify([...expectedCoverage].sort()) ||
+      !String(finding?.file ?? '').trim() ||
+      !Number.isInteger(finding?.line) || finding.line <= 0 ||
+      !Number.isInteger(finding?.column) || finding.column <= 0 ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(finding?.matchHash ?? '')) ||
+      !['replace_with_drupal_owner', 'accepted_custom_exception', 'false_positive'].includes(disposition) ||
+      !['route', 'field', 'config', 'view_mode', 'entity_reference', 'media_view_mode', 'image_formatter', 'custom_exception', 'not_applicable'].includes(owner) ||
+      !ownerMatchesDisposition ||
+      !String(finding?.reason ?? '').trim() ||
+      !String(finding?.offRoadDisposition ?? '').trim() ||
+      !String(finding?.acceptedBy ?? '').trim() ||
+      !await nonEmptyPacketEvidence(packetDir, finding?.evidence) ||
+      finding?.reviewed !== true
+    ) {
+      invalidBehaviorFinding = true;
+    }
+  }
+  if (invalidBehaviorFinding) {
+    reasons.push('drupal-readback.json custom behavior findings must bind to exact source surfaces and be replaced by a Drupal owner, covered by a narrow tested exception, or dispositioned as an evidence-backed false positive.');
+  }
+  const pendingBehaviorRemediations = behaviorFindings.filter((finding) =>
+    finding?.disposition === 'replace_with_drupal_owner'
+  );
+  if (pendingBehaviorRemediations.length > 0) {
+    reasons.push(`Custom behavior findings marked replace_with_drupal_owner are pending remediation and block completion until the runtime scan no longer finds them: ${pendingBehaviorRemediations.map((finding) => finding?.id || '(unnamed finding)').join(', ')}.`);
+  }
+
+  const testFileKeys = new Set();
+  const invalidTestFiles = customTestFiles.some((testFile) => {
+    const key = `${testFile?.extension ?? ''}\u0000${testFile?.path ?? ''}`;
+    const duplicate = testFileKeys.has(key);
+    testFileKeys.add(key);
+    const methods = normalizedStringArray(testFile?.testMethods);
+    const detectedCoverage = normalizedStringArray(testFile?.detectedCoverage);
+    return duplicate ||
+      !customExtensions.some((extension) => extension?.machineName === testFile?.extension) ||
+      !customTests.includes(String(testFile?.path ?? '').trim()) ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(testFile?.sha256 ?? '')) ||
+      methods.length === 0 ||
+      detectedCoverage.some((coverage) => !CUSTOM_CODE_TEST_COVERAGE.has(coverage)) ||
+      testFile?.hasAssertions !== true;
+  });
+  const behaviorTestIds = new Set();
+  let invalidBehaviorTest = invalidTestFiles;
+  for (const behaviorTest of behaviorTests) {
+    const duplicate = behaviorTestIds.has(behaviorTest?.id);
+    behaviorTestIds.add(behaviorTest?.id);
+    const extension = customExtensions.find((candidate) => candidate?.machineName === behaviorTest?.extension);
+    const ladder = substantiveObjects(extension?.solutionLadders).find((candidate) =>
+      candidate?.capabilityId === behaviorTest?.capabilityId
+    );
+    const testFile = customTestFiles.find((candidate) =>
+      candidate?.extension === behaviorTest?.extension && candidate?.path === behaviorTest?.testPath
+    );
+    const sourceBinding = sourceSurfaceBinding(
+      behaviorTest?.extension,
+      behaviorTest?.sourceFile,
+      behaviorTest?.capabilityId,
+      behaviorTest?.sourceSurfaceIds
+    );
+    const rawCoverage = arrayOrEmpty(behaviorTest?.coverage);
+    const coverage = rawCoverage.map((value) => String(value).trim()).filter(Boolean);
+    const execution = behaviorTest?.execution ?? {};
+    if (
+      duplicate ||
+      !/^CODE-TEST-[a-f0-9]{16}$/.test(String(behaviorTest?.id ?? '')) ||
+      !extension ||
+      !ladder ||
+      !testFile ||
+      behaviorTest?.testSha256 !== testFile.sha256 ||
+      !sourceBinding.valid ||
+      rawCoverage.length === 0 ||
+      rawCoverage.length !== coverage.length ||
+      new Set(coverage).size !== coverage.length ||
+      coverage.some((value) => !CUSTOM_CODE_TEST_COVERAGE.has(value)) ||
+      coverage.some((value) => !normalizedStringArray(testFile?.detectedCoverage).includes(value)) ||
+      execution?.status !== 'recorded' ||
+      execution?.authority !== 'builder_record_only' ||
+      !timestampIsFresh(execution?.checkedAt) ||
+      !String(execution?.command ?? '').trim() ||
+      !await nonEmptyPacketEvidence(packetDir, execution?.evidence) ||
+      behaviorTest?.accepted !== true
+    ) {
+      invalidBehaviorTest = true;
+    }
+  }
+  if (invalidBehaviorTest) {
+    reasons.push('drupal-readback.json behaviorTests must bind a current non-tautological assertion-bearing custom test file to exact implementation surfaces, machine-detected coverage, and fresh packet-local builder-run evidence. Builder command/status records are non-authoritative; the live verifier independently executes live-derived test paths.');
+  }
   const customControllerInvalid = (controller) => {
     const extension = customExtensions.find((candidate) => candidate?.machineName === controller?.extension);
     const capabilityIds = new Set(
@@ -3571,6 +3728,74 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       route?.accepted !== true
     );
   };
+  let loadBearingCoverageInvalid = false;
+  for (const extension of customExtensions) {
+    for (const ladder of substantiveObjects(extension?.solutionLadders)) {
+      const requiredCoverage = new Set(normalizedStringArray(ladder?.requiredTestCoverage));
+      const machineRequiredCoverage = new Set();
+      const hasPublicRuntimeSurface = customSourceFiles.some((sourceFile) => {
+        if (sourceFile?.extension !== extension?.machineName) {
+          return false;
+        }
+        const ownsCapability = substantiveObjects(sourceFile?.capabilityBindings).some((binding) =>
+          binding?.capabilityId === ladder?.capabilityId
+        );
+        if (!ownsCapability) {
+          return false;
+        }
+        return sourceFile?.kind === 'twig_template' ||
+          sourceFile?.kind === 'sdc_component' ||
+          (sourceFile?.kind === 'javascript' && substantiveObjects(sourceFile?.surfaces).some((surface) =>
+            surface?.kind === 'drupal_behavior'
+          )) ||
+          sourceFile?.kind === 'procedural_php' ||
+          (sourceFile?.kind === 'php_class' && /\/src\/Plugin\//i.test(String(sourceFile?.path ?? '')));
+      });
+      if (customRoutes.some((route) =>
+        route?.extension === extension?.machineName && route?.capabilityId === ladder?.capabilityId
+      )) {
+        machineRequiredCoverage.add('anonymous_access');
+      }
+      if (hasPublicRuntimeSurface && ladder?.loadBearing === true) {
+        machineRequiredCoverage.add('anonymous_output');
+      }
+      for (const finding of behaviorFindings.filter((candidate) =>
+        candidate?.extension === extension?.machineName &&
+        candidate?.capabilityId === ladder?.capabilityId &&
+        candidate?.disposition === 'accepted_custom_exception'
+      )) {
+        for (const coverage of normalizedStringArray(finding?.requiredTestCoverage)) {
+          machineRequiredCoverage.add(coverage);
+        }
+      }
+      const capabilityTests = behaviorTests.filter((behaviorTest) =>
+        behaviorTest?.extension === extension?.machineName &&
+        behaviorTest?.capabilityId === ladder?.capabilityId &&
+        behaviorTest?.accepted === true
+      );
+      const testedCoverage = new Set(capabilityTests.flatMap((behaviorTest) =>
+        normalizedStringArray(behaviorTest?.coverage)
+      ));
+      const nonPublicException = ladder?.nonPublicException ?? {};
+      const nonPublicExceptionValid =
+        nonPublicException.accepted === true &&
+        Boolean(String(nonPublicException.acceptedBy ?? '').trim()) &&
+        Boolean(String(nonPublicException.rationale ?? '').trim()) &&
+        await nonEmptyPacketEvidence(packetDir, nonPublicException.evidence);
+      if (
+        (hasPublicRuntimeSurface && ladder?.loadBearing === false && !nonPublicExceptionValid) ||
+        (machineRequiredCoverage.size > 0 && ladder?.loadBearing !== true) ||
+        [...machineRequiredCoverage].some((coverage) => !requiredCoverage.has(coverage)) ||
+        (ladder?.loadBearing === true && [...requiredCoverage].some((coverage) => !testedCoverage.has(coverage))) ||
+        (ladder?.loadBearing === false && capabilityTests.length > 0)
+      ) {
+        loadBearingCoverageInvalid = true;
+      }
+    }
+  }
+  if (loadBearingCoverageInvalid) {
+    reasons.push('drupal-readback.json must declare route- and output-affecting custom capabilities load-bearing and cover every required anonymous, identity, access, mutation, cache-dependency, and invalidation check with current focused automated-test evidence.');
+  }
   if (
     customInventory.completed !== true ||
     typeof customInventory.applies !== 'boolean' ||
@@ -3581,6 +3806,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       customRoutes.length > 0 ||
       customControllers.length > 0 ||
       customTests.length > 0 ||
+      customTestFiles.length > 0 ||
+      behaviorTests.length > 0 ||
+      behaviorFindings.length > 0 ||
       themeOwnershipFindings.length > 0
     )) ||
     (customInventory.applies === true && (

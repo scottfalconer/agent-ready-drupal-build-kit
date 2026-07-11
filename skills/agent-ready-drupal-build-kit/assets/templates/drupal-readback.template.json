@@ -178,6 +178,15 @@
             {
               "capabilityId": "",
               "need": "",
+              "loadBearing": false,
+              "loadBearingRationale": "",
+              "requiredTestCoverage": [],
+              "nonPublicException": {
+                "accepted": false,
+                "acceptedBy": "",
+                "rationale": "",
+                "evidence": ""
+              },
               "acceptanceCriteria": [
                 {
                   "id": "",
@@ -274,7 +283,7 @@
           "phpFileCount": 0,
           "qualityChecks": [
             {
-              "kind": "coding_standards | static_analysis",
+              "kind": "php_syntax | coding_standards | static_analysis | config_schema",
               "status": "verify | exception",
               "exception": {
                 "reason": "",
@@ -332,6 +341,27 @@
           "reviewed": false
         }
       ],
+      "behaviorFindings": [
+        {
+          "id": "",
+          "extension": "",
+          "capabilityId": "",
+          "sourceSurfaceIds": [],
+          "kind": "mutable_alias_identity | mutable_request_path_identity | mutable_title_identity | mutable_media_name_identity | bare_media_file_image_render_array",
+          "file": "",
+          "line": 0,
+          "column": 0,
+          "matchHash": "",
+          "requiredTestCoverage": [],
+          "disposition": "replace_with_drupal_owner | accepted_custom_exception | false_positive",
+          "drupalOwner": "route | field | config | view_mode | entity_reference | media_view_mode | image_formatter | custom_exception | not_applicable",
+          "reason": "",
+          "offRoadDisposition": "",
+          "acceptedBy": "",
+          "evidence": "",
+          "reviewed": false
+        }
+      ],
       "routes": [
         {
           "name": "",
@@ -377,6 +407,36 @@
         }
       ],
       "tests": [],
+      "testFiles": [
+        {
+          "extension": "",
+          "path": "",
+          "sha256": "",
+          "testMethods": [],
+          "hasAssertions": false,
+          "detectedCoverage": []
+        }
+      ],
+      "behaviorTests": [
+        {
+          "id": "",
+          "extension": "",
+          "capabilityId": "",
+          "testPath": "",
+          "testSha256": "",
+          "sourceFile": "",
+          "sourceSurfaceIds": [],
+          "coverage": [],
+          "execution": {
+            "status": "recorded",
+            "authority": "builder_record_only",
+            "checkedAt": "",
+            "command": "",
+            "evidence": ""
+          },
+          "accepted": false
+        }
+      ],
       "completed": false
     },
     "blockers": []

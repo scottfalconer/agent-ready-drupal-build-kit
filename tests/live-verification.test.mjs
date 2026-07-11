@@ -11,10 +11,12 @@ import { deflateSync } from 'node:zlib';
 import {
   canvasAssetRuntimeErrors,
   ALIAS_POLICY_AUDIT_PHP,
+  CUSTOM_CONFIG_SCHEMA_AUDIT_PHP,
   CUSTOM_ROUTE_AUDIT_PHP,
   DISPLAY_PLUGIN_AUDIT_PHP,
   customExtensionFiles,
   inspectCustomCode,
+  inspectCustomFocusedTests,
   inspectCustomPhpQuality,
   inspectTrackedCanvasTemplates,
   sourceNameLint,
@@ -56,6 +58,15 @@ function acceptedSolutionLadder(
   return {
     capabilityId,
     need,
+    loadBearing: false,
+    loadBearingRationale: 'This fixture capability has no public route or machine-detected load-bearing output unless a focused test overrides this declaration.',
+    requiredTestCoverage: [],
+    nonPublicException: {
+      accepted: true,
+      acceptedBy: 'Fixture Maintainer',
+      rationale: 'The generic fixture capability is not public unless a focused test explicitly overrides it.',
+      evidence: 'evidence/independent-verification/claim-evidence.json'
+    },
     acceptanceCriteria: [{
       id: 'stable_output',
       criterion: 'Anonymous consumers receive the required stable capability output.'
@@ -370,6 +381,64 @@ function public_theme_page_attachments_alter(array &$attachments): void {
   );
 });
 
+test('custom behavior inventory detects mutable identity and bare Media/File image rendering conservatively', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'custom-behavior-inventory-'));
+  const themeRoot = join(projectRoot, 'web', 'themes', 'custom', 'profile_theme');
+  mkdirSync(join(themeRoot, 'tests', 'src', 'Functional'), { recursive: true });
+  writeFileSync(join(themeRoot, 'profile_theme.info.yml'), 'name: Profile theme\ntype: theme\n');
+  writeFileSync(join(themeRoot, 'profile_theme.theme'), `<?php
+function profile_theme_alias(array &$variables, object $node): void {
+  $alias = \\Drupal::service('path_alias.manager')->getAliasByPath('/node/' . $node->id());
+  if ($alias === '/about/someone') {
+    $variables['variant'] = 'special';
+  }
+}
+function profile_theme_title(array &$variables, object $node): void {
+  $title = $node->label();
+  switch ($title) {
+    case 'Mutable title':
+      $variables['variant'] = 'special';
+  }
+}
+function profile_theme_media(string $name): array {
+  $media_items = \\Drupal::entityTypeManager()->getStorage('media')->loadByProperties(['name' => $name]);
+  $media = reset($media_items);
+  $source = $media->getSource()->getConfiguration()['source_field'];
+  $image = $media->get($source)->first();
+  return ['#theme' => 'image', '#uri' => $image->entity->getFileUri()];
+}
+function profile_theme_safe_media(object $media): array {
+  return \\Drupal::entityTypeManager()->getViewBuilder('media')->view($media, 'default');
+}
+`);
+  writeFileSync(
+    join(themeRoot, 'tests', 'src', 'Functional', 'ProfileThemeTest.php'),
+    "<?php\nfinal class ProfileThemeTest { public function testProfileOutput(): void { $tags = ['node:1']; $this->assertSame(['node:1'], $tags); } }\n"
+  );
+
+  const inventory = inspectCustomCode(projectRoot);
+  const kinds = inventory.behaviorFindings.map((finding) => finding.kind);
+
+  assert.deepEqual([...new Set(kinds)].sort(), [
+    'bare_media_file_image_render_array',
+    'mutable_alias_identity',
+    'mutable_media_name_identity',
+    'mutable_title_identity'
+  ]);
+  assert.ok(inventory.behaviorFindings.every((finding) => /^CODE-[a-f0-9]{16}$/.test(finding.id)));
+  assert.deepEqual(inventory.behaviorFindings.find((finding) =>
+    finding.kind === 'bare_media_file_image_render_array'
+  ).requiredTestCoverage, [
+    'anonymous_output',
+    'access_control',
+    'cacheability_dependencies',
+    'cache_invalidation'
+  ]);
+  assert.equal(inventory.testFiles.length, 1);
+  assert.deepEqual(inventory.testFiles[0].testMethods, ['testProfileOutput']);
+  assert.equal(inventory.testFiles[0].hasAssertions, true);
+});
+
 test('custom extension traversal follows top-level links and fails closed on unsafe or malformed roots', () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'custom-extension-walk-'));
   const customRoot = join(projectRoot, 'web', 'modules', 'custom');
@@ -543,6 +612,12 @@ test('embedded Drupal audits cover live callback routes, real Requests, and regi
     DISPLAY_PLUGIN_AUDIT_PHP.indexOf("isset($extra_fields[$field_name])") <
       DISPLAY_PLUGIN_AUDIT_PHP.indexOf("'missing_field_definition'")
   );
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /SchemaCheckTrait/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /checkConfigSchema\(\$typed_config, \$config_name, \$data, TRUE\)/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /missing_schema/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\$candidate_names = \$shipped_names/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /custom_schema_data_contains/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /custom_plugin_scan_file_limit_exceeded/);
 });
 
 test('custom PHP quality uses verifier-owned canonical tools and reports unsupported checks', () => {
@@ -566,6 +641,7 @@ printf '%s' '{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}'
   chmodSync(phpcs, 0o755);
   chmodSync(phpstan, 0o755);
   writeFileSync(join(projectRoot, 'phpstan.neon'), 'parameters:\n  level: 1\n');
+  writeFileSync(join(projectRoot, extensionPath, 'calendar_feed.module'), '<?php\nfunction calendar_feed_help(): void {}\n');
   const extension = {
     machineName: 'calendar_feed', type: 'module', path: extensionPath, phpFileCount: 1
   };
@@ -573,11 +649,13 @@ printf '%s' '{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}'
   const [result] = inspectCustomPhpQuality(projectRoot, [extension]);
 
   assert.deepEqual(result.checks.map((check) => [check.kind, check.supported, check.status]), [
+    ['php_syntax', true, 'pass'],
     ['coding_standards', true, 'pass'],
     ['static_analysis', true, 'pass']
   ]);
-  assert.match(result.checks[0].command.join(' '), /vendor\/bin\/phpcs --standard=Drupal,DrupalPractice/);
-  assert.match(result.checks[1].command.join(' '), /vendor\/bin\/phpstan analyse --configuration=phpstan\.neon/);
+  assert.match(result.checks[0].command.join(' '), /php -l <verifier-derived-custom-php-files>/);
+  assert.match(result.checks[1].command.join(' '), /vendor\/bin\/phpcs --standard=Drupal,DrupalPractice/);
+  assert.match(result.checks[2].command.join(' '), /vendor\/bin\/phpstan analyse --configuration=phpstan\.neon/);
 
   const withoutConfig = mkdtempSync(join(tmpdir(), 'custom-php-quality-no-config-'));
   mkdirSync(join(withoutConfig, 'vendor', 'bin'), { recursive: true });
@@ -586,11 +664,49 @@ printf '%s' '{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}'
   cpSync(phpstan, join(withoutConfig, 'vendor', 'bin', 'phpstan'));
   chmodSync(join(withoutConfig, 'vendor', 'bin', 'phpcs'), 0o755);
   chmodSync(join(withoutConfig, 'vendor', 'bin', 'phpstan'), 0o755);
+  writeFileSync(join(withoutConfig, extensionPath, 'calendar_feed.module'), '<?php\nfunction calendar_feed_help(): void {}\n');
   const [unsupported] = inspectCustomPhpQuality(withoutConfig, [extension]);
   assert.deepEqual(
     unsupported.checks.map((check) => [check.kind, check.supported, check.status]),
-    [['coding_standards', true, 'pass'], ['static_analysis', false, 'unsupported']]
+    [
+      ['php_syntax', true, 'pass'],
+      ['coding_standards', true, 'pass'],
+      ['static_analysis', false, 'unsupported']
+    ]
   );
+});
+
+test('focused custom tests run through a verifier-owned command over live-derived paths', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'custom-focused-tests-'));
+  const moduleRoot = join(projectRoot, 'web', 'modules', 'custom', 'calendar_feed');
+  const testPath = join(moduleRoot, 'tests', 'src', 'Functional', 'CalendarFeedTest.php');
+  const binRoot = join(projectRoot, 'vendor', 'bin');
+  mkdirSync(dirname(testPath), { recursive: true });
+  mkdirSync(binRoot, { recursive: true });
+  writeFileSync(join(moduleRoot, 'calendar_feed.info.yml'), 'name: Calendar feed\ntype: module\n');
+  writeFileSync(testPath, `<?php
+final class CalendarFeedTest {
+  public function testAnonymousAccess(): void {
+    $this->drupalGet('/calendar');
+    $this->assertSession()->statusCodeEquals(200);
+  }
+}
+`);
+  writeFileSync(join(projectRoot, 'phpunit.xml'), '<phpunit/>\n');
+  const phpunit = join(binRoot, 'phpunit');
+  writeFileSync(phpunit, '#!/bin/sh\nprintf \'%s\' \'OK (1 test, 1 assertion)\'\n');
+  chmodSync(phpunit, 0o755);
+  const inventory = inspectCustomCode(projectRoot);
+
+  const result = inspectCustomFocusedTests(projectRoot, inventory.testFiles, {});
+
+  assert.equal(result.completed, true);
+  assert.equal(result.runs.length, 1);
+  assert.equal(result.runs[0].commandSource, 'live_custom_test_inventory');
+  assert.equal(result.runs[0].status, 'pass');
+  assert.match(result.runs[0].command.join(' '), /vendor\/bin\/phpunit --configuration=phpunit\.xml/);
+  assert.ok(result.runs[0].testFiles.every((path) => inventory.testFiles.some((testFile) => testFile.path === path)));
+  assert.deepEqual(inventory.testFiles[0].detectedCoverage.sort(), ['anonymous_access', 'anonymous_output']);
 });
 
 test('tracked config Canvas audit reads active content templates and ignores translation overrides', () => {
@@ -2592,6 +2708,153 @@ test('custom PHP extensions require coding-standards and static-analysis disposi
   );
 });
 
+test('G-CODE-01 binds accepted behavior exceptions to focused load-bearing tests', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'custom-code-behavior-evidence-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const sourceFile = acceptedSourceFile({
+    capabilityId: 'profile_theme.media_output',
+    extension: 'profile_theme',
+    hex: 'b',
+    kind: 'procedural_php',
+    path: 'web/themes/custom/profile_theme/profile_theme.theme',
+    surfaceKind: 'function',
+    surfaceName: 'profile_theme_media'
+  });
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory = {
+      applies: true,
+      reason: 'A custom Media presentation exception is under review.',
+      extensions: [acceptedExtensionIdentity({
+        machineName: 'profile_theme',
+        type: 'theme',
+        path: 'web/themes/custom/profile_theme',
+        purpose: 'Render one narrowly reviewed Media presentation.',
+        solutionLadders: [{
+          ...acceptedSolutionLadder(
+            'Render one narrowly reviewed Media presentation.',
+            'profile_theme.media_output'
+          ),
+          loadBearing: true,
+          loadBearingRationale: 'This custom renderer controls anonymous entity output.',
+          requiredTestCoverage: [
+            'anonymous_output',
+            'access_control',
+            'cacheability_dependencies',
+            'cache_invalidation'
+          ]
+        }],
+        phpFileCount: 1,
+        qualityChecks: [
+          { kind: 'coding_standards', status: 'verify' },
+          { kind: 'static_analysis', status: 'verify' }
+        ],
+        accepted: true
+      })],
+      sourceFiles: [sourceFile],
+      themeOwnershipReviewCompleted: true,
+      themeOwnershipFindings: [],
+      behaviorFindings: [{
+        id: `CODE-${'b'.repeat(16)}`,
+        extension: 'profile_theme',
+        capabilityId: 'profile_theme.media_output',
+        sourceSurfaceIds: [sourceFile.surfaces[0].id],
+        kind: 'bare_media_file_image_render_array',
+        file: sourceFile.path,
+        line: 1,
+        column: 1,
+        matchHash: `sha256:${'b'.repeat(64)}`,
+        requiredTestCoverage: [
+          'anonymous_output',
+          'access_control',
+          'cacheability_dependencies',
+          'cache_invalidation'
+        ],
+        disposition: 'accepted_custom_exception',
+        drupalOwner: 'custom_exception',
+        reason: 'The fixture exercises a narrow exception with exact tests.',
+        offRoadDisposition: 'OR-TEST accepted for this fixture.',
+        acceptedBy: 'Fixture Maintainer',
+        evidence: 'evidence/independent-verification/claim-evidence.json',
+        reviewed: true
+      }],
+      routes: [],
+      controllers: [],
+      tests: ['web/themes/custom/profile_theme/tests/src/Functional/ProfileThemeTest.php'],
+      testFiles: [{
+        extension: 'profile_theme',
+        path: 'web/themes/custom/profile_theme/tests/src/Functional/ProfileThemeTest.php',
+        sha256: `sha256:${'c'.repeat(64)}`,
+        testMethods: ['testMediaCacheability'],
+        hasAssertions: true,
+        detectedCoverage: [
+          'anonymous_output',
+          'access_control',
+          'cacheability_dependencies',
+          'cache_invalidation'
+        ]
+      }],
+      behaviorTests: [{
+        id: `CODE-TEST-${'c'.repeat(16)}`,
+        extension: 'profile_theme',
+        capabilityId: 'profile_theme.media_output',
+        testPath: 'web/themes/custom/profile_theme/tests/src/Functional/ProfileThemeTest.php',
+        testSha256: `sha256:${'c'.repeat(64)}`,
+        sourceFile: sourceFile.path,
+        sourceSurfaceIds: [sourceFile.surfaces[0].id],
+        coverage: [
+          'anonymous_output',
+          'access_control',
+          'cacheability_dependencies',
+          'cache_invalidation'
+        ],
+        execution: {
+          status: 'recorded',
+          authority: 'builder_record_only',
+          checkedAt: testCheckedAt,
+          command: 'phpunit ProfileThemeTest.php',
+          evidence: 'evidence/independent-verification/claim-evidence.json'
+        },
+        accepted: true
+      }],
+      completed: true
+    };
+  });
+
+  const accepted = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    accepted.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /custom behavior findings|behaviorTests|load-bearing/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.behaviorTests[0].coverage = ['anonymous_output'];
+  });
+  const incompleteCoverage = await validatePacket({ packetDir });
+  assert.match(
+    incompleteCoverage.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /load-bearing.*focused automated-test evidence/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.behaviorTests[0].coverage = [
+      'anonymous_output',
+      'access_control',
+      'cacheability_dependencies',
+      'cache_invalidation'
+    ];
+    readback.implementationQuality.customCodeInventory.behaviorFindings[0].disposition = 'replace_with_drupal_owner';
+    readback.implementationQuality.customCodeInventory.behaviorFindings[0].drupalOwner = 'media_view_mode';
+  });
+  const pendingReplacement = await validatePacket({ packetDir });
+  assert.match(
+    pendingReplacement.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /Custom behavior findings marked replace_with_drupal_owner are pending remediation/
+  );
+});
+
 test('source-named custom extensions require a structured packet-evidenced exception', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'source-name-exception-'));
   const packetDir = join(temp, 'review-packet');
@@ -2884,7 +3147,10 @@ test('live theme ownership findings require explicit review dispositions', async
           completed: true,
           controllers: [],
           errors: [],
-          extensions: scanned.extensions,
+          extensions: scanned.extensions.map((extension) => ({
+            ...extension,
+            qualityChecks: [{ kind: 'config_schema', supported: true, status: 'pass' }]
+          })),
           routeAuditCompleted: true,
           routeAuditViolations: [],
           routes: [],
@@ -3116,10 +3382,15 @@ test('live custom-route review handles custom access, anonymous roles, and param
             type: 'module',
             path: 'web/modules/custom/calendar_feed',
             purpose: 'Expose calendar capability routes.',
-            solutionLadders: [acceptedSolutionLadder(
-              'Expose access-controlled calendar capability routes.',
-              'calendar_feed.routes'
-            )],
+            solutionLadders: [{
+              ...acceptedSolutionLadder(
+                'Expose access-controlled calendar capability routes.',
+                'calendar_feed.routes'
+              ),
+              loadBearing: true,
+              loadBearingRationale: 'These custom routes directly determine anonymous HTTP behavior.',
+              requiredTestCoverage: ['anonymous_access']
+            }],
             phpFileCount: 1,
             qualityChecks: [
               {
@@ -3171,6 +3442,32 @@ test('live custom-route review handles custom access, anonymous roles, and param
             sourceSurfaceIds: [routeSourceFiles[2].surfaces[0].id]
           }],
           tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php'],
+          testFiles: [{
+            extension: 'calendar_feed',
+            path: 'web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php',
+            sha256: `sha256:${'a'.repeat(64)}`,
+            testMethods: ['testAnonymousRouteAccess'],
+            hasAssertions: true,
+            detectedCoverage: ['anonymous_access']
+          }],
+          behaviorTests: [{
+            id: `CODE-TEST-${'a'.repeat(16)}`,
+            extension: 'calendar_feed',
+            capabilityId: 'calendar_feed.routes',
+            testPath: 'web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php',
+            testSha256: `sha256:${'a'.repeat(64)}`,
+            sourceFile: 'web/modules/custom/calendar_feed/calendar_feed.routing.yml',
+            sourceSurfaceIds: [routingSourceFile.surfaces[0].id],
+            coverage: ['anonymous_access'],
+            execution: {
+              status: 'recorded',
+              authority: 'builder_record_only',
+              checkedAt: testCheckedAt,
+              command: 'phpunit CalendarFeedTest.php',
+              evidence: 'evidence/independent-verification/claim-evidence.json'
+            },
+            accepted: true
+          }],
           completed: true
         };
       });
@@ -3213,8 +3510,10 @@ test('live custom-route review handles custom access, anonymous roles, and param
             path: 'web/modules/custom/calendar_feed',
             phpFileCount: 1,
             qualityChecks: [
+              { kind: 'php_syntax', supported: true, status: 'pass' },
               { kind: 'coding_standards', supported: true, status: 'pass' },
-              { kind: 'static_analysis', supported: true, status: 'pass' }
+              { kind: 'static_analysis', supported: true, status: 'pass' },
+              { kind: 'config_schema', supported: true, status: 'pass' }
             ]
           })],
           routeAuditCompleted: true,
@@ -3238,7 +3537,23 @@ test('live custom-route review handles custom access, anonymous roles, and param
             representativePath: route.representativePath
           })),
           sourceFiles: routeSourceFiles.map(({ capabilityBindings, reviewed, ...sourceFile }) => sourceFile),
-          tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php']
+          tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php'],
+          testFiles: [{
+            extension: 'calendar_feed',
+            path: 'web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php',
+            sha256: `sha256:${'a'.repeat(64)}`,
+            testMethods: ['testAnonymousRouteAccess'],
+            hasAssertions: true,
+            detectedCoverage: ['anonymous_access']
+          }],
+          focusedTestRuns: [{
+            extension: 'calendar_feed',
+            testFiles: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php'],
+            supported: true,
+            status: 'pass',
+            commandSource: 'live_custom_test_inventory',
+            outputSha256: `sha256:${'d'.repeat(64)}`
+          }]
         }
       });
 
@@ -3280,7 +3595,7 @@ test('live custom-route review handles custom access, anonymous roles, and param
         readback.implementationQuality.customCodeInventory.routes[0].capabilityId = 'calendar_feed.routes';
       });
 
-      runtime.customCodeInventory.extensions[0].qualityChecks[1] = {
+      runtime.customCodeInventory.extensions[0].qualityChecks[2] = {
         kind: 'static_analysis',
         supported: false,
         status: 'unsupported',

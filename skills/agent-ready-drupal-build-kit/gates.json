@@ -178,6 +178,14 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-CODE-01",
+      "title": "Native-first custom code quality and Drupal runtime correctness verified",
+      "phase": 5,
+      "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-INTENT-01",
       "title": "Durable intent is current or treated as advisory",
       "phase": 3,
