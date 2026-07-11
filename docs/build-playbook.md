@@ -161,7 +161,7 @@ The cleaner Drupal answer is usually one content owner plus a deliberate display
 
 Every run should emit comparable Drupal readback. At minimum include:
 
-- `ddev drush status`, `ddev drush config:get system.site --field=uuid`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
+- `ddev drush status`, `ddev drush config:get system.site uuid --format=string`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
 - Drupal CMS/core versions from `ddev composer show` and `ddev drush status`, plus the Recipe runner actually available in the target;
 - the active config sync directory and the real YAML paths Git tracks in that exact directory;
 - content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
@@ -179,6 +179,33 @@ For DDEV Drupal CMS projects with a `web` docroot, set the active config sync di
 The local handoff gate independently runs Git against the actual project and proves that Drupal's current active sync directory contains real tracked YAML and that `drush config:status` reports no active-to-sync drift. Packet-authored paths are not sufficient. Also inspect representative YAML for the public theme, custom content types and fields, Views, menus, roles, and workflows expected by the rebuild.
 
 A clean install plus `drush config:import` into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. Record its commands and readbacks when actually run; do not infer it from a clean config status and do not perform a destructive reinstall of the working target merely to satisfy wording.
+
+## Continue After The Verified Baseline
+
+The first successful full verifier run creates a create-once, integrity-checked historical baseline under kit tooling for the exact Drupal state inspected. Treat the initial rebuild as done. Later code, config, content, route, or composition changes do not make the historical result false; they create a new current-state question. This is not a claim of cryptographic immutability or tamper-proof storage.
+
+Before meaningful post-baseline work, run `scripts/lifecycle.mjs status`. It reports the last inspected cached state and does not inspect DDEV. Begin a change before editing from the latest verified or evidence-recorded anchor; retain that anchor as `baseAnchorId`. Declare every affected anonymous route or use explicit `--no-public-route` for a change with no anonymous route effect. If changes already exist, `--adopt-current` explicitly classifies them and always adds conservative `unknown` impact. If an active change will not be completed, use `abandon --reason "..."` rather than deleting its history.
+
+Begin one coherent active change:
+
+- Use `repair` for missing or defective work against the original source/rebuild contract. Cite the source observation, baseline claim, route, or gate the repair satisfies.
+- Use `extension` for new requested scope. Write acceptance criteria from the new request and identify which existing surfaces could regress.
+
+Impact, not the label alone, selects evidence. A content-only edit may need editor save/readback and one affected anonymous route. A content-model change also needs config, field, ownership, and editor workflow evidence. A global theme, block, display, or PageRegion change needs site-wide header/navigation/footer/brand regression checks. Routing, access, custom-code, dependency, and integration changes add their corresponding evidence. Detected component impact can widen the required checks; an agent must not remove or narrow them.
+
+Every change still needs:
+
+- the intended DDEV/Drupal identity;
+- exact current configuration and resulting-state binding;
+- concrete acceptance criteria;
+- affected anonymous-route checks;
+- a check for detected impacts omitted from the active record.
+
+After implementation, run the default full verifier to refresh the exact current live state. Exit `2` can be expected while lifecycle evidence is pending. Copy the base fingerprint from `begin` and the result fingerprint from the fresh report into the targeted evidence. Then close the lifecycle record; `complete` performs its own fresh live inspection before it records `evidence_recorded`. The authored semantic evidence is integrity-bound to the exact state but is not independently evaluated and is not a new completion certificate. A later edit makes the result stale rather than silently reusable.
+
+Only after targeted evidence is recorded may `verify.mjs --change` re-evaluate the current packet/live state against the full original verifier gates and bind that full report. It must not synthesize passing semantic checks from authored targeted evidence. The command validates existing packet artifacts rather than recreating source, editor, independent, or blind-review work; refresh affected evidence first. Create a full checkpoint when a coherent set of evidence-recorded changes deserves renewed full-site verification. The checkpoint becomes the latest verified anchor but never overwrites the historical initial baseline.
+
+Do not require a full source crawl and blind adversarial review for every localized change. Rerun them when their claims can be affected, for a major checkpoint, or at the human's request. Likewise, this lifecycle does not mandate Git commits, Canvas, per-edit checkpoints, or production/launch gates for ordinary local work. See [site-lifecycle.md](site-lifecycle.md).
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
 

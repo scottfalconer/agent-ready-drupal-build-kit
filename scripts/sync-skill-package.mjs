@@ -65,6 +65,7 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'recommended-agent-skills.md'), destination: join(skillRoot, 'references', 'recommended-agent-skills.md') },
     { source: join(repoRoot, 'docs', 'parity-spec.md'), destination: join(skillRoot, 'references', 'parity-spec.md') },
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
+    { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
     ...gates.reviewPacketFiles.map((packetFile) => {
       const name = templateName(packetFile);
       return {
@@ -84,6 +85,15 @@ function copyPlan(assetsOnly) {
       {
         source: join(repoRoot, 'bin', 'verify-packet.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-packet.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'state-fingerprint.mjs'),
+        destination: join(skillRoot, 'scripts', 'state-fingerprint.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'lifecycle.mjs'),
+        destination: join(skillRoot, 'scripts', 'lifecycle.mjs'),
         executable: true
       }
     );

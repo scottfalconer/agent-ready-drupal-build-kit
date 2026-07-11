@@ -82,11 +82,39 @@ If `--target-url URL` is supplied, it must match the current DDEV origin. The ve
 
 Do not call the rebuild complete unless the default verifier inspected the intended live target and its final report authorizes the claim. A structurally valid but incomplete packet is useful handoff evidence, not proof that the site is done. Complete-local-rebuild status is separate from production readiness and launch approval.
 
+## Continue from the verified foundation
+
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling in `review-packet/evidence/lifecycle/`. The initial rebuild remains done when the site later changes. Do not claim cryptographic immutability or tamper-proof storage. Report later state separately as active, unclassified, `evidence_recorded`, or fully verified.
+
+The intrinsic state fingerprint covers portable tracked config/code, effective Drupal runtime facts, declared editorial entities and revisions, managed public-file bytes, and stable route semantics. The complete consumed packet-evidence manifest, verifier, target/raw-response, and digest-only machine-local bindings remain attached evidence rather than intrinsic site components.
+
+Before post-baseline work, run:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
+```
+
+`status` reports the last inspected cached state; it does not inspect DDEV. These examples use host `node`; replace it with `ddev exec node` when Node is available only inside DDEV.
+
+Classify one active change as:
+
+- `repair` when it corrects something the original rebuild should already have delivered; or
+- `extension` when it adds genuinely new scope.
+
+If cached lifecycle status is not fresh, run the default verifier before beginning. Begin before editing with `lifecycle.mjs begin --packet review-packet --id <change-id> --kind repair|extension --summary "..." --acceptance "..." --route </affected-path>`. The record stores `baseAnchorId` from the latest verified or evidence-recorded anchor. Record concrete acceptance criteria, every anonymous route expected to change, and affected content, model, composition, presentation, routing, access, code, integration, and editor surfaces. Use explicit `--no-public-route` only when the task intentionally has no anonymous route effect; omission of both route choices is rejected. If edits already exist, `--adopt-current` is explicit recovery and always adds conservative `unknown` impact. Detected component or undeclared-route impact may widen required checks; never remove or narrow those checks. Use `lifecycle.mjs abandon --packet review-packet --id <change-id> --reason "..."` if the active work will not be completed.
+
+After implementation, run the default full verifier without `--change` to refresh the exact current live-state fingerprint. Exit `2` can be expected while lifecycle evidence is pending. Every concrete affected route must be represented in the packet's primary or target-required route matrix and pass the fresh anonymous fetch; authored evidence cannot substitute for that machine check. Write a `public-kit.change-verification.1` JSON with one evidence claim for every stable acceptance-criterion ID and every generated non-machine check. Copy `baseFingerprint` from `begin` and `resultFingerprint` from `.buildState.fingerprint` in the fresh live-verification report; the state must remain unchanged while `complete` performs its second inspection. The input may include `conservative-full-regression` proactively in case derived impact widens. Then run `lifecycle.mjs complete --packet review-packet --id <change-id> --verification <path>`. `complete` derives machine checks, snapshots referenced evidence bytes, and records the targeted result as `evidence_recorded`. The authored semantic evidence is integrity-bound but is not independently evaluated, and targeted completion is not a new completion certificate. After `abandon`, run the default verifier again; revert leftover edits or classify them with `--adopt-current` before another change.
+
+Do not automatically rerun the full source crawl, blind review, and every original editor task for a localized change. Only after targeted evidence is recorded may `verify.mjs --packet review-packet --change <change-id>` re-evaluate and bind the current packet/live state against the full original verifier gates. It must not synthesize semantic passes from the authored targeted evidence, and it validates existing review artifacts rather than recreating them. Refresh any artifact whose claim can be affected. Add `--checkpoint <checkpoint-id>` to promote that exact passing full result to an optional checkpoint. A checkpoint never overwrites the historical baseline.
+
+This lifecycle does not require a Git commit, Canvas, a checkpoint after every edit, or production/launch gates for ordinary local work.
+
 ## Included runtime files
 
 Everything required at runtime is inside this skill directory:
 
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
+- `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
 - `gates.json` defines the stable gate and packet-file vocabulary.

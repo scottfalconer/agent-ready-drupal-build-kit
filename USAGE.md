@@ -77,6 +77,14 @@ drupal-project/
       field-output-matrix.json
       launch-checklist.md
       evidence/
+        lifecycle/
+          initial-baseline.json
+          current-state.json
+          changes/
+            change-id/
+              change.json
+              verification.json
+          checkpoints/
         independent-verification/
         blind-adversarial-review/
         live-verification.json
@@ -119,6 +127,24 @@ Before calling the local build successful, the agent must record:
 - an open decisions handoff that lists only human-owned decisions with current evidence, options, owner role, impact, and affected gate.
 
 The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output on primary routes, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
+
+## Continue After The Initial Pass
+
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling for that exact initial rebuild state. The initial rebuild remains done when development continues; this is an integrity-checked record, not a claim of cryptographic immutability or tamper-proof storage.
+
+Before later work, inspect the lifecycle:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
+```
+
+`status` reports the last inspected cached state; it does not inspect DDEV. Commands in this section use host `node`; replace the leading `node` with `ddev exec node` when Node is available only inside DDEV. If `currentStateFresh` is false, run the default verifier before `begin`; use `--adopt-current` when that inspection exposes existing drift. Classify the request as a `repair` when it corrects something the initial rebuild should have delivered, or an `extension` when it adds new scope. Run `lifecycle.mjs begin` before editing so the record captures `baseAnchorId` from the latest verified or evidence-recorded anchor. Repeat `--route /path` for every anonymous route expected to change, or explicitly use `--no-public-route` when the change has no anonymous route effect; an omitted route classification is rejected. Implement the change, then run the default full verifier to refresh the exact live-state fingerprint. Exit `2` can be expected while that changed state still lacks lifecycle evidence.
+
+Write a `public-kit.change-verification.1` JSON containing one `acceptanceEvidence` claim for every stable criterion ID returned by `begin`, every generated non-machine semantic check, and project-relative evidence. Copy `baseFingerprint` from the `begin` output and `resultFingerprint` from `.buildState.fingerprint` in the fresh `review-packet/evidence/live-verification.json`. Every concrete affected route must also appear in the packet's primary or target-required route matrix and pass the fresh anonymous fetch. Then run `lifecycle.mjs complete --verification <path>`. Completion performs its own fresh live inspection, derives the state/config/route checks itself, snapshots the referenced evidence bytes, and records the result as `evidence_recorded`. The authored semantic evidence is integrity-bound to that inspected state, but the kit does not independently evaluate it and this is not a new completion certificate. Detected component or undeclared-route impact can widen the required checks; an agent must not remove or narrow them. The authored input may include `conservative-full-regression` proactively for that widening case. Use `lifecycle.mjs abandon --reason "..."` instead when the active record will not be completed. After abandonment, refresh with the default verifier and either revert leftover edits or classify them with `--adopt-current` before beginning again.
+
+Only after targeted evidence is recorded may `verify.mjs --change <change-id>` re-evaluate the current packet/live state against the full original verifier gates and bind its report. This path does not synthesize passing semantic checks from the targeted evidence, and it does not itself recreate source crawls, editor runs, or independent/blind reviews. Refresh affected evidence first. Add `--checkpoint <checkpoint-id>` when that passing full result should promote the exact current state to a new checkpoint. Neither operation overwrites the historical initial baseline.
+
+Unclassified changes are not evidence-recorded or fully verified, even though the initial baseline remains passed. The kit does not require a Git commit, Canvas, launch evidence, or a full source/blind-review rerun for every post-baseline change. See the canonical [site lifecycle reference](https://github.com/scottfalconer/agent-ready-drupal-build-kit/blob/main/docs/site-lifecycle.md).
 
 ## Fallback
 

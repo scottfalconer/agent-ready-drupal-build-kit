@@ -51,6 +51,35 @@ test('each required review packet file has a matching template', () => {
   assert.deepEqual(missing, []);
 });
 
+test('post-baseline impact profiles reference one canonical check catalog and known state components', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const knownComponents = new Set([
+    'targetIdentity',
+    'configTree',
+    'runtimeCodeTree',
+    'runtimeFacts',
+    'entityInventory',
+    'routeManifest'
+  ]);
+
+  assert.ok(gates.changeChecks && typeof gates.changeChecks === 'object');
+  assert.ok(gates.changeImpactProfiles && typeof gates.changeImpactProfiles === 'object');
+  for (const [profileId, profile] of Object.entries(gates.changeImpactProfiles)) {
+    assert.ok(Array.isArray(profile.checks), `${profileId} must declare checks`);
+    assert.ok(Array.isArray(profile.components), `${profileId} must declare state components`);
+    for (const checkId of profile.checks) {
+      assert.equal(typeof gates.changeChecks[checkId], 'string', `${profileId} references unknown check ${checkId}`);
+      assert.notEqual(gates.changeChecks[checkId].trim(), '', `${checkId} must have a description`);
+    }
+    for (const component of profile.components) {
+      assert.equal(knownComponents.has(component), true, `${profileId} references unknown component ${component}`);
+    }
+  }
+  for (const requiredProfile of ['universal', 'repair', 'extension', 'unknown']) {
+    assert.ok(gates.changeImpactProfiles[requiredProfile], `${requiredProfile} impact profile is required`);
+  }
+});
+
 test('template directory contains only packet templates named by gates.json', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
   const requiredFiles = new Set(gates.reviewPacketFiles);
@@ -129,7 +158,7 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.notEqual(path, 'skills-lock.json');
     assert.doesNotMatch(path, /\.tgz$/);
   }
-  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs']) {
+  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs', 'bin/lifecycle.mjs']) {
     assert.equal(files.has(path), true, `${path} missing from npm package`);
     assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
   }

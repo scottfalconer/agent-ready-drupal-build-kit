@@ -22,8 +22,106 @@
   ],
   "generatedEvidenceFiles": [
     "evidence/live-verification.json",
-    "evidence/packet-verification.json"
+    "evidence/packet-verification.json",
+    "evidence/lifecycle/initial-baseline.json",
+    "evidence/lifecycle/current-state.json"
   ],
+  "generatedEvidenceDirectories": [
+    "evidence/lifecycle/changes",
+    "evidence/lifecycle/checkpoints"
+  ],
+  "changeChecks": {
+    "state-bound": "The kit freshly inspected the result fingerprint and bound it to the recorded base and change intent.",
+    "config-clean": "Active Drupal configuration is clean and exactly represented by tracked configuration.",
+    "baseline-route-smoke": "The baseline primary and target-required routes remain anonymously reachable without regressions.",
+    "repair-regression": "The original defect is evidenced, fixed, and protected by a focused regression check.",
+    "extension-acceptance": "Every declared extension acceptance criterion has concrete result evidence.",
+    "drupal-ownership": "New public or editorial behavior has an explicit Drupal data, composition, and editor owner.",
+    "accessibility-regression": "Affected routes have accessibility evidence without a baseline-route regression.",
+    "canvas-model": "Canvas component and configuration inventory, canonical data ownership, and non-admin save/publish behavior are evidenced.",
+    "global-chrome-regression": "Shared PageRegion, header, navigation, footer, and branding output remains correct on baseline routes.",
+    "affected-public-output": "Changed Drupal-owned content or media appears on every declared affected anonymous route.",
+    "editor-workflow": "A representative non-admin editor completed the affected Drupal-owned task.",
+    "dependency-safety": "Dependency audit, database-update status, and affected runtime smoke evidence are recorded.",
+    "integration-behavior": "Affected integration success, failure, consent, and fallback behavior is evidenced.",
+    "managed-media": "Affected media remains Drupal-managed with access, metadata, and cache behavior evidenced.",
+    "link-resolution": "Changed menu and footer links resolve to their intended public behavior.",
+    "permission-boundary": "Representative allowed and denied non-admin actions match the intended access boundary.",
+    "route-regression": "Affected aliases, redirects, canonical paths, and negative routes resolve as intended.",
+    "seo-regression": "Affected public routes render the intended canonical, description, robots, and social metadata.",
+    "route-visual-regression": "Affected routes retain the intended visual hierarchy and responsive behavior.",
+    "conservative-full-regression": "Unknown or undeclared impact receives conservative whole-site, editor-boundary, and changed-state evidence."
+  },
+  "changeImpactProfiles": {
+    "universal": {
+      "checks": ["state-bound", "config-clean", "baseline-route-smoke"],
+      "components": []
+    },
+    "repair": {
+      "checks": ["repair-regression"],
+      "components": []
+    },
+    "extension": {
+      "checks": ["extension-acceptance", "drupal-ownership"],
+      "components": []
+    },
+    "content": {
+      "checks": ["affected-public-output", "editor-workflow"],
+      "components": ["entityInventory", "routeManifest"]
+    },
+    "media": {
+      "checks": ["managed-media", "affected-public-output"],
+      "components": ["configTree", "entityInventory", "routeManifest"]
+    },
+    "canvas": {
+      "checks": ["canvas-model", "global-chrome-regression"],
+      "components": ["configTree", "runtimeCodeTree", "entityInventory", "routeManifest"]
+    },
+    "theme-global": {
+      "checks": ["global-chrome-regression"],
+      "components": ["configTree", "runtimeCodeTree", "routeManifest"]
+    },
+    "theme-route": {
+      "checks": ["route-visual-regression"],
+      "components": ["configTree", "runtimeCodeTree", "routeManifest"]
+    },
+    "routing": {
+      "checks": ["route-regression"],
+      "components": ["configTree", "runtimeCodeTree", "entityInventory", "routeManifest"]
+    },
+    "navigation": {
+      "checks": ["global-chrome-regression", "link-resolution"],
+      "components": ["configTree", "runtimeCodeTree", "entityInventory", "routeManifest"]
+    },
+    "permissions-workflow": {
+      "checks": ["permission-boundary", "editor-workflow"],
+      "components": ["configTree", "runtimeCodeTree", "entityInventory"]
+    },
+    "editor": {
+      "checks": ["editor-workflow"],
+      "components": ["configTree", "entityInventory", "routeManifest"]
+    },
+    "dependency": {
+      "checks": ["dependency-safety"],
+      "components": ["configTree", "runtimeCodeTree", "runtimeFacts"]
+    },
+    "seo": {
+      "checks": ["seo-regression"],
+      "components": ["configTree", "runtimeCodeTree", "entityInventory", "routeManifest"]
+    },
+    "accessibility": {
+      "checks": ["accessibility-regression"],
+      "components": ["configTree", "runtimeCodeTree", "routeManifest"]
+    },
+    "integration": {
+      "checks": ["integration-behavior"],
+      "components": ["configTree", "runtimeCodeTree", "routeManifest"]
+    },
+    "unknown": {
+      "checks": ["conservative-full-regression"],
+      "components": ["targetIdentity", "configTree", "runtimeCodeTree", "runtimeFacts", "entityInventory", "routeManifest"]
+    }
+  },
   "gates": [
     {
       "id": "G-OPERATOR-01",

@@ -37,6 +37,18 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `live-verification.json` from the default live-target-and-packet run.
 - `packet-verification.json` from an explicit packet-only lint run.
 
+After the first successful full verification, the kit also manages lifecycle evidence under `review-packet/evidence/lifecycle/`:
+
+- `initial-baseline.json`: create-once, integrity-checked historical evidence under kit tooling for the exact initial state that passed the complete-local-rebuild bar, including its passing report, portable Drupal state components, and complete consumed packet-evidence manifest; it is not cryptographically immutable or tamper-proof.
+- `current-state.json`: the last inspected cached comparison of Drupal state to the latest verified or evidence-recorded anchor; `status` reads this file and does not inspect DDEV.
+- `changes/<change-id>/change.json`: create-once repair or extension intent, acceptance criteria, affected surfaces, and `baseAnchorId`; status is derived from transition records.
+- `changes/<change-id>/verification.json`: integrity-bound authored evidence for an `evidence_recorded` state.
+- `changes/<change-id>/full-verification.json`: optional later authoritative full report bound to the same result state.
+- `changes/<change-id>/abandonment.json`: reasoned closure for a withdrawn or mistaken active intent.
+- `checkpoints/<checkpoint-id>.json`: optional later full-verification checkpoints.
+
+Lifecycle evidence is additive and is not required to structurally validate a packet created by an earlier kit version. A historical green report without a strong state fingerprint remains legacy evidence; it is not silently promoted into a baseline.
+
 ## Gate Acceptance Criteria
 
 `gates.json` declares whether each gate blocks local handoff or launch. These grouped criteria explain what the gate IDs mean; they do not create unnamed gates:
@@ -64,8 +76,14 @@ Independent claim evidence must be JSON with `schemaVersion: public-kit.independ
 
 The verifier also parses the key local-rebuild handoff records rather than trusting an appended sentence: operator identity and run evidence, one resolved installed-substrate and Recipe-fit decision, a dispositioned gap list, evidence-backed human decisions or an explicit none declaration, accepted off-road review, current/explicitly empty durable intent, and a named positive maintainer verdict. `launch-checklist.md` and `production-target.md` remain required boundary records but do not mechanically authorize or block the narrower complete-local-rebuild claim.
 
+Once a strongly bound initial baseline exists, that original claim remains passed. Post-baseline lifecycle evidence answers a different question: whether the latest inspected state matches a known anchor, has an active change, or has an `evidence_recorded` repair or extension. Targeted completion performs a fresh live inspection and integrity-binds authored semantic evidence, but does not independently evaluate it or issue a completion certificate. Detected component impact can widen required checks and must not be narrowed. Unclassified changes leave current-state evidence open without rewriting the historical result.
+
+Intrinsic state and environment evidence are separate. Tracked config, portable runtime code, effective active config/schema facts, declared editorial entities and revisions, managed public assets, and stable route semantics participate in the Drupal state fingerprint. Target origin/raw response evidence, verifier identity, and a digest-only machine-local environment binding are retained beside it but do not turn a local port or override change into a Drupal content change.
+
 `scripts/verify-packet.mjs` and `verify.mjs --packet-only` are structural lint only. Packet-only data and injected test runtimes cannot authorize a complete rebuild claim.
 
 The default `verify.mjs` exits zero only when it authorizes completion, exits `2` when checks are valid but required evidence is incomplete, and exits `1` when packet or live-target validation fails.
 
 It fetches only the detected DDEV origin. Any explicit `--target-url URL` must match that origin, and cross-origin redirects are rejected before the redirected URL is requested. The verdict is complete-local-rebuild evidence, not production or launch approval.
+
+For post-baseline work, use `scripts/lifecycle.mjs status|begin|complete|abandon`, targeted evidence, and an optional later full checkpoint. Begin before edits; use `--adopt-current` only for existing work, with conservative `unknown` impact. Refresh live state with the default verifier before `complete`. Only after evidence is recorded may `verify.mjs --change` re-evaluate and bind the current packet/live state against the full original verifier gates. See [site-lifecycle.md](site-lifecycle.md).

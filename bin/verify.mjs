@@ -2,15 +2,23 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validatePacket } from './verify-packet.mjs';
+import { applyVerificationLifecycle } from './lifecycle.mjs';
+import {
+  buildSiteState,
+  collectFileManifest,
+  collectRuntimeCodeManifest,
+  sha256 as stateSha256
+} from './state-fingerprint.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
 const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
 
 Verify the packet against the real target by default.
@@ -19,6 +27,8 @@ Options:
   --packet <path>      Review packet directory (default: review-packet)
   --target-url <url>   Explicit target URL (otherwise detect current DDEV target)
   --out <path>         Report path (default: review-packet/evidence/live-verification.json)
+  --change <id>        Bind a passing full run to an evidence-recorded repair or extension
+  --checkpoint <id>    Create a create-only checkpoint for the passing change
   --packet-only        Run structural packet lint only; never authorizes completion
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -30,8 +40,17 @@ const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 class UsageError extends Error {}
 
 function parseArgs(argv) {
-  const args = { packet: 'review-packet', out: '', packetOnly: false, targetUrl: '' };
+  const args = {
+    changeId: '',
+    checkpointId: '',
+    packet: 'review-packet',
+    out: '',
+    packetOnly: false,
+    targetUrl: ''
+  };
   const valueOptions = new Map([
+    ['--change', 'changeId'],
+    ['--checkpoint', 'checkpointId'],
     ['--packet', 'packet'],
     ['--out', 'out'],
     ['--target-url', 'targetUrl']
@@ -67,6 +86,12 @@ function parseArgs(argv) {
   if (args.packetOnly && args.targetUrl) {
     throw new UsageError('--target-url cannot be combined with --packet-only.');
   }
+  if (args.packetOnly && (args.changeId || args.checkpointId)) {
+    throw new UsageError('Lifecycle change/checkpoint options cannot be combined with --packet-only.');
+  }
+  if (args.checkpointId && !args.changeId) {
+    throw new UsageError('--checkpoint requires --change <id>.');
+  }
   if (!args.out) {
     const filename = args.packetOnly ? 'packet-verification.json' : 'live-verification.json';
     args.out = join(args.packet, 'evidence', filename);
@@ -89,12 +114,83 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function packetEvidenceManifest(packetDir, outPath = '') {
+  const excluded = new Set([
+    'evidence/live-verification.json',
+    'evidence/packet-verification.json'
+  ]);
+  const absoluteOut = outPath ? resolve(outPath) : '';
+  if (absoluteOut && pathIsInside(packetDir, absoluteOut)) {
+    excluded.add(relative(packetDir, absoluteOut).split(sep).join('/'));
+  }
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePortable(left.name, right.name))) {
+      const path = join(directory, entry.name);
+      const packetPath = relative(packetDir, path).split(sep).join('/');
+      const metadata = lstatSync(path);
+      if (entry.isSymbolicLink() || metadata.isSymbolicLink()) {
+        throw new Error(`Review packet evidence must not contain symbolic links: ${packetPath}`);
+      }
+      if (metadata.isDirectory()) {
+        if (packetPath === 'evidence/lifecycle' || packetPath.startsWith('evidence/lifecycle/')) {
+          continue;
+        }
+        visit(path);
+      } else if (metadata.isFile()) {
+        if (!excluded.has(packetPath)) {
+          files.push(packetPath);
+        }
+      } else {
+        throw new Error(`Review packet evidence must contain only regular files and directories: ${packetPath}`);
+      }
+    }
+  };
+  visit(packetDir);
+  return collectFileManifest(packetDir, files);
+}
+
+function assertVerificationPacketInputs(packetDir) {
+  if (!existsSync(packetDir)) {
+    throw new Error(`Review packet directory does not exist: ${packetDir}`);
+  }
+  const packetMetadata = lstatSync(packetDir);
+  if (packetMetadata.isSymbolicLink() || !packetMetadata.isDirectory()) {
+    throw new Error('Review packet input must be a real directory, not a file or symbolic link.');
+  }
+  for (const entry of readdirSync(packetDir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink() || lstatSync(join(packetDir, entry.name)).isSymbolicLink()) {
+      throw new Error(`Review packet top-level input must not be a symbolic link: ${entry.name}`);
+    }
+  }
+}
+
+function verifierFingerprint() {
+  const scriptDirectory = dirname(SCRIPT_PATH);
+  const files = [
+    SCRIPT_PATH,
+    join(scriptDirectory, 'verify-packet.mjs'),
+    join(scriptDirectory, 'state-fingerprint.mjs'),
+    join(scriptDirectory, 'lifecycle.mjs'),
+    join(KIT_ROOT, 'gates.json')
+  ]
+    .filter((path) => existsSync(path))
+    .map((path) => relative(KIT_ROOT, path));
+  return collectFileManifest(KIT_ROOT, files).fingerprint;
+}
+
 function sharedMessage(value, absolutePacketDir) {
   return String(value).replaceAll(absolutePacketDir, basename(absolutePacketDir));
 }
 
 function normalizeText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function comparePortable(left, right) {
+  const a = String(left);
+  const b = String(right);
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function decodeEntities(value) {
@@ -143,6 +239,105 @@ function tagAttributes(tag) {
 function matchingTags(html, tagName, predicate) {
   const tags = html.match(new RegExp(`<${tagName}\\b[^>]*>`, 'gi')) ?? [];
   return tags.map(tagAttributes).filter(predicate);
+}
+
+function intrinsicUrl(value, finalUrl, { asset = false } = {}) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const base = new URL(finalUrl);
+    const url = new URL(text, base);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return `${url.protocol}${url.pathname || url.href.slice(url.protocol.length)}`;
+    }
+    const params = [...url.searchParams.entries()]
+      .map(([key, parameterValue]) => {
+        const drupalToken = /^(?:_?token|csrf(?:_token)?|form_build_id|form_token|nonce)$/i.test(key);
+        const assetCacheBuster = asset && /^(?:_|cache|cb|v|ver|version)$/i.test(key);
+        return [key, drupalToken ? '{drupal-token}' : assetCacheBuster ? '{asset-cache-buster}' : parameterValue];
+      })
+      .sort(([leftKey, leftValue], [rightKey, rightValue]) => (
+        comparePortable(leftKey, rightKey) || comparePortable(leftValue, rightValue)
+      ));
+    const query = params.length
+      ? `?${params.map(([key, parameterValue]) => `${encodeURIComponent(key)}=${encodeURIComponent(parameterValue)}`).join('&')}`
+      : '';
+    const fragment = url.hash;
+    const scope = url.origin === base.origin ? 'local:' : `external:${url.protocol}//${url.host}`;
+    return `${scope}${normalizePath(url.pathname)}${query}${fragment}`;
+  } catch {
+    return normalizeText(text);
+  }
+}
+
+function intrinsicRouteSemantics(html, finalUrl) {
+  const bodyMatch = String(html).match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+  const visibleSource = (bodyMatch?.[1] ?? String(html))
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(script|style|template|noscript|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<input\b[^>]*>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  let visibleTextValue = decodeEntities(visibleSource);
+  try {
+    visibleTextValue = visibleTextValue.replaceAll(new URL(finalUrl).origin, '{target-origin}');
+  } catch {
+    // The route verifier already validates finalUrl. Keep text as-is if a
+    // caller uses this helper with a malformed synthetic value.
+  }
+  const visibleText = normalizeText(visibleTextValue);
+  const links = matchingTags(html, 'a', (attributes) => Boolean(attributes.href))
+    .map((attributes) => intrinsicUrl(attributes.href, finalUrl));
+  const media = [];
+  for (const tagName of ['img', 'source', 'video', 'audio', 'iframe']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      const asset = tagName !== 'iframe';
+      for (const attribute of ['src', 'poster']) {
+        if (attributes[attribute]) {
+          media.push(`${tagName}:${attribute}:${intrinsicUrl(attributes[attribute], finalUrl, { asset })}`);
+        }
+      }
+      if (attributes.srcset) {
+        for (const candidate of attributes.srcset.split(',')) {
+          const [url, descriptor = ''] = candidate.trim().split(/\s+/, 2);
+          if (url) {
+            media.push(`${tagName}:srcset:${intrinsicUrl(url, finalUrl, { asset })}:${descriptor}`);
+          }
+        }
+      }
+    }
+  }
+  const forms = matchingTags(html, 'form', () => true).map((attributes) => ({
+    action: intrinsicUrl(attributes.action || finalUrl, finalUrl),
+    method: String(attributes.method || 'get').toLowerCase()
+  }));
+  const controls = [];
+  for (const tagName of ['input', 'select', 'textarea', 'button']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      controls.push({
+        tag: tagName,
+        name: String(attributes.name ?? ''),
+        type: String(attributes.type ?? '').toLowerCase()
+      });
+    }
+  }
+  const semantics = {
+    visibleTextSha256: stateSha256(visibleText),
+    visibleTextLength: visibleText.length,
+    linkTargetsSha256: stateSha256(links),
+    linkCount: links.length,
+    mediaTargetsSha256: stateSha256(media),
+    mediaCount: media.length,
+    formShapeSha256: stateSha256({ forms, controls }),
+    formCount: forms.length,
+    formControlCount: controls.length
+  };
+  return {
+    schemaVersion: 'public-kit.route-semantics.1',
+    ...semantics,
+    fingerprint: stateSha256({ schemaVersion: 'public-kit.route-semantics.1', ...semantics })
+  };
 }
 
 function renderedMetadata(html, finalUrl) {
@@ -200,6 +395,21 @@ function normalizePath(value) {
     pathname = `/${pathname}`;
   }
   return pathname !== '/' ? pathname.replace(/\/+$/, '') : '/';
+}
+
+function normalizeRouteKey(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const url = /^https?:\/\//i.test(text)
+      ? new URL(text)
+      : new URL(text, 'https://route-key.invalid/');
+    return `${normalizePath(url.pathname)}${url.search}`;
+  } catch {
+    return normalizePath(text);
+  }
 }
 
 function parseHttpUrl(value, label) {
@@ -305,6 +515,7 @@ function requestOnce(url) {
 
 async function requestFollowingRedirects(startUrl) {
   let current = new URL(startUrl);
+  current.hash = '';
   const allowedOrigin = current.origin;
   const redirects = [];
   let localTlsVerificationBypassed = false;
@@ -318,6 +529,7 @@ async function requestFollowingRedirects(startUrl) {
         throw new Error(`Too many redirects (more than ${MAX_REDIRECTS}).`);
       }
       const next = new URL(location, current);
+      next.hash = '';
       if (next.origin !== allowedOrigin) {
         throw new Error(`Refusing cross-origin redirect from ${current.origin} to ${next.origin}.`);
       }
@@ -354,11 +566,12 @@ function recursiveStringForKey(value, keys) {
   return '';
 }
 
-function ddevTargetUrl(cwd) {
+function ddevTargetUrl(cwd, environment = process.env) {
   try {
     const output = execFileSync('ddev', ['describe', '-j'], {
       cwd,
       encoding: 'utf8',
+      env: environment,
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 10_000
     });
@@ -391,8 +604,45 @@ function findDrupalDdevRoot(cwd) {
   }
 }
 
-function runDrushResult(projectRoot, environment, args) {
-  const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
+function ddevConfigValue(projectRoot, key) {
+  try {
+    const config = readFileSync(join(projectRoot, '.ddev', 'config.yaml'), 'utf8');
+    const match = config.match(new RegExp(`^\\s*${key}:\\s*(?:["']([^"']*)["']|([^#\\r\\n]*?))\\s*(?:#.*)?$`, 'mi'));
+    return String(match?.[1] ?? match?.[2] ?? '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function ddevContainerContext(projectRoot, environment) {
+  if (!/^(?:1|true|yes)$/i.test(String(environment.IS_DDEV_PROJECT ?? '').trim())) {
+    return false;
+  }
+  const appRoot = String(environment.DDEV_APPROOT ?? '').trim();
+  if (!appRoot || !isAbsolute(appRoot) || !existsSync(appRoot)) {
+    return false;
+  }
+  let realAppRoot;
+  try {
+    realAppRoot = realpathSync(appRoot);
+  } catch {
+    return false;
+  }
+  if (realAppRoot !== realpathSync(projectRoot)) {
+    return false;
+  }
+  const configuredName = ddevConfigValue(projectRoot, 'name');
+  const environmentName = String(environment.DDEV_PROJECT || environment.DDEV_SITENAME || '').trim();
+  if (!configuredName || !environmentName || configuredName !== environmentName) {
+    return false;
+  }
+  const configuredDocroot = ddevConfigValue(projectRoot, 'docroot').replace(/^\.\//, '').replace(/\/+$/, '');
+  const environmentDocroot = String(environment.DDEV_DOCROOT ?? '').trim().replace(/^\.\//, '').replace(/\/+$/, '');
+  return Boolean(configuredDocroot && environmentDocroot && configuredDocroot === environmentDocroot);
+}
+
+function runDrushResult(projectRoot, environment, args, timeout = 15_000) {
+  const inContainer = ddevContainerContext(projectRoot, environment);
   const commands = inContainer
     ? [
         ['drush', args],
@@ -407,7 +657,7 @@ function runDrushResult(projectRoot, environment, args) {
           cwd: projectRoot,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 15_000
+          timeout
         }).trim()
       };
     } catch {
@@ -419,6 +669,774 @@ function runDrushResult(projectRoot, environment, args) {
 
 function runDrush(projectRoot, environment, args) {
   return runDrushResult(projectRoot, environment, args).output;
+}
+
+const DRUPAL_ENTITY_INVENTORY_SCHEMA = 'public-kit.drupal-entity-inventory.4';
+export const DRUPAL_ENTITY_INVENTORY_EVAL = String.raw`
+$manager = \Drupal::entityTypeManager();
+$definitions = $manager->getDefinitions();
+$declared_editorial_roots = isset($declared_editorial_roots) && is_array($declared_editorial_roots)
+  ? $declared_editorial_roots
+  : [];
+$declared_public_fields = isset($declared_public_fields) && is_array($declared_public_fields)
+  ? $declared_public_fields
+  : [];
+$public_route_paths = isset($public_route_paths) && is_array($public_route_paths)
+  ? $public_route_paths
+  : [];
+$normalize = function ($value) use (&$normalize) {
+  if (!is_array($value)) {
+    return $value;
+  }
+  if (!array_is_list($value)) {
+    ksort($value, SORT_STRING);
+  }
+  foreach ($value as $key => $child) {
+    $value[$key] = $normalize($child);
+  }
+  return $value;
+};
+$encode = static function ($value): string {
+  $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+  return $encoded === false ? serialize($value) : $encoded;
+};
+foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
+  $bundles = array_values(array_unique(array_map('strval', is_array($bundles) ? $bundles : [])));
+  sort($bundles, SORT_STRING);
+  $declared_editorial_roots[(string) $entity_type_id] = $bundles;
+}
+ksort($declared_editorial_roots, SORT_STRING);
+foreach ($declared_public_fields as $entity_type_id => $by_bundle) {
+  if (!is_array($by_bundle)) {
+    unset($declared_public_fields[$entity_type_id]);
+    continue;
+  }
+  foreach ($by_bundle as $bundle => $field_names) {
+    $field_names = array_values(array_unique(array_map('strval', is_array($field_names) ? $field_names : [])));
+    sort($field_names, SORT_STRING);
+    $declared_public_fields[(string) $entity_type_id][(string) $bundle] = $field_names;
+  }
+  ksort($declared_public_fields[(string) $entity_type_id], SORT_STRING);
+}
+ksort($declared_public_fields, SORT_STRING);
+$public_route_paths = array_values(array_unique(array_filter(array_map('strval', $public_route_paths), static fn ($path): bool => str_starts_with($path, '/'))));
+sort($public_route_paths, SORT_STRING);
+$infrastructure_type_policy = [
+  'menu_link_content' => 'public navigation infrastructure',
+  'path_alias' => 'public routing infrastructure',
+  'redirect' => 'public redirect infrastructure',
+];
+$excluded_type_policy = [
+  'user' => 'excluded as a broad root; only transitively referenced users are admitted through a privacy-safe display-field projection',
+  'file' => 'excluded as a broad root; only transitively referenced managed files are admitted and only public:// bytes are streamed',
+  'media' => 'excluded as a broad root; only transitively referenced media are admitted',
+  'crop' => 'excluded as a broad root; focal/crop state is admitted only for files already in the public closure',
+  'webform_submission' => 'private form submissions',
+  'contact_message' => 'private contact submissions',
+  'easy_email' => 'private generated email messages',
+  'oauth2_token' => 'volatile authentication token',
+  'oauth2_refresh_token' => 'volatile authentication token',
+  'oauth2_auth_code' => 'volatile authentication token',
+  'simple_oauth_token' => 'volatile authentication token',
+  'simple_oauth_refresh_token' => 'volatile authentication token',
+  'simple_oauth_auth_code' => 'volatile authentication token',
+  'search_api_task' => 'derived search indexing task',
+  'content_moderation_state' => 'derived revision moderation state',
+  'workspace' => 'private derived workspace state',
+  'workspace_association' => 'derived workspace association',
+  'commerce_order' => 'private customer transaction data',
+  'commerce_order_item' => 'private customer transaction data',
+  'commerce_payment' => 'private payment data',
+  'commerce_payment_method' => 'private payment credentials and customer data',
+  'commerce_log' => 'private transaction audit data',
+  'consumer' => 'private API consumer credentials and identity data',
+];
+$queue = [];
+$roles = [];
+$processed = [];
+$declared_root_keys = [];
+$enqueue = function (string $entity_type_id, $entity_id, string $role) use (&$enqueue, &$queue, &$roles, $definitions): void {
+  $entity_id = (string) $entity_id;
+  if ($entity_id === '' || !isset($definitions[$entity_type_id]) || !($definitions[$entity_type_id] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
+    return;
+  }
+  $key = $entity_type_id . ':' . $entity_id;
+  $roles[$key][$role] = TRUE;
+  if (!isset($queue[$key])) {
+    $queue[$key] = ['entityType' => $entity_type_id, 'id' => $entity_id];
+  }
+};
+$missing_declared_roots = [];
+$bundle_info = \Drupal::service('entity_type.bundle.info');
+foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
+  if (!isset($definitions[$entity_type_id]) || !($definitions[$entity_type_id] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
+    foreach ($bundles as $bundle) {
+      $missing_declared_roots[] = $entity_type_id . '.' . $bundle;
+    }
+    continue;
+  }
+  $definition = $definitions[$entity_type_id];
+  $available_bundles = $bundle_info->getBundleInfo($entity_type_id);
+  $bundle_key = $definition->getKey('bundle');
+  foreach ($bundles as $bundle) {
+    if (!isset($available_bundles[$bundle])) {
+      $missing_declared_roots[] = $entity_type_id . '.' . $bundle;
+      continue;
+    }
+    $query = $manager->getStorage($entity_type_id)->getQuery()->accessCheck(FALSE);
+    if ($bundle_key) {
+      $query->condition($bundle_key, $bundle);
+    }
+    $ids = array_map('strval', array_values($query->execute()));
+    sort($ids, SORT_STRING);
+    foreach ($ids as $id) {
+      $key = $entity_type_id . ':' . $id;
+      $declared_root_keys[$key] = TRUE;
+      $enqueue($entity_type_id, $id, 'declared-output-root');
+    }
+  }
+}
+sort($missing_declared_roots, SORT_STRING);
+$entity_backed_route_count = 0;
+$infrastructure_route_count = 0;
+foreach ($public_route_paths as $route_path) {
+  $route_entities = [];
+  try {
+    $parameters = \Drupal::service('router.no_access_checks')->match($route_path);
+    foreach ($parameters as $parameter) {
+      if ($parameter instanceof \Drupal\Core\Entity\EntityInterface) {
+        $route_entities[$parameter->getEntityTypeId() . ':' . $parameter->id()] = $parameter;
+      }
+    }
+  }
+  catch (\Throwable) {
+    // A View or other non-entity route remains covered by HTTP semantics and
+    // active configuration; it is counted as route infrastructure below.
+  }
+  if (count($route_entities) === 0 && isset($definitions['path_alias'])) {
+    try {
+      $internal_path = (string) \Drupal::service('path_alias.manager')->getPathByAlias($route_path);
+      if (preg_match('#^/([a-z][a-z0-9_]*)/([^/]+)$#', $internal_path, $match) && isset($definitions[$match[1]])) {
+        $entity = $manager->getStorage($match[1])->load($match[2]);
+        if ($entity instanceof \Drupal\Core\Entity\EntityInterface) {
+          $route_entities[$entity->getEntityTypeId() . ':' . $entity->id()] = $entity;
+        }
+      }
+    }
+    catch (\Throwable) {
+      // Continue as a non-entity route.
+    }
+  }
+  if (count($route_entities) > 0) {
+    $entity_backed_route_count++;
+    foreach ($route_entities as $entity) {
+      $enqueue($entity->getEntityTypeId(), $entity->id(), 'route-composition-root');
+    }
+  }
+  else {
+    $infrastructure_route_count++;
+  }
+}
+foreach ($infrastructure_type_policy as $entity_type_id => $description) {
+  if (!isset($definitions[$entity_type_id]) || !($definitions[$entity_type_id] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
+    continue;
+  }
+  $definition = $definitions[$entity_type_id];
+  $query = $manager->getStorage($entity_type_id)->getQuery()->accessCheck(FALSE);
+  $status_key = $definition->getKey('status');
+  if ($status_key) {
+    $query->condition($status_key, TRUE);
+  }
+  $ids = array_map('strval', array_values($query->execute()));
+  sort($ids, SORT_STRING);
+  foreach ($ids as $id) {
+    $enqueue($entity_type_id, $id, 'route-navigation-infrastructure');
+  }
+}
+$privacy_safe_user_values = function ($translation) use ($normalize): array {
+  $safe = [];
+  $base_fields = ['name', 'status', 'user_picture', 'langcode'];
+  foreach ($translation->toArray() as $field_name => $field_value) {
+    $base_allowed = in_array($field_name, $base_fields, TRUE);
+    $custom_allowed = str_starts_with($field_name, 'field_') &&
+      !preg_match('/(?:pass|password|mail|email|phone|address|token|secret|auth|login|access|init|session|ip|key|hash|salt)/i', $field_name);
+    if ($base_allowed || $custom_allowed) {
+      $safe[$field_name] = $normalize($field_value);
+    }
+  }
+  ksort($safe, SORT_STRING);
+  return $safe;
+};
+$entity_record = function ($entity, string $entity_type_id, string $kind) use ($normalize, $encode, $privacy_safe_user_values): array {
+  $languages = method_exists($entity, 'getTranslationLanguages')
+    ? array_keys($entity->getTranslationLanguages(TRUE))
+    : [(string) $entity->language()->getId()];
+  sort($languages, SORT_STRING);
+  $translations = [];
+  foreach ($languages as $langcode) {
+    $translation = method_exists($entity, 'hasTranslation') && $entity->hasTranslation($langcode)
+      ? $entity->getTranslation($langcode)
+      : $entity;
+    $values = $entity_type_id === 'user'
+      ? $privacy_safe_user_values($translation)
+      : $normalize($translation->toArray());
+    $translations[(string) $langcode] = 'sha256:' . hash('sha256', $encode($values));
+  }
+  ksort($translations, SORT_STRING);
+  $record = [
+    'kind' => $kind,
+    'id' => (string) $entity->id(),
+    'uuid' => method_exists($entity, 'uuid') ? (string) $entity->uuid() : '',
+    'bundle' => method_exists($entity, 'bundle') ? (string) $entity->bundle() : '',
+    'revisionId' => method_exists($entity, 'getRevisionId') ? (string) ($entity->getRevisionId() ?? '') : '',
+    'translations' => $translations,
+  ];
+  $missing_managed_files = 0;
+  if ($entity_type_id === 'file' && method_exists($entity, 'getFileUri')) {
+    $uri = (string) $entity->getFileUri();
+    $scheme = (string) (\Drupal\Core\StreamWrapper\StreamWrapperManager::getScheme($uri) ?? '');
+    $metadata = [
+      'scheme' => $scheme,
+      'filename' => method_exists($entity, 'getFilename') ? (string) $entity->getFilename() : '',
+      'mime' => method_exists($entity, 'getMimeType') ? (string) $entity->getMimeType() : '',
+      'declaredSize' => method_exists($entity, 'getSize') ? (int) $entity->getSize() : 0,
+      'status' => method_exists($entity, 'isPermanent') ? (bool) $entity->isPermanent() : NULL,
+    ];
+    $record['managed_file'] = [
+      'scheme' => $scheme,
+      'metadataSha256' => 'sha256:' . hash('sha256', $encode($normalize($metadata))),
+      'publicBytesHashed' => FALSE,
+    ];
+    if ($scheme === 'public') {
+      $handle = @fopen($uri, 'rb');
+      if (is_resource($handle)) {
+        $byte_context = hash_init('sha256');
+        $bytes_read = hash_update_stream($byte_context, $handle);
+        fclose($handle);
+        $record['managed_file']['publicBytesHashed'] = TRUE;
+        $record['managed_file']['streamedSize'] = $bytes_read;
+        $record['managed_file']['sha256'] = 'sha256:' . hash_final($byte_context);
+      }
+      else {
+        $record['managed_file']['sha256'] = '';
+        $missing_managed_files = 1;
+      }
+    }
+  }
+  return [
+    'encoded' => $encode($record),
+    'translationCount' => count($translations),
+    'missingManagedFileCount' => $missing_managed_files,
+  ];
+};
+$variant_digests = [];
+$type_metrics = [];
+$missing_managed_file_count = 0;
+while (count($queue) > 0) {
+  ksort($queue, SORT_STRING);
+  $first = reset($queue);
+  $batch_type = $first['entityType'];
+  $batch = [];
+  foreach ($queue as $key => $queued) {
+    if ($queued['entityType'] === $batch_type && count($batch) < 100) {
+      $batch[$key] = $queued;
+      unset($queue[$key]);
+    }
+  }
+  $ids = array_values(array_map(static fn ($queued): string => $queued['id'], $batch));
+  sort($ids, SORT_STRING);
+  $definition = $definitions[$batch_type];
+  $storage = $manager->getStorage($batch_type);
+  $entities = $storage->loadMultiple($ids);
+  $entities_by_id = [];
+  foreach ($entities as $entity) {
+    $entities_by_id[(string) $entity->id()] = $entity;
+  }
+  $latest_non_default_revisions = [];
+  if ($definition->isRevisionable() && method_exists($storage, 'loadMultipleRevisions')) {
+    $id_key = $definition->getKey('id');
+    $revision_key = $definition->getKey('revision');
+    $revision_table = $definition->getRevisionTable();
+    $revision_default_key = $definition->getRevisionMetadataKey('revision_default');
+    if ($id_key && $revision_key && $revision_table) {
+      $query = \Drupal::database()->select($revision_table, 'revision');
+      $query->fields('revision', [$id_key, $revision_key]);
+      $query->condition($id_key, $ids, 'IN');
+      if ($revision_default_key) {
+        $query->condition($revision_default_key, 0);
+      }
+      $query->orderBy($revision_key, 'DESC');
+      $revision_ids_by_entity = [];
+      foreach ($query->execute() as $row) {
+        $entity_id = (string) $row->{$id_key};
+        $revision_id = (string) $row->{$revision_key};
+        $current_revision_id = isset($entities_by_id[$entity_id]) && method_exists($entities_by_id[$entity_id], 'getRevisionId')
+          ? (string) ($entities_by_id[$entity_id]->getRevisionId() ?? '')
+          : '';
+        if (!isset($revision_ids_by_entity[$entity_id]) && $revision_id !== $current_revision_id) {
+          $revision_ids_by_entity[$entity_id] = $revision_id;
+        }
+      }
+      if (count($revision_ids_by_entity) > 0) {
+        $loaded_revisions = $storage->loadMultipleRevisions(array_values($revision_ids_by_entity));
+        foreach ($loaded_revisions as $revision) {
+          $latest_non_default_revisions[(string) $revision->id()] = $revision;
+        }
+      }
+    }
+  }
+  foreach ($ids as $entity_id) {
+    $key = $batch_type . ':' . $entity_id;
+    if (isset($processed[$key])) {
+      continue;
+    }
+    $processed[$key] = TRUE;
+    if (!isset($entities_by_id[$entity_id])) {
+      continue;
+    }
+    $entity = $entities_by_id[$entity_id];
+    $variants = [['kind' => 'current-default', 'entity' => $entity]];
+    if (isset($latest_non_default_revisions[$entity_id])) {
+      $variants[] = ['kind' => 'latest-non-default', 'entity' => $latest_non_default_revisions[$entity_id]];
+    }
+    $variant_digests[$batch_type][$entity_id] = [];
+    foreach ($variants as $variant) {
+      $record = $entity_record($variant['entity'], $batch_type, $variant['kind']);
+      $variant_digests[$batch_type][$entity_id][] = 'sha256:' . hash('sha256', $record['encoded']);
+      $type_metrics[$batch_type]['translationCount'] = ($type_metrics[$batch_type]['translationCount'] ?? 0) + $record['translationCount'];
+      if ($variant['kind'] === 'latest-non-default') {
+        $type_metrics[$batch_type]['revisionCount'] = ($type_metrics[$batch_type]['revisionCount'] ?? 0) + 1;
+        $type_metrics[$batch_type]['revisionTranslationCount'] = ($type_metrics[$batch_type]['revisionTranslationCount'] ?? 0) + $record['translationCount'];
+      }
+      $type_metrics[$batch_type]['missingManagedFileCount'] = ($type_metrics[$batch_type]['missingManagedFileCount'] ?? 0) + $record['missingManagedFileCount'];
+      $missing_managed_file_count += $record['missingManagedFileCount'];
+      $variant_entity = $variant['entity'];
+      $languages = method_exists($variant_entity, 'getTranslationLanguages')
+        ? array_keys($variant_entity->getTranslationLanguages(TRUE))
+        : [(string) $variant_entity->language()->getId()];
+      foreach ($languages as $langcode) {
+        $translation = method_exists($variant_entity, 'hasTranslation') && $variant_entity->hasTranslation($langcode)
+          ? $variant_entity->getTranslation($langcode)
+          : $variant_entity;
+        $bundle = method_exists($translation, 'bundle') ? (string) $translation->bundle() : '';
+        $declared_fields = $declared_public_fields[$batch_type][$bundle] ?? [];
+        foreach ($translation->getFieldDefinitions() as $field_name => $field_definition) {
+          $field_type = (string) $field_definition->getType();
+          if (!in_array($field_type, ['entity_reference', 'entity_reference_revisions', 'file', 'image'], TRUE) || !$translation->hasField($field_name)) {
+            continue;
+          }
+          $is_declared_root = isset($declared_root_keys[$key]);
+          $field_is_public = in_array($field_name, $declared_fields, TRUE);
+          $transitive_field = str_starts_with($field_name, 'field_') || $field_name === 'user_picture';
+          if (($is_declared_root && !$field_is_public) || (!$is_declared_root && !$transitive_field)) {
+            continue;
+          }
+          $target_type = in_array($field_type, ['file', 'image'], TRUE)
+            ? 'file'
+            : (string) ($field_definition->getSetting('target_type') ?? '');
+          if ($target_type === 'user' && !$field_is_public && $field_name !== 'user_picture') {
+            continue;
+          }
+          try {
+            foreach ($translation->get($field_name)->referencedEntities() as $referenced_entity) {
+              if ($referenced_entity instanceof \Drupal\Core\Entity\ContentEntityInterface) {
+                $enqueue($referenced_entity->getEntityTypeId(), $referenced_entity->id(), 'transitive-public-reference');
+              }
+            }
+          }
+          catch (\Throwable) {
+            // A broken reference remains represented in the source field value
+            // digest and does not broaden the closure speculatively.
+          }
+        }
+      }
+    }
+    if ($batch_type === 'file' && isset($definitions['crop'])) {
+      try {
+        $crop_ids = $manager->getStorage('crop')->getQuery()
+          ->accessCheck(FALSE)
+          ->condition('entity_type', 'file')
+          ->condition('entity_id', $entity_id)
+          ->execute();
+        foreach ($crop_ids as $crop_id) {
+          $enqueue('crop', $crop_id, 'referenced-file-presentation-state');
+        }
+      }
+      catch (\Throwable) {
+        // Sites without compatible Crop storage simply have no crop closure.
+      }
+    }
+  }
+  unset($entities, $entities_by_id, $latest_non_default_revisions);
+}
+$types = [];
+ksort($variant_digests, SORT_STRING);
+foreach ($variant_digests as $entity_type_id => $by_entity) {
+  ksort($by_entity, SORT_STRING);
+  $context = hash_init('sha256');
+  foreach ($by_entity as $entity_id => $digests) {
+    $encoded = $encode(['id' => (string) $entity_id, 'variants' => $digests]);
+    hash_update($context, pack('N', strlen($encoded)) . $encoded);
+  }
+  $metrics = $type_metrics[$entity_type_id] ?? [];
+  $types[$entity_type_id] = [
+    'count' => count($by_entity),
+    'translationCount' => (int) ($metrics['translationCount'] ?? 0),
+    'revisionCount' => (int) ($metrics['revisionCount'] ?? 0),
+    'revisionTranslationCount' => (int) ($metrics['revisionTranslationCount'] ?? 0),
+    'missingManagedFileCount' => (int) ($metrics['missingManagedFileCount'] ?? 0),
+    'fingerprint' => 'sha256:' . hash_final($context),
+  ];
+}
+ksort($types, SORT_STRING);
+$role_counts = [
+  'declaredOutputRootCount' => 0,
+  'routeCompositionRootCount' => 0,
+  'routeNavigationInfrastructureCount' => 0,
+  'transitivePublicReferenceCount' => 0,
+  'referencedFilePresentationStateCount' => 0,
+];
+foreach ($roles as $entity_roles) {
+  foreach (array_keys($entity_roles) as $role) {
+    $role_key = match ($role) {
+      'declared-output-root' => 'declaredOutputRootCount',
+      'route-composition-root' => 'routeCompositionRootCount',
+      'route-navigation-infrastructure' => 'routeNavigationInfrastructureCount',
+      'transitive-public-reference' => 'transitivePublicReferenceCount',
+      'referenced-file-presentation-state' => 'referencedFilePresentationStateCount',
+      default => '',
+    };
+    if ($role_key !== '') {
+      $role_counts[$role_key]++;
+    }
+  }
+}
+$public_author_user_digest = [
+  'count' => (int) ($types['user']['count'] ?? 0),
+  'translationCount' => (int) ($types['user']['translationCount'] ?? 0),
+  'fingerprint' => (string) ($types['user']['fingerprint'] ?? ('sha256:' . hash('sha256', ''))),
+  'includedBaseFields' => ['name', 'status', 'user_picture', 'langcode'],
+  'customFieldPolicy' => 'Referenced users only; field_* values are hashed unless the machine name signals authentication or private contact data.',
+];
+$policy = [
+  'batchSize' => 100,
+  'inclusion' => 'Public reference closure rooted in every entity from declared anonymous-output bundles (including unpublished/draft instances), entity-backed verified routes/compositions, and public route/navigation infrastructure.',
+  'declaredEditorialRoots' => $declared_editorial_roots,
+  'declaredPublicReferenceFields' => $declared_public_fields,
+  'routePathCount' => count($public_route_paths),
+  'entityBackedRouteCount' => $entity_backed_route_count,
+  'infrastructureRouteCount' => $infrastructure_route_count,
+  'infrastructureEntityTypes' => array_keys($infrastructure_type_policy),
+  'references' => 'entity_reference, entity_reference_revisions, file, and image fields are followed transitively; broad media, file, user, taxonomy, paragraph, and reusable-content tables are never swept.',
+  'revisions' => 'Current default plus only the latest non-default revision and every available translation are included for each entity in the closure.',
+  'managedFiles' => 'Only referenced files count. public:// bytes are streamed into the digest; other schemes contribute privacy-safe metadata only and are never byte-read.',
+  'cropAndFocalPresentation' => 'Crop entities are included only when they describe a referenced file, preserving focal/crop presentation state without sweeping unrelated crops.',
+  'publicAuthorUsers' => 'Only explicitly referenced users count; raw user entities are projected to privacy-safe public display fields, and base owner/revision-user fields do not broaden the closure.',
+  'rawPerItemRowsEmitted' => FALSE,
+];
+$closure_counts = ['entityCount' => count($processed), 'entityTypeCount' => count($types)] + $role_counts;
+$fingerprint_input = [
+  'closureCounts' => $closure_counts,
+  'excludedEntityTypes' => $excluded_type_policy,
+  'missingDeclaredRoots' => $missing_declared_roots,
+  'policy' => $policy,
+  'publicAuthorUserDigest' => $public_author_user_digest,
+  'types' => $types,
+];
+print json_encode([
+  'schemaVersion' => 'public-kit.drupal-entity-inventory.4',
+  'fingerprint' => 'sha256:' . hash('sha256', $encode($fingerprint_input)),
+  'entityTypeCount' => count($types),
+  'closureCounts' => $closure_counts,
+  'excludedEntityTypes' => $excluded_type_policy,
+  'missingDeclaredRoots' => $missing_declared_roots,
+  'missingManagedFileCount' => $missing_managed_file_count,
+  'policy' => $policy,
+  'publicAuthorUserDigest' => $public_author_user_digest,
+  'types' => $types,
+], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+`;
+const DRUPAL_RUNTIME_FACTS_SCHEMA = 'public-kit.drupal-runtime-facts.2';
+export const DRUPAL_RUNTIME_FACTS_EVAL = String.raw`
+$normalize = function ($value) use (&$normalize) {
+  if (is_array($value)) {
+    if (!array_is_list($value)) {
+      ksort($value, SORT_STRING);
+    }
+    foreach ($value as $key => $child) {
+      $value[$key] = $normalize($child);
+    }
+    return $value;
+  }
+  if (is_object($value)) {
+    return [
+      '__class' => get_class($value),
+      '__properties' => $normalize(get_object_vars($value)),
+    ];
+  }
+  if (is_resource($value)) {
+    return ['__resource' => get_resource_type($value)];
+  }
+  return $value;
+};
+$system_schema = \Drupal::keyValue('system.schema')->getAll();
+ksort($system_schema, SORT_STRING);
+$encoded_schema = json_encode($normalize($system_schema), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+$settings = $normalize(\Drupal\Core\Site\Settings::getAll());
+$encoded_settings = json_encode($settings, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+$hash_salt = (string) \Drupal\Core\Site\Settings::getHashSalt();
+$config_factory = \Drupal::configFactory();
+$config_names = $config_factory->listAll();
+sort($config_names, SORT_STRING);
+$active_config_context = hash_init('sha256');
+foreach ($config_names as $config_name) {
+  $config = $config_factory->get($config_name);
+  $record = [
+    'name' => (string) $config_name,
+    'raw' => $normalize($config->getRawData()),
+    'effective' => $normalize($config->get()),
+  ];
+  $encoded_record = json_encode($record, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+  $encoded_record = $encoded_record === false ? serialize($record) : $encoded_record;
+  hash_update($active_config_context, pack('N', strlen($encoded_record)) . $encoded_record);
+}
+$pending_update_count = 0;
+$database_update_status_confirmed = FALSE;
+try {
+  \Drupal::moduleHandler()->loadAllIncludes('install');
+  $update_hook_registry = \Drupal::service('update.update_hook_registry');
+  foreach (array_keys(\Drupal::moduleHandler()->getModuleList()) as $module_name) {
+    $installed_version = $update_hook_registry->getInstalledVersion($module_name);
+    foreach ($update_hook_registry->getAvailableUpdates($module_name) as $available_update) {
+      if ($available_update > $installed_version) {
+        $pending_update_count++;
+      }
+    }
+  }
+  $pending_update_count += count(\Drupal::service('update.post_update_registry')->getPendingUpdateFunctions());
+  $database_update_status_confirmed = TRUE;
+}
+catch (\Throwable) {
+  $database_update_status_confirmed = FALSE;
+}
+$config_split_directories = [];
+foreach ($config_factory->listAll('config_split.config_split.') as $config_split_name) {
+  $split = $config_factory->get($config_split_name)->getRawData();
+  foreach (['folder', 'directory'] as $directory_key) {
+    $directory = trim((string) ($split[$directory_key] ?? ''));
+    if ($directory !== '') {
+      $config_split_directories[] = $directory;
+    }
+  }
+}
+$config_split_directories = array_values(array_unique($config_split_directories));
+sort($config_split_directories, SORT_STRING);
+$facts = [
+  'coreVersion' => \Drupal::VERSION,
+  'phpVersion' => PHP_VERSION,
+  'databaseDriver' => (string) \Drupal::database()->driver(),
+  'activeConfigEntryCount' => count($config_names),
+  'effectiveActiveConfigSha256' => 'sha256:' . hash_final($active_config_context),
+  'systemSchemaEntryCount' => count($system_schema),
+  'systemSchemaSha256' => 'sha256:' . hash('sha256', $encoded_schema === false ? serialize($system_schema) : $encoded_schema),
+  'effectiveSettingsEntryCount' => count($settings),
+  'effectiveSettingsHmacSha256' => 'sha256:' . hash_hmac('sha256', $encoded_settings === false ? serialize($settings) : $encoded_settings, $hash_salt),
+  'databaseUpdateStatusConfirmed' => $database_update_status_confirmed,
+  'pendingDatabaseUpdateCount' => $pending_update_count,
+  'databaseUpdatesPending' => $pending_update_count > 0,
+  'configSplitDirectories' => $config_split_directories,
+];
+ksort($facts, SORT_STRING);
+$encoded_facts = json_encode($facts, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+print json_encode([
+  'schemaVersion' => 'public-kit.drupal-runtime-facts.2',
+  'fingerprint' => 'sha256:' . hash('sha256', $encoded_facts === false ? serialize($facts) : $encoded_facts),
+] + $facts, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+`;
+
+function inspectDrupalRuntimeFacts(projectRoot, environment) {
+  const result = runDrushResult(
+    projectRoot,
+    environment,
+    ['php:eval', DRUPAL_RUNTIME_FACTS_EVAL],
+    30_000
+  );
+  if (!result.ok || !result.output) {
+    return {
+      confirmed: false,
+      fingerprint: '',
+      reason: 'Drupal runtime facts could not be read through Drush.',
+      schemaVersion: DRUPAL_RUNTIME_FACTS_SCHEMA
+    };
+  }
+  try {
+    const facts = JSON.parse(result.output);
+    const confirmed =
+      facts?.schemaVersion === DRUPAL_RUNTIME_FACTS_SCHEMA &&
+      /^sha256:[a-f0-9]{64}$/.test(String(facts?.fingerprint ?? '')) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(facts?.systemSchemaSha256 ?? '')) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(facts?.effectiveSettingsHmacSha256 ?? '')) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(facts?.effectiveActiveConfigSha256 ?? '')) &&
+      facts?.databaseUpdateStatusConfirmed === true &&
+      Number.isSafeInteger(Number(facts?.pendingDatabaseUpdateCount)) &&
+      Number(facts.pendingDatabaseUpdateCount) >= 0 &&
+      Boolean(String(facts?.coreVersion ?? '').trim()) &&
+      Boolean(String(facts?.phpVersion ?? '').trim()) &&
+      Boolean(String(facts?.databaseDriver ?? '').trim());
+    return {
+      ...facts,
+      confirmed,
+      reason: confirmed ? '' : 'Drupal runtime facts were incomplete or malformed.'
+    };
+  } catch {
+    return {
+      confirmed: false,
+      fingerprint: '',
+      reason: 'Drupal runtime facts returned malformed JSON.',
+      schemaVersion: DRUPAL_RUNTIME_FACTS_SCHEMA
+    };
+  }
+}
+
+function declaredEditorialRoots(fieldOutputMatrix) {
+  const roots = new Map();
+  for (const row of Array.isArray(fieldOutputMatrix?.bundles) ? fieldOutputMatrix.bundles : []) {
+    const entityType = String(row?.entityType ?? '').trim();
+    const bundle = String(row?.bundle ?? '').trim();
+    if (!/^[a-z][a-z0-9_]*$/.test(entityType) || !/^[a-z][a-z0-9_]*$/.test(bundle)) {
+      continue;
+    }
+    if (!roots.has(entityType)) {
+      roots.set(entityType, new Set());
+    }
+    roots.get(entityType).add(bundle);
+  }
+  return Object.fromEntries(
+    [...roots.entries()]
+      .sort(([left], [right]) => comparePortable(left, right))
+      .map(([entityType, bundles]) => [entityType, [...bundles].sort(comparePortable)])
+  );
+}
+
+function declaredPublicReferenceFields(fieldOutputMatrix) {
+  const fields = new Map();
+  for (const row of Array.isArray(fieldOutputMatrix?.bundles) ? fieldOutputMatrix.bundles : []) {
+    const entityType = String(row?.entityType ?? '').trim();
+    const bundle = String(row?.bundle ?? '').trim();
+    if (!/^[a-z][a-z0-9_]*$/.test(entityType) || !/^[a-z][a-z0-9_]*$/.test(bundle)) {
+      continue;
+    }
+    const key = `${entityType}:${bundle}`;
+    if (!fields.has(key)) {
+      fields.set(key, new Set());
+    }
+    for (const field of Array.isArray(row?.fields) ? row.fields : []) {
+      const machineName = String(field?.machineName ?? '').trim();
+      const fieldType = String(field?.fieldType ?? '').trim();
+      if (
+        /^[a-z][a-z0-9_]*$/.test(machineName) &&
+        field?.affectsAnonymousOutput === true &&
+        (fieldType.startsWith('entity_reference') || ['file', 'image'].includes(fieldType.split(':')[0]))
+      ) {
+        fields.get(key).add(machineName);
+      }
+    }
+  }
+  const result = {};
+  for (const [key, names] of [...fields.entries()].sort(([left], [right]) => comparePortable(left, right))) {
+    const [entityType, bundle] = key.split(':');
+    result[entityType] ??= {};
+    result[entityType][bundle] = [...names].sort(comparePortable);
+  }
+  return result;
+}
+
+function publicClosureRoutePaths(routeMatrix, patternMap) {
+  const paths = new Set();
+  const add = (value) => {
+    const path = normalizePath(value);
+    if (path.startsWith('/')) {
+      paths.add(path);
+    }
+  };
+  for (const route of Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []) {
+    add(route?.targetPath);
+  }
+  for (const route of Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : []) {
+    add(route?.targetPath ?? route?.targetFinalPath);
+  }
+  for (const route of Array.isArray(routeMatrix?.targetRequiredRoutes) ? routeMatrix.targetRequiredRoutes : []) {
+    add(route?.targetPath ?? route?.path);
+  }
+  for (const route of Array.isArray(patternMap?.compositionModel?.flexibleLandingRoutes)
+    ? patternMap.compositionModel.flexibleLandingRoutes
+    : []) {
+    add(route?.targetRoute);
+  }
+  for (const route of Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : []) {
+    add(route?.targetRoute ?? route?.sourceRoute);
+  }
+  return [...paths].sort(comparePortable);
+}
+
+function inspectDrupalEntityInventory(projectRoot, environment, fieldOutputMatrix, routeMatrix, patternMap) {
+  const roots = Buffer.from(JSON.stringify(declaredEditorialRoots(fieldOutputMatrix)), 'utf8').toString('base64');
+  const fields = Buffer.from(JSON.stringify(declaredPublicReferenceFields(fieldOutputMatrix)), 'utf8').toString('base64');
+  const routes = Buffer.from(JSON.stringify(publicClosureRoutePaths(routeMatrix, patternMap)), 'utf8').toString('base64');
+  const evaluation = [
+    `$declared_editorial_roots = json_decode(base64_decode('${roots}', TRUE), TRUE);`,
+    `$declared_public_fields = json_decode(base64_decode('${fields}', TRUE), TRUE);`,
+    `$public_route_paths = json_decode(base64_decode('${routes}', TRUE), TRUE);`,
+    DRUPAL_ENTITY_INVENTORY_EVAL
+  ].join('\n');
+  const result = runDrushResult(
+    projectRoot,
+    environment,
+    ['php:eval', evaluation],
+    120_000
+  );
+  if (!result.ok || !result.output) {
+    return {
+      confirmed: false,
+      fingerprint: '',
+      reason: 'Drupal content-entity inventory could not be read through Drush.',
+      schemaVersion: DRUPAL_ENTITY_INVENTORY_SCHEMA,
+      types: {}
+    };
+  }
+  try {
+    const inventory = JSON.parse(result.output);
+    const typeErrors = Object.entries(inventory?.types ?? {})
+      .filter(([, value]) => value?.error)
+      .map(([entityType]) => entityType);
+    const authorDigestError = String(inventory?.publicAuthorUserDigest?.error ?? '');
+    const confirmed =
+      inventory?.schemaVersion === DRUPAL_ENTITY_INVENTORY_SCHEMA &&
+      /^sha256:[a-f0-9]{64}$/.test(String(inventory?.fingerprint ?? '')) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(inventory?.publicAuthorUserDigest?.fingerprint ?? '')) &&
+      Array.isArray(inventory?.missingDeclaredRoots) &&
+      inventory.missingDeclaredRoots.length === 0 &&
+      Number(inventory?.missingManagedFileCount ?? 0) === 0 &&
+      !authorDigestError &&
+      typeErrors.length === 0;
+    return {
+      ...inventory,
+      confirmed,
+      reason: confirmed
+        ? ''
+        : `Drupal entity inventory was incomplete${typeErrors.length ? ` for: ${typeErrors.join(', ')}` : ''}${authorDigestError ? '; public author digest failed' : ''}${Array.isArray(inventory?.missingDeclaredRoots) && inventory.missingDeclaredRoots.length ? `; declared roots were missing: ${inventory.missingDeclaredRoots.join(', ')}` : ''}${Number(inventory?.missingManagedFileCount ?? 0) > 0 ? `; ${inventory.missingManagedFileCount} managed files were unreadable` : ''}.`
+    };
+  } catch {
+    return {
+      confirmed: false,
+      fingerprint: '',
+      reason: 'Drupal content-entity inventory returned malformed JSON.',
+      schemaVersion: DRUPAL_ENTITY_INVENTORY_SCHEMA,
+      types: {}
+    };
+  }
 }
 
 function cleanScalar(value) {
@@ -442,6 +1460,38 @@ function pathIsInside(parent, child) {
   );
 }
 
+function safeExistingProjectDirectory(projectRoot, candidate) {
+  const root = resolve(projectRoot);
+  const path = resolve(candidate);
+  if (
+    !pathIsInside(root, path) ||
+    !existsSync(root) ||
+    !existsSync(path) ||
+    lstatSync(root).isSymbolicLink() ||
+    !statSync(path).isDirectory()
+  ) {
+    return '';
+  }
+  let current = path;
+  while (current !== root) {
+    if (lstatSync(current).isSymbolicLink()) {
+      return '';
+    }
+    const parent = dirname(current);
+    if (!pathIsInside(root, parent)) {
+      return '';
+    }
+    current = parent;
+  }
+  try {
+    const realRoot = realpathSync(root);
+    const realPath = realpathSync(path);
+    return pathIsInside(realRoot, realPath) ? realPath : '';
+  } catch {
+    return '';
+  }
+}
+
 function ddevDocroot(projectRoot) {
   try {
     const config = readFileSync(join(projectRoot, '.ddev', 'config.yaml'), 'utf8');
@@ -460,10 +1510,10 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   const docroot = ddevDocroot(projectRoot);
   if (!isAbsolute(configured)) {
     const candidate = resolve(projectRoot, docroot, configured);
-    return pathIsInside(projectRoot, candidate) ? candidate : '';
+    return safeExistingProjectDirectory(projectRoot, candidate);
   }
   if (existsSync(configured) && pathIsInside(projectRoot, configured)) {
-    return resolve(configured);
+    return safeExistingProjectDirectory(projectRoot, configured);
   }
 
   const normalizedDrupalRoot = cleanScalar(drupalRoot).replaceAll('\\', '/').replace(/\/+$/, '');
@@ -474,19 +1524,40 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
     : '';
   if (containerProjectRoot && normalizedConfigured.startsWith(`${containerProjectRoot}/`)) {
     const candidate = resolve(projectRoot, normalizedConfigured.slice(containerProjectRoot.length + 1));
-    return pathIsInside(projectRoot, candidate) ? candidate : '';
+    return safeExistingProjectDirectory(projectRoot, candidate);
   }
   return '';
 }
 
-function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
+function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, configSplitDirectories = []) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
+  const splitPaths = [];
+  const missingConfigSplitDirectories = [];
+  for (const configured of Array.isArray(configSplitDirectories) ? configSplitDirectories : []) {
+    const path = hostConfigSyncPath(projectRoot, configured, drupalRoot);
+    if (path) {
+      splitPaths.push(path);
+    } else if (cleanScalar(configured)) {
+      missingConfigSplitDirectories.push(cleanScalar(configured));
+    }
+  }
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
-    return { confirmed: false, directory: '', yamlFiles: [] };
+    return {
+      allYamlFiles: [],
+      confirmed: false,
+      configManifest: collectFileManifest(projectRoot, []),
+      configSplitDirectories: [],
+      directory: '',
+      missingConfigSplitDirectories,
+      untrackedYamlFiles: [],
+      yamlFiles: []
+    };
   }
   const directory = relative(projectRoot, hostPath).split(sep).join('/');
+  const directories = [...new Set([hostPath, ...splitPaths])];
+  const relativeDirectories = directories.map((path) => relative(projectRoot, path).split(sep).join('/'));
   try {
-    const output = execFileSync('git', ['ls-files', '--', directory], {
+    const output = execFileSync('git', ['ls-files', '--', ...relativeDirectories], {
       cwd: projectRoot,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -495,10 +1566,50 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
     const yamlFiles = output
       .split(/\r?\n/)
       .map((path) => path.trim())
-      .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    return { confirmed: yamlFiles.length > 0, directory, yamlFiles };
+      .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)))
+      .sort();
+    const allYamlFiles = [];
+    const visit = (directoryPath) => {
+      for (const entry of readdirSync(directoryPath, { withFileTypes: true })) {
+        const path = join(directoryPath, entry.name);
+        if (entry.isSymbolicLink() || lstatSync(path).isSymbolicLink()) {
+          throw new Error(`Config sync contains a symbolic link: ${relative(projectRoot, path)}.`);
+        }
+        if (entry.isDirectory()) {
+          visit(path);
+        } else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
+          allYamlFiles.push(relative(projectRoot, path).split(sep).join('/'));
+        }
+      }
+    };
+    for (const path of directories) {
+      visit(path);
+    }
+    allYamlFiles.sort(comparePortable);
+    const trackedSet = new Set(yamlFiles);
+    const untrackedYamlFiles = allYamlFiles.filter((path) => !trackedSet.has(path));
+    const configManifest = collectFileManifest(projectRoot, allYamlFiles);
+    return {
+      allYamlFiles,
+      confirmed: yamlFiles.length > 0 && untrackedYamlFiles.length === 0 && missingConfigSplitDirectories.length === 0,
+      configManifest,
+      configSplitDirectories: relativeDirectories.slice(1),
+      directory,
+      missingConfigSplitDirectories,
+      untrackedYamlFiles,
+      yamlFiles
+    };
   } catch {
-    return { confirmed: false, directory, yamlFiles: [] };
+    return {
+      allYamlFiles: [],
+      confirmed: false,
+      configManifest: collectFileManifest(projectRoot, []),
+      configSplitDirectories: relativeDirectories.slice(1),
+      directory,
+      missingConfigSplitDirectories,
+      untrackedYamlFiles: [],
+      yamlFiles: []
+    };
   }
 }
 
@@ -519,7 +1630,7 @@ function configStatusIsClean(result) {
   }
 }
 
-function inspectDrupalRuntime(cwd, environment) {
+function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, patternMap) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
@@ -528,17 +1639,38 @@ function inspectDrupalRuntime(cwd, environment) {
       configStatusClean: false,
       configSyncTracked: false,
       configSyncDirectory: '',
+      configManifest: null,
+      configSplitDirectories: [],
+      entityInventory: {
+        confirmed: false,
+        fingerprint: '',
+        reason: 'Drupal runtime is unavailable.',
+        schemaVersion: DRUPAL_ENTITY_INVENTORY_SCHEMA,
+        types: {}
+      },
+      runtimeFacts: {
+        confirmed: false,
+        fingerprint: '',
+        reason: 'Drupal runtime is unavailable.',
+        schemaVersion: DRUPAL_RUNTIME_FACTS_SCHEMA
+      },
       frontPage: '',
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
       trackedConfigDirectory: '',
-      trackedConfigYamlFiles: []
+      missingConfigSplitDirectories: [],
+      trackedConfigYamlFiles: [],
+      untrackedConfigYamlFiles: []
     };
   }
-  const inContainer = Boolean(environment.DDEV_PRIMARY_URL || environment.DDEV_PROJECT || environment.DDEV_SITENAME);
+  const inContainer = ddevContainerContext(projectRoot, environment);
   const bootstrap = runDrush(projectRoot, environment, ['status', '--field=bootstrap']);
-  const uuidOutput = runDrush(projectRoot, environment, ['config:get', 'system.site', '--field=uuid']);
+  const uuidOutput = runDrush(
+    projectRoot,
+    environment,
+    ['config:get', 'system.site', 'uuid', '--format=string']
+  );
   const frontPage = cleanScalar(
     runDrush(projectRoot, environment, ['config:get', 'system.site', 'page.front', '--format=string'])
   );
@@ -547,24 +1679,43 @@ function inspectDrupalRuntime(cwd, environment) {
   );
   const drupalRoot = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=root']));
   const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
-  const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
+  const runtimeFacts = inspectDrupalRuntimeFacts(projectRoot, environment);
+  const trackedConfig = trackedConfigEvidence(
+    projectRoot,
+    configSyncDirectory,
+    drupalRoot,
+    runtimeFacts?.configSplitDirectories
+  );
+  const entityInventory = inspectDrupalEntityInventory(
+    projectRoot,
+    environment,
+    fieldOutputMatrix,
+    routeMatrix,
+    patternMap
+  );
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
-  const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
+  const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot, environment);
   return {
     baseUrl,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
+    configManifest: trackedConfig.configManifest,
+    configSplitDirectories: trackedConfig.configSplitDirectories,
     drupalRoot,
+    entityInventory,
+    runtimeFacts,
     frontPage,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
     reason: confirmed ? '' : 'Drupal did not bootstrap or expose a valid system.site UUID through Drush.',
     siteUuid,
     trackedConfigDirectory: trackedConfig.directory,
-    trackedConfigYamlFiles: trackedConfig.yamlFiles
+    missingConfigSplitDirectories: trackedConfig.missingConfigSplitDirectories,
+    trackedConfigYamlFiles: trackedConfig.yamlFiles,
+    untrackedConfigYamlFiles: trackedConfig.untrackedYamlFiles
   };
 }
 
@@ -579,10 +1730,12 @@ function environmentTargetUrl(environment) {
 }
 
 function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
+  const projectRoot = findDrupalDdevRoot(cwd);
+  const inContainer = Boolean(projectRoot && ddevContainerContext(projectRoot, environment));
   const choices = [
     ['explicit', explicitTargetUrl],
-    ['ddev-environment', environmentTargetUrl(environment)],
-    ['ddev-describe', ddevTargetUrl(cwd)]
+    ['ddev-environment', inContainer ? environmentTargetUrl(environment) : ''],
+    ['ddev-describe', inContainer ? '' : ddevTargetUrl(projectRoot || cwd, environment)]
   ];
   const [source, value] = choices.find(([, candidate]) => String(candidate ?? '').trim()) ?? [];
   if (!value) {
@@ -593,7 +1746,7 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
 
 function matchingRouteRecord(routeMatrix, targetPath) {
   return (Array.isArray(routeMatrix.routes) ? routeMatrix.routes : []).find(
-    (route) => normalizePath(route?.targetPath) === targetPath
+    (route) => normalizeRouteKey(route?.targetPath) === targetPath
   );
 }
 
@@ -612,7 +1765,7 @@ function comparableUrl(value, baseUrl = undefined) {
 
 function expectedRenderedSeo(browserEvidence, targetPath) {
   const records = (Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])
-    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) => normalizePath(url) === targetPath))
+    .filter((check) => [check?.targetUrl, check?.targetFinalUrl].some((url) => normalizeRouteKey(url) === targetPath))
     .filter((check) => check?.accepted === true && check?.renderedSeoSignals?.accepted === true)
     .map((check) => check?.renderedSeoSignals ?? {});
   if (records.length === 0) {
@@ -645,7 +1798,7 @@ function expectedRenderedSeo(browserEvidence, targetPath) {
 }
 
 function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
-  const targetPath = normalizePath(primaryRoute?.targetPath || primaryRoute?.sourcePath);
+  const targetPath = normalizeRouteKey(primaryRoute?.targetPath || primaryRoute?.sourcePath);
   const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
   const homepage = targetPath === '/' ? routeMatrix.homepageParity ?? {} : {};
   const declaredStatus = record.targetStatus;
@@ -655,7 +1808,7 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
   return {
     accepted: primaryRoute?.accepted === true,
     expectedBehavior: record.expectedRedirect === true ? 'redirect' : 'public_200',
-    expectedFinalPath: normalizePath(record.targetFinalPath || homepage.targetFinalPath || targetPath),
+    expectedFinalPath: normalizeRouteKey(record.targetFinalPath || homepage.targetFinalPath || targetPath),
     expectedH1: normalizeText(record.targetH1 || homepage.targetH1),
     expectedStatus,
     expectedTitle: normalizeText(record.targetTitle || homepage.targetTitle),
@@ -669,11 +1822,11 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
 }
 
 function expectedTargetRequiredRoute(record) {
-  const targetPath = normalizePath(record?.targetPath);
+  const targetPath = normalizeRouteKey(record?.targetPath);
   return {
     accepted: record?.accepted === true,
     expectedBehavior: String(record?.expectedPublicBehavior ?? ''),
-    expectedFinalPath: normalizePath(record?.targetFinalPath || targetPath),
+    expectedFinalPath: normalizeRouteKey(record?.targetFinalPath || targetPath),
     expectedH1: '',
     expectedStatus: Number(record?.targetStatus),
     expectedTitle: '',
@@ -825,7 +1978,8 @@ function completionEvidenceTargetErrors({
 }
 
 async function verifyRoute(baseUrl, expected) {
-  const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
+  const requestedUrl = new URL(expected.targetPath, new URL('/', baseUrl));
+  requestedUrl.hash = '';
   const errors = [];
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
@@ -867,13 +2021,14 @@ async function verifyRoute(baseUrl, expected) {
     const actualH1 = elementText(response.body, 'h1');
     const actualTitle = elementText(response.body, 'title');
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
+    const intrinsicSemantics = intrinsicRouteSemantics(response.body, response.finalUrl);
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
       errors.push(`${expected.targetPath} returned status ${actualStatus}; expected ${expected.expectedStatus}.`);
     }
-    if (normalizePath(response.finalUrl) !== expected.expectedFinalPath) {
+    if (normalizeRouteKey(response.finalUrl) !== expected.expectedFinalPath) {
       errors.push(
-        `${expected.targetPath} resolved to ${normalizePath(response.finalUrl)}; expected ${expected.expectedFinalPath}.`
+        `${expected.targetPath} resolved to ${normalizeRouteKey(response.finalUrl)}; expected ${expected.expectedFinalPath}.`
       );
     }
     if (new URL(response.finalUrl).origin !== baseUrl.origin) {
@@ -935,6 +2090,7 @@ async function verifyRoute(baseUrl, expected) {
       actualMetadata,
       actualTitle,
       bodySha256: `sha256:${sha256(response.body)}`,
+      intrinsicSemantics,
       errors,
       finalStatus: response.status,
       finalUrl: response.finalUrl,
@@ -953,11 +2109,13 @@ async function verifyRoute(baseUrl, expected) {
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
+  outPath = '',
   cwd = process.cwd(),
   environment = process.env,
   drupalRuntime = null
 } = {}) {
   const absolutePacketDir = resolve(cwd, packetDir);
+  assertVerificationPacketInputs(absolutePacketDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
   const packetReport = await validatePacket({ packetDir: absolutePacketDir });
   let routeMatrixText = '';
@@ -1027,7 +2185,13 @@ export async function verifyLive({
   }
 
   const runtimeWasInjected = drupalRuntime !== null;
-  const inspectedDrupalRuntime = drupalRuntime ?? inspectDrupalRuntime(cwd, environment);
+  const inspectedDrupalRuntime = drupalRuntime ?? inspectDrupalRuntime(
+    cwd,
+    environment,
+    fieldOutputMatrix,
+    routeMatrix,
+    patternMap
+  );
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
   let runtimeTargetOriginMatches = false;
   if (target && inspectedDrupalRuntime.baseUrl) {
@@ -1157,7 +2321,134 @@ export async function verifyLive({
     Boolean(packetTrackedConfigDirectory) &&
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
     packetTrackedConfigYamlFiles.length > 0 &&
+    packetTrackedConfigYamlFiles.length === runtimeTrackedConfigYamlFiles.length &&
+    new Set(packetTrackedConfigYamlFiles).size === packetTrackedConfigYamlFiles.length &&
     packetTrackedConfigYamlFiles.every((path) => runtimeTrackedConfigSet.has(path));
+  const routeEvidenceManifest = [...routeChecks, ...targetRequiredRouteChecks]
+    .map((route) => ({
+      bodySha256: route.bodySha256 ?? '',
+      finalUrl: route.finalUrl ?? '',
+      h1: route.actualH1 ?? '',
+      path: route.targetPath,
+      routeKind: route.routeKind ?? '',
+      status: route.finalStatus ?? 0,
+      title: route.actualTitle ?? ''
+    }))
+    .sort((left, right) => comparePortable(`${left.path}\0${left.routeKind}`, `${right.path}\0${right.routeKind}`));
+  const routeStateManifest = [...routeChecks, ...targetRequiredRouteChecks]
+    .map((route) => ({
+      canonicalPath: normalizeRouteKey(route.actualMetadata?.canonicalUrl),
+      finalPath: normalizeRouteKey(route.finalUrl),
+      h1: route.actualH1 ?? '',
+      initialStatus: route.initialStatus ?? 0,
+      intrinsicSemanticsSha256: route.intrinsicSemantics?.fingerprint ?? '',
+      metaDescriptionSha256: stateSha256(route.actualMetadata?.metaDescription ?? ''),
+      noindex: route.actualMetadata?.noindex === true,
+      openGraphImagePath: normalizePath(route.actualMetadata?.openGraphImage),
+      path: normalizeRouteKey(route.targetPath),
+      routeKind: route.routeKind ?? '',
+      status: route.finalStatus ?? 0,
+      title: route.actualTitle ?? ''
+    }))
+    .sort((left, right) => comparePortable(`${left.path}\0${left.routeKind}`, `${right.path}\0${right.routeKind}`));
+  const stateBlockers = [];
+  const runtimeProjectRoot = findDrupalDdevRoot(cwd);
+  if (!runtimeProjectRoot) {
+    stateBlockers.push('Current Drupal project root could not be resolved for state fingerprinting.');
+  }
+  if (!target) {
+    stateBlockers.push('Current live target could not be resolved for state fingerprinting.');
+  }
+  if (!inspectedDrupalRuntime.configManifest?.entryCount) {
+    stateBlockers.push('Current tracked configuration tree is unavailable for state fingerprinting.');
+  }
+  if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
+    stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
+  }
+  if (inspectedDrupalRuntime.runtimeFacts?.confirmed !== true) {
+    stateBlockers.push(inspectedDrupalRuntime.runtimeFacts?.reason || 'Drupal runtime facts are unavailable.');
+  }
+  if (inspectedDrupalRuntime.runtimeFacts?.databaseUpdatesPending === true) {
+    stateBlockers.push(
+      `Drupal reports ${Number(inspectedDrupalRuntime.runtimeFacts.pendingDatabaseUpdateCount ?? 0)} pending database update(s).`
+    );
+  }
+  let buildState = null;
+  try {
+    const codeManifest = runtimeProjectRoot
+      ? collectRuntimeCodeManifest(runtimeProjectRoot)
+      : collectFileManifest(cwd, []);
+    const entityInventory = {
+      schemaVersion: inspectedDrupalRuntime.entityInventory?.schemaVersion ?? '',
+      fingerprint: inspectedDrupalRuntime.entityInventory?.fingerprint ?? '',
+      entityTypeCount: inspectedDrupalRuntime.entityInventory?.entityTypeCount ?? 0,
+      closureCounts: inspectedDrupalRuntime.entityInventory?.closureCounts ?? {},
+      excludedEntityTypes: inspectedDrupalRuntime.entityInventory?.excludedEntityTypes ?? {},
+      missingDeclaredRoots: inspectedDrupalRuntime.entityInventory?.missingDeclaredRoots ?? [],
+      missingManagedFileCount: inspectedDrupalRuntime.entityInventory?.missingManagedFileCount ?? 0,
+      policy: inspectedDrupalRuntime.entityInventory?.policy ?? {},
+      publicAuthorUserDigest: inspectedDrupalRuntime.entityInventory?.publicAuthorUserDigest ?? {},
+      types: Object.fromEntries(
+        Object.entries(inspectedDrupalRuntime.entityInventory?.types ?? {}).map(([entityType, value]) => [
+          entityType,
+          {
+            count: value?.count ?? 0,
+            translationCount: value?.translationCount ?? 0,
+            revisionCount: value?.revisionCount ?? 0,
+            revisionTranslationCount: value?.revisionTranslationCount ?? 0,
+            missingManagedFileCount: value?.missingManagedFileCount ?? 0,
+            fingerprint: value?.fingerprint ?? '',
+            error: value?.error ?? ''
+          }
+        ])
+      )
+    };
+    const runtimeFacts = {
+      schemaVersion: inspectedDrupalRuntime.runtimeFacts?.schemaVersion ?? '',
+      fingerprint: inspectedDrupalRuntime.runtimeFacts?.fingerprint ?? '',
+      coreVersion: inspectedDrupalRuntime.runtimeFacts?.coreVersion ?? '',
+      phpVersion: inspectedDrupalRuntime.runtimeFacts?.phpVersion ?? '',
+      databaseDriver: inspectedDrupalRuntime.runtimeFacts?.databaseDriver ?? '',
+      activeConfigEntryCount: inspectedDrupalRuntime.runtimeFacts?.activeConfigEntryCount ?? 0,
+      effectiveActiveConfigSha256: inspectedDrupalRuntime.runtimeFacts?.effectiveActiveConfigSha256 ?? '',
+      systemSchemaEntryCount: inspectedDrupalRuntime.runtimeFacts?.systemSchemaEntryCount ?? 0,
+      systemSchemaSha256: inspectedDrupalRuntime.runtimeFacts?.systemSchemaSha256 ?? '',
+      effectiveSettingsEntryCount: inspectedDrupalRuntime.runtimeFacts?.effectiveSettingsEntryCount ?? 0,
+      effectiveSettingsHmacSha256: inspectedDrupalRuntime.runtimeFacts?.effectiveSettingsHmacSha256 ?? '',
+      databaseUpdateStatusConfirmed: inspectedDrupalRuntime.runtimeFacts?.databaseUpdateStatusConfirmed === true,
+      pendingDatabaseUpdateCount: inspectedDrupalRuntime.runtimeFacts?.pendingDatabaseUpdateCount ?? 0,
+      databaseUpdatesPending: inspectedDrupalRuntime.runtimeFacts?.databaseUpdatesPending === true,
+      configSplitDirectories: Array.isArray(inspectedDrupalRuntime.runtimeFacts?.configSplitDirectories)
+        ? [...inspectedDrupalRuntime.runtimeFacts.configSplitDirectories].sort(comparePortable)
+        : []
+    };
+    const packetEvidence = packetEvidenceManifest(
+      absolutePacketDir,
+      outPath || join(absolutePacketDir, 'evidence', 'live-verification.json')
+    );
+    buildState = buildSiteState({
+      targetIdentity: {
+        configSyncDirectory: runtimeConfigSyncDirectory,
+        frontPage: runtimeFrontPage,
+        siteUuid: String(inspectedDrupalRuntime.siteUuid ?? '').trim().toLowerCase()
+      },
+      configManifest: inspectedDrupalRuntime.configManifest ?? collectFileManifest(cwd, []),
+      codeManifest,
+      entityInventory,
+      routeManifest: routeStateManifest,
+      runtimeFacts,
+      packetFingerprint: packetEvidence.fingerprint,
+      packetEvidenceManifest: packetEvidence,
+      verifierFingerprint: verifierFingerprint()
+    });
+  } catch (error) {
+    stateBlockers.push(`Build-state fingerprint failed: ${error.message}`);
+  }
+  const buildStateReady = Boolean(buildState) && stateBlockers.length === 0;
+  if (buildState) {
+    buildState.complete = buildStateReady;
+    buildState.blockers = stateBlockers;
+  }
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -1167,7 +2458,8 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
-    drupalRuntimeTrackedConfigReadbackMatches;
+    drupalRuntimeTrackedConfigReadbackMatches &&
+    buildStateReady;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
@@ -1205,10 +2497,13 @@ export async function verifyLive({
     completionBlockedReasons.push('Current DDEV config status is not clean or could not be verified.');
   }
   if (!drupalRuntimeConfigSyncTracked) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
+    completionBlockedReasons.push('Current DDEV config-sync and configured Config Split directories do not contain complete Git-tracked YAML evidence.');
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
+  }
+  if (!buildStateReady) {
+    completionBlockedReasons.push(...stateBlockers);
   }
   if (!runtimeAuthoritativeForCompletion) {
     completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
@@ -1216,14 +2511,7 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
-    routeChecks: [...routeChecks, ...targetRequiredRouteChecks].map((route) => ({
-      bodySha256: route.bodySha256 ?? '',
-      finalUrl: route.finalUrl ?? '',
-      h1: route.actualH1 ?? '',
-      path: route.targetPath,
-      status: route.finalStatus ?? 0,
-      title: route.actualTitle ?? ''
-    }))
+    routeChecks: routeEvidenceManifest
   });
   const sharedPacketReport = {
     ...packetReport,
@@ -1251,11 +2539,13 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
-      targetFingerprintInputVersion: 1
+      packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
+      targetFingerprintInputVersion: 2
     },
     routeChecks,
     targetRequiredRouteChecks,
     liveTargetValid,
+    buildState,
     drupalRuntime: {
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
@@ -1293,9 +2583,39 @@ async function main() {
   const report = args.packetOnly
     ? await validatePacket({ packetDir: resolve(args.packet) })
     : await verifyLive({
-        packetDir: args.packet,
-        targetUrl: args.targetUrl
+      packetDir: args.packet,
+        targetUrl: args.targetUrl,
+        outPath: args.out
       });
+  if (!args.packetOnly) {
+    const operationCanRun = !args.changeId || report.completeLocalRebuildClaimAllowed === true;
+    const lifecycle = applyVerificationLifecycle({
+      packetDir: args.packet,
+      report,
+      checkpointId: operationCanRun ? args.checkpointId : '',
+      changeId: operationCanRun ? args.changeId : ''
+    });
+    report.lifecycle = {
+      ...lifecycle,
+      requestedOperation: args.changeId
+        ? {
+            changeId: args.changeId,
+            checkpointId: args.checkpointId,
+            status: operationCanRun ? 'completed' : 'blocked',
+            blockedReasons: operationCanRun ? [] : report.completionBlockedReasons
+          }
+        : null
+    };
+    report.currentSiteClaimAllowed =
+      report.completeLocalRebuildClaimAllowed === true &&
+      report.lifecycle.currentStateVerified === true;
+    report.currentStateBlockedReasons = report.lifecycle.currentStateVerified
+      ? []
+      : report.lifecycle.relation === 'changed-since-latest-anchor' &&
+          report.lifecycle.currentStateClassification?.kind === 'unclassified'
+        ? ['Current state differs from the latest lifecycle anchor and has no classified repair or extension; revert it or begin with explicit --adopt-current classification.']
+        : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
+  }
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
 
@@ -1309,10 +2629,21 @@ async function main() {
   }
   if (args.packetOnly) {
     process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
-  } else if (report.completeLocalRebuildClaimAllowed) {
-    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized. Report: ${args.out}\n`);
+  } else if (report.completeLocalRebuildClaimAllowed && report.currentSiteClaimAllowed) {
+    const lifecycleNote = report.lifecycle?.requestedOperation?.checkpointId
+      ? ` Checkpoint ${report.lifecycle.requestedOperation.checkpointId} recorded.`
+      : report.lifecycle?.initialBaseline?.status === 'passed'
+        ? ' The create-once, integrity-checked initial baseline remains recorded.'
+        : '';
+    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized.${lifecycleNote} Report: ${args.out}\n`);
   } else {
-    process.stderr.write(`Live target checks passed, but completion remains blocked by required review evidence. Report: ${args.out}\n`);
+    const baselineNote = report.lifecycle?.initialBaseline?.status === 'passed'
+      ? ' The create-once, integrity-checked initial baseline remains passed; the current derived state is not yet verified.'
+      : '';
+    const reason = report.completeLocalRebuildClaimAllowed && !report.currentSiteClaimAllowed
+      ? 'Full rebuild checks passed, but the changed current state is not classified and lifecycle-verified.'
+      : 'Live target checks passed, but completion remains blocked by required review evidence.';
+    process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
     process.exitCode = 2;
   }
 }
