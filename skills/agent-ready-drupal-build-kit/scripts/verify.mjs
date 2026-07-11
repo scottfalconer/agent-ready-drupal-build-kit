@@ -35,6 +35,8 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_CRITICAL_ASSET_BYTES = 20 * 1024 * 1024;
 const MAX_CRITICAL_ASSET_REQUESTS = 160;
 const MAX_CRITICAL_ASSET_TOTAL_BYTES = 100 * 1024 * 1024;
+const MAX_CRITICAL_ASSET_CONCURRENCY = 8;
+const MAX_CRITICAL_ASSET_WALL_CLOCK_MS = 60_000;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -622,48 +624,117 @@ function assetContentTypeMatches(contentType, expectedTypes) {
   return [...expectedTypes].every(matches);
 }
 
-async function inspectCriticalAssets(html, finalUrl, context) {
-  const errors = [];
-  const manifest = [];
-  for (const candidate of criticalAssetCandidates(html, finalUrl)) {
-    if (!context.cache.has(candidate.url.href)) {
-      if (context.cache.size >= MAX_CRITICAL_ASSET_REQUESTS) {
-        errors.push(`Critical same-origin asset inventory exceeds the ${MAX_CRITICAL_ASSET_REQUESTS} request limit.`);
-        break;
-      }
-      context.cache.set(candidate.url.href, requestFollowingRedirects(candidate.url, {
-        maxBodyBytes: MAX_CRITICAL_ASSET_BYTES
-      }));
+export function createCriticalAssetContext({
+  concurrency = MAX_CRITICAL_ASSET_CONCURRENCY,
+  wallClockMs = MAX_CRITICAL_ASSET_WALL_CLOCK_MS
+} = {}) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CRITICAL_ASSET_CONCURRENCY) {
+    throw new Error(`Critical asset concurrency must be between 1 and ${MAX_CRITICAL_ASSET_CONCURRENCY}.`);
+  }
+  if (!Number.isSafeInteger(wallClockMs) || wallClockMs < 1 || wallClockMs > MAX_CRITICAL_ASSET_WALL_CLOCK_MS) {
+    throw new Error(`Critical asset wall-clock budget must be between 1 and ${MAX_CRITICAL_ASSET_WALL_CLOCK_MS} ms.`);
+  }
+  return {
+    active: 0,
+    cache: new Map(),
+    concurrency,
+    counted: new Set(),
+    deadlineAt: Date.now() + wallClockMs,
+    queue: [],
+    totalBytes: 0,
+    wallClockMs
+  };
+}
+
+async function withCriticalAssetSlot(context, task) {
+  if (context.active >= context.concurrency) {
+    await new Promise((resolvePromise) => context.queue.push(resolvePromise));
+  }
+  context.active += 1;
+  try {
+    if (Date.now() >= context.deadlineAt) {
+      throw new Error(`aggregate wall-clock budget of ${context.wallClockMs} ms was exceeded`);
     }
+    return await task();
+  } finally {
+    context.active -= 1;
+    context.queue.shift()?.();
+  }
+}
+
+async function beforeCriticalAssetDeadline(context, promise) {
+  const remaining = context.deadlineAt - Date.now();
+  if (remaining <= 0) throw new Error(`aggregate wall-clock budget of ${context.wallClockMs} ms was exceeded`);
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolvePromise, rejectPromise) => {
+        timeout = setTimeout(
+          () => rejectPromise(new Error(`aggregate wall-clock budget of ${context.wallClockMs} ms was exceeded`)),
+          remaining
+        );
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function criticalAssetResponse(candidate, context) {
+  if (!context.cache.has(candidate.url.href)) {
+    if (context.cache.size >= MAX_CRITICAL_ASSET_REQUESTS) {
+      throw new Error(`inventory exceeds the ${MAX_CRITICAL_ASSET_REQUESTS} request limit`);
+    }
+    context.cache.set(candidate.url.href, withCriticalAssetSlot(
+      context,
+      () => requestFollowingRedirects(candidate.url, { maxBodyBytes: MAX_CRITICAL_ASSET_BYTES })
+    ));
+  }
+  return beforeCriticalAssetDeadline(context, context.cache.get(candidate.url.href));
+}
+
+export async function inspectCriticalAssets(html, finalUrl, context) {
+  const errors = [];
+  const candidates = criticalAssetCandidates(html, finalUrl);
+  const results = await Promise.all(candidates.map(async (candidate) => {
     try {
-      const response = await context.cache.get(candidate.url.href);
+      const response = await criticalAssetResponse(candidate, context);
       const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
       if (!context.counted.has(candidate.url.href)) {
         context.counted.add(candidate.url.href);
         context.totalBytes += bytes.length;
       }
       if (context.totalBytes > MAX_CRITICAL_ASSET_TOTAL_BYTES) {
-        errors.push(`Critical same-origin asset bytes exceed the ${MAX_CRITICAL_ASSET_TOTAL_BYTES} byte total limit.`);
-        break;
+        throw new Error(`bytes exceed the ${MAX_CRITICAL_ASSET_TOTAL_BYTES} byte total limit`);
       }
+      const candidateErrors = [];
       if (response.status < 200 || response.status >= 300) {
-        errors.push(`${candidate.url.pathname} critical asset returned HTTP ${response.status}.`);
+        candidateErrors.push(`${candidate.url.pathname} critical asset returned HTTP ${response.status}.`);
       }
       const contentType = response.headers['content-type'] ?? '';
       if (!assetContentTypeMatches(contentType, candidate.expectedTypes)) {
-        errors.push(`${candidate.url.pathname} critical asset has content type ${JSON.stringify(String(contentType))}, incompatible with ${[...candidate.roles].join(', ')}.`);
+        candidateErrors.push(`${candidate.url.pathname} critical asset has content type ${JSON.stringify(String(contentType))}, incompatible with ${[...candidate.roles].join(', ')}.`);
       }
-      manifest.push({
-        contentType: String(contentType).split(';', 1)[0].trim().toLowerCase(),
-        path: intrinsicUrl(response.finalUrl, finalUrl, { asset: true }),
-        roles: [...candidate.roles].sort(comparePortable),
-        sha256: `sha256:${sha256(bytes)}`,
-        size: bytes.length
-      });
+      return {
+        errors: candidateErrors,
+        manifest: {
+          contentType: String(contentType).split(';', 1)[0].trim().toLowerCase(),
+          path: intrinsicUrl(response.finalUrl, finalUrl, { asset: true }),
+          roles: [...candidate.roles].sort(comparePortable),
+          sha256: `sha256:${sha256(bytes)}`,
+          size: bytes.length
+        }
+      };
     } catch (error) {
-      errors.push(`${candidate.url.pathname} critical asset could not be fetched: ${error.message}`);
+      return {
+        errors: [`${candidate.url.pathname} critical asset could not be fetched: ${error.message}`],
+        manifest: null
+      };
     }
-  }
+  }));
+  const manifest = results.map((result) => result.manifest).filter(Boolean);
+  errors.push(...results.flatMap((result) => result.errors));
   manifest.sort((left, right) => comparePortable(`${left.path}\0${left.roles.join(',')}`, `${right.path}\0${right.roles.join(',')}`));
   return {
     errors,
@@ -2395,7 +2466,7 @@ export async function verifyLive({
     }
   }
 
-  const criticalAssetContext = { cache: new Map(), counted: new Set(), totalBytes: 0 };
+  const criticalAssetContext = createCriticalAssetContext();
   const primaryRoutes = Array.isArray(routeMatrix.primaryRoutes) ? routeMatrix.primaryRoutes : [];
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
@@ -2718,7 +2789,9 @@ export async function verifyLive({
       limits: {
         requestCount: MAX_CRITICAL_ASSET_REQUESTS,
         perAssetBytes: MAX_CRITICAL_ASSET_BYTES,
-        totalBytes: MAX_CRITICAL_ASSET_TOTAL_BYTES
+        totalBytes: MAX_CRITICAL_ASSET_TOTAL_BYTES,
+        concurrency: MAX_CRITICAL_ASSET_CONCURRENCY,
+        wallClockMs: MAX_CRITICAL_ASSET_WALL_CLOCK_MS
       }
     },
     routeChecks,

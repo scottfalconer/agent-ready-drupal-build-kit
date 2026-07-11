@@ -9,8 +9,10 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  createCriticalAssetContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
+  inspectCriticalAssets,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
@@ -1285,7 +1287,9 @@ test('critical same-origin rendered asset bytes are bounded, validated, and stat
         limits: {
           requestCount: 160,
           perAssetBytes: 20 * 1024 * 1024,
-          totalBytes: 100 * 1024 * 1024
+          totalBytes: 100 * 1024 * 1024,
+          concurrency: 8,
+          wallClockMs: 60_000
         }
       });
 
@@ -1303,6 +1307,37 @@ test('critical same-origin rendered asset bytes are bounded, validated, and stat
     }
   );
   assert.equal(stylesheetRequests, 2, 'the shared asset cache should fetch one stylesheet once per verification run');
+});
+
+test('critical asset inspection has global concurrency and wall-clock bounds', async () => {
+  let active = 0;
+  let maximumActive = 0;
+  await withHttpServer(
+    (request, response) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      setTimeout(() => {
+        response.writeHead(200, { 'connection': 'close', 'content-type': 'text/css' });
+        response.end(`/* ${request.url} */`);
+        active -= 1;
+      }, 200);
+    },
+    async (baseUrl) => {
+      const html = `<!doctype html><html><head>${Array.from(
+        { length: 6 },
+        (_, index) => `<link rel="stylesheet" href="/slow-${index}.css">`
+      ).join('')}</head><body></body></html>`;
+      const context = createCriticalAssetContext({ concurrency: 2, wallClockMs: 50 });
+      const started = Date.now();
+      const result = await inspectCriticalAssets(html, `${baseUrl}/`, context);
+      const elapsed = Date.now() - started;
+
+      assert.ok(elapsed < 500, `critical assets exceeded aggregate deadline: ${elapsed}ms`);
+      assert.ok(maximumActive <= 2, `critical asset concurrency reached ${maximumActive}`);
+      assert.equal(result.manifest.length, 0);
+      assert.match(result.errors.join('\n'), /aggregate wall-clock budget of 50 ms was exceeded/i);
+    }
+  );
 });
 
 test('critical same-origin rendered assets fail closed on HTTP and content-type errors', async () => {
