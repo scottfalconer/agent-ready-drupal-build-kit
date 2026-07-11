@@ -2210,6 +2210,27 @@ test('E-ASSEMBLY-01 reports builder evidence without affecting completion author
       mutate: (assembly) => {
         assembly.portableDependencies.dependencies[0].source = '/Users/example/dev/tool/package.json';
       }
+    },
+    {
+      name: 'working-directory-traversal',
+      expected: /portable assembly entrypoints/i,
+      mutate: (assembly) => {
+        assembly.assemblyEntrypoints[0].workingDirectory = '../../outside';
+      }
+    },
+    {
+      name: 'absolute-command-path',
+      expected: /portable assembly entrypoints/i,
+      mutate: (assembly) => {
+        assembly.assemblyEntrypoints[0].command = '/opt/private/assemble --run';
+      }
+    },
+    {
+      name: 'non-user-absolute-dependency',
+      expected: /dependencies are portable/i,
+      mutate: (assembly) => {
+        assembly.portableDependencies.dependencies[0].source = '/opt/tool/package.json';
+      }
     }
   ];
 

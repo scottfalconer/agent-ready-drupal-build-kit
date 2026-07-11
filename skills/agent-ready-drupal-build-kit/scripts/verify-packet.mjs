@@ -397,6 +397,28 @@ function hasDeveloperMachinePath(value) {
   );
 }
 
+function isPortableProjectReference(value, { directory = false } = {}) {
+  const text = String(value ?? '').trim();
+  if (!text || text.includes('\0')) return false;
+  if (/^runtime:[a-z0-9._-]+$/i.test(text)) return true;
+  const portable = text.replaceAll('\\', '/');
+  if (
+    isAbsolute(text) ||
+    /^(?:~\/|[a-z]:\/|\/)/i.test(portable) ||
+    /^[a-z][a-z0-9+.-]*:/i.test(portable) ||
+    portable.split('/').includes('..')
+  ) {
+    return false;
+  }
+  return !directory || portable === '.' || !/[\r\n]/.test(portable);
+}
+
+function commandContainsUnsafePath(value) {
+  const text = String(value ?? '');
+  return hasDeveloperMachinePath(text) ||
+    /(?:^|[\s"'=])(?:\/(?!\/)|~\/|\.\.(?:\/|\\)|[a-z]:[\\/])/i.test(text);
+}
+
 async function assemblyEvidenceRecordReasons(packetDir, assemblyEvidence) {
   const reasons = [];
   const evidenceDir = join(packetDir, 'evidence', 'assembly');
@@ -421,12 +443,11 @@ async function assemblyEvidenceRecordReasons(packetDir, assemblyEvidence) {
     entrypointEvidenceValid &&=
       Boolean(String(entrypoint?.name ?? '').trim()) &&
       Boolean(String(entrypoint?.command ?? '').trim()) &&
-      Boolean(String(entrypoint?.workingDirectory ?? '').trim()) &&
+      isPortableProjectReference(entrypoint?.workingDirectory, { directory: true }) &&
       /source.?key|uuid|config.?machine.?name|plugin.?id/i.test(String(entrypoint?.stableIdentityStrategy ?? '')) &&
       entrypoint?.portableDependencies === true &&
       arrayOrEmpty(entrypoint?.absoluteDeveloperPaths).length === 0 &&
-      !hasDeveloperMachinePath(entrypoint?.command) &&
-      !hasDeveloperMachinePath(entrypoint?.workingDirectory) &&
+      !commandContainsUnsafePath(entrypoint?.command) &&
       await allPacketEvidencePresent(packetDir, entrypoint?.evidence, evidenceDir);
   }
   if (!entrypointEvidenceValid) {
@@ -450,7 +471,7 @@ async function assemblyEvidenceRecordReasons(packetDir, assemblyEvidence) {
   if (
     dryRun.status !== 'pass' ||
     !String(dryRun.command ?? '').trim() ||
-    hasDeveloperMachinePath(dryRun.command) ||
+    commandContainsUnsafePath(dryRun.command) ||
     dryRun.mutatedState !== false ||
     dryRun.allOperationClassesReported !== true ||
     !['creates', 'updates', 'deletes', 'unchanged'].every((key) => Array.isArray(dryRunInventory[key])) ||
@@ -592,8 +613,7 @@ async function assemblyEvidenceRecordReasons(packetDir, assemblyEvidence) {
   for (const dependency of dependencies) {
     portabilityValid &&=
       Boolean(String(dependency.name ?? '').trim()) &&
-      Boolean(String(dependency.source ?? '').trim()) &&
-      !hasDeveloperMachinePath(dependency.source) &&
+      isPortableProjectReference(dependency.source) &&
       await allPacketEvidencePresent(packetDir, dependency.evidence, evidenceDir);
   }
   if (!portabilityValid) {
