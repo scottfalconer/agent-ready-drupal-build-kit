@@ -524,7 +524,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       }
     }
     try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 2 });
+      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch (error) {
       errors.push(`Browser profile cleanup failed: ${error.message}`);
     }
@@ -724,7 +724,7 @@ export async function captureBeforeConsentNetwork({
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     }
     try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 2 });
+      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch (error) {
       errors.push(`Browser profile cleanup failed: ${error.message}`);
     }
