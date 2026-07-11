@@ -6,7 +6,10 @@
 - Role:
 - Environment:
 - Environment provisioning (manual, One Line Installer, other):
+- Builder identity:
 - Date:
+
+`Builder identity` names the agent/runtime that produced the build. The operator `Name` and `Reviewer` are human identities and must differ from it.
 
 ## Run Evidence
 
@@ -27,6 +30,8 @@
 - Reviewer:
 
 ## Decision
+
+This is the `G-OPERATOR-01` human acceptance. The builder agent fills the run evidence but leaves these boxes unchecked; only the named human operator records the decision. Until then the verifier caps the run at exit `2`: mechanically verified, awaiting human signoff.
 
 - [ ] Repeatability not reviewed
 - [ ] Repeatability blocked

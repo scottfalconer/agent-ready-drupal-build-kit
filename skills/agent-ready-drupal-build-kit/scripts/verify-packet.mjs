@@ -601,6 +601,12 @@ function validateGateVocabulary(gates, errors) {
     errors.push('gates.json must use schemaVersion public-kit.gates.1.');
   }
 
+  for (const checker of new Set(arrayOrEmpty(gates?.gates).map((gate) => gate?.checkedBy).filter(Boolean))) {
+    if (GATE_CHECKED_BY.has(checker) && !String(gates?.checkedBySemantics?.[checker] ?? '').trim()) {
+      errors.push(`gates.json checkedBySemantics must define what checkedBy ${checker} means.`);
+    }
+  }
+
   const ids = new Set();
   const knownEvidenceFiles = new Set([
     ...arrayOrEmpty(gates?.reviewPacketFiles),
@@ -1993,7 +1999,7 @@ function unresolvedMarkdownUnknown(text) {
   return /:\s*`?UNKNOWN`?\s*$/im.test(text) || /\|\s*UNKNOWN\s*\|/i.test(text);
 }
 
-async function markdownCompletionReadiness(packetDir) {
+async function markdownCompletionReadiness(packetDir, records = {}) {
   const reasons = [];
   const texts = Object.fromEntries(
     await Promise.all(
@@ -2016,6 +2022,7 @@ async function markdownCompletionReadiness(packetDir) {
     'Environment',
     'Environment provisioning (manual, One Line Installer, other)',
     'Date',
+    'Builder identity',
     'DDEV project URL',
     '`ddev drush status`',
     'Config export location',
@@ -2028,13 +2035,20 @@ async function markdownCompletionReadiness(packetDir) {
     'Repeatability accepted',
     'Repeatability accepted with restrictions'
   ].filter((decision) => checkedStatement(operator, decision));
-  if (
-    operatorFields.some((field) => !markdownField(operator, field)) ||
+  const operatorBuilderIdentity = markdownField(operator, 'Builder identity');
+  if (operatorFields.some((field) => !markdownField(operator, field))) {
+    reasons.push('operator-run.md must identify the operator/runtime, name the builder identity, and point to concrete run evidence.');
+  } else if (
     acceptedOperatorDecisions.length !== 1 ||
     !uncheckedStatement(operator, 'Repeatability not reviewed') ||
     !uncheckedStatement(operator, 'Repeatability blocked')
   ) {
-    reasons.push('operator-run.md must identify the operator/runtime, point to concrete run evidence, and record an accepted repeatability decision.');
+    reasons.push('operator-run.md repeatability acceptance is pending a named human operator; the verdict ceiling is mechanically verified, awaiting human signoff.');
+  } else if (
+    identitiesMatch(markdownField(operator, 'Name'), operatorBuilderIdentity) ||
+    identitiesMatch(markdownField(operator, 'Reviewer'), operatorBuilderIdentity)
+  ) {
+    reasons.push('operator-run.md acceptance must come from a named human operator and reviewer distinct from the recorded builder identity.');
   }
 
   const maintainer = texts['maintainer-review.md'];
@@ -2048,14 +2062,20 @@ async function markdownCompletionReadiness(packetDir) {
     'Are the remaining business, legal, integration, production, and launch gaps named?',
     'Would a Drupal maintainer put their name on this as a complete local starting point?'
   ];
+  const maintainerBuilderIdentity = markdownField(maintainer, 'Builder identity');
   if (
-    ['Site', 'Target', 'Reviewer', 'Date'].some((field) => !markdownField(maintainer, field)) ||
+    ['Site', 'Target', 'Reviewer', 'Date', 'Builder identity'].some((field) => !markdownField(maintainer, field)) ||
     maintainerQuestions.some((question) => !checkedStatement(maintainer, question)) ||
-    !checkedStatement(maintainer, 'I would stake my name on this as a complete local Drupal CMS rebuild.') ||
-    !uncheckedStatement(maintainer, 'I would not stake my name on this as a complete local Drupal CMS rebuild.') ||
     !markdownField(maintainer, 'Reasons to accept')
   ) {
-    reasons.push('maintainer-review.md must contain a named, dated positive stake-my-name review with all local-rebuild questions answered.');
+    reasons.push('maintainer-review.md must contain a named, dated review with the builder identity recorded and all local-rebuild questions answered.');
+  } else if (
+    !checkedStatement(maintainer, 'I would stake my name on this as a complete local Drupal CMS rebuild.') ||
+    !uncheckedStatement(maintainer, 'I would not stake my name on this as a complete local Drupal CMS rebuild.')
+  ) {
+    reasons.push('maintainer-review.md stake-my-name acceptance is pending a named human maintainer; the verdict ceiling is mechanically verified, awaiting human signoff.');
+  } else if (identitiesMatch(markdownField(maintainer, 'Reviewer'), maintainerBuilderIdentity)) {
+    reasons.push('maintainer-review.md acceptance must be recorded by a named human maintainer distinct from the recorded builder identity.');
   }
 
   const recipe = texts['recipe-start-point.md'];
@@ -2101,6 +2121,23 @@ async function markdownCompletionReadiness(packetDir) {
   }
 
   const offRoad = texts['off-road-inventory.md'];
+  const builderAcceptedDeviationSources = [];
+  if (/^\|\s*OR-[^\n]+\|\s*$/im.test(offRoad)) {
+    builderAcceptedDeviationSources.push('off-road-inventory.md OR- exception rows');
+  }
+  if (arrayOrEmpty(records.blindAdversarialReview?.productDefects).some((defect) => defect?.status === 'accepted_out_of_scope')) {
+    builderAcceptedDeviationSources.push('blind-adversarial-review.json accepted_out_of_scope defects');
+  }
+  if (arrayOrEmpty(records.blindAdversarialReview?.routeCoverage?.omittedPrimaryRoutes)
+    .some((route) => route?.disposition === 'accepted_out_of_scope')) {
+    builderAcceptedDeviationSources.push('blind-adversarial-review.json accepted primary-route omissions');
+  }
+  if (hasMeaningfulEntry(records.parityReport?.addressableSurface?.exclusions)) {
+    builderAcceptedDeviationSources.push('parity-report.json addressable-surface exclusions');
+  }
+  if (noOpenDecisions && builderAcceptedDeviationSources.length > 0) {
+    reasons.push(`open-decisions.md cannot declare "Decisions still open: None" while ${builderAcceptedDeviationSources.join(', ')} record accepted deviations awaiting human ratification.`);
+  }
   if (
     ['Site', 'Checked at', 'Reviewer'].some((field) => !markdownField(offRoad, field)) ||
     !/^\s*-\s*Overall status:\s*`?accepted`?\s*$/mi.test(offRoad) ||
@@ -2174,7 +2211,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
 
-  reasons.push(...await markdownCompletionReadiness(packetDir));
+  reasons.push(...await markdownCompletionReadiness(packetDir, records));
 
   const {
     blindAdversarialReview,
@@ -2548,6 +2585,12 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const publicRouteChecks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
+  if (publicRouteChecks.some((check) =>
+    check?.visualComparison?.method === 'human_review' &&
+    !String(check?.visualComparison?.reviewer ?? '').trim()
+  )) {
+    reasons.push('browser-evidence.json visualComparison method human_review requires a named human reviewer; record agent_review for agent-performed structural comparison.');
+  }
   let browserScreenshotsCredible = true;
   const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
   for (const check of publicRouteChecks) {
@@ -2739,6 +2782,23 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   return { packetCompletionReady: reasons.length === 0, reasons };
 }
 
+// Independence declarations live in builder-writable packet JSON, so the strongest
+// honest machine label is self-attested; subagent independence is allowed, not proven.
+function independenceAttestation(actor) {
+  if (!isJsonObject(actor) || !String(actor.nameOrRole ?? '').trim()) {
+    return 'not-declared';
+  }
+  if (
+    String(actor.independenceDegradedReason ?? '').trim() ||
+    actor.freshContextUsed !== true ||
+    actor.sameContextAsBuilder !== false ||
+    actor.builderSummaryExcluded !== true
+  ) {
+    return 'degraded';
+  }
+  return 'self-attested';
+}
+
 function sharedPacketDir(packetDir) {
   return basename(resolve(packetDir));
 }
@@ -2814,6 +2874,10 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
+      independence: {
+        independentVerification: independenceAttestation(independentVerification?.verifier),
+        blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
+      },
       packetCompletionReady: completionReadiness.packetCompletionReady,
       packetCompletionBlockedReasons: completionReadiness.reasons,
       packetSupportsCompletion:

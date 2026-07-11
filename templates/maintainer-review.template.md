@@ -5,7 +5,10 @@
 - Site:
 - Target:
 - Reviewer:
+- Builder identity:
 - Date:
+
+`Builder identity` names the agent/runtime that produced the build. `Reviewer` names the human maintainer recording acceptance; it must differ from the builder identity.
 
 ## Architecture Review
 
@@ -80,6 +83,8 @@ Answer these questions exactly. `gates.json` is the machine-readable gate vocabu
 - [ ] Would a Drupal maintainer put their name on this as a complete local starting point?
 
 ## Binary Verdict
+
+This is the `G-MAINTAINER-01` human acceptance. The builder agent fills the evidence and checklist sections but leaves both boxes unchecked; only a named human maintainer distinct from the builder identity checks one. Until then the verifier caps the run at exit `2`: mechanically verified, awaiting human signoff.
 
 Choose exactly one:
 

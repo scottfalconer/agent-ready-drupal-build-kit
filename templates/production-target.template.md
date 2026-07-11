@@ -24,6 +24,8 @@
 
 ## Boundary
 
+This is a `checkedBy: human` gate record: the builder agent fills the evidence fields, but only a named human distinct from the builder identity accepts the target.
+
 Disposable lab evidence is not production target evidence.
 
 Local DDEV evidence can support a local review build. It is not production target evidence unless the project explicitly defines that DDEV environment as the accepted target for the current review phase.

@@ -1,5 +1,11 @@
 {
   "schemaVersion": "public-kit.gates.1",
+  "checkedBySemantics": {
+    "human": "The builder agent fills the evidence fields but leaves acceptance pending. Only a named human whose identity differs from the recorded builder identity may record acceptance; until that happens the default verifier caps the run at exit 2: mechanically verified, awaiting human signoff.",
+    "verify-script": "The installed verifier scripts evaluate this gate mechanically from packet and live-target evidence.",
+    "verifier": "A fresh independent verifier context records this gate's evidence and the packet verifier checks it mechanically; its independence declarations are builder-writable and reported as self-attested.",
+    "blind-verifier": "A blind reviewer context that did not build the target records this gate's evidence from the brief, target, and source-of-truth materials only; its independence declarations are builder-writable and reported as self-attested."
+  },
   "reviewPacketFiles": [
     "source-audit.json",
     "pattern-map.json",

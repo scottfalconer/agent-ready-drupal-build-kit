@@ -213,9 +213,9 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 
 ### Phase 5: Stake-My-Name Self-Eval
 
-- Complete `review-packet/maintainer-review.md`.
-- Answer the canonical signoff verdict.
+- Fill the evidence, checklist, and rationale sections of `review-packet/maintainer-review.md`, including the builder identity, and answer the canonical signoff questions as self-eval.
 - If any answer is no, say the result is useful but not something to stand behind yet.
+- Leave the binary stake-my-name acceptance pending. Gates marked `checkedBy: human` in `gates.json` (operator run, open decisions, production target, launch checklist, maintainer review) follow one rule: the agent fills evidence; only a named human whose identity differs from the builder identity records acceptance. Agent-authored acceptance caps the verifier at exit `2`: mechanically verified, awaiting human signoff.
 
 ### Phase 6: Independent Verification
 
@@ -289,7 +289,7 @@ After independent verification, run the installed skill's default target-local v
 node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
 ```
 
-This command binds the packet to the identified live target and the current DDEV runtime by target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status. It independently requires real Git-tracked YAML in that current sync directory; fetches all primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; and inspects each fetched primary route's actual rendered canonical, meta description, and `og:image` against browser evidence. It then writes `review-packet/evidence/live-verification.json`. It exits zero only when all required Drupal readback, authenticated editor/browser, independent-verification, and blind-review evidence authorizes local completion. Packet-only values and injected test runtimes cannot grant that authority. Exit `2` means the packet/live checks are valid but completion is still blocked; exit `1` means packet or live-target validation failed.
+This command binds the packet to the identified live target and the current DDEV runtime by target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status. It independently requires real Git-tracked YAML in that current sync directory; fetches all primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; and inspects each fetched primary route's actual rendered canonical, meta description, and `og:image` against browser evidence. It then writes `review-packet/evidence/live-verification.json`. It exits zero only when all required Drupal readback, authenticated editor/browser, independent-verification, and blind-review evidence authorizes local completion. Packet-only values and injected test runtimes cannot grant that authority. Exit `2` means the packet/live checks are valid but completion is still blocked — the ceiling for an agent-only run is mechanically verified, awaiting human signoff; exit `1` means packet or live-target validation failed. Independence declarations in the packet are builder-writable and are reported as self-attested, not proven.
 
 Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
@@ -324,7 +324,7 @@ Stop only when the local Drupal CMS site has reviewable content, media, visual d
 
 Claims about what a visitor sees or what an editor can do require browser evidence. The tool is not prescribed. The evidence is prescribed.
 
-Use any available real browser method: an automated browser runner, browser DevTools protocol, Selenium-style driver, local browser with screenshots, or another tool that renders CSS, JavaScript, fonts, media, redirects, and authenticated Drupal pages as a user would see them. Do not prescribe one tool. Do record the tool or method used.
+Use any available real browser method: an automated browser runner, browser DevTools protocol, Selenium-style driver, local browser with screenshots, or another tool that renders CSS, JavaScript, fonts, media, redirects, and authenticated Drupal pages as a user would see them. Do not prescribe one tool. Do record the tool or method used, and label the visual comparison honestly: agent-performed structural comparison is `agent_review`; `human_review` requires the named human reviewer in the record.
 
 Do not claim visual parity, functional parity, homepage parity, source-like behavior, or editor experience from curl, HTTP status, Drush, config export, Drupal readback, DOM snapshots without rendered layout, target-only screenshots, or prose review alone.
 
@@ -647,6 +647,8 @@ Create `review-packet/open-decisions.md` at final handoff. This is the short lis
 This is not a permission slip to stop early. Before adding a decision here, ask whether the agent can resolve it with more build work, browser checks, Drupal readback, packet updates, route cleanup, imports, theme work, or editor-form fixes. If yes, fix it or record it as an implementation gap in `scoped-gap-list.md`, not as a human decision.
 
 Valid human-only decisions include production target selection, credentials and provider accounts, legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope items. Every `accepted_out_of_scope` item needs a named accepter, specific reason, and evidence. External blockers are not accepted completion; they keep the result blocked.
+
+Builder-accepted consequential calls are ratification decisions, not resolved history. When `off-road-inventory.md` contains `OR-` rows or the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, list them here as decisions awaiting human ratification; the verifier rejects a `Decisions still open: None` declaration while such records exist.
 
 Use the four-layer truth model:
 

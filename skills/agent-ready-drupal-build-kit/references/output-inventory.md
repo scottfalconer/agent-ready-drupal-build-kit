@@ -37,6 +37,10 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 - `live-verification.json` from the default live-target-and-packet run.
 - `packet-verification.json` from an explicit packet-only lint run.
 
+## Gate Checker Semantics
+
+`gates.json` `checkedBySemantics` is the machine-readable definition of each `checkedBy` value. For `checkedBy: human` gates (`G-OPERATOR-01`, `G-TARGET-01`, `G-HANDOFF-01`, `G-LAUNCH-01`, `G-MAINTAINER-01`) the rule is: the builder agent fills the evidence fields but leaves acceptance pending; only a named human whose identity differs from the recorded builder identity records acceptance. While a human acceptance is pending or self-signed by the builder, the default verifier caps the run at exit `2` — mechanically verified, awaiting human signoff — and never grants full completion. `verify-script`, `verifier`, and `blind-verifier` gates are evaluated mechanically; their independence declarations are builder-writable booleans, so the verifier reports them as `self-attested` (subagent independence is allowed, labeled, and not proven).
+
 ## Gate Acceptance Criteria
 
 `gates.json` declares whether each gate blocks local handoff or launch. These grouped criteria explain what the gate IDs mean; they do not create unnamed gates:
@@ -58,7 +62,7 @@ Generated files can identify a gate or record a blocked stub. They cannot clear 
 
 The installed skill's `scripts/verify.mjs` is the default target-local verifier. It binds the packet to the detected DDEV runtime by target origin, matching Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status; independently requires real Git-tracked YAML in that current sync directory; fetches primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; checks each fetched primary route's rendered canonical, meta description, and `og:image`; runs semantic packet-readiness checks; and writes `review-packet/evidence/live-verification.json`. Its success does not replace authenticated editor/browser evidence, independent verification, or blind review.
 
-Completion readiness also fails closed when a required packet file is still byte-identical to its template, JSON contains unresolved enum sentinels, critical parity/browser/readback/route acceptance markers are open, passing completion claims lack non-empty packet-local verifier evidence, a blind `accepted_out_of_scope` record lacks named acceptance/reason/evidence, or an external blocker remains. An external blocker cannot stand in for primary-route coverage.
+Completion readiness also fails closed when a required packet file is still byte-identical to its template, JSON contains unresolved enum sentinels, critical parity/browser/readback/route acceptance markers are open, passing completion claims lack non-empty packet-local verifier evidence, a blind `accepted_out_of_scope` record lacks named acceptance/reason/evidence, or an external blocker remains. An external blocker cannot stand in for primary-route coverage. It also fails closed when a human-gate acceptance is pending or self-signed by the recorded builder identity, when a `human_review` visual comparison lacks a named human reviewer (agent-performed structural comparison must be labeled `agent_review`), or when `open-decisions.md` declares `Decisions still open: None` while off-road `OR-` rows or accepted parity/blind deviation records still await human ratification.
 
 Independent claim evidence must be JSON with `schemaVersion: public-kit.independent-claim-evidence.1`. Each claim entry binds `claimId`, `gate`, `targetBaseUrl`, and `checkedAt` to concrete checks containing `name`, `method`, `result: pass`, and `observation`. A single evidence manifest may cover multiple claims through a `claims` array; a generic status-only file cannot clear them.
 
@@ -66,6 +70,6 @@ The verifier also parses the key local-rebuild handoff records rather than trust
 
 `scripts/verify-packet.mjs` and `verify.mjs --packet-only` are structural lint only. Packet-only data and injected test runtimes cannot authorize a complete rebuild claim.
 
-The default `verify.mjs` exits zero only when it authorizes completion, exits `2` when checks are valid but required evidence is incomplete, and exits `1` when packet or live-target validation fails.
+The default `verify.mjs` exits zero only when it authorizes completion, including human-recorded gate acceptance. It exits `2` when checks are valid but required evidence or human acceptance is incomplete — the report `verdict` is then `mechanically-verified-awaiting-human-signoff`, the ceiling for an agent-only run — and exits `1` when packet or live-target validation fails.
 
 It fetches only the detected DDEV origin. Any explicit `--target-url URL` must match that origin, and cross-origin redirects are rejected before the redirected URL is requested. The verdict is complete-local-rebuild evidence, not production or launch approval.

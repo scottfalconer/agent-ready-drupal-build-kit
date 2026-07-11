@@ -1,6 +1,6 @@
 # Launch Checklist
 
-Launch readiness requires accepted evidence for every launch-blocking gate in `gates.json`. Use this checklist as a human tracker, not as a second source of truth.
+Launch readiness requires accepted evidence for every launch-blocking gate in `gates.json`. Use this checklist as a human tracker, not as a second source of truth. This is a `checkedBy: human` gate record: the builder agent may link evidence, but only a named human distinct from the builder identity clears items.
 
 - [ ] `G-OPERATOR-01`: independent operator run accepted.
 - [ ] `G-TARGET-01`: production-equivalent Drupal target verified.
