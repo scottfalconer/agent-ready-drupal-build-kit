@@ -22,6 +22,19 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+const completionClaimGateIds = {
+  content: 'G-CONTENT-01',
+  media: 'G-PARITY-01',
+  visual: 'G-BROWSER-02',
+  behavior: 'G-PARITY-01',
+  editor: 'G-EDITOR-01',
+  route: 'G-ROUTE-01',
+  seo: 'G-SEO-01',
+  accessibility: 'G-BROWSER-01',
+  security_privacy: 'G-VERIFY-01',
+  architecture: 'G-COMPOSITION-02',
+  packet: 'G-VERIFY-01'
+};
 
 function templateName(packetFile) {
   const parsed = parse(packetFile);
@@ -283,6 +296,12 @@ function liveRouteMatrix(baseUrl) {
 
 function injectedDrupalRuntime(baseUrl, overrides = {}) {
   return {
+    architectureInventory: {
+      confirmed: true,
+      configNames: ['node.type.page', 'field.storage.node.body', 'views.view.content'],
+      customModules: [],
+      reason: ''
+    },
     baseUrl,
     confirmed: true,
     configStatusClean: true,
@@ -649,6 +668,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claimId: `${gate}-checked`,
     claim: `The ${gate} completion evidence was independently checked.`,
     gate,
+    gateId: completionClaimGateIds[gate],
     builderEvidence: [],
     falsificationChecks: [`Attempted to falsify the ${gate} evidence against the target and packet.`],
     verifierEvidence: ['claim-evidence.json'],
@@ -667,12 +687,13 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   const independentEvidenceDir = join(packetDir, 'evidence', 'independent-verification');
   mkdirSync(independentEvidenceDir, { recursive: true });
   writeJson(join(independentEvidenceDir, 'claim-evidence.json'), {
-    schemaVersion: 'public-kit.independent-claim-evidence.1',
+    schemaVersion: 'public-kit.independent-claim-evidence.2',
     targetBaseUrl,
     checkedAt: testCheckedAt,
     claims: independent.completionClaims.map((claim) => ({
       claimId: claim.claimId,
       gate: claim.gate,
+      gateId: claim.gateId,
       checks: [
         {
           name: `${claim.gate} falsification`,
@@ -1458,6 +1479,15 @@ if (args[0] !== 'drush') {
   process.exit(1);
 }
 const command = args.slice(1).join(' ');
+if (args[1] === 'php:eval') {
+  process.stdout.write(JSON.stringify({
+    schemaVersion: 'public-kit.architecture-runtime.1',
+    confirmed: true,
+    configNames: ['node.type.page', 'field.storage.node.body', 'views.view.content'],
+    customModules: []
+  }) + '\\n');
+  process.exit(0);
+}
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
   ['status --field=root', 'web'],
@@ -2260,10 +2290,12 @@ intent_records: []
   assert.match(emptyReasons, /durable-intent\.yml cannot leave intent_records empty/);
   assert.match(emptyReasons, /maintainer-review\.md cannot claim load-bearing decisions are captured/);
 
+  writeFileSync(join(packetDir, 'evidence', 'empty-intent-acceptance.txt'), 'Fixture Maintainer accepted the empty intent disposition.\n');
   writeFileSync(join(packetDir, 'durable-intent.yml'), `${emptyIntent}empty_justification:
   rationale: "The declared Page bundle ships unmodified from the installed Starter."
-  asserted_by: "Fixture Maintainer"
+  accepted_by: "Fixture Maintainer"
   last_reviewed: "2026-07-09"
+  acceptance_evidence: "empty-intent-acceptance.txt"
 `);
   const justifiedReport = await validatePacket({ packetDir });
   const justifiedReasons = justifiedReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
@@ -2271,10 +2303,28 @@ intent_records: []
   assert.match(justifiedReasons, /maintainer-review\.md cannot claim load-bearing decisions are captured/);
   assert.equal(justifiedReport.completionEvidence.packetSupportsCompletion, false);
 
+  writeFileSync(
+    join(packetDir, 'durable-intent.yml'),
+    readFileSync(join(packetDir, 'durable-intent.yml'), 'utf8').replace('accepted_by: "Fixture Maintainer"', 'accepted_by: "fixture-builder-agent"')
+  );
+  const selfAcceptedReport = await validatePacket({ packetDir });
+  assert.match(
+    selfAcceptedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted_by distinct from the builder/i
+  );
+
   writeFileSync(join(packetDir, 'durable-intent.yml'), emptyIntent);
   mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
     value.contentTypes = [];
     value.views = [];
+  });
+  mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+    value.content.contentTypes = [];
+    value.content.fieldStorage = [];
+    value.content.formDisplays = [];
+    value.content.viewDisplays = [];
+    value.views = [];
+    value.workflows = [];
   });
   const undeclaredReport = await validatePacket({ packetDir });
   const undeclaredReasons = undeclaredReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
@@ -2350,7 +2400,7 @@ test('independent completion claims require target-bound concrete check evidence
 
   assert.equal(report.valid, false);
   assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
-  assert.match(report.errors.join('\n'), /bound to its claimId, gate, target, checkedAt time, and concrete passing checks/);
+  assert.match(report.errors.join('\n'), /bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks/);
 });
 
 test('blind completion evidence fails closed on missing declarations, all-N/A checks, and copied captures', async () => {
@@ -3072,6 +3122,11 @@ test('packet reports emit machine-readable per-gate results for the full gate vo
   for (const gate of report.gateResults) {
     assert.ok(['pass', 'fail', 'human_review', 'not_evaluated'].includes(gate.status), gate.gateId);
     assert.ok(Array.isArray(gate.errors), gate.gateId);
+    assert.equal(typeof gate.evaluator, 'string', gate.gateId);
+    assert.equal(typeof gate.evaluatorRan, 'boolean', gate.gateId);
+    if (gate.status === 'pass') {
+      assert.equal(gate.evaluatorRan, true, `${gate.gateId} passed without running its evaluator`);
+    }
     assert.equal(gate.status === 'fail', gate.errors.length > 0, gate.gateId);
     for (const error of gate.errors) {
       assert.ok(knownFindings.has(error), `${gate.gateId} attributed an unknown finding: ${error}`);
@@ -3089,6 +3144,10 @@ test('packet reports emit machine-readable per-gate results for the full gate vo
   const handoffGate = report.gateResults.find((gate) => gate.gateId === 'G-HANDOFF-01');
   assert.equal(handoffGate.status, 'fail');
   assert.match(handoffGate.errors.join('\n'), /scoped-gap-list\.md/);
+
+  const noEvaluators = perGateResults(gates, [], { evaluatedGateIds: [] });
+  assert.equal(noEvaluators.some((gate) => gate.status === 'pass'), false);
+  assert.equal(noEvaluators.find((gate) => gate.gateId === 'G-VERIFY-02').evaluatorRan, false);
 });
 
 test('every packet and generated evidence file has a gate attribution home derived from gates.json', () => {
@@ -3176,6 +3235,8 @@ test('live reports attribute unassigned live errors to the live-verifier gate an
   assert.equal(report.valid, false);
   const liveVerifierGate = report.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02');
   assert.equal(liveVerifierGate.status, 'fail');
+  assert.equal(liveVerifierGate.evaluatorRan, true);
+  assert.equal(liveVerifierGate.evaluator, 'liveVerification');
   assert.match(liveVerifierGate.errors.join('\n'), /No live target URL found/);
   assert.ok(report.gateResults.some((gate) => gate.status === 'fail'));
   const attributedFindings = new Set(report.gateResults.flatMap((gate) => gate.errors));
@@ -3185,5 +3246,154 @@ test('live reports attribute unassigned live errors to the live-verifier gate an
   assert.equal(
     report.packetVerification.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02').status,
     'not_evaluated'
+  );
+});
+
+test('strict structured contracts reject unknown gates, invalid enums, contradictions, and unreconciled counts', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'strict-structured-contracts-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'unknown-gate-id',
+      file: 'independent-verification.json',
+      expected: /gateId must name a gate from gates\.json|unknown gate id/i,
+      mutate(value) { value.completionClaims[0].gateId = 'G-MADEUP-99'; }
+    },
+    {
+      name: 'unknown-nested-artifact-gate-id',
+      file: 'parity-report.json',
+      expected: /names unknown gate id "G-MADEUP-98"/i,
+      mutate(value) { value.routeChecks[0].gateId = 'G-MADEUP-98'; }
+    },
+    {
+      name: 'invalid-independent-status',
+      file: 'independent-verification.json',
+      expected: /completionClaims\[0\]\.status has invalid value "green"/i,
+      mutate(value) { value.completionClaims[0].status = 'green'; }
+    },
+    {
+      name: 'invalid-browser-status',
+      file: 'browser-evidence.json',
+      expected: /visualComparison.*invalid value "done"/i,
+      mutate(value) { value.publicRouteChecks[0].visualComparison.status = 'done'; }
+    },
+    {
+      name: 'parity-pass-with-blocked-child',
+      file: 'parity-report.json',
+      expected: /verdict pass contradicts.*child record/i,
+      mutate(value) {
+        value.functionalChecks = [{ route: '/', sourceExpectation: 'Works', targetObservation: 'Blocked', status: 'blocked', evidence: 'blocked.json' }];
+      }
+    },
+    {
+      name: 'blind-pass-with-blocked-child',
+      file: 'blind-adversarial-review.json',
+      expected: /passing summary contradicts.*child/i,
+      mutate(value) { value.routeViewportReviews[0].verdict = 'blocked'; }
+    },
+    {
+      name: 'reviewed-pattern-with-open-owner',
+      file: 'pattern-map.json',
+      expected: /reviewStatus reviewed contradicts/i,
+      mutate(value) { value.buildTypeDeclaration.accepted = false; }
+    },
+    {
+      name: 'accepted-primary-with-404',
+      file: 'route-matrix.json',
+      expected: /primaryRoutes\[0\] acceptance contradicts/i,
+      mutate(value) { value.routes[0].targetStatus = 404; }
+    },
+    {
+      name: 'complete-readback-with-drift',
+      file: 'drupal-readback.json',
+      expected: /readbackComplete true contradicts/i,
+      mutate(value) { value.drupal.configStatusClean = false; }
+    },
+    {
+      name: 'unreconciled-parity-count',
+      file: 'parity-report.json',
+      expected: /routesExcluded must equal exclusions\.length/i,
+      mutate(value) { value.addressableSurface.routesExcluded = 1; }
+    },
+    {
+      name: 'unreconciled-source-count',
+      file: 'source-audit.json',
+      expected: /routeInventorySummary counts do not reconcile/i,
+      mutate(value) { value.routeInventorySummary.failedRoutes = 1; }
+    },
+    {
+      name: 'passing-composition-owner-mismatch',
+      file: 'independent-verification.json',
+      expected: /pass contradicts ownership or deviation facts/i,
+      mutate(value) { value.compositionModelFidelityChecks[0].actualCompositionOwner = 'canvas_page'; }
+    }
+  ];
+
+  for (const fixture of cases) {
+    const packetDir = join(temp, fixture.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, fixture.file), fixture.mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.valid, false, fixture.name);
+    assert.match(report.errors.join('\n'), fixture.expected, fixture.name);
+  }
+
+  const invalidIntentPacket = join(temp, 'invalid-intent-status');
+  cpSync(canonicalPacket, invalidIntentPacket, { recursive: true });
+  const invalidIntent = readFileSync(join(invalidIntentPacket, 'durable-intent.yml'), 'utf8')
+    .replace('status: "hash-valid"', 'status: "magical"');
+  writeFileSync(join(invalidIntentPacket, 'durable-intent.yml'), invalidIntent);
+  const invalidIntentReport = await validatePacket({ packetDir: invalidIntentPacket });
+  assert.equal(invalidIntentReport.valid, false);
+  assert.match(invalidIntentReport.errors.join('\n'), /invalid durable intent status magical/i);
+});
+
+test('live architecture independently blocks unjustified empty durable intent and allows a truly empty runtime', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-empty-intent-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1\nsite: "${baseUrl}"\nintent_records: []\n`);
+
+      let report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.errors.join('\n'), /empty while live Drupal architecture contains/i);
+
+      mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+        value.contentTypes = [];
+        value.views = [];
+      });
+      mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+        value.content.contentTypes = [];
+        value.content.fieldStorage = [];
+        value.content.formDisplays = [];
+        value.content.viewDisplays = [];
+        value.views = [];
+        value.workflows = [];
+      });
+      report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          architectureInventory: { confirmed: true, configNames: [], customModules: [], reason: '' }
+        })
+      });
+      assert.equal(report.liveTargetValid, true, report.errors.join('\n'));
+    }
   );
 });

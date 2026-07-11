@@ -41,17 +41,18 @@ Builders compute hashes after config export. Verifiers recompute them before tru
 
 ## Empty Intent Rule
 
-An empty `intent_records: []` list is honest only when there was nothing load-bearing to record. The packet verifier accepts it only when `pattern-map.json` declares no content types or Views and no off-road exceptions are recorded, or when the file carries a structured disposition:
+An empty `intent_records: []` list is honest only when there was nothing load-bearing to record. The verifier accepts it only when live/readback evidence, `pattern-map.json`, and the off-road inventory show no content model, View, workflow, display, custom-module, or off-road architecture, or when the file carries a structured named disposition:
 
 ```yaml
 intent_records: []
 empty_justification:
   rationale: "Why no intent records apply to this run."
-  asserted_by: "Named owner"
+  accepted_by: "Named owner"
   last_reviewed: "2026-07-01"
+  acceptance_evidence: "evidence/empty-intent-acceptance.md"
 ```
 
-While the pattern map declares content types or Views, an empty intent file also vetoes the maintainer-review "load-bearing decisions captured" checkbox: record real intent before claiming the decisions are captured.
+The named accepter must be distinct from the recorded builder, and the evidence reference must resolve to a non-empty packet-local file. An empty intent file also vetoes contradictory maintainer claims that load-bearing decisions were captured.
 
 ## Stale Intent Rule
 

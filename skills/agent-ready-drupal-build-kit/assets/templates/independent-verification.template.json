@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "public-kit.independent-verification.1",
+  "schemaVersion": "public-kit.independent-verification.2",
   "site": "",
   "checkedAt": "",
   "verifier": {
@@ -32,10 +32,11 @@
     "review-packet/maintainer-review.md"
   ],
   "verifierEvidenceContract": {
-    "schemaVersion": "public-kit.independent-claim-evidence.1",
+    "schemaVersion": "public-kit.independent-claim-evidence.2",
     "requiredBindingFields": [
       "claimId",
       "gate",
+      "gateId",
       "targetBaseUrl",
       "checkedAt"
     ],
@@ -52,6 +53,7 @@
       "claimId": "",
       "claim": "",
       "gate": "content | media | visual | behavior | editor | route | seo | accessibility | security_privacy | architecture | packet",
+      "gateId": "",
       "builderEvidence": [],
       "falsificationChecks": [],
       "verifierEvidence": [],

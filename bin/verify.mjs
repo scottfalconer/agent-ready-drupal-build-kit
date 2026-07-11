@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   attributeFindingsToGates,
   LIVE_RESIDUAL_GATE_ID,
+  MACHINE_GATE_EVALUATORS,
   readGateVocabulary,
   validatePacket
 } from './verify-packet.mjs';
@@ -524,11 +525,41 @@ function configStatusIsClean(result) {
   }
 }
 
+function inspectArchitectureInventory(projectRoot, environment) {
+  const php = String.raw`$storage = \Drupal::service('config.storage');
+$prefixes = ['node.type.', 'field.storage.', 'field.field.', 'core.entity_form_display.', 'core.entity_view_display.', 'views.view.', 'workflows.workflow.'];
+$config_names = array_values(array_filter($storage->listAll(), static function ($name) use ($prefixes) { foreach ($prefixes as $prefix) { if (str_starts_with($name, $prefix)) { return TRUE; } } return FALSE; }));
+$custom_modules = [];
+foreach (\Drupal::service('extension.list.module')->getList() as $name => $extension) { if (preg_match('#(?:^|/)modules/custom/#', '/' . $extension->getPath() . '/')) { $custom_modules[] = $name; } }
+print json_encode(['schemaVersion' => 'public-kit.architecture-runtime.1', 'confirmed' => TRUE, 'configNames' => $config_names, 'customModules' => $custom_modules], JSON_UNESCAPED_SLASHES);`;
+  const result = runDrushResult(projectRoot, environment, ['php:eval', php]);
+  if (!result.ok) {
+    return { confirmed: false, configNames: [], customModules: [], reason: 'Drupal architecture could not be inspected through Drush.' };
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    return {
+      confirmed: parsed.confirmed === true,
+      configNames: Array.isArray(parsed.configNames) ? parsed.configNames : [],
+      customModules: Array.isArray(parsed.customModules) ? parsed.customModules : [],
+      reason: ''
+    };
+  } catch {
+    return { confirmed: false, configNames: [], customModules: [], reason: 'Drupal architecture inspection returned invalid JSON.' };
+  }
+}
+
 function inspectDrupalRuntime(cwd, environment) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
       baseUrl: '',
+      architectureInventory: {
+        confirmed: false,
+        configNames: [],
+        customModules: [],
+        reason: 'Current working directory is not inside a DDEV Drupal project.'
+      },
       confirmed: false,
       configStatusClean: false,
       configSyncTracked: false,
@@ -553,11 +584,13 @@ function inspectDrupalRuntime(cwd, environment) {
   const drupalRoot = cleanScalar(runDrush(projectRoot, environment, ['status', '--field=root']));
   const configStatus = runDrushResult(projectRoot, environment, ['config:status', '--format=json']);
   const trackedConfig = trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot);
+  const architectureInventory = inspectArchitectureInventory(projectRoot, environment);
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot);
   return {
     baseUrl,
+    architectureInventory,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
     configSyncTracked: trackedConfig.confirmed,
@@ -611,13 +644,15 @@ function liveGateResults(packetGateResults, gates, liveFindingMessages, liveTarg
     const additional = (liveFindings.get(result.gateId) ?? []).filter((error) => !result.errors.includes(error));
     const errors = [...result.errors, ...additional];
     if (result.gateId !== 'G-VERIFY-02') {
-      return { gateId: result.gateId, status: errors.length > 0 ? 'fail' : result.status, errors };
+      return { ...result, status: errors.length > 0 ? 'fail' : result.status, errors };
     }
     if (!liveTargetValid && errors.length === 0) {
       errors.push('Live target identity or route verification failed.');
     }
     return {
       gateId: result.gateId,
+      evaluator: MACHINE_GATE_EVALUATORS?.[result.gateId] ?? 'liveVerification',
+      evaluatorRan: true,
       status: liveTargetValid && errors.length === 0 ? 'pass' : 'fail',
       errors
     };
@@ -1010,6 +1045,7 @@ export async function verifyLive({
   let parityReport = null;
   let patternMap = null;
   let sourceAudit = null;
+  let durableIntentText = '';
   try {
     independentVerification = JSON.parse(
       await readFile(join(absolutePacketDir, 'independent-verification.json'), 'utf8')
@@ -1037,6 +1073,11 @@ export async function verifyLive({
     );
   } catch {
     // Packet validation already records malformed or missing required JSON.
+  }
+  try {
+    durableIntentText = await readFile(join(absolutePacketDir, 'durable-intent.yml'), 'utf8');
+  } catch {
+    // Packet validation already records the missing required artifact.
   }
   const liveErrors = routeMatrixError ? [routeMatrixError] : [];
   const declaredSource = String(routeMatrix.sourceBaseUrl ?? '').trim();
@@ -1148,6 +1189,28 @@ export async function verifyLive({
       );
     } catch (error) {
       liveErrors.push(error.message);
+    }
+  }
+
+  const emptyIntent = /^\s*intent_records:\s*\[\s*\]\s*$/m.test(durableIntentText);
+  const acceptedEmptyIntent = /^empty_justification:[ \t]*\n(?:(?:[ \t]+[^\n]*\n?)+)/m.test(durableIntentText) &&
+    ['rationale', 'accepted_by', 'last_reviewed', 'acceptance_evidence'].every((field) =>
+      new RegExp(`^\\s*${field}:\\s*["']?\\S.+?["']?\\s*$`, 'm').test(durableIntentText)
+    );
+  const architectureInventory = inspectedDrupalRuntime.architectureInventory ?? {
+    confirmed: runtimeWasInjected,
+    configNames: [],
+    customModules: [],
+    reason: runtimeWasInjected ? '' : 'Drupal architecture inventory is unavailable.'
+  };
+  if (emptyIntent && !acceptedEmptyIntent) {
+    if (architectureInventory.confirmed !== true) {
+      liveErrors.push('Empty durable intent cannot be accepted because live Drupal architecture inspection did not run.');
+    } else if (
+      (Array.isArray(architectureInventory.configNames) ? architectureInventory.configNames : []).length > 0 ||
+      (Array.isArray(architectureInventory.customModules) ? architectureInventory.customModules : []).length > 0
+    ) {
+      liveErrors.push('durable-intent.yml is empty while live Drupal architecture contains content-model, View, workflow, display, or custom-module decisions.');
     }
   }
 

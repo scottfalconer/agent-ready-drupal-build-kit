@@ -56,6 +56,17 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const PASS_FAIL_BLOCKED = new Set(['pass', 'fail', 'blocked']);
+const PASS_FAIL_BLOCKED_NA = new Set(['pass', 'fail', 'blocked', 'not_applicable']);
+const BROWSER_STATUSES = new Set(['pass', 'needs-review', 'fail', 'blocked']);
+const BLIND_VERDICTS = new Set(['good', 'good_enough', 'acceptable_with_issues', 'not_good_enough', 'blocked']);
+const COMPLETION_STATES = new Set(['mechanically_verified', 'parity_reviewed', 'human_accepted', 'complete', 'blocked']);
+const PARITY_VERDICTS = new Set(['blocked', 'partial', 'pass']);
+const PATTERN_REVIEW_STATUSES = new Set(['draft', 'reviewed', 'needs-revision']);
+const ROUTE_CLASSIFICATIONS = new Set(['canonical', 'duplicate_alias', 'legacy', 'test_staging', 'private_boundary', 'unknown']);
+const ROUTE_DISPOSITIONS = new Set(['keep', 'redirect', 'unpublished_import', 'intentionally_drop', 'owner_decision_required', 'blocked']);
+const PUBLIC_BEHAVIORS = new Set(['public_200', 'redirect', 'private_403', 'noindex', 'blocked']);
+const COUNT_DISPOSITIONS = new Set(['none', 'item_blocked', 'owner_approved_exclusion', 'private_unreachable', 'implementation_gap', 'unknown']);
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -242,28 +253,29 @@ export function attributeFindingsToGates(messages, gates, { residualGateId } = {
 }
 
 // Per-gate results are diagnostic triage output: fail means findings were attributed to
-// the gate, pass means the machine checks recorded no findings for it in this run,
+// the gate, pass means its named evaluator ran and recorded no findings in this run,
 // human_review marks gates a machine can never pass, and not_evaluated marks the live
 // verifier gate in packet-only scope. Completion authority stays with valid and
 // completeLocalRebuildClaimAllowed; per-gate passes never certify anything on their own.
-export function perGateResults(gates, messages) {
+export function perGateResults(gates, messages, { evaluatedGateIds = [] } = {}) {
   const findings = attributeFindingsToGates(messages, gates, {
     residualGateId: PACKET_RESIDUAL_GATE_ID
   });
+  const evaluated = new Set(evaluatedGateIds);
   return arrayOrEmpty(gates?.gates)
     .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
     .map((gate) => {
       const gateId = String(gate.id);
       const errors = findings.get(gateId) ?? [];
-      let status = 'pass';
+      const evaluator = gate.checkedBy === 'human' ? 'human' : (MACHINE_GATE_EVALUATORS[gateId] ?? '');
+      const evaluatorRan = gate.checkedBy !== 'human' && evaluated.has(gateId);
+      let status = evaluatorRan ? 'pass' : 'not_evaluated';
       if (errors.length > 0) {
         status = 'fail';
       } else if (gate.checkedBy === 'human') {
         status = 'human_review';
-      } else if (gateId === 'G-VERIFY-02') {
-        status = 'not_evaluated';
       }
-      return { gateId, status, errors };
+      return { gateId, evaluator, evaluatorRan, status, errors };
     });
 }
 
@@ -389,6 +401,301 @@ function substantiveObject(value) {
 
 function substantiveObjects(values) {
   return arrayOrEmpty(values).filter(substantiveObject);
+}
+
+function enumValueAllowed(value, allowed) {
+  const text = String(value ?? '').trim();
+  if (allowed.has(text)) {
+    return true;
+  }
+  const templateChoices = text.split('|').map((choice) => choice.trim()).filter(Boolean);
+  return templateChoices.length > 1 && templateChoices.every((choice) => allowed.has(choice));
+}
+
+function validateEnum(errors, file, path, value, allowed) {
+  if (!enumValueAllowed(value, allowed)) {
+    errors.push(`${file} ${path} has invalid value ${JSON.stringify(value)}; allowed values are ${[...allowed].join(', ')}.`);
+  }
+}
+
+function validateStatusRecords(errors, file, path, values, allowed = PASS_FAIL_BLOCKED, fields = ['status']) {
+  for (const [index, record] of arrayOrEmpty(values).entries()) {
+    if (!isJsonObject(record) || !substantiveObject(record)) {
+      continue;
+    }
+    for (const field of fields) {
+      validateEnum(errors, file, `${path}[${index}].${field}`, record[field], allowed);
+    }
+  }
+}
+
+function validateGateIdReferences(value, gateIds, file, errors, path = '$') {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => validateGateIdReferences(child, gateIds, file, errors, `${path}[${index}]`));
+    return;
+  }
+  if (!isJsonObject(value)) {
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = `${path}.${key}`;
+    if (/gateId$/i.test(key) && String(child ?? '').trim() && !gateIds.has(String(child).trim())) {
+      errors.push(`${file} ${childPath} names unknown gate id ${JSON.stringify(child)}.`);
+    }
+    if (/gateIds$/i.test(key) && Array.isArray(child)) {
+      for (const [index, gateId] of child.entries()) {
+        if (!gateIds.has(String(gateId ?? '').trim())) {
+          errors.push(`${file} ${childPath}[${index}] names unknown gate id ${JSON.stringify(gateId)}.`);
+        }
+      }
+    }
+    validateGateIdReferences(child, gateIds, file, errors, childPath);
+  }
+}
+
+function allSubstantiveRecordsPass(values, { allowNotApplicable = false } = {}) {
+  const allowed = allowNotApplicable ? new Set(['pass', 'not_applicable']) : new Set(['pass']);
+  return substantiveObjects(values).every((record) => allowed.has(record.status));
+}
+
+function structuredArtifactErrors(gates, records) {
+  const errors = [];
+  const gateIds = new Set(arrayOrEmpty(gates?.gates).map((gate) => String(gate?.id ?? '').trim()).filter(Boolean));
+  for (const [file, record] of Object.entries(records)) {
+    validateGateIdReferences(record, gateIds, file, errors);
+  }
+
+  const independent = records['independent-verification.json'];
+  const completionClaims = substantiveObjects(independent?.completionClaims);
+  for (const [index, claim] of completionClaims.entries()) {
+    validateEnum(errors, 'independent-verification.json', `completionClaims[${index}].gate`, claim.gate, COMPLETION_CLAIM_GATES);
+    if (
+      (String(claim.claimId ?? '').trim() || String(claim.claim ?? '').trim()) &&
+      !gateIds.has(String(claim.gateId ?? '').trim())
+    ) {
+      errors.push(`independent-verification.json completionClaims[${index}].gateId must name a gate from gates.json.`);
+    }
+  }
+  validateStatusRecords(errors, 'independent-verification.json', 'completionClaims', independent?.completionClaims);
+  for (const key of [
+    'perRouteItemCounts', 'collectionOwnershipChecks', 'renderedEmbedChecks', 'footerAndMenuLinkChecks',
+    'targetRequiredRouteChecks', 'routeDriftDispositionChecks', 'compositionModelFidelityChecks',
+    'canvasComponentModelChecks', 'editorAddRowChecks', 'fieldOutputFalsification', 'coldReaderLabelChecks',
+    'directDatabaseCleanupChecks', 'packetFreshnessChecks'
+  ]) {
+    validateStatusRecords(errors, 'independent-verification.json', key, independent?.[key]);
+  }
+  validateStatusRecords(
+    errors,
+    'independent-verification.json',
+    'firstFoldBrandAssetChecks',
+    independent?.firstFoldBrandAssetChecks,
+    PASS_FAIL_BLOCKED_NA,
+    ['heroArtworkStatus', 'logoOrLockupStatus', 'signatureGraphicStatus', 'primaryCtaTreatmentStatus']
+  );
+  for (const key of ['rawEmbedAndMarkupScan', 'placeholderTextScan', 'starterRouteAndLeakChecks', 'canvasPlaceholderChecks']) {
+    if (substantiveObject(independent?.[key])) {
+      validateEnum(errors, 'independent-verification.json', `${key}.status`, independent[key].status, PASS_FAIL_BLOCKED);
+    }
+  }
+  if (substantiveObject(independent?.summary)) {
+    validateEnum(errors, 'independent-verification.json', 'summary.verdict', independent.summary.verdict, PASS_FAIL_BLOCKED);
+  }
+  if (independent?.summary?.verdict === 'pass') {
+    const childCollections = [
+      independent.completionClaims, independent.perRouteItemCounts, independent.collectionOwnershipChecks,
+      independent.renderedEmbedChecks, independent.footerAndMenuLinkChecks, independent.targetRequiredRouteChecks,
+      independent.routeDriftDispositionChecks, independent.compositionModelFidelityChecks,
+      independent.canvasComponentModelChecks, independent.editorAddRowChecks, independent.fieldOutputFalsification,
+      independent.coldReaderLabelChecks, independent.directDatabaseCleanupChecks, independent.packetFreshnessChecks
+    ];
+    const singletons = ['rawEmbedAndMarkupScan', 'placeholderTextScan', 'starterRouteAndLeakChecks', 'canvasPlaceholderChecks'];
+    const badFirstFold = substantiveObjects(independent.firstFoldBrandAssetChecks).some((check) =>
+      ['heroArtworkStatus', 'logoOrLockupStatus', 'signatureGraphicStatus', 'primaryCtaTreatmentStatus']
+        .some((field) => !['pass', 'not_applicable'].includes(check[field]))
+    );
+    if (
+      childCollections.some((children) => !allSubstantiveRecordsPass(children)) ||
+      singletons.some((key) => substantiveObject(independent[key]) && independent[key].status !== 'pass') ||
+      badFirstFold
+    ) {
+      errors.push('independent-verification.json summary.verdict pass contradicts a failed, blocked, unknown, or unevaluated child record.');
+    }
+  }
+
+  const browser = records['browser-evidence.json'];
+  validateStatusRecords(errors, 'browser-evidence.json', 'publicRouteChecks.visualComparison', browser?.publicRouteChecks?.map((check) => check?.visualComparison), BROWSER_STATUSES);
+  validateStatusRecords(errors, 'browser-evidence.json', 'editorWorkflowChecks', browser?.editorWorkflowChecks, BROWSER_STATUSES);
+  validateStatusRecords(errors, 'browser-evidence.json', 'canvasAuthoringChecks', browser?.canvasAuthoringChecks, BROWSER_STATUSES);
+  for (const [index, check] of arrayOrEmpty(browser?.publicRouteChecks).entries()) {
+    const seo = check?.renderedSeoSignals;
+    if (substantiveObject(seo)) {
+      validateEnum(errors, 'browser-evidence.json', `publicRouteChecks[${index}].renderedSeoSignals.metaDescriptionStatus`, seo.metaDescriptionStatus, new Set(['present', 'not_applicable']));
+      validateEnum(errors, 'browser-evidence.json', `publicRouteChecks[${index}].renderedSeoSignals.openGraphImageStatus`, seo.openGraphImageStatus, new Set(['present', 'not_applicable']));
+    }
+  }
+  for (const [index, check] of arrayOrEmpty(browser?.canvasAuthoringChecks).entries()) {
+    validateStatusRecords(errors, 'browser-evidence.json', `canvasAuthoringChecks[${index}].declaredSectionEditChecks`, check?.declaredSectionEditChecks, BROWSER_STATUSES);
+  }
+  if (browser?.browserEvidenceComplete === true) {
+    const browserChildren = [
+      arrayOrEmpty(browser.publicRouteChecks).map((check) => check?.visualComparison),
+      browser.editorWorkflowChecks,
+      browser.canvasAuthoringChecks,
+      arrayOrEmpty(browser.canvasAuthoringChecks).flatMap((check) => arrayOrEmpty(check?.declaredSectionEditChecks))
+    ];
+    if (
+      browserChildren.some((children) => substantiveObjects(children).some((child) => child.status !== 'pass')) ||
+      arrayOrEmpty(browser.missingBrowserEvidence).length > 0
+    ) {
+      errors.push('browser-evidence.json browserEvidenceComplete true contradicts a non-passing child or missing evidence record.');
+    }
+  }
+
+  const parity = records['parity-report.json'];
+  validateStatusRecords(errors, 'parity-report.json', 'functionalChecks', parity?.functionalChecks, new Set(['pass', 'not_applicable', 'fail', 'blocked']));
+  validateStatusRecords(errors, 'parity-report.json', 'visualChecks', parity?.visualChecks);
+  validateStatusRecords(errors, 'parity-report.json', 'contentChecks', parity?.contentChecks);
+  if (String(parity?.verdict ?? '').trim()) {
+    validateEnum(errors, 'parity-report.json', 'verdict', parity.verdict, PARITY_VERDICTS);
+  }
+  if (parity?.verdict === 'pass' && (
+    !allSubstantiveRecordsPass(parity.functionalChecks, { allowNotApplicable: true }) ||
+    !allSubstantiveRecordsPass(parity.visualChecks) ||
+    !allSubstantiveRecordsPass(parity.contentChecks) ||
+    arrayOrEmpty(parity.blockedEvidence).length > 0
+  )) {
+    errors.push('parity-report.json verdict pass contradicts a failed, blocked, unknown, or unevaluated child record.');
+  }
+  if (
+    finiteNumberValue(parity?.addressableSurface?.routesExcluded) &&
+    Number(parity.addressableSurface.routesExcluded) !== arrayOrEmpty(parity.addressableSurface.exclusions).length
+  ) {
+    errors.push('parity-report.json addressableSurface.routesExcluded must equal exclusions.length.');
+  }
+
+  const blind = records['blind-adversarial-review.json'];
+  for (const [index, review] of arrayOrEmpty(blind?.routeViewportReviews).entries()) {
+    if (String(review?.verdict ?? '').trim()) {
+      validateEnum(errors, 'blind-adversarial-review.json', `routeViewportReviews[${index}].verdict`, review.verdict, BLIND_VERDICTS);
+    }
+    for (const [check, status] of Object.entries(review?.checks ?? {})) {
+      validateEnum(errors, 'blind-adversarial-review.json', `routeViewportReviews[${index}].checks.${check}`, status, PASS_FAIL_BLOCKED_NA);
+    }
+  }
+  for (const [index, review] of arrayOrEmpty(blind?.editorExperienceReviews).entries()) {
+    validateEnum(errors, 'blind-adversarial-review.json', `editorExperienceReviews[${index}].verdict`, review?.verdict, BLIND_VERDICTS);
+  }
+  for (const [index, review] of arrayOrEmpty(blind?.reviewPasses).entries()) {
+    validateEnum(errors, 'blind-adversarial-review.json', `reviewPasses[${index}].verdict`, review?.verdict, BLIND_VERDICTS);
+  }
+  for (const [index, defect] of arrayOrEmpty(blind?.productDefects).entries()) {
+    validateEnum(errors, 'blind-adversarial-review.json', `productDefects[${index}].status`, defect?.status, BLIND_DEFECT_STATUSES);
+  }
+  for (const [index, route] of arrayOrEmpty(blind?.routeCoverage?.omittedPrimaryRoutes).entries()) {
+    validateEnum(errors, 'blind-adversarial-review.json', `routeCoverage.omittedPrimaryRoutes[${index}].disposition`, route?.disposition, new Set(['accepted_out_of_scope', 'external_blocker']));
+  }
+  if (substantiveObject(blind?.summary)) {
+    validateEnum(errors, 'blind-adversarial-review.json', 'summary.verdict', blind.summary.verdict, BLIND_VERDICTS);
+    validateEnum(errors, 'blind-adversarial-review.json', 'summary.completionState', blind.summary.completionState, COMPLETION_STATES);
+  }
+  if (BLIND_COMPLETE_VERDICTS.has(blind?.summary?.verdict)) {
+    const badRoute = substantiveObjects(blind.routeViewportReviews).some((review) =>
+      !BLIND_COMPLETE_VERDICTS.has(review.verdict) ||
+      Object.values(review.checks ?? {}).some((status) => !['pass', 'not_applicable'].includes(status))
+    );
+    const badEditor = substantiveObjects(blind.editorExperienceReviews).some((review) => !BLIND_COMPLETE_VERDICTS.has(review.verdict));
+    const badPass = substantiveObjects(blind.reviewPasses).some((review) => !BLIND_COMPLETE_VERDICTS.has(review.verdict));
+    const openDefect = substantiveObjects(blind.productDefects).some((defect) => ['open', 'external_blocker'].includes(defect.status));
+    if (badRoute || badEditor || badPass || openDefect || arrayOrEmpty(blind.routeCoverage?.omittedPrimaryRoutes).some((route) => route?.disposition === 'external_blocker')) {
+      errors.push('blind-adversarial-review.json passing summary contradicts a non-passing route, editor, review-pass, defect, or omitted-route child.');
+    }
+  }
+
+  const pattern = records['pattern-map.json'];
+  if (String(pattern?.reviewStatus ?? '').trim()) {
+    validateEnum(errors, 'pattern-map.json', 'reviewStatus', pattern.reviewStatus, PATTERN_REVIEW_STATUSES);
+  }
+  if (pattern?.reviewStatus === 'reviewed' && (
+    pattern?.buildTypeDeclaration?.accepted !== true ||
+    pattern?.compositionModel?.completedBeforeImplementation !== true ||
+    pattern?.contentTypeLabelPolicy?.accepted !== true
+  )) {
+    errors.push('pattern-map.json reviewStatus reviewed contradicts unaccepted build-type, composition, or content-label decisions.');
+  }
+
+  const routeMatrix = records['route-matrix.json'];
+  for (const [index, route] of arrayOrEmpty(routeMatrix?.sourceRouteDriftClassification).entries()) {
+    validateEnum(errors, 'route-matrix.json', `sourceRouteDriftClassification[${index}].classification`, route?.classification, ROUTE_CLASSIFICATIONS);
+    validateEnum(errors, 'route-matrix.json', `sourceRouteDriftClassification[${index}].targetDisposition`, route?.targetDisposition, ROUTE_DISPOSITIONS);
+    if (route?.accepted === true && (route.classification === 'unknown' || ['blocked', 'owner_decision_required'].includes(route.targetDisposition))) {
+      errors.push(`route-matrix.json sourceRouteDriftClassification[${index}] is accepted despite an unresolved classification or disposition.`);
+    }
+  }
+  for (const [index, route] of arrayOrEmpty(routeMatrix?.targetRequiredRoutes).entries()) {
+    validateEnum(errors, 'route-matrix.json', `targetRequiredRoutes[${index}].expectedPublicBehavior`, route?.expectedPublicBehavior, PUBLIC_BEHAVIORS);
+    if (route?.accepted === true && (route.expectedPublicBehavior === 'blocked' || numericValue(route.targetStatus) >= 500)) {
+      errors.push(`route-matrix.json targetRequiredRoutes[${index}] is accepted despite blocked or 5xx behavior.`);
+    }
+  }
+  for (const [index, row] of arrayOrEmpty(routeMatrix?.perRouteItemReconciliation).entries()) {
+    validateEnum(errors, 'route-matrix.json', `perRouteItemReconciliation[${index}].mismatchDisposition`, row?.mismatchDisposition, COUNT_DISPOSITIONS);
+    const countMismatch = finiteNumberValue(row?.sourceCount) && finiteNumberValue(row?.targetRenderedCount) && Number(row.sourceCount) !== Number(row.targetRenderedCount);
+    if (row?.accepted === true && countMismatch && ['none', 'unknown', 'implementation_gap'].includes(row.mismatchDisposition)) {
+      errors.push(`route-matrix.json perRouteItemReconciliation[${index}] accepts contradictory source and target counts without a resolved disposition.`);
+    }
+  }
+  for (const [index, route] of arrayOrEmpty(routeMatrix?.primaryRoutes).entries()) {
+    const matching = arrayOrEmpty(routeMatrix?.routes).find((candidate) =>
+      normalizeRouteKey(candidate?.sourcePath) === normalizeRouteKey(route?.sourcePath) &&
+      normalizeRouteKey(candidate?.targetPath) === normalizeRouteKey(route?.targetPath)
+    );
+    if (route?.accepted === true && (!matching || matching.accepted !== true || numericValue(matching.targetStatus) >= 400)) {
+      errors.push(`route-matrix.json primaryRoutes[${index}] acceptance contradicts its route row or target status.`);
+    }
+  }
+
+  const readback = records['drupal-readback.json'];
+  if (readback?.readbackComplete === true && (
+    arrayOrEmpty(readback.blockers).length > 0 ||
+    readback?.drupal?.configStatusClean !== true ||
+    readback?.drupal?.configSyncDirectoryMatchesTrackedDirectory !== true
+  )) {
+    errors.push('drupal-readback.json readbackComplete true contradicts blockers or unclean/mismatched config evidence.');
+  }
+
+  const fieldMatrix = records['field-output-matrix.json'];
+  if (fieldMatrix?.runSpecificEvidenceRecorded === true && arrayOrEmpty(fieldMatrix?.blockedFields).length > 0) {
+    errors.push('field-output-matrix.json runSpecificEvidenceRecorded true contradicts unresolved blockedFields.');
+  }
+
+  const sourceAudit = records['source-audit.json'];
+  const routeSummary = sourceAudit?.routeInventorySummary;
+  if (
+    finiteNumberValue(routeSummary?.attemptedRoutes) &&
+    [routeSummary?.successfulRoutes, routeSummary?.failedRoutes].every(finiteNumberValue) &&
+    Number(routeSummary.attemptedRoutes) !== Number(routeSummary.successfulRoutes) + Number(routeSummary.failedRoutes)
+  ) {
+    errors.push('source-audit.json routeInventorySummary counts do not reconcile.');
+  }
+
+  for (const [index, check] of arrayOrEmpty(independent?.compositionModelFidelityChecks).entries()) {
+    if (check?.status === 'pass' && (
+      !compositionOwnersMatch(check.declaredCompositionOwner, check.actualCompositionOwner) ||
+      (check.deviationRecordRequired === true && check.deviationRecordPresent !== true)
+    )) {
+      errors.push(`independent-verification.json compositionModelFidelityChecks[${index}] pass contradicts ownership or deviation facts.`);
+    }
+  }
+  for (const [index, check] of arrayOrEmpty(independent?.targetRequiredRouteChecks).entries()) {
+    validateEnum(errors, 'independent-verification.json', `targetRequiredRouteChecks[${index}].expectedPublicBehavior`, check?.expectedPublicBehavior, PUBLIC_BEHAVIORS);
+  }
+  for (const [index, check] of arrayOrEmpty(independent?.routeDriftDispositionChecks).entries()) {
+    validateEnum(errors, 'independent-verification.json', `routeDriftDispositionChecks[${index}].classification`, check?.classification, ROUTE_CLASSIFICATIONS);
+    validateEnum(errors, 'independent-verification.json', `routeDriftDispositionChecks[${index}].targetDisposition`, check?.targetDisposition, ROUTE_DISPOSITIONS);
+  }
+
+  return errors;
 }
 
 function routeLikeValue(value) {
@@ -569,9 +876,10 @@ async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
       const checkedAt = String(candidate?.checkedAt ?? evidence?.checkedAt ?? '').trim();
       const checks = arrayOrEmpty(candidate?.checks);
       return (
-        evidence?.schemaVersion === 'public-kit.independent-claim-evidence.1' &&
+        evidence?.schemaVersion === 'public-kit.independent-claim-evidence.2' &&
         candidate?.claimId === claim.claimId &&
         candidate?.gate === claim.gate &&
+        candidate?.gateId === claim.gateId &&
         evidenceTargetUrl?.origin === independentTargetUrl.origin &&
         timestampIsFresh(checkedAt) &&
         checks.length > 0 &&
@@ -1473,8 +1781,8 @@ async function validateIndependentVerification(packetDir, independentVerificatio
   }
 
   const startingErrorCount = errors.length;
-  if (independentVerification.schemaVersion !== 'public-kit.independent-verification.1') {
-    errors.push('independent-verification.json must use schemaVersion public-kit.independent-verification.1.');
+  if (independentVerification.schemaVersion !== 'public-kit.independent-verification.2') {
+    errors.push('independent-verification.json must use schemaVersion public-kit.independent-verification.2.');
   }
 
   const verifier = independentVerification.verifier ?? {};
@@ -1554,7 +1862,7 @@ async function validateIndependentVerification(packetDir, independentVerificatio
     }
     if (!semanticallyBoundEvidence) {
       errors.push(
-        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks.`
+        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks.`
       );
     }
   }
@@ -2051,6 +2359,10 @@ async function validateDurableIntent(packetDir, errors) {
     const status = block.match(/\bstatus:\s*"?([^"\n]+)"?/)?.[1] ?? '';
     const configHash = block.match(/\bconfig_hash:\s*"?([^"\n]*)"?/)?.[1] ?? '';
 
+    if (status && !['draft', 'hash-valid', 'accepted', 'superseded'].includes(status)) {
+      errors.push(`${id} has invalid durable intent status ${status}; allowed values are draft, hash-valid, accepted, superseded.`);
+    }
+
     if ((status === 'hash-valid' || status === 'accepted') && !HASH_RE.test(configHash) && configHash !== 'not-applicable') {
       errors.push(`${id} has status ${status} but config_hash is not sha256:<64 hex chars> or not-applicable.`);
     }
@@ -2385,20 +2697,40 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     reasons.push('durable-intent.yml must name the site and contain current accepted/hash-valid intent or an explicit empty intent record list.');
   }
 
+  const drupalReadback = records.drupalReadback;
   const declaredLoadBearingConfig =
-    hasMeaningfulEntry(patternMap?.contentTypes) || hasMeaningfulEntry(patternMap?.views);
+    hasMeaningfulEntry(patternMap?.contentTypes) ||
+    hasMeaningfulEntry(patternMap?.views) ||
+    hasMeaningfulEntry(drupalReadback?.content?.contentTypes) ||
+    hasMeaningfulEntry(drupalReadback?.content?.fieldStorage) ||
+    hasMeaningfulEntry(drupalReadback?.content?.formDisplays) ||
+    hasMeaningfulEntry(drupalReadback?.content?.viewDisplays) ||
+    hasMeaningfulEntry(drupalReadback?.views) ||
+    hasMeaningfulEntry(drupalReadback?.workflows);
   const offRoadExceptionsRecorded =
     /^\|\s*OR-[^\n]+\|\s*$/im.test(offRoad) || !/no off-road moves/i.test(offRoad);
   const emptyJustificationBlock = durableIntent.match(/^empty_justification:[ \t]*\n((?:[ \t]+[^\n]*\n?)+)/m)?.[1] ?? '';
-  const emptyJustificationAccepted = ['rationale', 'asserted_by', 'last_reviewed'].every((field) =>
+  const emptyJustificationAccepted = ['rationale', 'accepted_by', 'last_reviewed', 'acceptance_evidence'].every((field) =>
     new RegExp(`^\\s*${field}:\\s*["']?\\S.+?["']?\\s*$`, 'm').test(emptyJustificationBlock)
   );
+  const emptyJustificationEvidence = emptyJustificationBlock.match(
+    /^\s*acceptance_evidence:\s*["']?([^"'\n]+)["']?\s*$/m
+  )?.[1]?.trim();
+  const emptyJustificationAcceptedBy = emptyJustificationBlock.match(
+    /^\s*accepted_by:\s*["']?([^"'\n]+)["']?\s*$/m
+  )?.[1]?.trim();
+  const emptyJustificationIndependent =
+    !identitiesMatch(emptyJustificationAcceptedBy, maintainerBuilderIdentity) &&
+    !identitiesMatch(emptyJustificationAcceptedBy, operatorBuilderIdentity);
+  const emptyJustificationEvidencePresent = emptyJustificationEvidence
+    ? await nonEmptyPacketEvidence(packetDir, emptyJustificationEvidence)
+    : false;
   if (
     explicitEmptyIntent &&
     (declaredLoadBearingConfig || offRoadExceptionsRecorded) &&
-    !emptyJustificationAccepted
+    (!emptyJustificationAccepted || !emptyJustificationEvidencePresent || !emptyJustificationIndependent)
   ) {
-    reasons.push('durable-intent.yml cannot leave intent_records empty while pattern-map.json declares content types or Views or off-road exceptions are recorded; add intent records or an empty_justification block with rationale, asserted_by, and last_reviewed.');
+    reasons.push('durable-intent.yml cannot leave intent_records empty while live/readback architecture, pattern-map content types or Views, or off-road exceptions exist; add intent records or an empty_justification with rationale, accepted_by distinct from the builder, last_reviewed, and packet-local acceptance_evidence.');
   }
   if (
     explicitEmptyIntent &&
@@ -2414,7 +2746,7 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
   if (!gates) {
-    return { packetCompletionReady: false, reasons: ['Gate vocabulary could not be loaded.'] };
+    return { evaluatedGateIds: [], packetCompletionReady: false, reasons: ['Gate vocabulary could not be loaded.'] };
   }
 
   for (const packetFile of arrayOrEmpty(gates.reviewPacketFiles)) {
@@ -3013,7 +3345,11 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('The newest completion evidence is older than seven days and must be refreshed against the current target.');
   }
 
-  return { packetCompletionReady: reasons.length === 0, reasons };
+  return {
+    evaluatedGateIds: Object.keys(MACHINE_GATE_EVALUATORS).filter((gateId) => gateId !== 'G-VERIFY-02'),
+    packetCompletionReady: reasons.length === 0,
+    reasons
+  };
 }
 
 // Independence declarations live in builder-writable packet JSON, so the strongest
@@ -3066,6 +3402,17 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
+  errors.push(...structuredArtifactErrors(gates, {
+    'blind-adversarial-review.json': blindAdversarialReview,
+    'browser-evidence.json': browserEvidence,
+    'drupal-readback.json': drupalReadback,
+    'field-output-matrix.json': fieldOutputMatrix,
+    'independent-verification.json': independentVerification,
+    'parity-report.json': parityReport,
+    'pattern-map.json': patternMap,
+    'route-matrix.json': routeMatrix,
+    'source-audit.json': sourceAudit
+  }));
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
   const independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
@@ -3133,7 +3480,9 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         blindAdversarialReviewSupportsCompletion &&
         completionReadiness.packetCompletionReady
     },
-    gateResults: perGateResults(gates, [...sharedErrors, ...sharedCompletionBlockedReasons]),
+    gateResults: perGateResults(gates, [...sharedErrors, ...sharedCompletionBlockedReasons], {
+      evaluatedGateIds: completionReadiness.evaluatedGateIds
+    }),
     completeLocalRebuildClaimAllowed: false,
     valid: errors.length === 0,
     errors: sharedErrors,

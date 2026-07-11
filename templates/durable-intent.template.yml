@@ -5,8 +5,9 @@ site: ""
 # records or add a structured empty-intent disposition:
 # empty_justification:
 #   rationale: ""
-#   asserted_by: ""
+#   accepted_by: ""
 #   last_reviewed: ""
+#   acceptance_evidence: ""
 intent_records:
   - id: ""
     target_config: ""

@@ -97,6 +97,7 @@
     "Evidence-ranked Drupal fundamentals from rebuild reviews: tracked config sync as source of truth, rendered SEO verification, non-admin editor-role checks, and off-road inventory review",
     "Release-readiness tests for template naming, orphan templates, verifier argument handling, symlinked bin execution, structural packet success messaging, and npm-pack manifest drift",
     "Machine-readable per-gate results in packet and live verifier reports (public-kit.packet-verification.2 and public-kit.live-verification.2) that attribute findings to gates.json gate ids while keeping the flat error arrays authoritative",
+    "Strict artifact contracts for canonical gate ids, status enums, child-summary and count reconciliation, ownership/route/config contradictions, evidenced empty-intent acceptance, and evaluator-executed pass state",
     "Pattern-map architecture guards for managed media, menu ownership, collection Views, custom controllers, marker modules, and raw rendering",
     "Regulated-content governance guardrails for source/review status, disclosures, product/detail route QA, source-intent aliases, search, and SEO metadata",
     "LICENSE",
