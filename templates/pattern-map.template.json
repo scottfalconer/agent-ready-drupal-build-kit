@@ -214,6 +214,7 @@
         "aliasSource": "pathauto_pattern | manual_alias_policy",
         "pattern": "",
         "aliasPrefix": "",
+        "rootPrefixJustification": "",
         "manualAliasPolicyOwner": "",
         "manualAliasPolicyRationale": "",
         "accepted": false,

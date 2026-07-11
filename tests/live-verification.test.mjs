@@ -818,6 +818,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       aliasSource: 'pathauto_pattern',
       pattern: '/[node:title]',
       aliasPrefix: '/',
+      rootPrefixJustification: 'The one-route fixture publishes its single page bundle at the site root by design.',
       manualAliasPolicyOwner: '',
       manualAliasPolicyRationale: '',
       accepted: true,
@@ -1004,6 +1005,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.content.fieldStorage = [{ field: 'body', type: 'text_long' }];
   readback.content.formDisplays = [{ bundle: 'page', mode: 'default' }];
   readback.content.viewDisplays = [{ bundle: 'page', mode: 'full' }];
+  readback.routing.aliases = [{ path: '/node/1', alias: '/target-home', bundle: 'page' }];
   readback.routing.menus = [{ id: 'main', label: 'Main navigation' }];
   readback.routing.menuLinks = [{ menu: 'main', title: 'Home', url: '/' }];
   readback.rolesAndPermissionsNotes = ['Content editor can create and edit Page content.'];
@@ -1595,6 +1597,39 @@ test('per-bundle alias coverage and alias quality fail closed in packet completi
       mutate: (value) => {
         value.routing.aliases = [{ path: '/node/9', alias: '/documents/source-4f1d9e2ab7c30586', bundle: 'document' }];
       }
+    },
+    {
+      name: 'empty-readback-alias-table',
+      file: 'drupal-readback.json',
+      expected: /routing\.aliases must record at least one \{path, alias, bundle\} entry attributed to node bundle page/i,
+      mutate: (value) => { value.routing.aliases = []; }
+    },
+    {
+      name: 'unattributed-readback-aliases',
+      file: 'drupal-readback.json',
+      expected: /routing\.aliases must record at least one \{path, alias, bundle\} entry attributed to node bundle page/i,
+      mutate: (value) => { value.routing.aliases = [{ path: '/node/1', alias: '/target-home' }]; }
+    },
+    {
+      name: 'root-prefix-without-justification',
+      file: 'pattern-map.json',
+      expected: /declares the root alias prefix "\/"; record rootPrefixJustification/i,
+      mutate: (value) => { value.displayConfig.pathautoPatterns[0].rootPrefixJustification = ''; }
+    },
+    {
+      name: 'create-probe-relabeled-as-edit',
+      file: 'browser-evidence.json',
+      expected: /needs an accepted passing create-workflow editor probe recording createdContentPath for node\.page/i,
+      mutate: (value) => {
+        value.editorWorkflowChecks[0].workflow = 'edit';
+        value.editorWorkflowChecks[0].createdContentPath = '/node/42';
+      }
+    },
+    {
+      name: 'create-probe-missing-created-content-path',
+      file: 'browser-evidence.json',
+      expected: /needs an accepted passing create-workflow editor probe recording createdContentPath for node\.page/i,
+      mutate: (value) => { value.editorWorkflowChecks[0].createdContentPath = ''; }
     }
   ];
 
@@ -1610,7 +1645,10 @@ test('per-bundle alias coverage and alias quality fail closed in packet completi
   const policyPacket = join(temp, 'manual-policy-covered');
   cpSync(canonicalPacket, policyPacket, { recursive: true });
   mutateJson(join(policyPacket, 'drupal-readback.json'), (value) => {
-    value.routing.aliases = [{ path: '/node/9', alias: '/documents/source-4f1d9e2ab7c30586', bundle: 'document' }];
+    value.routing.aliases = [
+      { path: '/node/1', alias: '/target-home', bundle: 'page' },
+      { path: '/node/9', alias: '/documents/source-4f1d9e2ab7c30586', bundle: 'document' }
+    ];
   });
   mutateJson(join(policyPacket, 'pattern-map.json'), (value) => {
     value.displayConfig.pathautoPatterns.push({
@@ -1635,6 +1673,21 @@ test('per-bundle alias coverage and alias quality fail closed in packet completi
     policyReport.completionEvidence.packetSupportsCompletion,
     true,
     policyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  // A manual-alias policy scoped to another entity type must not exempt the node bundle.
+  const crossEntityPacket = join(temp, 'cross-entity-manual-policy');
+  cpSync(policyPacket, crossEntityPacket, { recursive: true });
+  mutateJson(join(crossEntityPacket, 'pattern-map.json'), (value) => {
+    const policyRecord = value.displayConfig.pathautoPatterns.find((record) => record.bundle === 'document');
+    policyRecord.entityType = 'taxonomy_term';
+  });
+  const crossEntityReport = await validatePacket({ packetDir: crossEntityPacket });
+  assert.equal(crossEntityReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    crossEntityReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /alias \/documents\/source-4f1d9e2ab7c30586 looks machine-generated/i,
+    'a taxonomy_term manual-alias policy must not exempt node readback aliases for a same-named bundle'
   );
 });
 
@@ -1701,6 +1754,49 @@ test('editor probe aliases must land in the declared bundle alias structure', as
           mutate: (packetDir) => {
             mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
               patternMap.displayConfig.pathautoPatterns = [];
+            });
+          }
+        },
+        {
+          name: 'create-workflow-relabeled-as-edit',
+          expected: /no accepted passing create-workflow editor probe for node\.page/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].workflow = 'edit';
+              browser.editorWorkflowChecks[0].createdContentPath = '/node/42';
+            });
+          }
+        },
+        {
+          name: 'blocked-create-workflow-still-fails-closed',
+          expected: /no accepted passing create-workflow editor probe for node\.page/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].status = 'blocked';
+              browser.editorWorkflowChecks[0].accepted = false;
+              browser.editorWorkflowChecks[0].createdContentPath = '';
+              browser.editorWorkflowChecks[0].blockers = ['Content creation is blocked in this environment.'];
+            });
+          }
+        },
+        {
+          name: 'root-prefix-without-existing-alias-structure',
+          expected: /root-prefix declaration cannot be verified without existing alias structure/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+              readback.routing.aliases = [];
+            });
+          }
+        },
+        {
+          name: 'root-prefix-probe-drifts-from-existing-structure',
+          expected: /probe alias \/qa-test-news does not share the alias prefix structure of existing page content \(\/news\)/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+              readback.routing.aliases = [{ path: '/node/7', alias: '/news/runway-closure-261', bundle: 'page' }];
+            });
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].createdContentPath = '/qa-test-news';
             });
           }
         }

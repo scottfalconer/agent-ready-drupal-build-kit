@@ -1211,11 +1211,15 @@ async function independentStructuredGateReasons({
 
   const aliasPatternRecords = substantiveObjects(patternMap?.displayConfig?.pathautoPatterns)
     .filter((record) => record?.accepted === true);
+  // Manual-alias policies are scoped to one entity type and bundle; a taxonomy_term
+  // policy must not exempt a node bundle with the same name.
+  const aliasPolicyKey = (entityType, bundle) => `${identityKey(entityType) || 'node'}:${identityKey(bundle)}`;
   const manualAliasPolicyBundles = new Set(aliasPatternRecords.filter((record) =>
     record.aliasSource === 'manual_alias_policy' &&
     String(record.manualAliasPolicyOwner ?? '').trim() &&
     String(record.manualAliasPolicyRationale ?? '').trim()
-  ).map((record) => identityKey(record.bundle)));
+  ).map((record) => aliasPolicyKey(record.entityType, record.bundle)));
+  const readbackAliasRecords = substantiveObjects(drupalReadback?.routing?.aliases);
   for (const bundleName of requiredNodeBundles) {
     const aliasRecord = aliasPatternRecords.find((record) =>
       exactIdentityMatch(record.entityType || 'node', 'node') && exactIdentityMatch(record.bundle, bundleName)
@@ -1224,23 +1228,47 @@ async function independentStructuredGateReasons({
       String(aliasRecord.pattern ?? '').trim() &&
       String(aliasRecord.aliasPrefix ?? '').trim();
     const manualPolicy = aliasRecord?.aliasSource === 'manual_alias_policy' &&
-      manualAliasPolicyBundles.has(identityKey(aliasRecord.bundle));
+      manualAliasPolicyBundles.has(aliasPolicyKey(aliasRecord.entityType, aliasRecord.bundle));
     if (!aliasRecord || (!declaredPattern && !manualPolicy)) {
       reasons.push(`pattern-map.json displayConfig.pathautoPatterns must cover node bundle ${bundleName} with an accepted Pathauto pattern and alias prefix, or a manual-alias policy naming an owner and rationale.`);
+    }
+    if (declaredPattern && !editorWorkflowChecks.some((check) =>
+      identityKey(check?.workflow) === 'create' &&
+      exactIdentityMatch(check?.entityType, 'node') &&
+      exactIdentityMatch(check?.bundle, bundleName) &&
+      String(check?.createdContentPath ?? '').trim()
+    )) {
+      reasons.push(`browser-evidence.json needs an accepted passing create-workflow editor probe recording createdContentPath for node.${bundleName}; a declared Pathauto pattern is only proven by editor-created probe content.`);
+    }
+    if (!readbackAliasRecords.some((entry) =>
+      (!String(entry?.entityType ?? '').trim() || exactIdentityMatch(entry.entityType, 'node')) &&
+      exactIdentityMatch(entry?.bundle, bundleName) &&
+      String(entry?.path ?? '').trim() &&
+      String(entry?.alias ?? '').trim()
+    )) {
+      reasons.push(`drupal-readback.json routing.aliases must record at least one {path, alias, bundle} entry attributed to node bundle ${bundleName}; alias-structure checks cannot run against an empty or unattributed alias readback.`);
     }
   }
   for (const record of aliasPatternRecords) {
     if (machineGeneratedAliasValue(record.pattern) || machineGeneratedAliasValue(record.aliasPrefix)) {
       reasons.push(`pattern-map.json declares a machine-generated alias pattern for bundle ${record.bundle || '(bundle)'}; public bundles need human-readable, title-derived aliases.`);
     }
+    if (
+      record.aliasSource !== 'manual_alias_policy' &&
+      String(record.aliasPrefix ?? '').trim().replace(/\//g, '') === '' &&
+      !String(record.rootPrefixJustification ?? '').trim()
+    ) {
+      reasons.push(`pattern-map.json pathautoPatterns record for bundle ${record.bundle || '(bundle)'} declares the root alias prefix "/"; record rootPrefixJustification explaining why this bundle's aliases live at the site root instead of under a bundle prefix.`);
+    }
   }
   for (const entry of arrayOrEmpty(drupalReadback?.routing?.aliases)) {
     const alias = String((isJsonObject(entry) ? entry.alias : entry) ?? '').trim();
     const aliasBundle = isJsonObject(entry) ? String(entry.bundle ?? '').trim() : '';
+    const aliasEntityType = isJsonObject(entry) ? String(entry.entityType ?? '').trim() : '';
     if (
       alias &&
       machineGeneratedAliasValue(alias) &&
-      !(aliasBundle && manualAliasPolicyBundles.has(identityKey(aliasBundle)))
+      !(aliasBundle && manualAliasPolicyBundles.has(aliasPolicyKey(aliasEntityType, aliasBundle)))
     ) {
       reasons.push(`drupal-readback.json alias ${alias} looks machine-generated; public content needs a human-readable, title-derived alias or an accepted manual-alias policy for its bundle.`);
     }

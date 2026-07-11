@@ -846,30 +846,55 @@ function firstPathSegment(path) {
   return normalizePath(path).split('/').filter(Boolean)[0] ?? '';
 }
 
+// The directory an alias lives in: '/news' for /news/runway-closure-261, '/' for /about.
+function parentAliasPrefix(path) {
+  const segments = normalizePath(path).split('/').filter(Boolean);
+  return segments.length > 1 ? `/${segments.slice(0, -1).join('/')}` : '/';
+}
+
 // Editor-created content must land in the same alias structure as the content already in
 // its bundle; a probe node with a root-level or /node/{id} route proves the alias
-// architecture is import-script-imposed rather than owned by Pathauto config.
+// architecture is import-script-imposed rather than owned by Pathauto config. This check
+// fails closed: every accepted Pathauto pattern requires an accepted passing create-probe
+// workflow, so relabeling the create workflow (or omitting it) cannot bypass the comparison.
 function probeAliasConsistencyErrors({ browserEvidence, drupalReadback, patternMap }) {
   const errors = [];
   const aliasRecords = (Array.isArray(patternMap?.displayConfig?.pathautoPatterns)
     ? patternMap.displayConfig.pathautoPatterns
     : []).filter((record) => record && typeof record === 'object' && record.accepted === true);
   const bundleKey = (value) => normalizeText(value).toLowerCase();
-  const existingBundlePrefixes = new Map();
+  const existingBundleStructure = new Map();
   for (const entry of Array.isArray(drupalReadback?.routing?.aliases) ? drupalReadback.routing.aliases : []) {
     if (!entry || typeof entry !== 'object') {
       continue;
     }
+    const entityType = bundleKey(entry.entityType) || 'node';
     const bundle = bundleKey(entry.bundle);
-    const segment = firstPathSegment(entry.alias);
-    if (bundle && segment) {
-      const segments = existingBundlePrefixes.get(bundle) ?? new Set();
-      segments.add(segment);
-      existingBundlePrefixes.set(bundle, segments);
+    const alias = normalizePath(entry.alias);
+    if (entityType !== 'node' || !bundle || !alias || alias === '/') {
+      continue;
     }
+    const structure = existingBundleStructure.get(bundle) ?? { firstSegments: new Set(), parentPrefixes: new Set() };
+    structure.firstSegments.add(firstPathSegment(alias));
+    structure.parentPrefixes.add(parentAliasPrefix(alias));
+    existingBundleStructure.set(bundle, structure);
   }
   const createChecks = (Array.isArray(browserEvidence?.editorWorkflowChecks) ? browserEvidence.editorWorkflowChecks : [])
-    .filter((check) => check?.workflow === 'create' && bundleKey(check?.entityType) === 'node' && bundleKey(check?.bundle));
+    .filter((check) =>
+      check?.workflow === 'create' &&
+      check?.accepted === true &&
+      check?.status === 'pass' &&
+      bundleKey(check?.entityType) === 'node' &&
+      bundleKey(check?.bundle)
+    );
+  for (const record of aliasRecords) {
+    if (bundleKey(record.entityType || 'node') !== 'node' || record.aliasSource === 'manual_alias_policy') {
+      continue;
+    }
+    if (!createChecks.some((check) => bundleKey(check.bundle) === bundleKey(record.bundle))) {
+      errors.push(`browser-evidence.json has no accepted passing create-workflow editor probe for node.${normalizeText(record.bundle)}; the declared Pathauto pattern cannot be verified without editor-created probe content.`);
+    }
+  }
   for (const check of createChecks) {
     const bundle = normalizeText(check.bundle);
     const record = aliasRecords.find((candidate) =>
@@ -892,13 +917,25 @@ function probeAliasConsistencyErrors({ browserEvidence, drupalReadback, patternM
       continue;
     }
     const prefix = normalizePath(record.aliasPrefix);
-    if (prefix && prefix !== '/' && createdPath !== prefix && !createdPath.startsWith(`${prefix}/`)) {
+    const rootPrefixDeclared = !prefix || prefix === '/';
+    if (!rootPrefixDeclared && createdPath !== prefix && !createdPath.startsWith(`${prefix}/`)) {
       errors.push(`node.${bundle} editor probe alias ${createdPath} does not match the declared bundle alias prefix ${prefix}; editor-created and imported content must share one alias structure.`);
       continue;
     }
-    const existingSegments = existingBundlePrefixes.get(bundleKey(bundle));
-    if (existingSegments && !existingSegments.has(firstPathSegment(createdPath))) {
-      errors.push(`node.${bundle} editor probe alias ${createdPath} does not share the alias prefix structure of existing ${bundle} content (${[...existingSegments].map((segment) => `/${segment}`).join(', ')}).`);
+    const structure = existingBundleStructure.get(bundleKey(bundle));
+    if (!structure) {
+      // A root prefix makes the declared-prefix comparison vacuous, so the
+      // existing-structure comparison is the only remaining teeth; require it.
+      if (rootPrefixDeclared) {
+        errors.push(`node.${bundle} declares the root alias prefix "/" but drupal-readback.json routing.aliases has no bundle-attributed ${bundle} aliases to compare the probe against; a root-prefix declaration cannot be verified without existing alias structure.`);
+      }
+      continue;
+    }
+    if (
+      !structure.firstSegments.has(firstPathSegment(createdPath)) &&
+      !structure.parentPrefixes.has(parentAliasPrefix(createdPath))
+    ) {
+      errors.push(`node.${bundle} editor probe alias ${createdPath} does not share the alias prefix structure of existing ${bundle} content (${[...structure.parentPrefixes].sort().join(', ')}).`);
     }
   }
   return errors;

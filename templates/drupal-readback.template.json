@@ -29,7 +29,13 @@
     "canvasPages": []
   },
   "routing": {
-    "aliases": [],
+    "aliases": [
+      {
+        "path": "",
+        "alias": "",
+        "bundle": ""
+      }
+    ],
     "duplicateAliases": [],
     "redirects": [],
     "unexpectedPublicRoutes": [],
