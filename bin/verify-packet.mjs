@@ -84,7 +84,8 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
   'G-EDITOR-01': 'editorWorkflow',
-  'G-SEO-01': 'renderedSeo'
+  'G-SEO-01': 'renderedSeo',
+  'G-PRIVACY-01': 'negativeRouteConsent'
 });
 
 class UsageError extends Error {}
@@ -1269,6 +1270,7 @@ async function independentStructuredGateReasons({
     'browser-evidence.json',
     'drupal-readback.json',
     'field-output-matrix.json',
+    'negative-route-consent.json',
     'parity-report.json',
     'pattern-map.json'
   ]) {
@@ -2140,6 +2142,159 @@ async function markdownCompletionReadiness(packetDir) {
   return reasons;
 }
 
+async function dispositionReady(packetDir, disposition) {
+  return Boolean(
+    String(disposition?.acceptedBy ?? '').trim() &&
+    String(disposition?.rationale ?? '').trim() &&
+    arrayOrEmpty(disposition?.evidence).length > 0 &&
+    (await Promise.all(arrayOrEmpty(disposition?.evidence).map((reference) =>
+      nonEmptyPacketEvidence(packetDir, reference)
+    ))).every(Boolean)
+  );
+}
+
+async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
+  const reasons = [];
+  if (!isJsonObject(record) || record.schemaVersion !== 'public-kit.negative-route-consent.1') {
+    return ['negative-route-consent.json must use schemaVersion public-kit.negative-route-consent.1.'];
+  }
+  if (!String(record.site ?? '').trim() || !String(record.toolOrMethod ?? '').trim() || !isoTimestamp(record.checkedAt)) {
+    reasons.push('negative-route-consent.json must identify the site, UTC check time, and tool or method.');
+  }
+  if (record.runSpecificEvidenceRecorded !== true) {
+    reasons.push('negative-route-consent.json must affirm that run-specific evidence was recorded.');
+  }
+
+  const missingRoute = record.missingRoute;
+  if (!isJsonObject(missingRoute) || missingRoute.canonicalPolicy !== 'absent_or_self') {
+    reasons.push('negative-route-consent.json must require absent-or-self canonical behavior for the generated missing route.');
+  }
+  if (!['required', 'status_only_with_disposition'].includes(missingRoute?.noindexPolicy)) {
+    reasons.push('negative-route-consent.json must select a supported missing-route noindex policy.');
+  } else if (
+    missingRoute.noindexPolicy === 'status_only_with_disposition' &&
+    !(await dispositionReady(packetDir, missingRoute.statusOnlyDisposition))
+  ) {
+    reasons.push('A status-only missing-route noindex policy requires a named, evidenced disposition.');
+  }
+
+  const accessWallRoutes = arrayOrEmpty(record.accessWallRoutes);
+  if (
+    accessWallRoutes.length === 0 ||
+    accessWallRoutes.some((route) =>
+      !normalizeRouteKey(route?.path) ||
+      route?.canonicalPolicy !== 'absent_or_self' ||
+      !['available', 'denied', 'disabled', 'external_auth'].includes(route?.expectedBehavior)
+    )
+  ) {
+    reasons.push('negative-route-consent.json must declare at least one valid access-wall route with absent-or-self canonical policy.');
+  }
+  for (const route of accessWallRoutes.filter((candidate) => candidate?.expectedBehavior === 'external_auth')) {
+    const disposition = route.externalAuthDisposition;
+    if (!httpUrl(disposition?.expectedOrigin) || !(await dispositionReady(packetDir, disposition))) {
+      reasons.push(`${normalizeRouteKey(route?.path) || 'An external-auth access wall'} needs an expected origin and named, evidenced disposition.`);
+    }
+  }
+
+  const legalScope = record.legalPrivacyScope;
+  const requirements = arrayOrEmpty(legalScope?.requirements);
+  if (legalScope?.reviewed !== true) {
+    reasons.push('negative-route-consent.json legal/privacy scope must be reviewed.');
+  }
+  if (requirements.length === 0 && !String(legalScope?.noRoutesReason ?? '').trim()) {
+    reasons.push('An empty legal/privacy requirement list needs a reason.');
+  }
+  for (const requirement of requirements) {
+    if (!normalizeRouteKey(requirement?.path) || !['active', 'production_only'].includes(requirement?.status)) {
+      reasons.push('Every legal/privacy requirement needs a route and active or production_only status.');
+      continue;
+    }
+    if (requirement.status === 'production_only' && !(await dispositionReady(packetDir, requirement))) {
+      reasons.push(`${normalizeRouteKey(requirement.path)} is production-only and needs a named, evidenced disposition.`);
+    }
+  }
+
+  const consent = record.consent;
+  if (!['installed', 'not_installed'].includes(consent?.discoveryStatus)) {
+    reasons.push('negative-route-consent.json must record whether a consent manager is installed.');
+    return reasons;
+  }
+  const managers = arrayOrEmpty(consent.managers);
+  const applications = arrayOrEmpty(consent.applications);
+  const beforeChecks = arrayOrEmpty(consent.beforeConsentChecks);
+  if (consent.discoveryStatus === 'not_installed') {
+    if (!String(consent.notInstalledReason ?? '').trim() || managers.length || applications.length || beforeChecks.length) {
+      reasons.push('A not-installed consent result needs a reason and must not declare managers, applications, or before-consent checks.');
+    }
+    return reasons;
+  }
+  if (
+    managers.length === 0 ||
+    managers.some((manager) => !String(manager?.id ?? '').trim() || !String(manager?.module ?? '').trim())
+  ) {
+    reasons.push('Installed consent must enumerate each manager with an id and Drupal module.');
+  }
+  const managerIds = new Set(managers.map((manager) => String(manager?.id ?? '').trim()).filter(Boolean));
+  for (const application of applications) {
+    const resources = arrayOrEmpty(application?.controlledResources);
+    if (
+      !String(application?.id ?? '').trim() ||
+      !managerIds.has(String(application?.managerId ?? '').trim()) ||
+      !String(application?.configName ?? '').trim() ||
+      typeof application?.enabled !== 'boolean' ||
+      typeof application?.required !== 'boolean'
+    ) {
+      reasons.push('Every consent application needs an id, known manager, config name, and boolean enabled/required state.');
+    }
+    if (resources.some((resource) =>
+      !['script', 'iframe', 'image', 'style', 'resource', 'selector', 'attachment'].includes(resource?.kind) ||
+      !String(resource?.pattern ?? '').trim()
+    )) {
+      reasons.push(`Consent application ${application?.id || '(missing id)'} has an invalid controlled-resource declaration.`);
+    }
+    if (resources.length === 0 && !(await dispositionReady(packetDir, application?.resourceDiscoveryDisposition))) {
+      reasons.push(`Consent application ${application?.id || '(missing id)'} needs controlled resources or a named, evidenced discovery disposition.`);
+    }
+  }
+
+  const primaryRoutes = new Set(
+    arrayOrEmpty(routeMatrix?.primaryRoutes).map((route) => normalizeRouteKey(route?.targetPath)).filter(Boolean)
+  );
+  const checksByRoute = new Map(beforeChecks.map((check) => [normalizeRouteKey(check?.route), check]));
+  for (const route of primaryRoutes) {
+    const check = checksByRoute.get(route);
+    if (!check || check.status !== 'pass' || check.browserContextFresh !== true || check.consentStorageCleared !== true) {
+      reasons.push(`Installed consent needs a passing fresh before-consent browser check with storage cleared for ${route}.`);
+      continue;
+    }
+    const evidencePath = resolveReviewEvidencePath(packetDir, join(packetDir, 'evidence'), check.evidence);
+    if (!evidencePath) {
+      reasons.push(`Before-consent check for ${route} needs packet-local evidence.`);
+      continue;
+    }
+    try {
+      const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+      const target = httpUrl(evidence?.targetBaseUrl);
+      const declaredTarget = httpUrl(routeMatrix?.targetBaseUrl);
+      if (
+        evidence?.schemaVersion !== 'public-kit.before-consent-evidence.1' ||
+        target?.origin !== declaredTarget?.origin ||
+        normalizeRouteKey(evidence?.route) !== route ||
+        evidence?.browserContextFresh !== true ||
+        evidence?.consentStorageCleared !== true ||
+        !timestampIsFresh(evidence?.checkedAt) ||
+        JSON.stringify(arrayOrEmpty(evidence?.observedResourceUrls)) !== JSON.stringify(arrayOrEmpty(check.observedResourceUrls)) ||
+        JSON.stringify(arrayOrEmpty(evidence?.blockedApplicationIds)) !== JSON.stringify(arrayOrEmpty(check.blockedApplicationIds))
+      ) {
+        reasons.push(`Before-consent evidence for ${route} is stale, target-mismatched, or inconsistent with its packet record.`);
+      }
+    } catch {
+      reasons.push(`Before-consent evidence for ${route} must be valid JSON.`);
+    }
+  }
+  return reasons;
+}
+
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
   if (!gates) {
@@ -2182,11 +2337,13 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    negativeRouteConsent,
     parityReport,
     patternMap,
     routeMatrix,
     sourceAudit
   } = records;
+  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
@@ -2722,7 +2879,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     ['independent-verification.json', independentVerification?.checkedAt],
     ['blind-adversarial-review.json', blindAdversarialReview?.checkedAt],
     ['drupal-readback.json', drupalReadback?.checkedAt],
-    ['field-output-matrix.json', fieldOutputMatrix?.checkedAt]
+    ['field-output-matrix.json', fieldOutputMatrix?.checkedAt],
+    ['negative-route-consent.json', negativeRouteConsent?.checkedAt]
   ];
   const invalidTimestampFiles = completionTimestamps.filter(([, value]) => isoTimestamp(value) === null).map(([file]) => file);
   const parsedTimestamps = completionTimestamps.map(([, value]) => isoTimestamp(value)).filter((value) => value !== null);
@@ -2766,6 +2924,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
+  const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), []);
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
   const independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
@@ -2794,6 +2953,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    negativeRouteConsent,
     parityReport,
     patternMap,
     routeMatrix,

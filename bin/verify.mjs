@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -383,6 +383,60 @@ function renderedMetadata(html, finalUrl) {
     openGraphImage: absolute(openGraphImages[0]?.content),
     openGraphImageCount: openGraphImages.length
   };
+}
+
+function absoluteRenderedUrl(value, finalUrl) {
+  const text = String(value ?? '').trim();
+  if (!text || /^(?:data|javascript|mailto|tel):/i.test(text)) {
+    return '';
+  }
+  try {
+    const url = new URL(text, finalUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      return '';
+    }
+    url.hash = '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function renderedLegalLinks(html, finalUrl) {
+  const final = new URL(finalUrl);
+  const legalSignal = /(?:privacy|legal|terms|cookie|data[ -]?protection|do[ -]?not[ -]?sell|accessibility(?:[ -]?statement)?)/i;
+  const links = [];
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attributes = tagAttributes(`<a ${match[1]}>`);
+    const url = absoluteRenderedUrl(attributes.href, finalUrl);
+    const text = normalizeText(decodeEntities(match[2].replace(/<[^>]+>/g, ' ')));
+    const label = normalizeText(`${text} ${attributes['aria-label'] ?? ''} ${attributes.title ?? ''}`);
+    if (!url || new URL(url).origin !== final.origin || !legalSignal.test(`${label} ${new URL(url).pathname}`)) {
+      continue;
+    }
+    links.push({ sourceUrl: finalUrl, text: label, url });
+  }
+  return links;
+}
+
+function renderedResourceUrls(html, finalUrl) {
+  const urls = new Set();
+  const tags = [
+    ['script', 'src'],
+    ['iframe', 'src'],
+    ['img', 'src'],
+    ['source', 'src'],
+    ['link', 'href']
+  ];
+  for (const [tag, attribute] of tags) {
+    for (const attributes of matchingTags(html, tag, () => true)) {
+      const url = absoluteRenderedUrl(attributes[attribute], finalUrl);
+      if (url) {
+        urls.add(url);
+      }
+    }
+  }
+  return [...urls].sort();
 }
 
 function normalizePath(value) {
@@ -1635,6 +1689,63 @@ function configStatusIsClean(result) {
   }
 }
 
+function inspectConsentInventory(projectRoot, environment) {
+  const php = String.raw`$storage = \Drupal::service('config.storage');
+$extension = $storage->read('core.extension') ?: [];
+$module_names = array_keys($extension['module'] ?? []);
+$manager_modules = array_values(array_filter($module_names, static fn($name) => preg_match('/consent|cookie|privacy|klaro/i', $name)));
+$config_names = array_values(array_filter($storage->listAll(), static fn($name) => preg_match('/consent|cookie|privacy|klaro/i', $name)));
+$applications = [];
+foreach ($config_names as $config_name) {
+  $data = $storage->read($config_name) ?: [];
+  $is_application = preg_match('/(?:^|\.)(?:application|app|service|integration)(?:\.|$)/i', $config_name) || array_intersect(['required', 'javascripts', 'wrapper_identifier', 'attachments'], array_keys($data));
+  if (!$is_application) { continue; }
+  $resources = [];
+  $walk = function ($value, $key = '') use (&$walk, &$resources) {
+    if (is_array($value)) { foreach ($value as $child_key => $child) { $walk($child, $key === '' ? (string) $child_key : $key . '.' . $child_key); } return; }
+    if (!is_string($value) || trim($value) === '' || preg_match('/secret|password|token|api[_-]?key/i', $key)) { return; }
+    $kinds = ['javascripts' => 'script', 'javascript' => 'script', 'scripts' => 'script', 'wrapper_identifier' => 'selector', 'attachments' => 'attachment', 'iframe' => 'iframe', 'images' => 'image', 'styles' => 'style', 'resources' => 'resource', 'urls' => 'resource', 'domains' => 'resource'];
+    $normalized = strtolower(str_replace('-', '_', $key));
+    foreach ($kinds as $needle => $kind) { if (str_contains($normalized, $needle)) { $pattern = trim($value); if (preg_match('/^https?:\/\//i', $pattern)) { $pattern = preg_replace('/[?#].*$/', '', $pattern); } $resources[] = ['kind' => $kind, 'pattern' => $pattern]; break; } }
+  };
+  $walk($data);
+  $id = (string) ($data['id'] ?? preg_replace('/^.*\./', '', $config_name));
+  $applications[] = ['configName' => $config_name, 'id' => $id, 'enabled' => (bool) ($data['status'] ?? $data['enabled'] ?? TRUE), 'required' => (bool) ($data['required'] ?? FALSE), 'resources' => array_values(array_unique($resources, SORT_REGULAR))];
+}
+print json_encode(['schemaVersion' => 'public-kit.consent-runtime.1', 'confirmed' => TRUE, 'detected' => (bool) ($manager_modules || $config_names), 'managerModules' => $manager_modules, 'configNames' => $config_names, 'applications' => $applications], JSON_UNESCAPED_SLASHES);`;
+  const result = runDrushResult(projectRoot, environment, ['php:eval', php]);
+  if (!result.ok) {
+    return {
+      applications: [],
+      configNames: [],
+      confirmed: false,
+      detected: false,
+      managerModules: [],
+      reason: 'Drupal consent configuration could not be inspected through Drush.'
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    return {
+      applications: Array.isArray(parsed.applications) ? parsed.applications : [],
+      configNames: Array.isArray(parsed.configNames) ? parsed.configNames : [],
+      confirmed: parsed.confirmed === true,
+      detected: parsed.detected === true,
+      managerModules: Array.isArray(parsed.managerModules) ? parsed.managerModules : [],
+      reason: ''
+    };
+  } catch {
+    return {
+      applications: [],
+      configNames: [],
+      confirmed: false,
+      detected: false,
+      managerModules: [],
+      reason: 'Drupal consent configuration inspection returned invalid JSON.'
+    };
+  }
+}
+
 function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, patternMap) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
@@ -1642,6 +1753,10 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
       baseUrl: '',
       confirmed: false,
       configStatusClean: false,
+      consentInventory: {
+        applications: [], configNames: [], confirmed: false, detected: false, managerModules: [],
+        reason: 'Current working directory is not inside a DDEV Drupal project.'
+      },
       configSyncTracked: false,
       configSyncDirectory: '',
       configManifest: null,
@@ -1698,6 +1813,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     routeMatrix,
     patternMap
   );
+  const consentInventory = inspectConsentInventory(projectRoot, environment);
   const siteUuid = uuidOutput.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrap) && Boolean(siteUuid);
   const baseUrl = inContainer ? environmentTargetUrl(environment) : ddevTargetUrl(projectRoot, environment);
@@ -1705,6 +1821,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     baseUrl,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
+    consentInventory,
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
     configManifest: trackedConfig.configManifest,
@@ -1874,6 +1991,7 @@ function completionEvidenceTargetErrors({
   drupalReadback,
   fieldOutputMatrix,
   independentVerification,
+  negativeRouteConsent,
   parityReport,
   patternMap,
   sourceAudit,
@@ -1889,6 +2007,7 @@ function completionEvidenceTargetErrors({
   requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
   requiredOriginMatch(errors, 'drupal-readback.json site', drupalReadback?.site, targetOrigin);
+  requiredOriginMatch(errors, 'negative-route-consent.json site', negativeRouteConsent?.site, targetOrigin);
   requiredOriginMatch(
     errors,
     'independent-verification.json target.baseUrl',
@@ -2103,12 +2222,262 @@ async function verifyRoute(baseUrl, expected) {
       localTlsVerificationBypassed: response.localTlsVerificationBypassed,
       passed: errors.length === 0,
       redirects: response.redirects,
+      renderedLegalLinks: renderedLegalLinks(response.body, response.finalUrl),
+      renderedResourceUrls: renderedResourceUrls(response.body, response.finalUrl),
       requestedUrl: requestedUrl.href
     };
   } catch (error) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
     return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href };
   }
+}
+
+async function verifyGeneratedMissingRoute(baseUrl, policy) {
+  const path = `/.well-known/agent-ready-missing-${randomBytes(16).toString('hex')}`;
+  const requestedUrl = new URL(path, baseUrl);
+  const errors = [];
+  try {
+    const response = await requestOnce(requestedUrl);
+    const metadata = renderedMetadata(response.body, requestedUrl.href);
+    const title = elementText(response.body, 'title');
+    const h1 = elementText(response.body, 'h1');
+    if (response.status !== 404) {
+      errors.push(`${path} returned HTTP ${response.status}; a generated missing route must return exactly 404 without redirecting.`);
+    }
+    if (!title || !h1) {
+      errors.push(`${path} must render a non-empty title and H1 on the 404 response.`);
+    }
+    if (metadata.canonicalCount > 1) {
+      errors.push(`${path} rendered multiple canonicals; a missing route canonical must be absent or self-referential.`);
+    } else if (metadata.canonicalCount === 1 && metadata.canonicalUrl !== requestedUrl.href) {
+      errors.push(`${path} rendered canonical ${JSON.stringify(metadata.canonicalUrl)} instead of itself.`);
+    }
+    if (policy?.noindexPolicy === 'required' && !metadata.noindex) {
+      errors.push(`${path} did not render the required noindex directive.`);
+    }
+    return {
+      actualH1: h1,
+      actualMetadata: metadata,
+      actualTitle: title,
+      bodySha256: `sha256:${sha256(response.body)}`,
+      errors,
+      passed: errors.length === 0,
+      path,
+      requestedUrl: requestedUrl.href,
+      status: response.status
+    };
+  } catch (error) {
+    errors.push(`${path} could not be fetched: ${error.message}`);
+    return { errors, passed: false, path, requestedUrl: requestedUrl.href };
+  }
+}
+
+async function verifyAccessWallRoute(baseUrl, declaration) {
+  const path = normalizePath(declaration?.path);
+  const requestedUrl = new URL(path.replace(/^\//, ''), new URL('/', baseUrl));
+  const errors = [];
+  try {
+    if (declaration?.expectedBehavior === 'external_auth') {
+      const response = await requestOnce(requestedUrl);
+      const location = response.headers.location;
+      const destination = location ? new URL(location, requestedUrl) : null;
+      const expectedOrigin = parseHttpUrl(
+        declaration?.externalAuthDisposition?.expectedOrigin,
+        `${path} external authentication origin`
+      ).origin;
+      if (!REDIRECT_STATUSES.has(response.status) || destination?.origin !== expectedOrigin) {
+        errors.push(`${path} did not redirect to the declared external authentication origin ${expectedOrigin}.`);
+      }
+      const metadata = renderedMetadata(response.body, requestedUrl.href);
+      if (metadata.canonicalCount > 1 || (metadata.canonicalCount === 1 && metadata.canonicalUrl !== requestedUrl.href)) {
+        errors.push(`${path} rendered an unrelated public canonical on its access-wall response.`);
+      }
+      return {
+        actualMetadata: metadata,
+        errors,
+        finalUrl: destination?.href ?? requestedUrl.href,
+        passed: errors.length === 0,
+        path,
+        requestedUrl: requestedUrl.href,
+        status: response.status
+      };
+    }
+    const response = await requestFollowingRedirects(requestedUrl);
+    const metadata = renderedMetadata(response.body, response.finalUrl);
+    const expectedBehavior = declaration?.expectedBehavior;
+    if (normalizePath(response.finalUrl) !== path) {
+      errors.push(`${path} resolved to unrelated access-wall path ${normalizePath(response.finalUrl)}.`);
+    }
+    if (expectedBehavior === 'available' && (response.status < 200 || response.status >= 300)) {
+      errors.push(`${path} should be available but ended with HTTP ${response.status}.`);
+    } else if (expectedBehavior === 'denied' && ![401, 403].includes(response.status)) {
+      errors.push(`${path} should deny anonymous access with 401 or 403 but ended with HTTP ${response.status}.`);
+    } else if (expectedBehavior === 'disabled' && ![404, 410].includes(response.status)) {
+      errors.push(`${path} should be disabled with 404 or 410 but ended with HTTP ${response.status}.`);
+    }
+    if (metadata.canonicalCount > 1) {
+      errors.push(`${path} rendered multiple public canonicals.`);
+    } else if (metadata.canonicalCount === 1) {
+      const canonical = new URL(metadata.canonicalUrl);
+      const final = new URL(response.finalUrl);
+      if (canonical.origin !== baseUrl.origin || normalizePath(canonical.href) !== normalizePath(final.href)) {
+        errors.push(`${path} rendered unrelated canonical ${metadata.canonicalUrl} on its access-wall response.`);
+      }
+    }
+    return {
+      actualMetadata: metadata,
+      errors,
+      finalUrl: response.finalUrl,
+      passed: errors.length === 0,
+      path,
+      requestedUrl: requestedUrl.href,
+      status: response.status
+    };
+  } catch (error) {
+    errors.push(`${path || '(missing access-wall route)'} could not be verified: ${error.message}`);
+    return { errors, passed: false, path, requestedUrl: requestedUrl.href };
+  }
+}
+
+async function verifyRenderedLegalLinks(baseUrl, routeChecks, declaration) {
+  const rendered = [...routeChecks.flatMap((route) => route.renderedLegalLinks ?? [])];
+  const activeRequirements = (Array.isArray(declaration?.requirements) ? declaration.requirements : [])
+    .filter((requirement) => requirement?.status === 'active')
+    .map((requirement) => ({ sourceUrl: 'negative-route-consent.json', text: '', url: new URL(normalizePath(requirement.path).replace(/^\//, ''), new URL('/', baseUrl)).href }));
+  const candidates = [...rendered, ...activeRequirements];
+  const unique = [...new Map(candidates.map((link) => [link.url, link])).values()];
+  return Promise.all(unique.map(async (link) => {
+    const errors = [];
+    try {
+      const response = await requestFollowingRedirects(new URL(link.url));
+      if (new URL(response.finalUrl).origin !== baseUrl.origin || response.status < 200 || response.status >= 300) {
+        errors.push(`Rendered or active legal/privacy link ${link.url} ended at ${response.finalUrl} with HTTP ${response.status}; it cannot be treated as not applicable.`);
+      }
+      return { ...link, errors, finalUrl: response.finalUrl, passed: errors.length === 0, status: response.status };
+    } catch (error) {
+      errors.push(`Rendered or active legal/privacy link ${link.url} could not be fetched: ${error.message}`);
+      return { ...link, errors, passed: false };
+    }
+  }));
+}
+
+function controlledResourceMatches(resource, url) {
+  if (['selector', 'attachment'].includes(resource?.kind)) {
+    return false;
+  }
+  const pattern = String(resource?.pattern ?? '').trim();
+  if (!pattern) {
+    return false;
+  }
+  if (pattern.startsWith('regex:')) {
+    try {
+      return new RegExp(pattern.slice('regex:'.length), 'i').test(url);
+    } catch {
+      return false;
+    }
+  }
+  const normalizedPattern = pattern.replaceAll('*', '').toLowerCase();
+  return Boolean(normalizedPattern) && url.toLowerCase().includes(normalizedPattern);
+}
+
+function sameStringSet(left, right) {
+  const a = [...new Set(left.map((value) => String(value ?? '').trim()).filter(Boolean))].sort();
+  const b = [...new Set(right.map((value) => String(value ?? '').trim()).filter(Boolean))].sort();
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function verifyConsentReconciliation(declaration, runtime, routeChecks) {
+  const errors = [];
+  const discoveryStatus = declaration?.discoveryStatus;
+  const runtimeInventory = runtime ?? {
+    applications: [], configNames: [], confirmed: false, detected: false, managerModules: []
+  };
+  if (['installed', 'not_installed'].includes(discoveryStatus) && runtimeInventory.confirmed !== true) {
+    errors.push('Active Drupal consent configuration could not be independently inspected.');
+  }
+  if (runtimeInventory.detected === true && discoveryStatus !== 'installed') {
+    errors.push('Drupal consent configuration is active but negative-route-consent.json says it is not installed.');
+  }
+  if (runtimeInventory.detected !== true && discoveryStatus === 'installed') {
+    errors.push('negative-route-consent.json declares installed consent, but active Drupal configuration contains no consent manager.');
+  }
+  const managers = Array.isArray(declaration?.managers) ? declaration.managers : [];
+  const applications = Array.isArray(declaration?.applications) ? declaration.applications : [];
+  if (discoveryStatus === 'installed' && runtimeInventory.detected === true) {
+    if (!sameStringSet(managers.map((manager) => manager.module), runtimeInventory.managerModules ?? [])) {
+      errors.push('Declared consent manager modules do not exactly reconcile with enabled Drupal consent modules.');
+    }
+    const declaredConfigNames = managers.flatMap((manager) => Array.isArray(manager.configNames) ? manager.configNames : []);
+    if (!sameStringSet(declaredConfigNames, runtimeInventory.configNames ?? [])) {
+      errors.push('Declared consent config names do not exactly reconcile with active Drupal consent config.');
+    }
+    for (const runtimeApplication of runtimeInventory.applications ?? []) {
+      const declared = applications.find((application) =>
+        application.configName === runtimeApplication.configName || application.id === runtimeApplication.id
+      );
+      if (!declared) {
+        errors.push(`Active consent application ${runtimeApplication.configName || runtimeApplication.id} is not declared.`);
+        continue;
+      }
+      if (declared.enabled !== runtimeApplication.enabled || declared.required !== runtimeApplication.required) {
+        errors.push(`Consent application ${declared.id} enabled/required state contradicts active Drupal config.`);
+      }
+      for (const resource of runtimeApplication.resources ?? []) {
+        if (!(declared.controlledResources ?? []).some((candidate) =>
+          candidate.kind === resource.kind && candidate.pattern === resource.pattern
+        )) {
+          errors.push(`Consent application ${declared.id} omits active controlled resource ${resource.kind}:${resource.pattern}.`);
+        }
+      }
+    }
+    for (const declared of applications) {
+      if (!(runtimeInventory.applications ?? []).some((application) =>
+        application.configName === declared.configName || application.id === declared.id
+      )) {
+        errors.push(`Declared consent application ${declared.id} does not exist in active Drupal config.`);
+      }
+    }
+  }
+
+  const serverRenderedUrls = routeChecks.flatMap((route) => route.renderedResourceUrls ?? []);
+  const beforeChecks = Array.isArray(declaration?.beforeConsentChecks) ? declaration.beforeConsentChecks : [];
+  const authoredBrowserObservedUrls = beforeChecks.flatMap((check) =>
+    Array.isArray(check.observedResourceUrls) ? check.observedResourceUrls : []
+  );
+  // Packet browser transcripts remain useful authored evidence, but the live
+  // verifier did not observe those network requests and must not treat them as
+  // completion-authoritative. Server-rendered resources are independently
+  // observed here; optional/disabled browser-loaded resources fail closed until
+  // a verifier-owned fresh browser/network capture is implemented.
+  const observedUrls = [...new Set(serverRenderedUrls)];
+  for (const application of discoveryStatus === 'installed'
+    ? applications.filter((candidate) => String(candidate?.id ?? '').trim())
+    : []) {
+    const violating = observedUrls.filter((url) =>
+      (application.controlledResources ?? []).some((resource) => controlledResourceMatches(resource, url))
+    );
+    if (violating.length > 0 && (application.enabled !== true || application.required !== true)) {
+      const state = application.enabled === true ? 'before consent' : 'while its consent application is disabled';
+      errors.push(`Controlled resource for ${application.id} loaded ${state}: ${violating[0]}.`);
+    }
+    if (
+      (application.controlledResources ?? []).length > 0 &&
+      (application.enabled !== true || application.required !== true)
+    ) {
+      errors.push(
+        `Consent application ${application.id} requires verifier-owned fresh browser/network capture before G-PRIVACY-01 can pass; packet-authored before-consent URLs and blocked IDs are non-authoritative.`
+      );
+    }
+  }
+  return {
+    authoredBrowserObservedUrls,
+    authoritativeBeforeConsentCapture: false,
+    browserObservedUrls: [],
+    errors,
+    passed: errors.length === 0,
+    runtimeInventory,
+    serverRenderedUrls
+  };
 }
 
 export async function verifyLive({
@@ -2140,6 +2509,7 @@ export async function verifyLive({
   let parityReport = null;
   let patternMap = null;
   let sourceAudit = null;
+  let negativeRouteConsent = null;
   try {
     independentVerification = JSON.parse(
       await readFile(join(absolutePacketDir, 'independent-verification.json'), 'utf8')
@@ -2164,6 +2534,9 @@ export async function verifyLive({
     );
     sourceAudit = JSON.parse(
       await readFile(join(absolutePacketDir, 'source-audit.json'), 'utf8')
+    );
+    negativeRouteConsent = JSON.parse(
+      await readFile(join(absolutePacketDir, 'negative-route-consent.json'), 'utf8')
     );
   } catch {
     // Packet validation already records malformed or missing required JSON.
@@ -2287,6 +2660,44 @@ export async function verifyLive({
           ? 'Verifier-owned browser capture is disabled for an injected or unavailable runtime.'
           : 'No lifecycle baseline exists yet; the next live verifier run will establish the global chrome anchor.']
       };
+  const negativeRouteCheck = target && explicitTargetFetchAllowed
+    ? await verifyGeneratedMissingRoute(target.url, negativeRouteConsent?.missingRoute)
+    : null;
+  if (negativeRouteCheck) {
+    liveErrors.push(...negativeRouteCheck.errors);
+  }
+  const accessWallChecks = target && explicitTargetFetchAllowed
+    ? await Promise.all((Array.isArray(negativeRouteConsent?.accessWallRoutes)
+      ? negativeRouteConsent.accessWallRoutes
+      : []).map((route) => verifyAccessWallRoute(target.url, route)))
+    : [];
+  for (const check of accessWallChecks) {
+    liveErrors.push(...check.errors);
+  }
+  const legalPrivacyLinkChecks = target && explicitTargetFetchAllowed
+    ? await verifyRenderedLegalLinks(
+        target.url,
+        [...routeChecks, ...targetRequiredRouteChecks],
+        negativeRouteConsent?.legalPrivacyScope
+      )
+    : [];
+  for (const check of legalPrivacyLinkChecks) {
+    liveErrors.push(...check.errors);
+  }
+  const consentInventory = inspectedDrupalRuntime.consentInventory ?? {
+    applications: [],
+    configNames: [],
+    confirmed: runtimeWasInjected,
+    detected: false,
+    managerModules: [],
+    reason: runtimeWasInjected ? '' : 'Consent inventory is unavailable.'
+  };
+  const consentReconciliation = verifyConsentReconciliation(
+    negativeRouteConsent?.consent,
+    consentInventory,
+    [...routeChecks, ...targetRequiredRouteChecks]
+  );
+  liveErrors.push(...consentReconciliation.errors);
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -2302,6 +2713,7 @@ export async function verifyLive({
           drupalReadback,
           fieldOutputMatrix,
           independentVerification,
+          negativeRouteConsent,
           parityReport,
           patternMap,
           sourceAudit,
@@ -2568,7 +2980,13 @@ export async function verifyLive({
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
     routeChecks: routeEvidenceManifest,
-    globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? ''
+    globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
+    negativeRouteCheck: negativeRouteCheck
+      ? { bodySha256: negativeRouteCheck.bodySha256 ?? '', path: negativeRouteCheck.path, status: negativeRouteCheck.status ?? 0 }
+      : null,
+    accessWallChecks: accessWallChecks.map((check) => ({ finalUrl: check.finalUrl ?? '', path: check.path, status: check.status ?? 0 })),
+    legalPrivacyLinkChecks: legalPrivacyLinkChecks.map((check) => ({ finalUrl: check.finalUrl ?? '', status: check.status ?? 0, url: check.url })),
+    consentRuntime: consentInventory
   });
   const sharedPacketReport = {
     ...packetReport,
@@ -2603,6 +3021,10 @@ export async function verifyLive({
     targetRequiredRouteChecks,
     globalChromeCapture,
     globalChromeCaptureSummary: captureSummary(globalChromeCapture),
+    negativeRouteCheck,
+    accessWallChecks,
+    legalPrivacyLinkChecks,
+    consentReconciliation,
     liveTargetValid,
     buildState,
     drupalRuntime: {

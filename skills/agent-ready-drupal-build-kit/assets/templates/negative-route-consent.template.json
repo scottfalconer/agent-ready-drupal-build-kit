@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "public-kit.negative-route-consent.1",
+  "site": "",
+  "checkedAt": "",
+  "toolOrMethod": "",
+  "missingRoute": {
+    "noindexPolicy": "required | status_only_with_disposition",
+    "canonicalPolicy": "absent_or_self",
+    "statusOnlyDisposition": { "acceptedBy": "", "rationale": "", "evidence": [] }
+  },
+  "accessWallRoutes": [
+    {
+      "path": "/user/login",
+      "expectedBehavior": "available | denied | disabled | external_auth",
+      "canonicalPolicy": "absent_or_self",
+      "externalAuthDisposition": { "expectedOrigin": "", "acceptedBy": "", "rationale": "", "evidence": [] }
+    }
+  ],
+  "legalPrivacyScope": {
+    "reviewed": false,
+    "requirements": [
+      { "path": "", "status": "active | production_only", "acceptedBy": "", "rationale": "", "evidence": [] }
+    ],
+    "noRoutesReason": ""
+  },
+  "consent": {
+    "discoveryStatus": "installed | not_installed",
+    "notInstalledReason": "",
+    "managers": [ { "id": "", "module": "", "configNames": [] } ],
+    "applications": [
+      {
+        "id": "",
+        "managerId": "",
+        "configName": "",
+        "enabled": false,
+        "required": false,
+        "controlledResources": [
+          { "kind": "script | iframe | image | style | resource | selector | attachment", "pattern": "" }
+        ],
+        "resourceDiscoveryDisposition": { "acceptedBy": "", "rationale": "", "evidence": [] }
+      }
+    ],
+    "beforeConsentChecks": [
+      {
+        "route": "",
+        "browserContextFresh": false,
+        "consentStorageCleared": false,
+        "observedResourceUrls": [],
+        "blockedApplicationIds": [],
+        "status": "pass | fail | blocked",
+        "evidence": ""
+      }
+    ]
+  },
+  "runSpecificEvidenceRecorded": false,
+  "notes": ""
+}
