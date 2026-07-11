@@ -516,7 +516,7 @@ From the DDEV Drupal project root, collect recipe evidence with commands like:
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
-ddev composer show -a 'drupal/drupal_cms_events'
+ddev composer show -a 'drupal/<candidate>'
 ```
 
 Apply a bounded Recipe only after recording why it fits the pattern map. From the host, the Drupal core Recipe runner shape for a standard DDEV `web` docroot is:

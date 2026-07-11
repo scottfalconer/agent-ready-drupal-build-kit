@@ -1876,25 +1876,52 @@ async function validateDurableIntent(packetDir, errors) {
 }
 
 const RECIPE_CANDIDATE_RE = /\bdrupal_cms_[a-z0-9_]+\b/g;
-const RECIPE_UPSTREAM_AVAILABILITY_VALUES = new Set(['installed', 'available', 'not-published', 'not_published']);
+const RECIPE_DECISION_VALUES = new Set(['apply', 'reject', 'blocked', 'not_applicable', 'unknown']);
+const RECIPE_UPSTREAM_AVAILABILITY_VALUES = new Set(['installed', 'available', 'not-published']);
 
-function blockedRecipeCandidateRows(text) {
-  const rows = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
-      continue;
-    }
-    const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.replaceAll('`', '').trim());
-    const candidates = [...new Set(cells[0]?.match(RECIPE_CANDIDATE_RE) ?? [])];
-    if (candidates.length === 0 || !cells.some((cell) => cell.toLowerCase() === 'blocked')) {
-      continue;
-    }
-    const availability =
-      cells.map((cell) => cell.toLowerCase()).find((cell) => RECIPE_UPSTREAM_AVAILABILITY_VALUES.has(cell)) ?? '';
-    rows.push({ candidates, availability: availability.replace('_', '-') });
+function markdownTableCells(line) {
+  const trimmed = line.trim();
+  if (trimmed.length < 2 || !trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+    return null;
   }
-  return rows;
+  return trimmed.slice(1, -1).split('|').map((cell) => cell.replaceAll('`', '').trim());
+}
+
+function recipeCandidateRows(text) {
+  const rows = [];
+  let columns = null;
+  let candidateTableFound = false;
+  for (const line of text.split('\n')) {
+    const cells = markdownTableCells(line);
+    if (!cells) {
+      columns = null;
+      continue;
+    }
+    if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+      continue;
+    }
+    const headers = cells.map((cell) => cell.toLowerCase());
+    const decisionColumn = headers.indexOf('decision');
+    const availabilityColumn = headers.indexOf('upstream availability');
+    if (decisionColumn !== -1 && availabilityColumn !== -1) {
+      columns = { decision: decisionColumn, availability: availabilityColumn };
+      candidateTableFound = true;
+      continue;
+    }
+    if (!columns) {
+      continue;
+    }
+    const candidates = [...new Set(cells[0]?.match(RECIPE_CANDIDATE_RE) ?? [])];
+    if (candidates.length === 0) {
+      continue;
+    }
+    rows.push({
+      candidates,
+      decision: cells[columns.decision] ?? '',
+      availability: (cells[columns.availability] ?? '').toLowerCase().replaceAll('_', '-')
+    });
+  }
+  return { candidateTableFound, rows };
 }
 
 async function validateRecipeStartPoint(packetDir, errors) {
@@ -1917,18 +1944,36 @@ async function validateRecipeStartPoint(packetDir, errors) {
   // Discovery does not end at the on-disk recipes/ directory. A blocked candidate
   // must record whether the maintained package exists upstream, and a blocked
   // upstream-available candidate is a human composer-require-versus-hand-rolled
-  // decision, never a silent downgrade to custom config.
-  const blockedRows = blockedRecipeCandidateRows(text);
-  if (blockedRows.length > 0 && !/composer\s+show\s+(?:-a|--all)\b/.test(text)) {
-    errors.push("recipe-start-point.md must record upstream composer-installability discovery (composer show -a 'drupal/<candidate>' or a Packagist readback) for blocked recipe candidates.");
+  // decision, never a silent downgrade to custom config. Decision parsing fails
+  // closed: annotated variants such as "blocked — no such path/package" count as
+  // blocked, and any candidate row outside the documented Decision enum is an error.
+  const { candidateTableFound, rows: candidateRows } = recipeCandidateRows(text);
+  if (!candidateTableFound) {
+    errors.push('recipe-start-point.md must keep the Recipe Candidate Review table with Decision and Upstream availability columns.');
   }
   const decisionsPath = join(packetDir, 'open-decisions.md');
   const decisionsText = existsSync(decisionsPath) ? await readFile(decisionsPath, 'utf8') : '';
-  for (const row of blockedRows) {
+  for (const row of candidateRows) {
     const label = row.candidates.join(' / ');
-    if (!row.availability) {
+    const decision = row.decision.toLowerCase();
+    const blocked = /^blocked\b/.test(decision);
+    if (!blocked && !RECIPE_DECISION_VALUES.has(decision)) {
+      errors.push(`recipe-start-point.md records candidate ${label} with Decision "${row.decision || '(empty)'}"; use one of apply, reject, blocked, not_applicable, UNKNOWN.`);
+      continue;
+    }
+    if (!blocked) {
+      continue;
+    }
+    if (!RECIPE_UPSTREAM_AVAILABILITY_VALUES.has(row.availability)) {
       errors.push(`recipe-start-point.md marks ${label} blocked without recording upstream availability (installed, available, or not-published).`);
       continue;
+    }
+    const hasUpstreamEvidence = row.candidates.some((candidate) =>
+      new RegExp(`composer\\s+show\\s+(?:-a|--all)\\s+['"\`]?drupal/${candidate}\\b`).test(text) ||
+      new RegExp(`packagist\\.org/packages/drupal/${candidate}\\b`).test(text)
+    );
+    if (!hasUpstreamEvidence) {
+      errors.push(`recipe-start-point.md must record upstream composer-installability discovery for blocked ${label} (composer show -a 'drupal/${row.candidates[0]}' or its Packagist page).`);
     }
     if (row.availability !== 'available') {
       continue;

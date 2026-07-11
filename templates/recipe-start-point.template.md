@@ -44,7 +44,7 @@ From the DDEV Drupal project root, collect recipe evidence with:
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
-ddev composer show -a 'drupal/drupal_cms_events'
+ddev composer show -a 'drupal/<candidate>'
 ```
 
 Discovery does not end at the on-disk `recipes/` directory. If a named `drupal_cms_*` candidate is absent from `recipes/` and the installed package list, check whether `drupal/<candidate>` is composer-installable (`ddev composer show -a 'drupal/<candidate>'` or its Packagist page) before recording it `blocked`, and record the upstream availability with the decision. A maintained upstream recipe package is preferred over hand-rolled equivalent config: every `blocked` candidate whose upstream availability is `available` needs a matching `open-decisions.md` row recording the composer-require-versus-hand-rolled-overlay decision for the human owner.
@@ -81,7 +81,7 @@ Do not select or apply a different full site template here. Record the template 
 
 Decision values: `apply`, `reject`, `blocked`, `not_applicable`, `UNKNOWN`.
 
-Upstream availability values: `installed` (present in the target), `available` (composer-installable upstream but not installed), `not-published` (no maintained upstream package). Required for every `blocked` row, backed by `composer show -a` or Packagist evidence; leave blank otherwise.
+Upstream availability values: `installed` (present in the target), `available` (composer-installable upstream but not installed), `not-published` (no maintained upstream package). Required for every `blocked` row, backed by candidate-specific evidence recorded in this file (`composer show -a 'drupal/<candidate>'` output or that candidate's Packagist page); leave blank otherwise. Keep the `Decision` cell a bare enum value and put annotations such as "no such path/package" in Evidence or Notes.
 
 ## Site-Specific Overlay Boundary
 
@@ -103,7 +103,7 @@ ddev drush pm:list --status=enabled
 ddev drush config:export -y
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
-ddev composer show -a 'drupal/drupal_cms_events'
+ddev composer show -a 'drupal/<candidate>'
 ```
 
 Recipe discovery / apply evidence:

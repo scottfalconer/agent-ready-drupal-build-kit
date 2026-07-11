@@ -367,6 +367,10 @@ ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 
 All available recipe candidates were reviewed and dispositioned as not_applicable for this fixture.
+
+| Candidate recipe | Fit | Decision | Upstream availability | Evidence | Notes |
+| --- | --- | --- | --- | --- | --- |
+| drupal_cms_events | Event content type/listing candidate | not_applicable |  | The fixture source has no recurring event objects. |  |
 `);
 
   writeFileSync(join(packetDir, 'scoped-gap-list.md'), `# Scoped Gap List
@@ -2020,8 +2024,8 @@ test('blocked upstream-available recipe candidates fail closed without an open-d
 
   const recipe = recipeStartPointWithEventsRow(
     '| `drupal_cms_events` | Event content type/listing candidate | blocked | available | absent from recipes/; upstream package exists | Guardrail forbids unprompted install. |'
-  ).replaceAll('composer show -a', 'composer show');
-  assert.doesNotMatch(recipe, /composer show -a/);
+  );
+  assert.doesNotMatch(recipe, /composer show -a ['"`]?drupal\/drupal_cms_events/);
   writeFileSync(join(packetDir, 'recipe-start-point.md'), recipe);
 
   const report = await validatePacket({ packetDir });
@@ -2029,11 +2033,102 @@ test('blocked upstream-available recipe candidates fail closed without an open-d
   assert.equal(report.valid, false);
   assert.match(
     report.errors.join('\n'),
-    /recipe-start-point\.md must record upstream composer-installability discovery/
+    /recipe-start-point\.md must record upstream composer-installability discovery for blocked drupal_cms_events/
   );
   assert.match(
     report.errors.join('\n'),
     /marks upstream-available drupal_cms_events blocked without a matching open-decisions\.md row recording the composer-require-versus-hand-rolled-overlay decision/
+  );
+});
+
+test('annotated blocked decisions like the incident string still trigger the blocked-row checks', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-annotated-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(
+    join(packetDir, 'recipe-start-point.md'),
+    recipeStartPointWithEventsRow(
+      '| `drupal_cms_events` | Event content type/listing candidate | blocked — no such path/package |  | disk discovery only | |'
+    )
+  );
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md marks drupal_cms_events blocked without recording upstream availability \(installed, available, or not-published\)/
+  );
+});
+
+test('candidate decisions outside the documented enum fail closed', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-bad-enum-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(
+    join(packetDir, 'recipe-start-point.md'),
+    recipeStartPointWithEventsRow(
+      '| `drupal_cms_events` | Event content type/listing candidate | deferred | | disk discovery only | |'
+    )
+  );
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md records candidate drupal_cms_events with Decision "deferred"; use one of apply, reject, blocked, not_applicable, UNKNOWN/
+  );
+});
+
+test('upstream availability is read from its own column, not from any cell in the row', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-wrong-column-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(
+    join(packetDir, 'recipe-start-point.md'),
+    recipeStartPointWithEventsRow(
+      '| `drupal_cms_events` | Event content type/listing candidate | blocked |  | disk discovery only | available |'
+    )
+  );
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md marks drupal_cms_events blocked without recording upstream availability \(installed, available, or not-published\)/
+  );
+});
+
+test('removing the Recipe Candidate Review table fails closed', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-no-table-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const recipe = readFileSync(join(templatesDir, 'recipe-start-point.template.md'), 'utf8').replace(
+    '| Candidate recipe | Fit | Decision | Upstream availability | Evidence | Notes |',
+    '| Candidate recipe | Fit | Outcome | Notes |'
+  );
+  writeFileSync(join(packetDir, 'recipe-start-point.md'), recipe);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md must keep the Recipe Candidate Review table with Decision and Upstream availability columns/
   );
 });
 
