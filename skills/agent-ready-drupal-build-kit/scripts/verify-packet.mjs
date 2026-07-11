@@ -89,81 +89,109 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
 // Attribute verifier findings to gate ids so reports stay machine-consumable per gate.
 // A finding is matched by the packet evidence file it names plus gate-specific keywords;
 // a finding that names an evidence file but matches no sibling keyword lands on that
-// file's foundational gate so it never disappears from per-gate triage. The flat
-// errors[] array remains the complete authoritative list; per-gate results are
-// diagnostic and never grant completion authority.
+// file's fallback gate, and a finding that names no file and matches no keyword lands
+// on the caller's residual gate, so no finding can disappear from per-gate triage.
+// The flat errors[] array remains the complete authoritative list; per-gate results
+// are diagnostic and never grant completion authority.
 const GATE_ID_MENTION_RE = /\bG-[A-Z]+-\d{2}\b/g;
-const GATE_FINDING_ATTRIBUTION = Object.freeze([
-  {
-    file: 'route-matrix.json',
-    fallback: 'G-ROUTE-01',
-    keywords: [
-      ['G-ROUTE-02', /browser-first|route expansion/i],
-      ['G-ROUTE-03', /reconcil|item count|count delta|mismatchDisposition|owner_approved_exclusion|private_unreachable/i],
-      ['G-ROUTE-04', /drift|classif/i],
-      ['G-ROUTE-05', /target-required|starter/i],
-      ['G-ROUTE-06', /homepage|front[- ]page|alias/i],
-      ['G-BROWSER-02', /first-fold|brand/i],
-      ['G-CANVAS-01', /canvas/i]
-    ]
-  },
-  {
-    file: 'browser-evidence.json',
-    fallback: 'G-BROWSER-01',
-    keywords: [
-      ['G-ROUTE-03', /reconcil|item count/i],
-      ['G-BROWSER-02', /first-fold|brand/i],
-      ['G-CONTENT-02', /collection/i],
-      ['G-EDITOR-01', /editor/i],
-      ['G-SEO-01', /canonical|meta description|description, and social|social[- ]image|og:image|\bseo\b/i]
-    ]
-  },
-  {
-    file: 'independent-verification.json',
-    fallback: 'G-VERIFY-01',
-    keywords: [
-      ['G-ROUTE-03', /per-route item count|perRouteItemCounts/i],
-      ['G-ROUTE-04', /drift/i],
-      ['G-ROUTE-05', /target-required|starter-route/i],
-      ['G-BROWSER-02', /first-fold|brand/i],
-      ['G-CONTENT-02', /collection/i],
-      ['G-COMPOSITION-02', /composition/i],
-      ['G-CANVAS-01', /canvas/i],
-      ['G-EDITOR-01', /editor/i],
-      ['G-FIELD-01', /field-output/i],
-      ['G-OFFROAD-01', /raw embed|off-road|cleanup/i]
-    ]
-  },
-  {
-    file: 'pattern-map.json',
-    fallback: 'G-CONTENT-01',
-    keywords: [
-      ['G-CONTENT-02', /collection/i],
-      ['G-COMPOSITION-01', /composition|section ownership/i]
-    ]
-  },
-  { file: 'source-audit.json', fallback: 'G-ROUTE-01', keywords: [] },
-  { file: 'parity-report.json', fallback: 'G-PARITY-01', keywords: [] },
-  { file: 'blind-adversarial-review.json', fallback: 'G-BLIND-01', keywords: [] },
-  { file: 'drupal-readback.json', fallback: 'G-CONFIG-01', keywords: [] },
-  { file: 'field-output-matrix.json', fallback: 'G-FIELD-01', keywords: [] },
-  { file: 'recipe-start-point.md', fallback: 'G-RECIPE-01', keywords: [] },
-  { file: 'durable-intent.yml', fallback: 'G-INTENT-01', keywords: [] },
-  { file: 'off-road-inventory.md', fallback: 'G-OFFROAD-01', keywords: [] },
-  { file: 'live-verification.json', fallback: 'G-VERIFY-02', keywords: [] },
-  { file: 'operator-run.md', fallback: 'G-OPERATOR-01', keywords: [] },
-  { file: 'production-target.md', fallback: 'G-TARGET-01', keywords: [] },
-  { file: 'open-decisions.md', fallback: 'G-HANDOFF-01', keywords: [] },
-  { file: 'launch-checklist.md', fallback: 'G-LAUNCH-01', keywords: [] },
-  { file: 'maintainer-review.md', fallback: 'G-MAINTAINER-01', keywords: [] }
-]);
+
+// Sibling keyword routing for files whose gate family has more than one plausible
+// owner. Keys must name packet evidence files and gate ids must exist in gates.json;
+// the attribution-coverage test enforces both so this table cannot drift silently.
+const GATE_FINDING_KEYWORDS = Object.freeze({
+  'route-matrix.json': [
+    ['G-ROUTE-02', /browser-first|route expansion/i],
+    ['G-ROUTE-03', /reconcil|item count|count delta|mismatchDisposition|owner_approved_exclusion|private_unreachable/i],
+    ['G-ROUTE-04', /drift|classif/i],
+    ['G-ROUTE-05', /target-required|starter/i],
+    ['G-ROUTE-06', /homepage|front[- ]page|alias/i],
+    ['G-BROWSER-02', /first-fold|brand/i],
+    ['G-CANVAS-01', /canvas/i]
+  ],
+  'browser-evidence.json': [
+    ['G-ROUTE-03', /reconcil|item count/i],
+    ['G-BROWSER-02', /first-fold|brand/i],
+    ['G-CONTENT-02', /collection/i],
+    ['G-EDITOR-01', /editor/i],
+    ['G-SEO-01', /canonical|meta description|description, and social|social[- ]image|og:image|\bseo\b/i]
+  ],
+  'independent-verification.json': [
+    ['G-ROUTE-03', /per-route item count|perRouteItemCounts/i],
+    ['G-ROUTE-04', /drift/i],
+    ['G-ROUTE-05', /target-required|starter-route/i],
+    ['G-BROWSER-02', /first-fold|brand/i],
+    ['G-CONTENT-02', /collection/i],
+    ['G-COMPOSITION-02', /composition/i],
+    ['G-CANVAS-01', /canvas/i],
+    ['G-EDITOR-01', /editor/i],
+    ['G-FIELD-01', /field-output/i],
+    ['G-OFFROAD-01', /raw embed|off-road|cleanup/i]
+  ],
+  'pattern-map.json': [
+    ['G-CONTENT-01', /structured content|content type|managed media|menu ownership/i],
+    ['G-CONTENT-02', /collection/i],
+    ['G-COMPOSITION-01', /composition|section ownership/i]
+  ]
+});
+
+// Packet files that no gates.json entry names as evidenceFile still need a gate so
+// findings about them cannot disappear from per-gate triage. The attribution-coverage
+// test fails when a packet file has neither a derived nor an explicit home here.
+const UNGATED_FILE_FALLBACKS = Object.freeze({
+  'source-audit.json': 'G-ROUTE-01',
+  'scoped-gap-list.md': 'G-HANDOFF-01',
+  'packet-verification.json': 'G-VERIFY-01'
+});
+
 const GLOBAL_GATE_FINDING_KEYWORDS = Object.freeze([
-  ['G-BLIND-01', /blind review|blind-adversarial/i],
+  ['G-BLIND-01', /blind[- ]review|blind[- ]adversarial/i],
   ['G-INTENT-01', /config_hash/],
-  ['G-ROUTE-01', /primary route/i]
+  ['G-ROUTE-01', /primary route/i],
+  ['G-VERIFY-01', /independent verification|completion evidence/i]
 ]);
 
-export function attributeFindingsToGates(messages) {
+// Residual gates: findings that name no evidence file, mention no gate id, and match
+// no keyword are pinned to the widest verification gate in scope so a blocked run can
+// never present all-green per-gate results.
+export const PACKET_RESIDUAL_GATE_ID = 'G-VERIFY-01';
+export const LIVE_RESIDUAL_GATE_ID = 'G-VERIFY-02';
+
+// Derive the file-to-gate attribution groups from gates.json instead of hand-copying
+// its evidenceFile mapping: each file falls back to its verify-script gate (the gate
+// this verifier is the named machine checker for) or, when none exists, the first
+// gate that names the file. Only files gates.json never names as evidenceFile need an
+// explicit entry in UNGATED_FILE_FALLBACKS.
+export function gateFindingAttributionGroups(gates) {
+  const fallbackByFile = new Map();
+  for (const gate of arrayOrEmpty(gates?.gates)) {
+    if (!isJsonObject(gate)) {
+      continue;
+    }
+    const gateId = String(gate.id ?? '').trim();
+    const file = String(gate.evidenceFile ?? '').trim().split('/').pop();
+    if (!gateId || !file) {
+      continue;
+    }
+    const existing = fallbackByFile.get(file);
+    if (!existing || (gate.checkedBy === 'verify-script' && existing.checkedBy !== 'verify-script')) {
+      fallbackByFile.set(file, { checkedBy: gate.checkedBy, gateId });
+    }
+  }
+  const groups = [...fallbackByFile.entries()].map(([file, { gateId }]) => ({
+    fallback: gateId,
+    file,
+    keywords: GATE_FINDING_KEYWORDS[file] ?? []
+  }));
+  for (const [file, fallback] of Object.entries(UNGATED_FILE_FALLBACKS)) {
+    if (!fallbackByFile.has(file)) {
+      groups.push({ fallback, file, keywords: GATE_FINDING_KEYWORDS[file] ?? [] });
+    }
+  }
+  return groups;
+}
+
+export function attributeFindingsToGates(messages, gates, { residualGateId } = {}) {
+  const groups = gateFindingAttributionGroups(gates);
   const findings = new Map();
   const attach = (gateId, message) => {
     if (!findings.has(gateId)) {
@@ -181,7 +209,7 @@ export function attributeFindingsToGates(messages) {
       attach(mentionedGateId, message);
       attributed = true;
     }
-    for (const group of GATE_FINDING_ATTRIBUTION) {
+    for (const group of groups) {
       if (!message.includes(group.file)) {
         continue;
       }
@@ -201,8 +229,12 @@ export function attributeFindingsToGates(messages) {
       for (const [gateId, keywords] of GLOBAL_GATE_FINDING_KEYWORDS) {
         if (keywords.test(message)) {
           attach(gateId, message);
+          attributed = true;
         }
       }
+    }
+    if (!attributed && residualGateId) {
+      attach(residualGateId, message);
     }
   }
 
@@ -215,7 +247,9 @@ export function attributeFindingsToGates(messages) {
 // verifier gate in packet-only scope. Completion authority stays with valid and
 // completeLocalRebuildClaimAllowed; per-gate passes never certify anything on their own.
 export function perGateResults(gates, messages) {
-  const findings = attributeFindingsToGates(messages);
+  const findings = attributeFindingsToGates(messages, gates, {
+    residualGateId: PACKET_RESIDUAL_GATE_ID
+  });
   return arrayOrEmpty(gates?.gates)
     .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
     .map((gate) => {
@@ -3007,6 +3041,12 @@ function sharedPacketMessage(value, packetDir) {
   return String(value).replaceAll(resolve(packetDir), sharedPacketDir(packetDir));
 }
 
+// The shipped gate vocabulary, for callers (like the live verifier) that attribute
+// their own findings to gates. Returns null when gates.json cannot be loaded.
+export async function readGateVocabulary() {
+  return readJson(join(KIT_ROOT, 'gates.json'), []);
+}
+
 export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const errors = [];
   const warnings = [];
@@ -3061,7 +3101,13 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   });
 
   const sharedErrors = errors.map((error) => sharedPacketMessage(error, packetDir));
+  const sharedCompletionBlockedReasons = completionReadiness.reasons.map((reason) =>
+    sharedPacketMessage(reason, packetDir)
+  );
 
+  // v2 report invariant: every gateResults[].errors string appears verbatim in
+  // errors[] or completionEvidence.packetCompletionBlockedReasons; both flat arrays
+  // stay authoritative and per-gate results only regroup them for triage.
   return {
     schemaVersion: 'public-kit.packet-verification.2',
     checkedAt: new Date().toISOString(),
@@ -3081,13 +3127,13 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
       },
       packetCompletionReady: completionReadiness.packetCompletionReady,
-      packetCompletionBlockedReasons: completionReadiness.reasons,
+      packetCompletionBlockedReasons: sharedCompletionBlockedReasons,
       packetSupportsCompletion:
         independentVerificationSupportsCompletion &&
         blindAdversarialReviewSupportsCompletion &&
         completionReadiness.packetCompletionReady
     },
-    gateResults: perGateResults(gates, [...sharedErrors, ...completionReadiness.reasons]),
+    gateResults: perGateResults(gates, [...sharedErrors, ...sharedCompletionBlockedReasons]),
     completeLocalRebuildClaimAllowed: false,
     valid: errors.length === 0,
     errors: sharedErrors,

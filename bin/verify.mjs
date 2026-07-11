@@ -8,7 +8,12 @@ import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attributeFindingsToGates, validatePacket } from './verify-packet.mjs';
+import {
+  attributeFindingsToGates,
+  LIVE_RESIDUAL_GATE_ID,
+  readGateVocabulary,
+  validatePacket
+} from './verify-packet.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
@@ -591,26 +596,23 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
   return { source, url: parseHttpUrl(value, 'Live target URL') };
 }
 
-// Extend the packet per-gate results with live-run findings. Live findings that name a
-// packet evidence file join that gate's errors; everything else lands on G-VERIFY-02,
-// the live-verifier gate, so no live error disappears from per-gate triage. Per-gate
-// results stay diagnostic: completion authority remains with valid and
-// completeLocalRebuildClaimAllowed.
-function liveGateResults(packetGateResults, liveErrors, liveTargetValid) {
-  const liveFindings = attributeFindingsToGates(liveErrors);
-  const attributedLiveErrors = new Set([...liveFindings.values()].flat());
-  const residualLiveErrors = liveErrors.filter((error) => !attributedLiveErrors.has(error));
+// Extend the packet per-gate results with live-run findings: live errors AND live
+// completion-blocked reasons both flow through gate attribution, so a run blocked by
+// DDEV runtime-identity or config-authority mismatches always surfaces at least one
+// failing gate. Findings that name a packet evidence file join that gate's errors;
+// everything else lands on G-VERIFY-02, the live-verifier gate, so no live finding
+// disappears from per-gate triage. Per-gate results stay diagnostic: completion
+// authority remains with valid and completeLocalRebuildClaimAllowed.
+function liveGateResults(packetGateResults, gates, liveFindingMessages, liveTargetValid) {
+  const liveFindings = attributeFindingsToGates(liveFindingMessages, gates, {
+    residualGateId: LIVE_RESIDUAL_GATE_ID
+  });
   return (Array.isArray(packetGateResults) ? packetGateResults : []).map((result) => {
     const additional = (liveFindings.get(result.gateId) ?? []).filter((error) => !result.errors.includes(error));
+    const errors = [...result.errors, ...additional];
     if (result.gateId !== 'G-VERIFY-02') {
-      const errors = [...result.errors, ...additional];
       return { gateId: result.gateId, status: errors.length > 0 ? 'fail' : result.status, errors };
     }
-    const errors = [
-      ...result.errors,
-      ...additional,
-      ...residualLiveErrors.filter((error) => !result.errors.includes(error))
-    ];
     if (!liveTargetValid && errors.length === 0) {
       errors.push('Live target identity or route verification failed.');
     }
@@ -1263,7 +1265,12 @@ export async function verifyLive({
     warnings: packetReport.warnings.map((warning) => sharedMessage(warning, absolutePacketDir))
   };
   const sharedLiveErrors = liveErrors.map((error) => sharedMessage(error, absolutePacketDir));
+  const gateVocabulary = await readGateVocabulary();
 
+  // v2 report invariant: every gateResults[].errors string appears verbatim in
+  // errors[], completionBlockedReasons, or the embedded
+  // packetVerification.completionEvidence.packetCompletionBlockedReasons; the flat
+  // arrays stay authoritative and per-gate results only regroup them for triage.
   return {
     schemaVersion: 'public-kit.live-verification.2',
     checkedAt: new Date().toISOString(),
@@ -1304,7 +1311,12 @@ export async function verifyLive({
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
-    gateResults: liveGateResults(sharedPacketReport.gateResults, sharedLiveErrors, liveTargetValid),
+    gateResults: liveGateResults(
+      sharedPacketReport.gateResults,
+      gateVocabulary,
+      [...sharedLiveErrors, ...completionBlockedReasons],
+      liveTargetValid
+    ),
     completeLocalRebuildClaimAllowed,
     verdict: completeLocalRebuildClaimAllowed
       ? 'complete-local-rebuild'

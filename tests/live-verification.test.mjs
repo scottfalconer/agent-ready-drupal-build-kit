@@ -9,7 +9,14 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import { verifyLive } from '../bin/verify.mjs';
-import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  gateFindingAttributionGroups,
+  LIVE_RESIDUAL_GATE_ID,
+  MACHINE_GATE_EVALUATORS,
+  PACKET_RESIDUAL_GATE_ID,
+  perGateResults,
+  validatePacket
+} from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -1105,8 +1112,17 @@ test('default verifier fetches the declared real target and binds primary-route 
       );
       assert.match(report.completionBlockedReasons.join(' '), /Independent verification/);
       assert.equal(report.schemaVersion, 'public-kit.live-verification.2');
+      // The run is completion-blocked, so per-gate triage must not be all green even
+      // though the packet is structurally valid and the live target is reachable.
       const liveVerifierGate = report.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02');
-      assert.deepEqual(liveVerifierGate, { gateId: 'G-VERIFY-02', status: 'pass', errors: [] });
+      assert.equal(liveVerifierGate.status, 'fail');
+      const configGate = report.gateResults.find((gate) => gate.gateId === 'G-CONFIG-01');
+      assert.equal(configGate.status, 'fail');
+      assert.match(configGate.errors.join('\n'), /drupal-readback\.json/);
+      const attributedFindings = new Set(report.gateResults.flatMap((gate) => gate.errors));
+      for (const reason of report.completionBlockedReasons) {
+        assert.ok(attributedFindings.has(reason), `completion-blocked reason missing from per-gate triage: ${reason}`);
+      }
       assert.equal(
         report.packetVerification.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02').status,
         'not_evaluated'
@@ -3052,6 +3068,7 @@ test('packet reports emit machine-readable per-gate results for the full gate vo
     ...report.errors,
     ...report.completionEvidence.packetCompletionBlockedReasons
   ]);
+  const attributedFindings = new Set(report.gateResults.flatMap((gate) => gate.errors));
   for (const gate of report.gateResults) {
     assert.ok(['pass', 'fail', 'human_review', 'not_evaluated'].includes(gate.status), gate.gateId);
     assert.ok(Array.isArray(gate.errors), gate.gateId);
@@ -3060,10 +3077,70 @@ test('packet reports emit machine-readable per-gate results for the full gate vo
       assert.ok(knownFindings.has(error), `${gate.gateId} attributed an unknown finding: ${error}`);
     }
   }
+  // Attribution is total in both directions: every flat finding must reach per-gate
+  // triage, so a completion-blocked report can never present all-green gate results.
+  for (const finding of knownFindings) {
+    assert.ok(attributedFindings.has(finding), `finding missing from per-gate triage: ${finding}`);
+  }
   const statusByGate = new Map(report.gateResults.map((gate) => [gate.gateId, gate.status]));
   assert.equal(statusByGate.get('G-VERIFY-02'), 'not_evaluated');
   assert.equal(statusByGate.get('G-VERIFY-01'), 'fail');
   assert.equal(statusByGate.get('G-OPERATOR-01'), 'fail');
+  const handoffGate = report.gateResults.find((gate) => gate.gateId === 'G-HANDOFF-01');
+  assert.equal(handoffGate.status, 'fail');
+  assert.match(handoffGate.errors.join('\n'), /scoped-gap-list\.md/);
+});
+
+test('every packet and generated evidence file has a gate attribution home derived from gates.json', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const gateIds = new Set(gates.gates.map((gate) => gate.id));
+  const groups = gateFindingAttributionGroups(gates);
+  const groupByFile = new Map(groups.map((group) => [group.file, group]));
+  const packetAndEvidenceFiles = [
+    ...gates.reviewPacketFiles,
+    ...gates.generatedEvidenceFiles.map((file) => file.split('/').pop())
+  ];
+
+  for (const file of packetAndEvidenceFiles) {
+    const group = groupByFile.get(file);
+    assert.ok(group, `no gate attribution group for ${file}; findings naming it would vanish from per-gate triage`);
+    assert.ok(gateIds.has(group.fallback), `${file} fallback ${group.fallback} is not a gates.json gate id`);
+    for (const [gateId] of group.keywords) {
+      assert.ok(gateIds.has(gateId), `${file} keyword gate ${gateId} is not a gates.json gate id`);
+    }
+  }
+  const knownFiles = new Set(packetAndEvidenceFiles);
+  for (const group of groups) {
+    assert.ok(knownFiles.has(group.file), `attribution group names unknown file ${group.file}`);
+  }
+  assert.ok(gateIds.has(PACKET_RESIDUAL_GATE_ID), 'packet residual gate must exist in gates.json');
+  assert.ok(gateIds.has(LIVE_RESIDUAL_GATE_ID), 'live residual gate must exist in gates.json');
+});
+
+test('completion-blocked findings without a named evidence file still fail at least one gate', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const findings = [
+    'Completion evidence timestamps span more than seven days and do not describe one coherent verification run.',
+    'Completion evidence contains a future timestamp beyond the five-minute clock-skew allowance.',
+    'The newest completion evidence is older than seven days and must be refreshed against the current target.',
+    'scoped-gap-list.md must identify the run, declare complete-local-rebuild status, and disposition every gap without UNKNOWN or blocked rows.',
+    'An entirely novel finding no attribution rule knows about yet.'
+  ];
+
+  for (const finding of findings) {
+    const results = perGateResults(gates, [finding]);
+    const failing = results.filter((gate) => gate.status === 'fail');
+    assert.ok(failing.length > 0, `no failing gate for: ${finding}`);
+    assert.ok(
+      failing.some((gate) => gate.errors.includes(finding)),
+      `finding missing from failing gate errors: ${finding}`
+    );
+  }
+
+  const scopedGapResults = perGateResults(gates, [findings[3]]);
+  assert.equal(scopedGapResults.find((gate) => gate.gateId === 'G-HANDOFF-01').status, 'fail');
+  const residualResults = perGateResults(gates, [findings[4]]);
+  assert.equal(residualResults.find((gate) => gate.gateId === PACKET_RESIDUAL_GATE_ID).status, 'fail');
 });
 
 test('per-gate results fail closed on structural errors and authored completion claims', async () => {
@@ -3100,6 +3177,11 @@ test('live reports attribute unassigned live errors to the live-verifier gate an
   const liveVerifierGate = report.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02');
   assert.equal(liveVerifierGate.status, 'fail');
   assert.match(liveVerifierGate.errors.join('\n'), /No live target URL found/);
+  assert.ok(report.gateResults.some((gate) => gate.status === 'fail'));
+  const attributedFindings = new Set(report.gateResults.flatMap((gate) => gate.errors));
+  for (const reason of report.completionBlockedReasons) {
+    assert.ok(attributedFindings.has(reason), `completion-blocked reason missing from per-gate triage: ${reason}`);
+  }
   assert.equal(
     report.packetVerification.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02').status,
     'not_evaluated'
