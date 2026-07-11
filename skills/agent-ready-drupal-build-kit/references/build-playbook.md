@@ -178,6 +178,8 @@ For DDEV Drupal CMS projects with a `web` docroot, set the active config sync di
 
 The local handoff gate independently runs Git against the actual project and proves that Drupal's current active sync directory contains real tracked YAML and that `drush config:status` reports no active-to-sync drift. Packet-authored paths are not sufficient. Also inspect representative YAML for the public theme, custom content types and fields, Views, menus, roles, and workflows expected by the rebuild.
 
+The tracked-config inspection also inventories top-level `canvas.content_template.*` config from the active sync directory. An enabled Canvas content template supersedes the normal theme entity template for its exact entity type, bundle, and view mode. Public-target classification must honor row-only/no-detail ownership and include non-node or embedded view modes explicitly identified by Drupal readback; bundle existence alone does not prove a public `full` display. A build cannot claim Canvas is intentionally unused while an enabled template targets public output; disable/delete the template or declare and verify Canvas as the rendering owner. This is a config-ownership check, not a heuristic scan for unused Twig, CSS, or component files.
+
 A clean install plus `drush config:import` into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. Record its commands and readbacks when actually run; do not infer it from a clean config status and do not perform a destructive reinstall of the working target merely to satisfy wording.
 
 Scripts can still be useful for one-shot content/media import or repeatable local setup, but if the content model exists only in a script, the Drupal architecture is not reproducible enough for maintainer handoff.
@@ -347,6 +349,8 @@ Bad Canvas use: building repeatable structured content as hand-assembled pages. 
 
 Declare the build type so reviewers know what to expect: structured Drupal-native rebuild with Canvas intentionally unused; hybrid structured content plus Canvas composition; Canvas-heavy rebuild with Drupal-owned structured data embedded; or constrained fallback because Canvas was unavailable or blocked. This is not a marketing label. It must match the source shape, Canvas availability, and editor ownership evidence.
 
+Confirm that declaration against tracked config. An enabled `canvas.content_template.*` entity targeting a public bundle/view mode is an active rendering owner and supersedes the ordinary theme node/entity template for that target. Its presence contradicts a Canvas-unused declaration even if the theme contains a plausible Twig template and CSS.
+
 ## Composition Modeling Before Build
 
 Flexible landing-like pages need explicit authoring ownership before implementation. The rule is not that public `/` must be Canvas. The rule is that every homepage, landing page, campaign page, splash page, section landing page, one-off marketing page, presentation-heavy about page, product launch page, donor appeal, event splash, or partner page must declare what owns the composition and why.
@@ -431,6 +435,7 @@ The target's structure must be reviewable from Drupal artifacts and internally c
 - avoid empty custom modules that only mark ownership;
 - avoid source-site catch-all modules; custom modules should be reusable capabilities with explicit extension points and review evidence;
 - keep module install/update hooks idempotent and limited to behavior or data that cannot be represented cleanly in config.
+- inventory every custom route and controller from the filesystem and live router, including callback- and attribute-defined routes whose controller, form, title, or access callback belongs to custom code. Declare an HTTP method and representative parameters, generate and match a real Request, complete parameter conversion, and run request-aware anonymous access. Record live requirements, effective allowed/denied access, generated concrete path, and route-matrix path or route-name binding. Run verifier-owned Drupal PHPCS and project-configured PHPStan checks for custom PHP; never execute a command supplied by the packet. An unsupported quality check or missing controller test needs a named maintainer exception with concrete evidence; a generic statement that custom code was reviewed is insufficient.
 
 Config that imports but leaves editor forms unusable is not acceptable architecture.
 
@@ -446,7 +451,9 @@ The build is not reviewable until an editor can use it. Before handoff:
 - confirm media, related links, benefits, usage, page roles, retailer links, and source/reference fields are editable where relevant;
 - confirm form displays are not limited to title/meta controls when the source pattern requires structured fields.
 - confirm widgets match field types, such as entity reference autocomplete for taxonomy/media references and media library controls for image/media fields.
+- confirm Drupal's full plugin applicability contract: the configured widget/formatter declares the actual field type in `field_types`, its plugin class reports `isApplicable()`, and every typed component resolves to a real field definition or registered form/display extra-field definition. A fallback renderer is evidence of invalid exported display config, not a pass.
 - confirm view displays render the public fields with appropriate formatters, not machine labels or empty placeholders.
+- compare every configured widget and formatter plugin with the plugin Drupal actually resolves for the live field definition, and verify referenced target view modes exist. A fallback renderer/widget or missing referenced view mode is a configuration defect, not a successful editor check.
 - falsify every load-bearing field and every field claimed to affect anonymous output by changing it and checking the anonymous route;
 - for regulated or claim-sensitive content, confirm editors can see and update source status, review status, required disclosure/label text, warnings/restrictions, professional/consumer audience separation, and blocked-evidence notes.
 
@@ -515,7 +522,9 @@ For each important route, decide:
 
 Run a route/alias smoke check for every representative top-level source route and listing route. For condition/product/advice sites, this usually includes routes like `/`, condition hubs, product listings, advice listings, product details, article details, where-to-buy, search, contact, legal, privacy, and cookie pages when present. Record intended canonicalization, including trailing-slash behavior and Pathauto-generated alternates.
 
-Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
+Every URL-capable recurring entity bundle with an entity/Canvas public detail owner should have a Pathauto pattern or an explicit editor-supplied alias policy, including taxonomy terms, commerce/custom entities, and other non-node detail owners when used. Row-only `view_row` collections do not need detail aliases. For each required policy, live-load the representative entity, verify its bundle, confirm the declared Pathauto pattern is enabled, applicable, and selected when used, and prove the probe alias resolves to the entity and back through Drupal's alias manager. Editor-created detail content should not fall back to unpredictable system routes when the source pattern depends on readable URLs.
+
+For every public recurring bundle, create one representative item through the non-admin editor workflow and record its generated or supplied alias. The new alias must follow the declared future-content strategy and the established route structure for that bundle; preserved migration aliases do not establish that new content will be routed correctly.
 
 Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/seasonal-range`, either preserve, redirect, or explicitly retire the source-style route.
 

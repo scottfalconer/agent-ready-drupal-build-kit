@@ -25,7 +25,17 @@
     "contentTypes": [],
     "fieldStorage": [],
     "formDisplays": [],
-    "viewDisplays": [],
+    "viewDisplays": [
+      {
+        "displayConfig": "",
+        "entityType": "",
+        "bundle": "",
+        "viewMode": "",
+        "publicOutput": false,
+        "embeddedOnPublicOutput": false,
+        "evidence": ""
+      }
+    ],
     "canvasPages": []
   },
   "routing": {
@@ -34,7 +44,24 @@
     "redirects": [],
     "unexpectedPublicRoutes": [],
     "menus": [],
-    "menuLinks": []
+    "menuLinks": [],
+    "publicBundleAliasPolicies": [
+      {
+        "entityType": "",
+        "bundle": "",
+        "strategy": "pathauto_pattern | editor_supplied_alias | no_public_detail_route",
+        "patternId": "",
+        "probeEntityId": "",
+        "probeLanguage": "",
+        "existingAliasExample": "",
+        "probeAlias": "",
+        "structureMatchesExistingContent": false,
+        "editorCanCreateExpectedAlias": false,
+        "evidence": "",
+        "accepted": false,
+        "notes": ""
+      }
+    ]
   },
   "media": {
     "countsByType": {},
@@ -43,6 +70,130 @@
   "views": [],
   "workflows": [],
   "rolesAndPermissionsNotes": [],
+  "implementationQuality": {
+    "canvasTemplateAudit": {
+      "trackedConfigFileCount": 0,
+      "matchingConfigCount": 0,
+      "templates": [
+        {
+          "configName": "",
+          "path": "",
+          "enabled": false,
+          "id": "",
+          "entityType": "",
+          "bundle": "",
+          "viewMode": "",
+          "publicTarget": false,
+          "accepted": false
+        }
+      ],
+      "errors": [],
+      "conflicts": [],
+      "completed": false
+    },
+    "displayPluginAudit": {
+      "formComponentCount": 0,
+      "viewComponentCount": 0,
+      "registeredExtraComponents": [
+        {
+          "displayConfig": "",
+          "fieldName": "",
+          "context": "form | display",
+          "registeredExtraField": false
+        }
+      ],
+      "formComponents": [
+        {
+          "displayConfig": "",
+          "fieldName": "",
+          "fieldDefinitionPresent": false,
+          "fieldType": "",
+          "configuredPlugin": "",
+          "resolvedPlugin": "",
+          "supportsFieldType": false,
+          "classApplicable": false,
+          "applicable": false,
+          "accepted": false
+        }
+      ],
+      "viewComponents": [
+        {
+          "displayConfig": "",
+          "fieldName": "",
+          "fieldDefinitionPresent": false,
+          "fieldType": "",
+          "configuredPlugin": "",
+          "resolvedPlugin": "",
+          "supportsFieldType": false,
+          "classApplicable": false,
+          "applicable": false,
+          "accepted": false
+        }
+      ],
+      "violations": [],
+      "completed": false
+    },
+    "customCodeInventory": {
+      "applies": false,
+      "reason": "",
+      "extensions": [
+        {
+          "machineName": "",
+          "type": "module | theme",
+          "path": "",
+          "purpose": "",
+          "drupalNativeAlternativesReviewed": "",
+          "phpFileCount": 0,
+          "qualityChecks": [
+            {
+              "kind": "coding_standards | static_analysis",
+              "status": "verify | exception",
+              "exception": {
+                "reason": "",
+                "acceptedBy": "",
+                "evidence": ""
+              }
+            }
+          ],
+          "accepted": false
+        }
+      ],
+      "routes": [
+        {
+          "name": "",
+          "path": "",
+          "extension": "",
+          "controller": "",
+          "requirements": {},
+          "routeParameters": {},
+          "requestMethod": "GET | HEAD | POST | PUT | PATCH | DELETE | OPTIONS",
+          "representativePath": "",
+          "anonymousAccessDisposition": "allowed | denied",
+          "anonymousAccessEvidence": "",
+          "routeMatrixBinding": {
+            "kind": "concrete_path | route_name",
+            "value": ""
+          },
+          "accessReviewed": false,
+          "cacheabilityReviewed": false,
+          "sanitizationReviewed": false,
+          "dependencyInjectionReviewed": false,
+          "testEvidence": "",
+          "testException": {
+            "reason": "",
+            "acceptedBy": "",
+            "evidence": ""
+          },
+          "offRoadDisposition": "",
+          "accepted": false
+        }
+      ],
+      "controllers": [],
+      "tests": [],
+      "completed": false
+    },
+    "blockers": []
+  },
   "readbackComplete": false,
   "blockers": []
 }

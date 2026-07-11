@@ -8,8 +8,15 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { verifyLive } from '../bin/verify.mjs';
-import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  CUSTOM_ROUTE_AUDIT_PHP,
+  DISPLAY_PLUGIN_AUDIT_PHP,
+  inspectCustomCode,
+  inspectCustomPhpQuality,
+  inspectTrackedCanvasTemplates,
+  verifyLive
+} from '../bin/verify.mjs';
+import { canvasTemplateTargetsPublicOutput, MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -36,6 +43,177 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.deepEqual(Object.keys(MACHINE_GATE_EVALUATORS).sort(), expected);
   assert.deepEqual([...new Set(gates.gates.map((gate) => gate.blocking))].sort(), ['handoff', 'launch']);
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
+});
+
+test('custom-code inventory discovers extensions, routes, controllers, and tests', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'custom-code-inventory-'));
+  const moduleRoot = join(projectRoot, 'web', 'modules', 'custom', 'calendar_feed');
+  const themeRoot = join(projectRoot, 'web', 'themes', 'custom', 'public_theme');
+  mkdirSync(join(moduleRoot, 'src', 'Controller'), { recursive: true });
+  mkdirSync(join(moduleRoot, 'tests', 'src', 'Functional'), { recursive: true });
+  mkdirSync(themeRoot, { recursive: true });
+  writeFileSync(join(moduleRoot, 'calendar_feed.info.yml'), 'name: Calendar feed\ntype: module\n');
+  writeFileSync(join(themeRoot, 'public_theme.info.yml'), 'name: Public theme\ntype: theme\n');
+  writeFileSync(join(moduleRoot, 'calendar_feed.routing.yml'), `calendar_feed.permission:\n  path: '/calendar.ics'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _permission: 'access calendar feed'\ncalendar_feed.anonymous_role:\n  path: '/calendar/public'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _role: 'anonymous'\ncalendar_feed.custom_access:\n  path: '/calendar/{calendar}'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _custom_access: '\\Drupal\\calendar_feed\\Access\\CalendarAccess::access'\n`);
+  writeFileSync(join(moduleRoot, 'src', 'Controller', 'CalendarController.php'), '<?php\n');
+  writeFileSync(join(moduleRoot, 'tests', 'src', 'Functional', 'CalendarFeedTest.php'), '<?php\n');
+
+  const inventory = inspectCustomCode(projectRoot);
+
+  assert.deepEqual(inventory.extensions.map((extension) => extension.machineName), ['calendar_feed', 'public_theme']);
+  assert.deepEqual(inventory.routes.map((route) => route.name), [
+    'calendar_feed.anonymous_role',
+    'calendar_feed.custom_access',
+    'calendar_feed.permission'
+  ]);
+  assert.equal(inventory.routes.find((route) => route.name === 'calendar_feed.custom_access').path, '/calendar/{calendar}');
+  assert.equal(Object.hasOwn(inventory.routes[0], 'public'), false, 'filesystem YAML must not guess anonymous access');
+  assert.equal(inventory.extensions.find((extension) => extension.machineName === 'calendar_feed').phpFileCount, 2);
+  assert.match(inventory.controllers[0], /CalendarController\.php$/);
+  assert.match(inventory.tests[0], /CalendarFeedTest\.php$/);
+});
+
+test('embedded Drupal audits cover live callback routes, real Requests, and registered extra fields', () => {
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /getAllRoutes\(\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /live_callback/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /matchRequest\(\$request\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /\$param_converter->convert\(\$matched\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /checkRequest\(\$request, \$anonymous, TRUE\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /neutral_access_result/);
+  assert.match(DISPLAY_PLUGIN_AUDIT_PHP, /getExtraFields\(\$entity_type, \$bundle\)/);
+  assert.match(DISPLAY_PLUGIN_AUDIT_PHP, /registeredExtraField' => TRUE/);
+  assert.ok(
+    DISPLAY_PLUGIN_AUDIT_PHP.indexOf("isset($extra_fields[$field_name])") <
+      DISPLAY_PLUGIN_AUDIT_PHP.indexOf("'missing_field_definition'")
+  );
+});
+
+test('custom PHP quality uses verifier-owned canonical tools and reports unsupported checks', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'custom-php-quality-'));
+  const binRoot = join(projectRoot, 'vendor', 'bin');
+  const extensionPath = 'web/modules/custom/calendar_feed';
+  mkdirSync(join(projectRoot, extensionPath), { recursive: true });
+  mkdirSync(binRoot, { recursive: true });
+  const phpcs = join(binRoot, 'phpcs');
+  const phpstan = join(binRoot, 'phpstan');
+  writeFileSync(phpcs, `#!/bin/sh
+if [ "$1" = "-i" ]; then
+  echo "The installed coding standards are Drupal and DrupalPractice"
+else
+  printf '%s' '{"totals":{"errors":0,"warnings":0,"files":1},"files":{}}'
+fi
+`);
+  writeFileSync(phpstan, `#!/bin/sh
+printf '%s' '{"totals":{"errors":0,"file_errors":0},"files":{},"errors":[]}'
+`);
+  chmodSync(phpcs, 0o755);
+  chmodSync(phpstan, 0o755);
+  writeFileSync(join(projectRoot, 'phpstan.neon'), 'parameters:\n  level: 1\n');
+  const extension = {
+    machineName: 'calendar_feed', type: 'module', path: extensionPath, phpFileCount: 1
+  };
+
+  const [result] = inspectCustomPhpQuality(projectRoot, [extension]);
+
+  assert.deepEqual(result.checks.map((check) => [check.kind, check.supported, check.status]), [
+    ['coding_standards', true, 'pass'],
+    ['static_analysis', true, 'pass']
+  ]);
+  assert.match(result.checks[0].command.join(' '), /vendor\/bin\/phpcs --standard=Drupal,DrupalPractice/);
+  assert.match(result.checks[1].command.join(' '), /vendor\/bin\/phpstan analyse --configuration=phpstan\.neon/);
+
+  const withoutConfig = mkdtempSync(join(tmpdir(), 'custom-php-quality-no-config-'));
+  mkdirSync(join(withoutConfig, 'vendor', 'bin'), { recursive: true });
+  mkdirSync(join(withoutConfig, extensionPath), { recursive: true });
+  cpSync(phpcs, join(withoutConfig, 'vendor', 'bin', 'phpcs'));
+  cpSync(phpstan, join(withoutConfig, 'vendor', 'bin', 'phpstan'));
+  chmodSync(join(withoutConfig, 'vendor', 'bin', 'phpcs'), 0o755);
+  chmodSync(join(withoutConfig, 'vendor', 'bin', 'phpstan'), 0o755);
+  const [unsupported] = inspectCustomPhpQuality(withoutConfig, [extension]);
+  assert.deepEqual(
+    unsupported.checks.map((check) => [check.kind, check.supported, check.status]),
+    [['coding_standards', true, 'pass'], ['static_analysis', false, 'unsupported']]
+  );
+});
+
+test('tracked config Canvas audit reads active content templates and ignores translation overrides', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'canvas-template-config-'));
+  const configRoot = join(projectRoot, 'config', 'sync');
+  mkdirSync(join(configRoot, 'language', 'fr'), { recursive: true });
+  writeFileSync(join(configRoot, 'system.site.yml'), 'name: Fixture\n');
+  writeFileSync(join(configRoot, 'canvas.content_template.node.page.full.yml'), `status: true
+id: node.page.full
+content_entity_type_id: node
+content_entity_type_bundle: page
+content_entity_type_view_mode: full
+`);
+  writeFileSync(join(configRoot, 'canvas.content_template.node.article.full.yml'), `status: false
+id: node.article.full
+content_entity_type_id: node
+content_entity_type_bundle: article
+content_entity_type_view_mode: full
+`);
+  writeFileSync(
+    join(configRoot, 'language', 'fr', 'canvas.content_template.node.page.full.yml'),
+    'label: Page française\n'
+  );
+
+  const audit = inspectTrackedCanvasTemplates(projectRoot, [
+    'config/sync/system.site.yml',
+    'config/sync/canvas.content_template.node.page.full.yml',
+    'config/sync/canvas.content_template.node.article.full.yml',
+    'config/sync/language/fr/canvas.content_template.node.page.full.yml'
+  ], 'config/sync');
+
+  assert.equal(audit.completed, true, audit.errors.join('\n'));
+  assert.equal(audit.trackedConfigFileCount, 4);
+  assert.equal(audit.matchingConfigCount, 2);
+  assert.deepEqual(audit.templates.map((template) => ({
+    configName: template.configName,
+    enabled: template.enabled,
+    target: `${template.entityType}.${template.bundle}.${template.viewMode}`
+  })), [
+    { configName: 'canvas.content_template.node.page.full', enabled: true, target: 'node.page.full' },
+    { configName: 'canvas.content_template.node.article.full', enabled: false, target: 'node.article.full' }
+  ]);
+});
+
+test('Canvas public targets honor row-only bundles and include public embedded non-node displays', () => {
+  const rowOnlyPattern = {
+    contentTypes: [{ machineName: 'topic' }],
+    structuredContentModel: {
+      collectionOwnershipLedger: [{
+        accepted: true,
+        drupalEntityType: 'node',
+        contentTypeOrBundle: 'topic',
+        detailRouteOwner: 'view_row'
+      }]
+    }
+  };
+  const rowOnlyReadback = {
+    content: { nodes: [{ type: 'topic', published: true }], viewDisplays: [] },
+    routing: { publicBundleAliasPolicies: [] }
+  };
+  assert.equal(canvasTemplateTargetsPublicOutput(
+    { entityType: 'node', bundle: 'topic', viewMode: 'full' },
+    rowOnlyReadback,
+    rowOnlyPattern
+  ), false);
+
+  const embeddedReadback = {
+    content: {
+      nodes: [],
+      viewDisplays: [{
+        entityType: 'media', bundle: 'image', viewMode: 'card', embeddedOnPublicOutput: true
+      }]
+    },
+    routing: { publicBundleAliasPolicies: [] }
+  };
+  assert.equal(canvasTemplateTargetsPublicOutput(
+    { entityType: 'media', bundle: 'image', viewMode: 'card' },
+    embeddedReadback,
+    { contentTypes: [], structuredContentModel: { collectionOwnershipLedger: [] } }
+  ), true);
 });
 
 function writeJson(path, value) {
@@ -259,11 +437,58 @@ function liveRouteMatrix(baseUrl) {
 
 function injectedDrupalRuntime(baseUrl, overrides = {}) {
   return {
+    aliasPolicyAudit: {
+      completed: true,
+      records: [],
+      violations: []
+    },
     baseUrl,
     confirmed: true,
+    canvasTemplateAudit: {
+      completed: true,
+      trackedConfigFileCount: 2,
+      matchingConfigCount: 0,
+      templates: [],
+      errors: []
+    },
     configStatusClean: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
+    customCodeInventory: {
+      completed: true,
+      controllers: [],
+      extensions: [],
+      routes: [],
+      tests: []
+    },
+    displayPluginAudit: {
+      completed: true,
+      formComponentCount: 1,
+      formComponents: [{
+        displayConfig: 'core.entity_form_display.node.page.default',
+        fieldName: 'body',
+        fieldDefinitionPresent: true,
+        fieldType: 'text_with_summary',
+        configuredPlugin: 'text_textarea_with_summary',
+        resolvedPlugin: 'text_textarea_with_summary',
+        supportsFieldType: true,
+        classApplicable: true,
+        applicable: true
+      }],
+      viewComponents: [{
+        displayConfig: 'core.entity_view_display.node.page.default',
+        fieldName: 'body',
+        fieldDefinitionPresent: true,
+        fieldType: 'text_with_summary',
+        configuredPlugin: 'text_default',
+        resolvedPlugin: 'text_default',
+        supportsFieldType: true,
+        classApplicable: true,
+        applicable: true
+      }],
+      viewComponentCount: 1,
+      violations: []
+    },
     frontPage: '/',
     mode: 'test-injected',
     project: 'fixture',
@@ -537,6 +762,16 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       claim: 'Body affects anonymous output.',
       actualEditorSurface: '/node/1/edit',
       actualPublicOutput: '/',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }
+  ];
+  independent.drupalImplementationChecks = [
+    {
+      kind: 'display_plugin_audit',
+      identity: 'all_configured_components',
+      liveReadback: 'drupal-readback.json implementationQuality.displayPluginAudit',
+      falsificationAttempt: 'Compared configured and resolved plugins against live field applicability.',
       status: 'pass',
       evidence: 'claim-evidence.json'
     }
@@ -992,7 +1227,58 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.content.viewDisplays = [{ bundle: 'page', mode: 'full' }];
   readback.routing.menus = [{ id: 'main', label: 'Main navigation' }];
   readback.routing.menuLinks = [{ menu: 'main', title: 'Home', url: '/' }];
+  readback.routing.publicBundleAliasPolicies = [];
   readback.rolesAndPermissionsNotes = ['Content editor can create and edit Page content.'];
+  readback.implementationQuality = {
+    canvasTemplateAudit: {
+      trackedConfigFileCount: 2,
+      matchingConfigCount: 0,
+      templates: [],
+      errors: [],
+      conflicts: [],
+      completed: true
+    },
+    displayPluginAudit: {
+      formComponentCount: 1,
+      formComponents: [{
+        displayConfig: 'core.entity_form_display.node.page.default',
+        fieldName: 'body',
+        fieldDefinitionPresent: true,
+        fieldType: 'text_with_summary',
+        configuredPlugin: 'text_textarea_with_summary',
+        resolvedPlugin: 'text_textarea_with_summary',
+        supportsFieldType: true,
+        classApplicable: true,
+        applicable: true,
+        accepted: true
+      }],
+      viewComponents: [{
+        displayConfig: 'core.entity_view_display.node.page.default',
+        fieldName: 'body',
+        fieldDefinitionPresent: true,
+        fieldType: 'text_with_summary',
+        configuredPlugin: 'text_default',
+        resolvedPlugin: 'text_default',
+        supportsFieldType: true,
+        classApplicable: true,
+        applicable: true,
+        accepted: true
+      }],
+      viewComponentCount: 1,
+      violations: [],
+      completed: true
+    },
+    customCodeInventory: {
+      applies: false,
+      reason: 'The fixture project has no custom modules or themes.',
+      extensions: [],
+      routes: [],
+      controllers: [],
+      tests: [],
+      completed: true
+    },
+    blockers: []
+  };
   readback.readbackComplete = true;
   readback.blockers = [];
   writeJson(readbackPath, readback);
@@ -1047,6 +1333,628 @@ test('default verifier fetches the declared real target and binds primary-route 
     }
   );
   assert.equal(requestCount, 2, 'primary and target-required route checks should both fetch the declared target');
+});
+
+test('live verifier rejects Drupal display fallback even when packet evidence claims the configured plugin', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-display-plugin-fallback-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const runtime = injectedDrupalRuntime(baseUrl);
+      runtime.displayPluginAudit.formComponents[0].resolvedPlugin = 'entity_reference_autocomplete';
+      runtime.displayPluginAudit.formComponents[0].applicable = false;
+      runtime.displayPluginAudit.violations = [runtime.displayPluginAudit.formComponents[0]];
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.match(report.errors.join('\n'), /configured text_textarea_with_summary but resolved entity_reference_autocomplete/);
+    }
+  );
+});
+
+test('live display audit rejects unsupported field types and typed components without field definitions', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const cases = [
+        {
+          name: 'unsupported-field-type',
+          mutate: (component) => {
+            component.supportsFieldType = false;
+            component.applicable = false;
+            component.reason = 'plugin_field_type_not_supported';
+          },
+          expected: /does not declare support for field type text_with_summary/
+        },
+        {
+          name: 'missing-field-definition',
+          mutate: (component) => {
+            component.fieldDefinitionPresent = false;
+            component.fieldType = '';
+            component.supportsFieldType = false;
+            component.classApplicable = false;
+            component.applicable = false;
+            component.resolvedPlugin = '';
+            component.reason = 'missing_field_definition';
+          },
+          expected: /typed component body has no Drupal field definition/
+        }
+      ];
+      for (const auditCase of cases) {
+        const temp = mkdtempSync(join(tmpdir(), `live-display-${auditCase.name}-`));
+        const packetDir = join(temp, 'review-packet');
+        copyTemplatePacket(packetDir);
+        writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+        addQualifyingReviewEvidence(packetDir, baseUrl);
+        const runtime = injectedDrupalRuntime(baseUrl);
+        const component = runtime.displayPluginAudit.formComponents[0];
+        auditCase.mutate(component);
+        runtime.displayPluginAudit.violations = [component];
+
+        const report = await verifyLive({
+          packetDir,
+          targetUrl: baseUrl,
+          cwd: repoRoot,
+          environment: {},
+          drupalRuntime: runtime
+        });
+
+        assert.equal(report.liveTargetValid, false, auditCase.name);
+        assert.match(report.errors.join('\n'), auditCase.expected, auditCase.name);
+      }
+    }
+  );
+});
+
+test('completion requires valid display-plugin readback and future alias policy for public collections', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'drupal-maintainer-quality-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.displayPluginAudit.formComponents[0].resolvedPlugin = 'entity_reference_autocomplete';
+    readback.implementationQuality.displayPluginAudit.formComponents[0].applicable = false;
+  });
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.structuredContentModel.collectionOwnershipLedger = [{
+      sourceRoute: '/articles',
+      collectionPattern: 'archive',
+      sourceObject: 'article',
+      sourceItemCount: 3,
+      drupalEntityType: 'node',
+      contentTypeOrBundle: 'article',
+      requiredFields: ['title'],
+      collectionOwner: 'view',
+      viewDisplayOrConfig: 'articles.page_1',
+      detailRouteOwner: 'entity_view_display',
+      editorAddRowEvidence: 'browser-evidence.json',
+      exceptionRationale: '',
+      accepted: true,
+      notes: ''
+    }];
+  });
+
+  const report = await validatePacket({ packetDir });
+  const reasons = report.completionEvidence.packetCompletionBlockedReasons.join('\n');
+
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(reasons, /configured field widget and formatter/);
+  assert.match(reasons, /working future-content alias policy.*article/);
+});
+
+test('Canvas-unused claims fail when tracked config enables a public Canvas content template', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'canvas-unused-config-conflict-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  for (const testCase of [
+    { name: 'enabled-public-template', enabled: true, expectsConflict: true },
+    { name: 'disabled-public-template', enabled: false, expectsConflict: false }
+  ]) {
+    const packetDir = join(temp, testCase.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+      const path = 'config/sync/canvas.content_template.node.page.full.yml';
+      readback.drupal.trackedConfigYamlFiles.push(path);
+      readback.implementationQuality.canvasTemplateAudit = {
+        trackedConfigFileCount: 3,
+        matchingConfigCount: 1,
+        templates: [{
+          configName: 'canvas.content_template.node.page.full',
+          path,
+          enabled: testCase.enabled,
+          id: 'node.page.full',
+          entityType: 'node',
+          bundle: 'page',
+          viewMode: 'full',
+          publicTarget: true,
+          accepted: true
+        }],
+        errors: [],
+        conflicts: [],
+        completed: true
+      };
+    });
+
+    const report = await validatePacket({ packetDir });
+    const reasons = report.completionEvidence.packetCompletionBlockedReasons.join('\n');
+    assert.equal(
+      /declares Canvas intentionally unused while tracked config enables/.test(reasons),
+      testCase.expectsConflict,
+      `${testCase.name}: ${reasons}`
+    );
+  }
+});
+
+test('live Canvas audit rejects readback that hides an enabled public content template', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-canvas-template-mismatch-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const path = 'config/sync/canvas.content_template.node.page.full.yml';
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.drupal.trackedConfigYamlFiles.push(path);
+        readback.implementationQuality.canvasTemplateAudit = {
+          trackedConfigFileCount: 3,
+          matchingConfigCount: 1,
+          templates: [{
+            configName: 'canvas.content_template.node.page.full',
+            path,
+            enabled: false,
+            id: 'node.page.full',
+            entityType: 'node',
+            bundle: 'page',
+            viewMode: 'full',
+            publicTarget: true,
+            accepted: true
+          }],
+          errors: [],
+          conflicts: [],
+          completed: true
+        };
+      });
+      const runtime = injectedDrupalRuntime(baseUrl, {
+        trackedConfigYamlFiles: [
+          'config/sync/system.site.yml',
+          'config/sync/system.theme.yml',
+          path
+        ],
+        canvasTemplateAudit: {
+          completed: true,
+          trackedConfigFileCount: 3,
+          matchingConfigCount: 1,
+          templates: [{
+            configName: 'canvas.content_template.node.page.full',
+            path,
+            enabled: true,
+            id: 'node.page.full',
+            entityType: 'node',
+            bundle: 'page',
+            viewMode: 'full'
+          }],
+          errors: []
+        }
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.match(report.errors.join('\n'), /Canvas content template.*missing or inaccurate/);
+    }
+  );
+});
+
+test('future alias policy covers non-node detail owners but not row-only collections', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'alias-policy-entity-types-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'taxonomy-detail',
+      entityType: 'taxonomy_term',
+      detailRouteOwner: 'entity_view_display',
+      expectsAliasFailure: true
+    },
+    {
+      name: 'view-row-only',
+      entityType: 'node',
+      detailRouteOwner: 'view_row',
+      expectsAliasFailure: false
+    }
+  ];
+  for (const aliasCase of cases) {
+    const packetDir = join(temp, aliasCase.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+      patternMap.structuredContentModel.collectionOwnershipLedger = [{
+        sourceRoute: '/topics',
+        collectionPattern: 'directory',
+        sourceObject: 'topic',
+        sourceItemCount: 3,
+        drupalEntityType: aliasCase.entityType,
+        contentTypeOrBundle: 'topic',
+        requiredFields: ['name'],
+        collectionOwner: 'taxonomy_view',
+        viewDisplayOrConfig: 'topics.page_1',
+        detailRouteOwner: aliasCase.detailRouteOwner,
+        editorAddRowEvidence: 'browser-evidence.json',
+        exceptionRationale: '',
+        accepted: true,
+        notes: ''
+      }];
+    });
+
+    const report = await validatePacket({ packetDir });
+    const reasons = report.completionEvidence.packetCompletionBlockedReasons.join('\n');
+    assert.equal(
+      /future-content alias policy/.test(reasons),
+      aliasCase.expectsAliasFailure,
+      `${aliasCase.name}: ${reasons}`
+    );
+    if (aliasCase.expectsAliasFailure) {
+      assert.match(reasons, /taxonomy_term\.topic/);
+    }
+  }
+});
+
+test('live alias policy binds a non-node probe entity and alias-manager result', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-alias-policy-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const policy = {
+        entityType: 'taxonomy_term',
+        bundle: 'topic',
+        strategy: 'editor_supplied_alias',
+        patternId: '',
+        probeEntityId: '17',
+        probeLanguage: 'en',
+        existingAliasExample: '/topics/existing',
+        probeAlias: '/topics/probe',
+        structureMatchesExistingContent: true,
+        editorCanCreateExpectedAlias: true,
+        evidence: 'evidence/independent-verification/claim-evidence.json',
+        accepted: true,
+        notes: ''
+      };
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.routing.publicBundleAliasPolicies = [policy];
+      });
+      const runtime = injectedDrupalRuntime(baseUrl, {
+        aliasPolicyAudit: {
+          completed: true,
+          records: [{ ...policy, entityLoaded: true, bundleMatches: true, passed: true }],
+          violations: []
+        }
+      });
+
+      const passing = await verifyLive({
+        packetDir, targetUrl: baseUrl, cwd: repoRoot, environment: {}, drupalRuntime: runtime
+      });
+      assert.equal(passing.drupalRuntime.implementationQualityValid, true, passing.errors.join('\n'));
+
+      runtime.aliasPolicyAudit.records[0].passed = false;
+      runtime.aliasPolicyAudit.records[0].violations = ['probe_alias_resolution_mismatch'];
+      const failing = await verifyLive({
+        packetDir, targetUrl: baseUrl, cwd: repoRoot, environment: {}, drupalRuntime: runtime
+      });
+      assert.equal(failing.drupalRuntime.implementationQualityValid, false);
+      assert.match(failing.errors.join('\n'), /did not live-load its probe entity, applicable pattern, and alias resolution/);
+    }
+  );
+});
+
+test('custom PHP extensions require coding-standards and static-analysis dispositions', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'custom-code-quality-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory = {
+      applies: true,
+      reason: 'A custom capability module is present.',
+      extensions: [{
+        machineName: 'calendar_feed',
+        type: 'module',
+        path: 'web/modules/custom/calendar_feed',
+        purpose: 'Expose a public calendar feed.',
+        drupalNativeAlternativesReviewed: 'Core and maintained contrib did not provide the required feed contract.',
+        phpFileCount: 1,
+        qualityChecks: [{
+          kind: 'coding_standards',
+          status: 'verify',
+          exception: { reason: '', acceptedBy: '', evidence: '' }
+        }],
+        accepted: true
+      }],
+      routes: [],
+      controllers: [],
+      tests: [],
+      completed: true
+    };
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /custom modules, themes, routes, controllers, tests/
+  );
+});
+
+test('live custom-route review handles custom access, anonymous roles, and parameterized paths', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const denied = request.url === '/calendar/manage';
+      response.writeHead(denied ? 403 : 200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'custom-route-live-access-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const routeDefinitions = [
+        {
+          name: 'calendar_feed.custom_access',
+          path: '/calendar/{calendar}',
+          requirements: { _custom_access: '\\Drupal\\calendar_feed\\Access\\CalendarAccess::access' },
+          routeParameters: { calendar: '42' },
+          requestMethod: 'GET',
+          representativePath: '/calendar/42',
+          anonymousAccessDisposition: 'allowed',
+          bindingKind: 'route_name'
+        },
+        {
+          name: 'calendar_feed.anonymous_role',
+          path: '/calendar/public',
+          requirements: { _role: 'anonymous' },
+          routeParameters: {},
+          requestMethod: 'GET',
+          representativePath: '/calendar/public',
+          anonymousAccessDisposition: 'allowed',
+          bindingKind: 'concrete_path'
+        },
+        {
+          name: 'calendar_feed.permission',
+          path: '/calendar/manage',
+          requirements: { _permission: 'administer calendar feed' },
+          routeParameters: {},
+          requestMethod: 'GET',
+          representativePath: '/calendar/manage',
+          anonymousAccessDisposition: 'denied',
+          bindingKind: 'concrete_path'
+        }
+      ];
+      const controller = '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed';
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        for (const route of routeDefinitions) {
+          routeMatrix.targetRequiredRoutes.push({
+            routeName: route.name,
+            targetPath: route.representativePath,
+            reasonRequired: 'other',
+            targetStatus: route.anonymousAccessDisposition === 'denied' ? 403 : 200,
+            targetFinalPath: route.representativePath,
+            expectedPublicBehavior: route.anonymousAccessDisposition === 'denied' ? 'private_403' : 'public_200',
+            drupalOwner: 'custom_route',
+            shouldBePublic: route.anonymousAccessDisposition !== 'denied',
+            accepted: true,
+            notes: 'Custom route bound by live route name and representative path.'
+          });
+        }
+      });
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory = {
+          applies: true,
+          reason: 'A custom calendar capability owns three reviewed routes.',
+          extensions: [{
+            machineName: 'calendar_feed',
+            type: 'module',
+            path: 'web/modules/custom/calendar_feed',
+            purpose: 'Expose calendar capability routes.',
+            drupalNativeAlternativesReviewed: 'No maintained owner matched the route contract.',
+            phpFileCount: 1,
+            qualityChecks: [
+              {
+                kind: 'coding_standards', status: 'verify',
+                exception: { reason: '', acceptedBy: '', evidence: '' }
+              },
+              {
+                kind: 'static_analysis', status: 'verify',
+                exception: { reason: '', acceptedBy: '', evidence: '' }
+              }
+            ],
+            accepted: true
+          }],
+          routes: routeDefinitions.map((route) => ({
+            name: route.name,
+            path: route.path,
+            extension: 'calendar_feed',
+            controller,
+            requirements: route.requirements,
+            routeParameters: route.routeParameters,
+            requestMethod: route.requestMethod,
+            representativePath: route.representativePath,
+            anonymousAccessDisposition: route.anonymousAccessDisposition,
+            anonymousAccessEvidence: 'Live anonymous account access-manager result.',
+            routeMatrixBinding: {
+              kind: route.bindingKind,
+              value: route.bindingKind === 'route_name' ? route.name : route.representativePath
+            },
+            accessReviewed: true,
+            cacheabilityReviewed: true,
+            sanitizationReviewed: true,
+            dependencyInjectionReviewed: true,
+            testEvidence: 'evidence/independent-verification/claim-evidence.json',
+            testException: { reason: '', acceptedBy: '', evidence: '' },
+            offRoadDisposition: 'OR-001 accepted capability route.',
+            accepted: true
+          })),
+          controllers: ['web/modules/custom/calendar_feed/src/Controller/CalendarController.php'],
+          tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php'],
+          completed: true
+        };
+      });
+      mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+        for (const route of routeDefinitions) {
+          independent.drupalImplementationChecks.push({
+            kind: 'custom_route',
+            identity: route.name,
+            liveReadback: `drupal-readback.json ${route.name}`,
+            falsificationAttempt: 'Compared live router definition and anonymous access against the packet binding.',
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          });
+          independent.targetRequiredRouteChecks.push({
+            targetPath: route.representativePath,
+            reasonRequired: 'other',
+            targetStatus: route.anonymousAccessDisposition === 'denied' ? 403 : 200,
+            targetFinalUrl: `${baseUrl}${route.representativePath}`,
+            expectedPublicBehavior: route.anonymousAccessDisposition === 'denied' ? 'private_403' : 'public_200',
+            status: 'pass',
+            evidence: 'claim-evidence.json'
+          });
+        }
+      });
+
+      const runtime = injectedDrupalRuntime(baseUrl, {
+        customCodeInventory: {
+          completed: true,
+          controllers: ['web/modules/custom/calendar_feed/src/Controller/CalendarController.php'],
+          errors: [],
+          extensions: [{
+            machineName: 'calendar_feed',
+            type: 'module',
+            path: 'web/modules/custom/calendar_feed',
+            phpFileCount: 1,
+            qualityChecks: [
+              { kind: 'coding_standards', supported: true, status: 'pass' },
+              { kind: 'static_analysis', supported: true, status: 'pass' }
+            ]
+          }],
+          routeAuditCompleted: true,
+          routeAuditViolations: [],
+          routes: routeDefinitions.map((route) => ({
+            name: route.name,
+            extension: 'calendar_feed',
+            file: 'web/modules/custom/calendar_feed/calendar_feed.routing.yml',
+            filesystemPath: route.path,
+            filesystemController: controller,
+            path: route.path,
+            controller,
+            requirements: route.requirements,
+            routeParameters: route.routeParameters,
+            requestMethod: route.requestMethod,
+            parameterNames: [...route.path.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]),
+            accessCheckCompleted: true,
+            parameterConversionCompleted: true,
+            requestMatched: true,
+            anonymousAccess: route.anonymousAccessDisposition,
+            representativePath: route.representativePath
+          })),
+          tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php']
+        }
+      });
+
+      const passingReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(passingReport.liveTargetValid, true, passingReport.errors.join('\n'));
+      assert.equal(passingReport.drupalRuntime.implementationQualityValid, true);
+
+      runtime.customCodeInventory.extensions[0].qualityChecks[1] = {
+        kind: 'static_analysis',
+        supported: false,
+        status: 'unsupported',
+        reason: 'No project PHPStan configuration was found.'
+      };
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.extensions[0].qualityChecks[1] = {
+          kind: 'static_analysis',
+          status: 'exception',
+          exception: {
+            reason: 'The project has no PHPStan configuration.',
+            acceptedBy: 'Fixture Maintainer',
+            evidence: 'evidence/independent-verification/claim-evidence.json'
+          }
+        };
+      });
+      const exceptionReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(exceptionReport.drupalRuntime.implementationQualityValid, true, exceptionReport.errors.join('\n'));
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.routes[0].anonymousAccessDisposition = 'denied';
+      });
+      const mismatchReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(mismatchReport.liveTargetValid, false);
+      assert.match(mismatchReport.errors.join('\n'), /anonymous-access disposition denied does not match live Drupal access allowed/);
+    }
+  );
 });
 
 test('live route verification rejects identity mismatches and accepts a declared same-origin redirect', async () => {
@@ -1198,17 +2106,7 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
         targetUrl: baseUrl,
         cwd: repoRoot,
         environment: {},
-        drupalRuntime: {
-          baseUrl,
-          confirmed: true,
-          configStatusClean: true,
-          configSyncDirectory: '../config/sync',
-          frontPage: '/',
-          mode: 'test',
-          project: 'fixture',
-          reason: '',
-          siteUuid: testSiteUuid
-        }
+        drupalRuntime: injectedDrupalRuntime(baseUrl, { mode: 'test' })
       });
       assert.equal(liveReport.valid, true, liveReport.errors.join('\n'));
       assert.equal(liveReport.completeLocalRebuildClaimAllowed, false);
@@ -1371,6 +2269,17 @@ if (args[0] !== 'drush') {
   process.exit(1);
 }
 const command = args.slice(1).join(' ');
+if (args[1] === 'php:eval') {
+  process.stdout.write(JSON.stringify({
+    completed: true,
+    formComponents: [{ displayConfig: 'core.entity_form_display.node.page.default', fieldName: 'body', fieldDefinitionPresent: true, fieldType: 'text_with_summary', configuredPlugin: 'text_textarea_with_summary', resolvedPlugin: 'text_textarea_with_summary', supportsFieldType: true, classApplicable: true, applicable: true }],
+    formComponentCount: 1,
+    viewComponents: [{ displayConfig: 'core.entity_view_display.node.page.default', fieldName: 'body', fieldDefinitionPresent: true, fieldType: 'text_with_summary', configuredPlugin: 'text_default', resolvedPlugin: 'text_default', supportsFieldType: true, classApplicable: true, applicable: true }],
+    viewComponentCount: 1,
+    violations: []
+  }) + '\\n');
+  process.exit(0);
+}
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
   ['status --field=root', 'web'],
@@ -2378,17 +3287,10 @@ test('completion is blocked when live Drupal site UUID differs from packet readb
         targetUrl: baseUrl,
         cwd: repoRoot,
         environment: {},
-        drupalRuntime: {
-          baseUrl,
-          confirmed: true,
-          configStatusClean: true,
-          configSyncDirectory: '../config/sync',
-          frontPage: '/',
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
           mode: 'test',
-          project: 'fixture',
-          reason: '',
           siteUuid: '22222222-2222-4222-8222-222222222222'
-        }
+        })
       });
 
       assert.equal(report.valid, true, report.errors.join('\n'));
@@ -2416,17 +3318,12 @@ test('completion is blocked when live front-page or config state differs from pa
         targetUrl: baseUrl,
         cwd: repoRoot,
         environment: {},
-        drupalRuntime: {
-          baseUrl,
-          confirmed: true,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
           configStatusClean: false,
           configSyncDirectory: '../different-config/sync',
           frontPage: '/different-home',
-          mode: 'test',
-          project: 'fixture',
-          reason: '',
-          siteUuid: testSiteUuid
-        }
+          mode: 'test'
+        })
       });
 
       assert.equal(report.valid, true, report.errors.join('\n'));

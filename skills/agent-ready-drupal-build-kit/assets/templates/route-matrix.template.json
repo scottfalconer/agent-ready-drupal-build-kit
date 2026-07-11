@@ -59,6 +59,7 @@
   ],
   "targetRequiredRoutes": [
     {
+      "routeName": "",
       "targetPath": "",
       "reasonRequired": "privacy_legal_footer | sitemap | robots | login_admin | front_page | locally_introduced_menu_link | locally_introduced_footer_link | other",
       "targetStatus": null,
@@ -125,6 +126,7 @@
   ],
   "routes": [
     {
+      "routeName": "",
       "sourcePath": "",
       "sourceStatus": null,
       "sourceFinalPath": "",

@@ -77,6 +77,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-CANVAS-01': 'canvasComponentFidelity',
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
+  'G-DRUPAL-01': 'drupalImplementationQuality',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -282,6 +283,113 @@ function exactIdentityMatch(left, right) {
   const leftKey = identityKey(left);
   const rightKey = identityKey(right);
   return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function canvasTargetKey(entityType, bundle, viewMode) {
+  const parts = [entityType, bundle, viewMode].map((value) => String(value ?? '').trim().toLowerCase());
+  return parts.every(Boolean) ? parts.join('.') : '';
+}
+
+function entityViewDisplayTarget(value) {
+  const match = String(value ?? '').trim().match(
+    /(?:^|\.)entity_view_display\.([a-z0-9_]+)\.([a-z0-9_]+)\.([a-z0-9_]+)$/i
+  );
+  return match
+    ? { entityType: match[1], bundle: match[2], viewMode: match[3] }
+    : null;
+}
+
+function publicCanvasTargets(drupalReadback, patternMap) {
+  const targets = new Set();
+  const publicDetailBundles = new Set();
+  const noDetailBundles = new Set();
+  const add = (entityType, bundle, viewMode) => {
+    const key = canvasTargetKey(entityType, bundle, viewMode);
+    if (key) {
+      targets.add(key);
+    }
+  };
+  const bundleKey = (entityType, bundle) => {
+    const parts = [entityType, bundle].map((value) => String(value ?? '').trim().toLowerCase());
+    return parts.every(Boolean) ? parts.join('.') : '';
+  };
+
+  for (const ledger of substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)) {
+    if (ledger.accepted !== true) {
+      continue;
+    }
+    const key = bundleKey(ledger.drupalEntityType, ledger.contentTypeOrBundle);
+    if (!key) {
+      continue;
+    }
+    if (['entity_view_display', 'canvas_composition'].includes(ledger.detailRouteOwner)) {
+      publicDetailBundles.add(key);
+    } else if (['view_row', 'no_public_detail_route'].includes(ledger.detailRouteOwner)) {
+      noDetailBundles.add(key);
+    }
+  }
+  for (const policy of substantiveObjects(drupalReadback?.routing?.publicBundleAliasPolicies)) {
+    if (policy.strategy === 'no_public_detail_route') {
+      const key = bundleKey(policy.entityType, policy.bundle);
+      if (key) {
+        noDetailBundles.add(key);
+      }
+    }
+  }
+  const explicitlyRowOnly = (entityType, bundle) => {
+    const key = bundleKey(entityType, bundle);
+    return Boolean(key && noDetailBundles.has(key) && !publicDetailBundles.has(key));
+  };
+
+  for (const contentType of substantiveObjects(patternMap?.contentTypes)) {
+    const entityType = contentType.entityType || 'node';
+    const bundle = contentType.machineName || contentType.bundle;
+    if (!explicitlyRowOnly(entityType, bundle)) {
+      add(entityType, bundle, 'full');
+    }
+  }
+  for (const node of substantiveObjects(drupalReadback?.content?.nodes)) {
+    if (node.published === true && !explicitlyRowOnly('node', node.type || node.bundle)) {
+      add('node', node.type || node.bundle, 'full');
+    }
+  }
+  for (const ledger of substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)) {
+    if (ledger.accepted !== true) {
+      continue;
+    }
+    const displayTarget = entityViewDisplayTarget(ledger.viewDisplayOrConfig);
+    if (displayTarget) {
+      add(displayTarget.entityType, displayTarget.bundle, displayTarget.viewMode);
+    }
+    if (['entity_view_display', 'canvas_composition'].includes(ledger.detailRouteOwner)) {
+      add(ledger.drupalEntityType, ledger.contentTypeOrBundle, 'full');
+    }
+  }
+  for (const display of substantiveObjects(drupalReadback?.content?.viewDisplays)) {
+    if (
+      display.publicOutput === true ||
+      display.usedOnPublicRoute === true ||
+      display.embeddedOnPublicOutput === true
+    ) {
+      add(
+        display.entityType || display.targetEntityType,
+        display.bundle || display.targetBundle,
+        display.viewMode || display.mode
+      );
+    }
+  }
+  return targets;
+}
+
+export function canvasTemplateTargetsPublicOutput(template, drupalReadback, patternMap) {
+  const target = canvasTargetKey(template?.entityType, template?.bundle, template?.viewMode);
+  return Boolean(target && publicCanvasTargets(drupalReadback, patternMap).has(target));
+}
+
+export function canvasIntentionallyUnusedClaim(patternMap, routeMatrix, independentVerification) {
+  return /canvas_unused/.test(String(patternMap?.buildTypeDeclaration?.type ?? '')) ||
+    routeMatrix?.canvasPlaceholderDetection?.canvasIntentionallyUnused === true ||
+    independentVerification?.canvasPlaceholderChecks?.canvasIntentionallyUnusedAndDocumented === true;
 }
 
 function compositionOwnersMatch(declared, actual) {
@@ -1202,6 +1310,29 @@ async function independentStructuredGateReasons({
   }
   if (fieldBundles.length === 0 || fieldChecks.length === 0) {
     reasons.push('independent-verification.json must contain passing field-output falsification evidence.');
+  }
+  const implementationChecks = substantiveObjects(independentVerification?.drupalImplementationChecks);
+  const passingImplementationCheck = (kind, identity) => implementationChecks.some((check) =>
+    check?.kind === kind &&
+    exactIdentityMatch(check?.identity, identity) &&
+    String(check?.liveReadback ?? '').trim() &&
+    String(check?.falsificationAttempt ?? '').trim() &&
+    check?.status === 'pass' &&
+    String(check?.evidence ?? '').trim()
+  );
+  if (!passingImplementationCheck('display_plugin_audit', 'all_configured_components')) {
+    reasons.push('independent-verification.json needs a passing live display-plugin falsification check.');
+  }
+  for (const route of substantiveObjects(drupalReadback?.implementationQuality?.customCodeInventory?.routes)) {
+    if (!passingImplementationCheck('custom_route', route.name)) {
+      reasons.push(`independent-verification.json needs a passing custom-route implementation check for ${route.name || '(unnamed route)'}.`);
+    }
+  }
+  for (const policy of substantiveObjects(drupalReadback?.routing?.publicBundleAliasPolicies)) {
+    const identity = `${policy.entityType}.${policy.bundle}`;
+    if (!passingImplementationCheck('alias_policy', identity)) {
+      reasons.push(`independent-verification.json needs a passing future-alias implementation check for ${identity}.`);
+    }
   }
   for (const bundle of fieldBundles) {
     if (!editorWorkflowChecks.some((check) =>
@@ -2711,6 +2842,204 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     !hasMeaningfulEntry(drupalReadback?.rolesAndPermissionsNotes)
   ) {
     reasons.push('drupal-readback.json must substantively identify the bootstrapped site, config, Drupal structures, public content, menus, and editor permissions with no blockers.');
+  }
+
+  const implementationQuality = drupalReadback?.implementationQuality ?? {};
+  const canvasTemplateAudit = implementationQuality.canvasTemplateAudit ?? {};
+  const canvasTemplates = substantiveObjects(canvasTemplateAudit.templates);
+  const trackedConfigPaths = new Set(
+    arrayOrEmpty(drupalReadback?.drupal?.trackedConfigYamlFiles).map((path) => String(path).trim())
+  );
+  const canvasTemplateIdentities = new Set();
+  const invalidCanvasTemplate = canvasTemplates.some((template) => {
+    const identity = `${String(template?.configName ?? '').trim()}\u0000${String(template?.path ?? '').trim()}`;
+    const duplicate = canvasTemplateIdentities.has(identity);
+    canvasTemplateIdentities.add(identity);
+    return duplicate ||
+      !/^canvas\.content_template\..+$/i.test(String(template?.configName ?? '').trim()) ||
+      !trackedConfigPaths.has(String(template?.path ?? '').trim()) ||
+      typeof template?.enabled !== 'boolean' ||
+      !String(template?.id ?? '').trim() ||
+      !String(template?.entityType ?? '').trim() ||
+      !String(template?.bundle ?? '').trim() ||
+      !String(template?.viewMode ?? '').trim() ||
+      typeof template?.publicTarget !== 'boolean' ||
+      template.publicTarget !== canvasTemplateTargetsPublicOutput(template, drupalReadback, patternMap) ||
+      template?.accepted !== true;
+  });
+  if (
+    canvasTemplateAudit.completed !== true ||
+    !Number.isInteger(canvasTemplateAudit.trackedConfigFileCount) ||
+    canvasTemplateAudit.trackedConfigFileCount !== trackedConfigPaths.size ||
+    !Number.isInteger(canvasTemplateAudit.matchingConfigCount) ||
+    canvasTemplateAudit.matchingConfigCount !== canvasTemplates.length ||
+    invalidCanvasTemplate ||
+    arrayOrEmpty(canvasTemplateAudit.errors).length > 0 ||
+    arrayOrEmpty(canvasTemplateAudit.conflicts).length > 0
+  ) {
+    reasons.push('drupal-readback.json implementationQuality.canvasTemplateAudit must deterministically inventory tracked canvas.content_template.* config and accurately disposition each target.');
+  }
+  const unusedCanvasConflicts = canvasTemplates.filter((template) =>
+    template.enabled === true &&
+    canvasTemplateTargetsPublicOutput(template, drupalReadback, patternMap) &&
+    canvasIntentionallyUnusedClaim(patternMap, routeMatrix, independentVerification)
+  );
+  for (const template of unusedCanvasConflicts) {
+    reasons.push(
+      `drupal-readback.json declares Canvas intentionally unused while tracked config enables ${template.configName} for public ${template.entityType}.${template.bundle}.${template.viewMode}; active Canvas content templates supersede theme entity templates for that target.`
+    );
+  }
+
+  const displayPluginAudit = implementationQuality.displayPluginAudit ?? {};
+  const formPluginChecks = substantiveObjects(displayPluginAudit.formComponents);
+  const viewPluginChecks = substantiveObjects(displayPluginAudit.viewComponents);
+  const invalidPluginCheck = (check) =>
+    !String(check?.displayConfig ?? '').trim() ||
+    !String(check?.fieldName ?? '').trim() ||
+    check?.fieldDefinitionPresent !== true ||
+    !String(check?.fieldType ?? '').trim() ||
+    !String(check?.configuredPlugin ?? '').trim() ||
+    !String(check?.resolvedPlugin ?? '').trim() ||
+    check?.supportsFieldType !== true ||
+    check?.classApplicable !== true ||
+    check?.applicable !== true ||
+    check?.accepted !== true;
+  if (
+    displayPluginAudit.completed !== true ||
+    !Number.isInteger(displayPluginAudit.formComponentCount) ||
+    displayPluginAudit.formComponentCount <= 0 ||
+    !Number.isInteger(displayPluginAudit.viewComponentCount) ||
+    displayPluginAudit.viewComponentCount <= 0 ||
+    formPluginChecks.some(invalidPluginCheck) ||
+    viewPluginChecks.some(invalidPluginCheck) ||
+    arrayOrEmpty(displayPluginAudit.violations).length > 0
+  ) {
+    reasons.push('drupal-readback.json implementationQuality.displayPluginAudit must prove every configured field widget and formatter is applicable to its field and produces a resolved renderer without an incompatible fallback.');
+  }
+
+  const customInventory = implementationQuality.customCodeInventory ?? {};
+  const customExtensions = substantiveObjects(customInventory.extensions);
+  const customRoutes = substantiveObjects(customInventory.routes);
+  const customControllers = arrayOrEmpty(customInventory.controllers).map((path) => String(path).trim()).filter(Boolean);
+  const customTests = arrayOrEmpty(customInventory.tests).map((path) => String(path).trim()).filter(Boolean);
+  const routeMatrixRecords = [
+    ...arrayOrEmpty(routeMatrix?.routes),
+    ...arrayOrEmpty(routeMatrix?.primaryRoutes),
+    ...arrayOrEmpty(routeMatrix?.targetRequiredRoutes)
+  ];
+  const customRouteInvalid = (route) => {
+    const testException = route?.testException ?? {};
+    const routeBinding = route?.routeMatrixBinding ?? {};
+    const hasTestDisposition = String(route?.testEvidence ?? '').trim() || (
+      String(testException.reason ?? '').trim() &&
+      String(testException.acceptedBy ?? '').trim() &&
+      String(testException.evidence ?? '').trim()
+    );
+    return (
+      !String(route?.name ?? '').trim() ||
+      !normalizeRouteKey(route?.path) ||
+      !String(route?.extension ?? '').trim() ||
+      !isJsonObject(route?.requirements) ||
+      !isJsonObject(route?.routeParameters) ||
+      !/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/i.test(String(route?.requestMethod ?? '').trim()) ||
+      !normalizeRouteKey(route?.representativePath) ||
+      /[{}]/.test(String(route?.representativePath ?? '')) ||
+      !['allowed', 'denied'].includes(route?.anonymousAccessDisposition) ||
+      !String(route?.anonymousAccessEvidence ?? '').trim() ||
+      !['concrete_path', 'route_name'].includes(routeBinding.kind) ||
+      !String(routeBinding.value ?? '').trim() ||
+      (routeBinding.kind === 'concrete_path' &&
+        normalizeRouteKey(routeBinding.value) !== normalizeRouteKey(route.representativePath)) ||
+      (routeBinding.kind === 'route_name' && routeBinding.value !== route.name) ||
+      !routeMatrixRecords.some((record) =>
+        (routeBinding.kind === 'concrete_path' &&
+          normalizeRouteKey(record?.targetPath) === normalizeRouteKey(routeBinding.value)) ||
+        (routeBinding.kind === 'route_name' && record?.routeName === routeBinding.value)
+      ) ||
+      route?.accessReviewed !== true ||
+      route?.cacheabilityReviewed !== true ||
+      route?.sanitizationReviewed !== true ||
+      route?.dependencyInjectionReviewed !== true ||
+      !hasTestDisposition ||
+      !String(route?.offRoadDisposition ?? '').trim() ||
+      route?.accepted !== true
+    );
+  };
+  if (
+    customInventory.completed !== true ||
+    typeof customInventory.applies !== 'boolean' ||
+    (customInventory.applies === false && (
+      !String(customInventory.reason ?? '').trim() ||
+      customExtensions.length > 0 ||
+      customRoutes.length > 0 ||
+      customControllers.length > 0 ||
+      customTests.length > 0
+    )) ||
+    (customInventory.applies === true && (
+      customExtensions.length === 0 ||
+      customExtensions.some((extension) => {
+        const qualityChecks = substantiveObjects(extension?.qualityChecks);
+        const checkHasDisposition = (kind) => qualityChecks.some((check) => {
+          if (check?.kind !== kind) {
+            return false;
+          }
+          if (check?.status === 'verify') {
+            return true;
+          }
+          const exception = check?.exception ?? {};
+          return check?.status === 'exception' &&
+            String(exception.reason ?? '').trim() &&
+            String(exception.acceptedBy ?? '').trim() &&
+            String(exception.evidence ?? '').trim();
+        });
+        return !String(extension?.machineName ?? '').trim() ||
+          !['module', 'theme'].includes(String(extension?.type ?? '').trim()) ||
+          !String(extension?.path ?? '').trim() ||
+          !String(extension?.purpose ?? '').trim() ||
+          !String(extension?.drupalNativeAlternativesReviewed ?? '').trim() ||
+          !Number.isInteger(extension?.phpFileCount) ||
+          extension.phpFileCount < 0 ||
+          (extension.phpFileCount > 0 && (!checkHasDisposition('coding_standards') || !checkHasDisposition('static_analysis'))) ||
+          extension?.accepted !== true;
+      }) ||
+      customRoutes.some(customRouteInvalid) ||
+      (customControllers.length > 0 && customRoutes.length === 0)
+    )) ||
+    arrayOrEmpty(implementationQuality.blockers).length > 0
+  ) {
+    reasons.push('drupal-readback.json must truthfully inventory custom modules, themes, routes, controllers, tests, and route-level access/cache/sanitization/DI review, or explicitly prove custom code is not applicable.');
+  }
+
+  const aliasPolicies = substantiveObjects(drupalRouting.publicBundleAliasPolicies);
+  const recurringDetailOwners = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+    .filter((ledger) =>
+      ledger?.accepted === true &&
+      ['entity_view_display', 'canvas_composition'].includes(ledger?.detailRouteOwner) &&
+      String(ledger?.drupalEntityType ?? '').trim() &&
+      String(ledger?.contentTypeOrBundle ?? '').trim()
+    );
+  for (const ledger of recurringDetailOwners) {
+    const policy = aliasPolicies.find((candidate) =>
+      exactIdentityMatch(candidate?.entityType, ledger.drupalEntityType) &&
+      exactIdentityMatch(candidate?.bundle, ledger.contentTypeOrBundle)
+    );
+    if (
+      !policy ||
+      !['pathauto_pattern', 'editor_supplied_alias'].includes(policy.strategy) ||
+      (policy.strategy === 'pathauto_pattern' && !String(policy.patternId ?? '').trim()) ||
+      !String(policy.probeEntityId ?? '').trim() ||
+      !/^\/[^?#]*$/.test(String(policy.probeAlias ?? '').trim()) ||
+      (
+        !String(policy.existingAliasExample ?? '').trim() ||
+        !String(policy.probeAlias ?? '').trim() ||
+        policy.structureMatchesExistingContent !== true ||
+        policy.editorCanCreateExpectedAlias !== true
+      ) ||
+      !String(policy.evidence ?? '').trim() ||
+      policy.accepted !== true
+    ) {
+      reasons.push(`drupal-readback.json must record a working future-content alias policy for recurring public detail owner ${ledger.drupalEntityType}.${ledger.contentTypeOrBundle}.`);
+    }
   }
 
   const completionTimestamps = [

@@ -265,6 +265,16 @@
       "evidence": ""
     }
   ],
+  "drupalImplementationChecks": [
+    {
+      "kind": "display_plugin_audit | custom_route | alias_policy",
+      "identity": "",
+      "liveReadback": "",
+      "falsificationAttempt": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "coldReaderLabelChecks": [
     {
       "bundle": "",

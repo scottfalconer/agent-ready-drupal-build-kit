@@ -170,6 +170,14 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-DRUPAL-01",
+      "title": "Drupal display plugins, custom runtime code, and public alias policies verified",
+      "phase": 5,
+      "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-INTENT-01",
       "title": "Durable intent is current or treated as advisory",
       "phase": 3,

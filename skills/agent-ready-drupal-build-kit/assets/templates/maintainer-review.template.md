@@ -123,6 +123,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Non-admin editor proof shows a meaningful declared section/component can be changed through the selected owner and the anonymous public route changes without code.
 - [ ] No starter Canvas placeholder is counted as evidence for the rebuilt public route; starter Canvas pages are replaced, routed correctly, unpublished, or explicitly excluded.
 - [ ] The run declares its build type: structured Drupal-native with Canvas intentionally unused, hybrid structured content plus Canvas composition, Canvas-heavy with structured data embedded, or constrained fallback because Canvas was unavailable or blocked.
+- [ ] Active Git-tracked config was scanned for `canvas.content_template.*`; every enabled template's exact entity/bundle/view-mode target matches declared public or embedded output, and explicit row-only/no-detail bundles are not treated as public `full` displays. A Canvas-unused claim has no enabled public target, because an active Canvas content template supersedes the normal theme entity template for that target.
 - [ ] Major composed routes have section ownership records for hero copy, hero image, gallery, sponsor strip, CTA, media embeds, related items, footer CTA, and layout/order.
 - [ ] Utility Page exception records exist for every public source route owned by Utility Page, including why Canvas/Experience Builder and structured content were not better owners.
 - [ ] Editor-facing bundle labels are generic, portable nouns; source-site, client, brand, event, or campaign names are not exposed in content type labels unless they are part of the real content noun.
@@ -150,7 +151,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Public source assets use managed Media and image styles, or the packet documents why raw URI fields, CDN hotlinks, or placeholders remain.
 - [ ] Alt text, responsive image styles, image reuse, and hero/thumbnail/social-image field decisions are explicit.
 - [ ] Primary navigation and footer navigation are owned by Drupal menus/blocks or have a documented exception.
-- [ ] Custom content types have Pathauto patterns or an explicit alias-management decision.
+- [ ] Every URL-capable recurring entity bundle with a true public detail owner has a Pathauto or editor-supplied alias policy, including non-node entities; its representative entity loads, its Pathauto pattern is enabled/applicable/selected when used, and its probe alias resolves both ways. Row-only View collections are not misclassified as detail routes.
 - [ ] The content model has one reviewable source of truth; install hooks are not the only place custom structure exists.
 - [ ] The tracked config directory is the active sync directory, contains representative YAML, and has no active-to-sync drift; if Drupal exports to `web/sites/default/files/sync` or another active path, the packet names that path and does not misrepresent an empty project `config/sync` directory as authoritative.
 - [ ] Site structure lives in exported configuration or a Recipe. If content types, fields, displays, Views, menus, roles, workflows, or theme settings exist only in scripts, the tracked-config handoff gate fails.
@@ -160,6 +161,8 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Custom modules have purposeful bounded behavior, configuration or extension points where variation is likely, privacy-safe logging, and evidence for access, cacheability, sanitization, validation, and editor workflow.
 - [ ] Empty marker modules are not used to imply architecture.
 - [ ] Custom controllers, if present, are thin, access-controlled, cacheable, and driven by editable Drupal content/config.
+- [ ] YAML, callback, and attribute custom routes are reconciled through the live Drupal router; each declares an HTTP method, matches and converts a real representative Request, has effective allowed/denied anonymous access, and binds to the route matrix by concrete path or route name.
+- [ ] The verifier, not packet-authored commands, produced passing Drupal PHPCS and project-configured PHPStan results for custom PHP; every unsupported canonical check has a named maintainer exception.
 - [ ] Off-road moves are inventoried and justified in `off-road-inventory.md`: custom modules/controllers/endpoints, preprocess/entity-query rendering, hardcoded copy or computed values, raw CSS/presentation fields, unfiltered formats, `accessCheck(FALSE)`, `_access: TRUE`, forced `max-age=0`, raw markup, raw SQL, one-shot derived fields, stale contrib defaults, missing Pathauto patterns, hardcoded entity IDs in config, or config that is not import-reproducible.
 - [ ] Direct SQL cleanup, table purges, alias resets, or destructive import cleanup are recorded as local-only off-road moves with what changed, why Drupal APIs/config were insufficient, why it is safe in the clean workspace, and the production-safe alternative.
 - [ ] Public rendering avoids unsafe raw body/source output and undocumented forced `max-age=0`.
