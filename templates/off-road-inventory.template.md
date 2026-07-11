@@ -26,6 +26,14 @@ Use this packet to list every place the build leaves Drupal's normal paved path.
 | OR-011 | Embeds/markup | Raw iframe, script, inline event handler, style attribute, or source HTML in editorial fields | Media/oEmbed, typed provider field, configured block, Webform/integration plugin, filtered text format | UNKNOWN | UNKNOWN | blocked |
 | OR-012 | Local rebuild cleanup | Direct SQL, table purge, alias reset, or destructive import cleanup | Drupal APIs, entity deletes, migrations rollback, config import, clean rebuild scripts | UNKNOWN | UNKNOWN | blocked |
 
+## Custom code enumeration
+
+List every directory under `web/modules/custom/` and `web/themes/custom/`. The live verifier enumerates the same directories and their `*.routing.yml` files mechanically: a directory without a matching `CC-` row is a hard failure; a machine-derived public custom route (route requirements grant anonymous access via `_access: TRUE`, an anonymous-held permission such as `access content`, or the anonymous role) must appear in `route-matrix.json` or in this file; and a machine name matching the declared source domain or site name needs an `accepted` row with a named owner and rationale. Replace the table with `No custom modules or themes.` when both directories are empty.
+
+| ID | Path | Kind | Public routes | Controllers | Disposition | Accepted by | Rationale |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CC-001 | web/modules/custom/UNKNOWN | module | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+
 ## Required Notes
 
 - Custom code that remains:

@@ -2110,6 +2110,12 @@ async function markdownCompletionReadiness(packetDir) {
   ) {
     reasons.push('off-road-inventory.md must contain a named accepted review and disposition every paved-path exception without UNKNOWN or blocked rows.');
   }
+  if (
+    !/^##\s*Custom code enumeration\s*$/mi.test(offRoad) ||
+    !(/no custom modules or themes/i.test(offRoad) || /^\|\s*CC-[^\n]+\|\s*$/im.test(offRoad))
+  ) {
+    reasons.push('off-road-inventory.md must include a Custom code enumeration table with a CC- row for every custom module and theme, or state that no custom modules or themes exist.');
+  }
 
   const durableIntent = texts['durable-intent.yml'];
   const explicitEmptyIntent = /^\s*intent_records:\s*\[\s*\]\s*$/m.test(durableIntent);

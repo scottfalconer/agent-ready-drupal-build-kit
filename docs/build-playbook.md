@@ -269,7 +269,7 @@ Drupal is the gate: build through its APIs and systems so Drupal enforces access
 
 Recipe-backed assembly follows the same rule. Before creating a custom content type, View, workflow, or cross-cutting feature, discover available Drupal CMS recipes in the target. When a maintained recipe matches the source pattern, treat it as the default owner and record whether it was applied, rejected, blocked, or not applicable in `recipe-start-point.md`. Custom overlays should be bounded additions on top of the selected recipe or explicit fallback when recipe discovery proves no fit.
 
-When custom code is genuinely required, record why no Drupal-native tool could express the need, which editable content or config drives it, which platform guarantees it must now handle directly, and what evidence proves it preserves access, cacheability, sanitization, validation, and editor workflow.
+When custom code is genuinely required, record why no Drupal-native tool could express the need, which editable content or config drives it, which platform guarantees it must now handle directly, and what evidence proves it preserves access, cacheability, sanitization, validation, and editor workflow. Cacheability evidence for a custom route means captured response headers showing `X-Drupal-Cache` or `X-Drupal-Dynamic-Cache` at `HIT`/`MISS` rather than `UNCACHEABLE`, or a dispositioned exception in `off-road-inventory.md`. A custom endpoint that emits a wire format (iCal, RSS, JSON-LD) attaches validator output for that format, not just an HTTP 200 check.
 
 Review attention should concentrate where a framework gate was switched off. Inventory these off-road moves and justify each one:
 

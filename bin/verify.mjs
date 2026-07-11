@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -517,6 +517,268 @@ function configStatusIsClean(result) {
   } catch {
     return false;
   }
+}
+
+const ANONYMOUS_TYPICAL_PERMISSIONS = new Set([
+  'access content',
+  'access comments',
+  'search content',
+  'view media'
+]);
+const GENERIC_SOURCE_NAME_TOKENS = new Set([
+  'city', 'county', 'demo', 'info', 'local', 'site', 'staging', 'state', 'test', 'town', 'village', 'www'
+]);
+
+function yamlScalar(value) {
+  const text = String(value ?? '').trim();
+  const quoted = text.match(/^(['"])(.*?)\1/);
+  if (quoted) {
+    return quoted[2].trim();
+  }
+  return text.replace(/\s+#.*$/, '').trim();
+}
+
+function parseRoutingYamlRoutes(yamlText) {
+  const routes = [];
+  let current = null;
+  let propertyIndent = -1;
+  let openBlock = '';
+  let openBlockIndent = -1;
+  for (const rawLine of String(yamlText).split(/\r?\n/)) {
+    const expanded = rawLine.replace(/\t/g, '  ');
+    const content = expanded.trim();
+    if (!content || content.startsWith('#')) {
+      continue;
+    }
+    const indent = expanded.length - expanded.trimStart().length;
+    if (indent === 0) {
+      const name = content.match(/^([A-Za-z0-9_.-]+):\s*(?:#.*)?$/)?.[1] ?? '';
+      current = name ? { name, path: '', requirements: {} } : null;
+      if (current) {
+        routes.push(current);
+      }
+      propertyIndent = -1;
+      openBlock = '';
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    const keyValue = content.match(/^("?[^":]+"?):\s*(.*)$/);
+    if (!keyValue) {
+      continue;
+    }
+    const key = yamlScalar(keyValue[1]);
+    const value = yamlScalar(keyValue[2]);
+    if (propertyIndent === -1) {
+      propertyIndent = indent;
+    }
+    if (indent === propertyIndent) {
+      openBlock = value ? '' : key;
+      openBlockIndent = indent;
+      if (key === 'path' && value) {
+        current.path = value;
+      } else if (key === 'requirements' && keyValue[2].trim().startsWith('{')) {
+        for (const pair of keyValue[2].trim().replace(/^\{|\}\s*$/g, '').split(',')) {
+          const separator = pair.indexOf(':');
+          if (separator !== -1) {
+            current.requirements[yamlScalar(pair.slice(0, separator))] = yamlScalar(pair.slice(separator + 1));
+          }
+        }
+      }
+    } else if (indent > openBlockIndent && openBlock === 'requirements') {
+      current.requirements[key] = value;
+    }
+  }
+  return routes;
+}
+
+function routeRequirementGrantsAnonymous(key, value) {
+  if (key === '_access') {
+    return value.toUpperCase() === 'TRUE';
+  }
+  if (key === '_permission') {
+    return value.split(',').every((allOf) =>
+      allOf.split('+').some((anyOf) => ANONYMOUS_TYPICAL_PERMISSIONS.has(anyOf.trim().toLowerCase()))
+    );
+  }
+  if (key === '_role') {
+    return value.split(/[+,]/).some((role) => role.trim().toLowerCase() === 'anonymous');
+  }
+  return false;
+}
+
+function anonymousPublicRoute(route) {
+  const accessKeys = Object.keys(route.requirements).filter(
+    (key) => key.startsWith('_') && !['_content_type_format', '_format', '_method'].includes(key)
+  );
+  return (
+    accessKeys.length > 0 &&
+    accessKeys.every((key) => routeRequirementGrantsAnonymous(key, String(route.requirements[key] ?? '').trim()))
+  );
+}
+
+function walkFiles(directory) {
+  const files = [];
+  const stack = [directory];
+  while (stack.length > 0) {
+    const currentDirectory = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(currentDirectory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(path);
+      } else if (entry.isFile()) {
+        files.push(path);
+      }
+    }
+  }
+  return files.sort();
+}
+
+function enumerateCustomCode(projectRoot) {
+  if (!projectRoot) {
+    return { scanned: false, docroot: '', errors: [], modules: [], themes: [] };
+  }
+  const docroot = ddevDocroot(projectRoot);
+  const errors = [];
+  const modules = [];
+  const themes = [];
+  for (const [kind, collection] of [['modules', modules], ['themes', themes]]) {
+    const customRoot = join(projectRoot, docroot, kind, 'custom');
+    let entries;
+    try {
+      entries = readdirSync(customRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries.filter((candidate) => candidate.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))) {
+      const record = {
+        controllers: [],
+        kind: kind === 'modules' ? 'module' : 'theme',
+        machineName: entry.name,
+        path: [docroot, kind, 'custom', entry.name].join('/'),
+        publicRoutes: [],
+        routingFiles: []
+      };
+      for (const file of walkFiles(join(customRoot, entry.name))) {
+        const relativeFile = relative(projectRoot, file).split(sep).join('/');
+        if (/\.routing\.yml$/i.test(relativeFile)) {
+          record.routingFiles.push(relativeFile);
+          let routingText = '';
+          try {
+            routingText = readFileSync(file, 'utf8');
+          } catch (error) {
+            errors.push(`${relativeFile} could not be read for custom route enumeration: ${error.message}`);
+            continue;
+          }
+          for (const route of parseRoutingYamlRoutes(routingText)) {
+            if (route.path && anonymousPublicRoute(route)) {
+              record.publicRoutes.push({
+                path: route.path,
+                requirements: route.requirements,
+                routeName: route.name,
+                routingFile: relativeFile
+              });
+            }
+          }
+        } else if (relativeFile.includes('/src/Controller/') && relativeFile.endsWith('.php')) {
+          record.controllers.push(relativeFile);
+        }
+      }
+      collection.push(record);
+    }
+  }
+  return { scanned: true, docroot, errors, modules, themes };
+}
+
+function sourceNameTokens(sourceBaseUrl, sourceSiteName) {
+  const tokens = new Set();
+  const addToken = (value) => {
+    const normalized = String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normalized.length >= 4 && !GENERIC_SOURCE_NAME_TOKENS.has(normalized)) {
+      tokens.add(normalized);
+    }
+  };
+  try {
+    for (const label of new URL(String(sourceBaseUrl ?? '')).hostname.split('.')) {
+      addToken(label);
+    }
+  } catch {
+    // Without a parseable source hostname the declared site-name words below still apply.
+  }
+  for (const word of String(sourceSiteName ?? '').split(/[^A-Za-z0-9]+/)) {
+    addToken(word);
+  }
+  return [...tokens];
+}
+
+function acceptedCustomCodeNaming(row) {
+  if (!row) {
+    return false;
+  }
+  const cells = row.split('|').map((cell) => cell.trim());
+  const [disposition, acceptedBy, rationale] = cells.slice(6, 9);
+  const named = (value) => Boolean(value) && !/^(?:UNKNOWN|none|blocked|-+)$/i.test(value);
+  return /^accepted$/i.test(disposition ?? '') && named(acceptedBy) && named(rationale);
+}
+
+function customCodeDeclarationErrors({ customCode, offRoadInventoryText, routeMatrix, sourceSiteName }) {
+  const errors = [...customCode.errors];
+  if (!customCode.scanned) {
+    return errors;
+  }
+  const declaredTargetPaths = new Set();
+  const declarePath = (value) => {
+    const path = normalizePath(value);
+    if (path) {
+      declaredTargetPaths.add(path);
+    }
+  };
+  for (const routes of [routeMatrix?.routes, routeMatrix?.primaryRoutes, routeMatrix?.targetRequiredRoutes]) {
+    for (const route of Array.isArray(routes) ? routes : []) {
+      declarePath(route?.targetPath);
+      declarePath(route?.targetFinalPath);
+    }
+  }
+  const inventoryText = String(offRoadInventoryText ?? '');
+  const enumerationRows = inventoryText.split(/\r?\n/).filter((line) => /^\|\s*CC-/i.test(line.trim()));
+  const sourceTokens = sourceNameTokens(routeMatrix?.sourceBaseUrl, sourceSiteName);
+  for (const entry of [...customCode.modules, ...customCode.themes]) {
+    const row = enumerationRows.find((candidate) => candidate.includes(entry.path));
+    if (!row) {
+      errors.push(
+        `off-road-inventory.md has no Custom code enumeration row for ${entry.path}; every custom module and theme on disk needs a CC- row.`
+      );
+    }
+    const normalizedName = entry.machineName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const matchedToken = sourceTokens.find((token) => normalizedName.includes(token));
+    if (matchedToken && !acceptedCustomCodeNaming(row)) {
+      errors.push(
+        `Custom ${entry.kind} ${entry.machineName} is named after the declared source site (${matchedToken}); name it for its capability or record an accepted Custom code enumeration row with a named owner and rationale in off-road-inventory.md.`
+      );
+    }
+  }
+  for (const module of customCode.modules) {
+    for (const route of module.publicRoutes) {
+      const path = normalizePath(route.path);
+      if (
+        !declaredTargetPaths.has(path) &&
+        !inventoryText.includes(route.path) &&
+        !inventoryText.includes(path)
+      ) {
+        errors.push(
+          `${path} is a machine-derived public custom route (${route.routingFile} ${route.routeName}) absent from both route-matrix.json and off-road-inventory.md; undeclared public custom routes are unexpected public routes.`
+        );
+      }
+    }
+  }
+  return errors;
 }
 
 function inspectDrupalRuntime(cwd, environment) {
@@ -1092,6 +1354,20 @@ export async function verifyLive({
     liveErrors.push(...route.errors);
   }
 
+  let offRoadInventoryText = '';
+  try {
+    offRoadInventoryText = await readFile(join(absolutePacketDir, 'off-road-inventory.md'), 'utf8');
+  } catch {
+    // Packet validation records the missing inventory; enumeration checks below then fail closed on missing rows.
+  }
+  const customCode = enumerateCustomCode(findDrupalDdevRoot(cwd));
+  liveErrors.push(...customCodeDeclarationErrors({
+    customCode,
+    offRoadInventoryText,
+    routeMatrix,
+    sourceSiteName: sourceAudit?.site?.name
+  }));
+
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
     independentVerification?.summary?.verdict === 'pass' ||
@@ -1256,6 +1532,12 @@ export async function verifyLive({
     routeChecks,
     targetRequiredRouteChecks,
     liveTargetValid,
+    customCode: {
+      scanned: customCode.scanned,
+      docroot: customCode.docroot,
+      modules: customCode.modules,
+      themes: customCode.themes
+    },
     drupalRuntime: {
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,

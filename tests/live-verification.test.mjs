@@ -420,6 +420,10 @@ No human-only decisions remain for the complete local rebuild.
 ## Inventory
 
 No off-road moves were used in this fixture.
+
+## Custom code enumeration
+
+No custom modules or themes.
 `);
 
   writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1
@@ -1434,6 +1438,134 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(dirtyReport.completeLocalRebuildClaimAllowed, false);
       assert.match(dirtyReport.completionBlockedReasons.join('\n'), /config status is not clean/i);
     }
+  );
+});
+
+test('machine-derived custom code enumeration fails closed when the packet is silent about it', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const targetRoot = mkdtempSync(join(tmpdir(), 'live-custom-code-'));
+      mkdirSync(join(targetRoot, '.ddev'), { recursive: true });
+      writeFileSync(join(targetRoot, '.ddev', 'config.yaml'), 'name: custom-code\ntype: drupal11\ndocroot: web\n');
+      const moduleDir = join(targetRoot, 'web', 'modules', 'custom', 'example_site');
+      mkdirSync(join(moduleDir, 'src', 'Controller'), { recursive: true });
+      writeFileSync(join(moduleDir, 'example_site.info.yml'), 'name: Example site\ntype: module\n');
+      writeFileSync(join(moduleDir, 'example_site.routing.yml'), `example_site.events_ical:
+  path: '/events.ics'
+  defaults:
+    _controller: '\\\\Drupal\\\\example_site\\\\Controller\\\\EventFeedController::feed'
+  requirements:
+    _permission: 'access content'
+
+example_site.admin_settings:
+  path: '/admin/config/example-site'
+  requirements:
+    _permission: 'administer site configuration'
+`);
+      writeFileSync(join(moduleDir, 'src', 'Controller', 'EventFeedController.php'), '<?php\n');
+      const themeDir = join(targetRoot, 'web', 'themes', 'custom', 'fixture_theme');
+      mkdirSync(themeDir, { recursive: true });
+      writeFileSync(join(themeDir, 'fixture_theme.info.yml'), 'name: Fixture theme\ntype: theme\n');
+
+      const packetDir = join(targetRoot, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const silentReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: targetRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(silentReport.valid, false);
+      assert.equal(silentReport.customCode.scanned, true);
+      assert.deepEqual(
+        silentReport.customCode.modules.map((module) => module.machineName),
+        ['example_site']
+      );
+      assert.deepEqual(
+        silentReport.customCode.modules[0].publicRoutes.map((route) => route.path),
+        ['/events.ics'],
+        'only the anonymous-reachable route is classified public'
+      );
+      assert.deepEqual(silentReport.customCode.modules[0].controllers, [
+        'web/modules/custom/example_site/src/Controller/EventFeedController.php'
+      ]);
+      const silentErrors = silentReport.errors.join('\n');
+      assert.match(
+        silentErrors,
+        /\/events\.ics is a machine-derived public custom route \(web\/modules\/custom\/example_site\/example_site\.routing\.yml example_site\.events_ical\) absent from both route-matrix\.json and off-road-inventory\.md/
+      );
+      assert.match(silentErrors, /no Custom code enumeration row for web\/modules\/custom\/example_site/);
+      assert.match(silentErrors, /no Custom code enumeration row for web\/themes\/custom\/fixture_theme/);
+      assert.match(silentErrors, /Custom module example_site is named after the declared source site \(example\)/);
+      assert.ok(!silentErrors.includes('/admin/config/example-site'), 'admin-only routes are not flagged');
+
+      writeFileSync(join(packetDir, 'off-road-inventory.md'), `# Off-Road Inventory
+
+## Summary
+
+- Site: Fixture rebuild
+- Checked at: 2026-07-09
+- Reviewer: Fixture Maintainer
+- Overall status: \`accepted\`
+
+## Inventory
+
+| ID | Area | Off-road move | Drupal-native option considered | Why exception exists | Evidence | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| OR-001 | Custom code | Public /events.ics feed controller | Views iCal display | Views cannot emit the required calendar wire format | evidence/events-ics-validator.txt | accepted |
+
+## Custom code enumeration
+
+| ID | Path | Kind | Public routes | Controllers | Disposition | Accepted by | Rationale |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CC-001 | web/modules/custom/example_site | module | /events.ics | src/Controller/EventFeedController.php | accepted | Fixture Maintainer | Feed capability retained; name accepted for this handoff |
+| CC-002 | web/themes/custom/fixture_theme | theme | none | none | accepted | Fixture Maintainer | Default public theme |
+`);
+
+      const declaredReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: targetRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(declaredReport.valid, true, declaredReport.errors.join('\n'));
+    }
+  );
+});
+
+test('packet completion fails closed when the off-road inventory omits the custom code enumeration', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'custom-code-enumeration-packet-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const baseline = await validatePacket({ packetDir });
+  assert.ok(
+    !baseline.completionEvidence.packetCompletionBlockedReasons.join('\n').includes('Custom code enumeration'),
+    'a fixture inventory that dispositions custom code is not blocked'
+  );
+
+  const inventoryPath = join(packetDir, 'off-road-inventory.md');
+  writeFileSync(
+    inventoryPath,
+    readFileSync(inventoryPath, 'utf8').replace(/## Custom code enumeration[\s\S]*?(?=## |$)/, '')
+  );
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /off-road-inventory\.md must include a Custom code enumeration table/
   );
 });
 
