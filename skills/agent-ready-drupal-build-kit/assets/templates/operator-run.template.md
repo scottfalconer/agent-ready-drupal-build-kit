@@ -28,7 +28,7 @@
 
 ## Restore Path
 
-A maintainer must be able to restore this exact build state without asking the builder. Record the restore method, then list every restore artifact (database snapshot, ordered rebuild scripts, or the tracked config directory) as its own list line with the path in backticks, relative to the review packet or the project root. The packet verifier existence-checks every listed artifact; a referenced-but-missing restore file fails verification, and absolute machine paths are rejected.
+A maintainer must be able to restore this exact build state without asking the builder. Record the restore method, then list every restore artifact (database snapshot, ordered rebuild scripts, or the tracked config directory) as its own list line with the path in backticks, relative to the review packet or the project root. The packet verifier existence-checks every listed artifact; a referenced-but-missing restore file fails verification, absolute machine paths are rejected, symlinks that point outside the packet or project are rejected, and the packet itself or its primary artifacts do not count as restore artifacts.
 
 - Restore method (database snapshot, rebuild scripts, config import):
 - Restore artifacts:

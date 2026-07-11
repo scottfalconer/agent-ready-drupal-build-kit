@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -2019,6 +2019,33 @@ test('a referenced-but-missing restore artifact fails packet verification', asyn
   assert.equal(absoluteArtifact.valid, false);
   assert.match(absoluteArtifact.errors.join('\n'), /must be a relative path inside the review packet/);
 
+  const externalDir = mkdtempSync(join(tmpdir(), 'external-machine-'));
+  writeFileSync(join(externalDir, 'external-machine-snapshot.sql'), 'snapshot bytes on another machine path');
+  symlinkSync(join(externalDir, 'external-machine-snapshot.sql'), join(packetDir, 'evidence', 'restore', 'linked-snapshot.sql'));
+  writeFileSync(
+    operatorPath,
+    operatorRun.replace('`evidence/restore/db-snapshot.sql.gz`', '`evidence/restore/linked-snapshot.sql`')
+  );
+  const symlinkedArtifact = await validatePacket({ packetDir });
+  assert.equal(symlinkedArtifact.valid, false);
+  assert.match(
+    symlinkedArtifact.errors.join('\n'),
+    /restore artifact evidence\/restore\/linked-snapshot\.sql must resolve to an existing file or directory inside the review packet/
+  );
+
+  for (const trivialArtifact of ['.', 'operator-run.md']) {
+    writeFileSync(
+      operatorPath,
+      operatorRun.replace('`evidence/restore/db-snapshot.sql.gz`', `\`${trivialArtifact}\``)
+    );
+    const trivialReference = await validatePacket({ packetDir });
+    assert.equal(trivialReference.valid, false, `expected ${trivialArtifact} to be rejected as a restore artifact`);
+    assert.match(
+      trivialReference.errors.join('\n'),
+      /points at the review packet, the project root, or a primary packet artifact/
+    );
+  }
+
   writeFileSync(operatorPath, operatorRun.replace(/^## Restore Path[\s\S]*?(?=^## Decision)/m, ''));
   const missingSection = await validatePacket({ packetDir });
   assert.equal(missingSection.valid, true, missingSection.errors.join('\n'));
@@ -2027,6 +2054,29 @@ test('a referenced-but-missing restore artifact fails packet verification', asyn
     missingSection.completionEvidence.packetCompletionBlockedReasons.join('\n'),
     /structured restore path/
   );
+});
+
+test('a nested packet resolves restore artifacts against the detected Drupal project root', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'nested-restore-path-'));
+  const projectRoot = join(temp, 'example-project');
+  mkdirSync(join(projectRoot, '.ddev'), { recursive: true });
+  writeFileSync(join(projectRoot, '.ddev', 'config.yaml'), 'name: example-project\ntype: drupal11\n');
+  mkdirSync(join(projectRoot, 'scripts'), { recursive: true });
+  writeFileSync(join(projectRoot, 'scripts', 'rebuild-content.sh'), '#!/bin/sh\necho fixture rebuild\n');
+
+  const packetDir = join(projectRoot, 'handoff', 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const operatorPath = join(packetDir, 'operator-run.md');
+  writeFileSync(
+    operatorPath,
+    readFileSync(operatorPath, 'utf8').replace('`evidence/restore/db-snapshot.sql.gz`', '`scripts/rebuild-content.sh`')
+  );
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, true, report.errors.join('\n'));
 });
 
 test('workspace hygiene defects surface as warnings without failing the packet', async () => {
@@ -2042,8 +2092,10 @@ test('workspace hygiene defects surface as warnings without failing the packet',
   addQualifyingReviewEvidence(packetDir, 'https://target.example');
 
   writeFileSync(join(projectRoot, 'escaped-capture.png'), 'escaped evidence fixture');
+  writeFileSync(join(projectRoot, 'escaped-proof.png'), 'escaped acceptance proof fixture');
   mutateJson(join(packetDir, 'source-audit.json'), (value) => {
     value.evidence = '../escaped-capture.png';
+    value.acceptanceProof = '../escaped-proof.png';
   });
 
   const report = await validatePacket({ packetDir });
@@ -2055,6 +2107,10 @@ test('workspace hygiene defects surface as warnings without failing the packet',
   assert.match(
     report.warnings.join('\n'),
     /source-audit\.json references evidence at \.\.\/escaped-capture\.png which resolves outside the review packet/
+  );
+  assert.match(
+    report.warnings.join('\n'),
+    /source-audit\.json references evidence at \.\.\/escaped-proof\.png which resolves outside the review packet/
   );
 });
 

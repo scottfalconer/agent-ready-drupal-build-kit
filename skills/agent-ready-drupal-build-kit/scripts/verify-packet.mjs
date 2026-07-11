@@ -45,11 +45,17 @@ const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set(['launch-checklist.md', 'pr
 // Keys whose string values reference evidence files on disk. The workspace-hygiene scan
 // walks packet artifacts for these keys and warns when a reference resolves outside the packet.
 const EVIDENCE_REFERENCE_KEYS = new Set([
+  'acceptanceProof',
+  'dispositionEvidence',
+  'editorAddRowEvidence',
+  'editorScreenshot',
   'evidence',
   'failureEvidence',
   'formScreenshot',
   'liveSiteEvidence',
   'nonAdminEditorPublicOutputProof',
+  'publicRouteAfterEditScreenshot',
+  'publicRouteBeforeEditScreenshot',
   'resultScreenshot',
   'sourceScreenshot',
   'targetScreenshot',
@@ -2013,6 +2019,34 @@ function operatorRestoreArtifacts(text) {
   return [...section.matchAll(/^\s*-\s*`([^`\n]+)`/gm)].map((match) => match[1].trim()).filter(Boolean);
 }
 
+function realpathOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+// Resolves a restore artifact reference to its real path, requiring that both the reference and
+// its symlink target stay inside the review packet or the project root. Symlinks that point at
+// paths outside those roots do not count: the packet must actually contain the restore bytes.
+function resolveRestoreArtifactPath(packetRoot, projectRoot, artifact) {
+  for (const candidate of [resolve(packetRoot, artifact), resolve(projectRoot, artifact)]) {
+    if (!(isWithin(packetRoot, candidate) || isWithin(projectRoot, candidate)) || !existsSync(candidate)) {
+      continue;
+    }
+    try {
+      const realCandidate = realpathSync(candidate);
+      if (isWithin(realpathOrSelf(packetRoot), realCandidate) || isWithin(realpathOrSelf(projectRoot), realCandidate)) {
+        return realCandidate;
+      }
+    } catch {
+      // Treat unreadable or broken restore paths as missing.
+    }
+  }
+  return '';
+}
+
 async function validateOperatorRestorePath(packetDir, errors) {
   const path = join(packetDir, 'operator-run.md');
   if (!existsSync(path)) {
@@ -2020,7 +2054,9 @@ async function validateOperatorRestorePath(packetDir, errors) {
   }
 
   const packetRoot = resolve(packetDir);
-  const projectRoot = dirname(packetRoot);
+  const projectRoot = (await detectedDrupalProjectRoot(packetRoot)) || dirname(packetRoot);
+  const packetRealRoot = realpathOrSelf(packetRoot);
+  const projectRealRoot = realpathOrSelf(projectRoot);
   const text = await readFile(path, 'utf8');
   for (const artifact of operatorRestoreArtifacts(text)) {
     if (isAbsolute(artifact)) {
@@ -2029,12 +2065,22 @@ async function validateOperatorRestorePath(packetDir, errors) {
       );
       continue;
     }
-    const restoreArtifactExists = [resolve(packetRoot, artifact), resolve(projectRoot, artifact)].some(
-      (candidate) => (isWithin(packetRoot, candidate) || isWithin(projectRoot, candidate)) && existsSync(candidate)
-    );
-    if (!restoreArtifactExists) {
+    const resolvedArtifact = resolveRestoreArtifactPath(packetRoot, projectRoot, artifact);
+    if (!resolvedArtifact) {
       errors.push(
-        `operator-run.md restore artifact ${artifact} must resolve to an existing file inside the review packet or its project root.`
+        `operator-run.md restore artifact ${artifact} must resolve to an existing file or directory inside the review packet or its project root (a symlink pointing outside them does not count).`
+      );
+      continue;
+    }
+    let primaryPacketArtifact = false;
+    try {
+      primaryPacketArtifact = dirname(resolvedArtifact) === packetRealRoot && (await stat(resolvedArtifact)).isFile();
+    } catch {
+      // A path that disappears mid-check is handled by the existence error on the next run.
+    }
+    if (resolvedArtifact === packetRealRoot || resolvedArtifact === projectRealRoot || primaryPacketArtifact) {
+      errors.push(
+        `operator-run.md restore artifact ${artifact} points at the review packet, the project root, or a primary packet artifact; list the actual snapshot, script, or config paths a restore would use.`
       );
     }
   }
