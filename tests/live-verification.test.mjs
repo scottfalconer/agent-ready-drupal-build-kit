@@ -1104,6 +1104,13 @@ test('default verifier fetches the declared real target and binds primary-route 
         /unchanged from the shipped template/
       );
       assert.match(report.completionBlockedReasons.join(' '), /Independent verification/);
+      assert.equal(report.schemaVersion, 'public-kit.live-verification.2');
+      const liveVerifierGate = report.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02');
+      assert.deepEqual(liveVerifierGate, { gateId: 'G-VERIFY-02', status: 'pass', errors: [] });
+      assert.equal(
+        report.packetVerification.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02').status,
+        'not_evaluated'
+      );
     }
   );
   assert.equal(requestCount, 2, 'primary and target-required route checks should both fetch the declared target');
@@ -3028,4 +3035,73 @@ test('blind completion evidence rejects a text file named like a screenshot', as
   assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
   assert.match(report.errors.join('\n'), /checks\.actualRequestedOutcome must be pass/);
   assert.match(report.errors.join('\n'), /must be a credible packet-local PNG, JPEG, WebP, or GIF capture/);
+});
+
+test('packet reports emit machine-readable per-gate results for the full gate vocabulary', async () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const temp = mkdtempSync(join(tmpdir(), 'gate-results-shape-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.schemaVersion, 'public-kit.packet-verification.2');
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.deepEqual(report.gateResults.map((gate) => gate.gateId), gates.gates.map((gate) => gate.id));
+  const knownFindings = new Set([
+    ...report.errors,
+    ...report.completionEvidence.packetCompletionBlockedReasons
+  ]);
+  for (const gate of report.gateResults) {
+    assert.ok(['pass', 'fail', 'human_review', 'not_evaluated'].includes(gate.status), gate.gateId);
+    assert.ok(Array.isArray(gate.errors), gate.gateId);
+    assert.equal(gate.status === 'fail', gate.errors.length > 0, gate.gateId);
+    for (const error of gate.errors) {
+      assert.ok(knownFindings.has(error), `${gate.gateId} attributed an unknown finding: ${error}`);
+    }
+  }
+  const statusByGate = new Map(report.gateResults.map((gate) => [gate.gateId, gate.status]));
+  assert.equal(statusByGate.get('G-VERIFY-02'), 'not_evaluated');
+  assert.equal(statusByGate.get('G-VERIFY-01'), 'fail');
+  assert.equal(statusByGate.get('G-OPERATOR-01'), 'fail');
+});
+
+test('per-gate results fail closed on structural errors and authored completion claims', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'gate-results-fail-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeFileSync(join(packetDir, 'route-matrix.json'), '{not json');
+  mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+    value.summary = { ...(value.summary ?? {}), completeLocalRebuildClaimAllowed: true };
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  const gateResult = (gateId) => report.gateResults.find((gate) => gate.gateId === gateId);
+  assert.equal(gateResult('G-ROUTE-01').status, 'fail');
+  assert.match(gateResult('G-ROUTE-01').errors.join('\n'), /route-matrix\.json must be valid JSON/);
+  assert.equal(gateResult('G-VERIFY-01').status, 'fail');
+  assert.match(
+    gateResult('G-VERIFY-01').errors.join('\n'),
+    /cannot set summary\.completeLocalRebuildClaimAllowed=true/
+  );
+});
+
+test('live reports attribute unassigned live errors to the live-verifier gate and fail closed', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'gate-results-live-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+
+  const report = await verifyLive({ packetDir, cwd: temp, environment: {} });
+
+  assert.equal(report.schemaVersion, 'public-kit.live-verification.2');
+  assert.equal(report.valid, false);
+  const liveVerifierGate = report.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02');
+  assert.equal(liveVerifierGate.status, 'fail');
+  assert.match(liveVerifierGate.errors.join('\n'), /No live target URL found/);
+  assert.equal(
+    report.packetVerification.gateResults.find((gate) => gate.gateId === 'G-VERIFY-02').status,
+    'not_evaluated'
+  );
 });

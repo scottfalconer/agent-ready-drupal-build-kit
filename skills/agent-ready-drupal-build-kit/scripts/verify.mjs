@@ -8,7 +8,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePacket } from './verify-packet.mjs';
+import { attributeFindingsToGates, validatePacket } from './verify-packet.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = `Usage: node <path-to-skill>/scripts/verify.mjs [options]
@@ -589,6 +589,37 @@ function resolveTargetUrl({ explicitTargetUrl, cwd, environment }) {
     throw new Error('No live target URL found. Pass --target-url or run from the intended DDEV project.');
   }
   return { source, url: parseHttpUrl(value, 'Live target URL') };
+}
+
+// Extend the packet per-gate results with live-run findings. Live findings that name a
+// packet evidence file join that gate's errors; everything else lands on G-VERIFY-02,
+// the live-verifier gate, so no live error disappears from per-gate triage. Per-gate
+// results stay diagnostic: completion authority remains with valid and
+// completeLocalRebuildClaimAllowed.
+function liveGateResults(packetGateResults, liveErrors, liveTargetValid) {
+  const liveFindings = attributeFindingsToGates(liveErrors);
+  const attributedLiveErrors = new Set([...liveFindings.values()].flat());
+  const residualLiveErrors = liveErrors.filter((error) => !attributedLiveErrors.has(error));
+  return (Array.isArray(packetGateResults) ? packetGateResults : []).map((result) => {
+    const additional = (liveFindings.get(result.gateId) ?? []).filter((error) => !result.errors.includes(error));
+    if (result.gateId !== 'G-VERIFY-02') {
+      const errors = [...result.errors, ...additional];
+      return { gateId: result.gateId, status: errors.length > 0 ? 'fail' : result.status, errors };
+    }
+    const errors = [
+      ...result.errors,
+      ...additional,
+      ...residualLiveErrors.filter((error) => !result.errors.includes(error))
+    ];
+    if (!liveTargetValid && errors.length === 0) {
+      errors.push('Live target identity or route verification failed.');
+    }
+    return {
+      gateId: result.gateId,
+      status: liveTargetValid && errors.length === 0 ? 'pass' : 'fail',
+      errors
+    };
+  });
 }
 
 function matchingRouteRecord(routeMatrix, targetPath) {
@@ -1231,9 +1262,10 @@ export async function verifyLive({
     errors: packetReport.errors.map((error) => sharedMessage(error, absolutePacketDir)),
     warnings: packetReport.warnings.map((warning) => sharedMessage(warning, absolutePacketDir))
   };
+  const sharedLiveErrors = liveErrors.map((error) => sharedMessage(error, absolutePacketDir));
 
   return {
-    schemaVersion: 'public-kit.live-verification.1',
+    schemaVersion: 'public-kit.live-verification.2',
     checkedAt: new Date().toISOString(),
     claimScope: 'complete-local-rebuild',
     productionReadinessEvaluated: false,
@@ -1272,6 +1304,7 @@ export async function verifyLive({
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
+    gateResults: liveGateResults(sharedPacketReport.gateResults, sharedLiveErrors, liveTargetValid),
     completeLocalRebuildClaimAllowed,
     verdict: completeLocalRebuildClaimAllowed
       ? 'complete-local-rebuild'
@@ -1280,7 +1313,7 @@ export async function verifyLive({
         : 'blocked',
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
-    errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
+    errors: [...sharedPacketReport.errors, ...sharedLiveErrors],
     warnings: sharedPacketReport.warnings
   };
 }
