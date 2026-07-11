@@ -721,6 +721,9 @@ function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
 // Drupal Canvas / Experience Builder template config entities silently supersede theme
 // node--*.html.twig output for their bundle/view-mode, so an enabled one falsifies any
 // "Canvas intentionally unused" declaration.
+// Known follow-up: display-override style Canvas adoption (for example an entity view
+// display switched to Canvas rendering inside core.entity_view_display.*.yml) lives in
+// YAML content rather than filenames and is not detected by this filename scan.
 export const CANVAS_TEMPLATE_CONFIG_RE =
   /(?:^|[\\/])(?:canvas|experience_builder)\.(?:content_template|page_template)\.[^\\/]*\.ya?ml$/i;
 
@@ -744,7 +747,10 @@ export function canvasTemplateConfigTargetsRebuildBundle(configPath, patternMap,
     ...substantiveObjects(drupalReadback?.content?.nodes)
       .map((record) => String(record?.type || record?.bundle || '').trim())
   ].filter(Boolean));
-  return rebuildNodeBundles.has(bundle);
+  // A canvas_unused rebuild that declares zero node bundles is already invalid, so an
+  // empty set fails closed (treats every node content template as targeting the rebuild)
+  // instead of exempting them all on builder-attested emptiness.
+  return rebuildNodeBundles.size === 0 || rebuildNodeBundles.has(bundle);
 }
 
 async function trackedConfigEntityConfirmedDisabled(projectRoot, configPath) {

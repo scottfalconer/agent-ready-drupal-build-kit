@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { verifyLive } from '../bin/verify.mjs';
+import { trackedConfigEvidence, verifyLive } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1773,6 +1773,21 @@ test('an enabled Canvas content template falsifies a Canvas-unused claim', async
       yaml: canvasTemplateYaml('true'),
       trackedPath: 'config/sync/canvas.content_template.node.starter_demo.full.yml',
       completionSupported: true
+    },
+    {
+      name: 'empty-declared-bundle-set-fails-closed',
+      yaml: canvasTemplateYaml('true'),
+      trackedPath: 'config/sync/canvas.content_template.node.starter_demo.full.yml',
+      completionSupported: false,
+      expected: /canvas\.content_template\.node\.starter_demo\.full\.yml.*not confirmed disabled/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+          value.contentTypes = [];
+        });
+        mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
+          value.content.nodes = [];
+        });
+      }
     }
   ];
 
@@ -1789,6 +1804,7 @@ test('an enabled Canvas content template falsifies a Canvas-unused claim', async
     mutateJson(join(packetDir, 'drupal-readback.json'), (value) => {
       value.drupal.trackedConfigYamlFiles.push(testCase.trackedPath);
     });
+    testCase.mutate?.(packetDir);
 
     const report = await validatePacket({ packetDir });
 
@@ -1840,6 +1856,171 @@ test('live verification rejects an enabled Canvas template config in the runtime
         report.errors.join('\n'),
         /canvas\.content_template\.node\.page\.full\.yml.*Canvas-unused claim|Canvas-unused claim.*canvas\.content_template\.node\.page\.full\.yml/i
       );
+    }
+  );
+});
+
+test('an enabled Canvas template in the sync directory contradicts a Canvas-unused claim even when it is not Git-tracked', async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'canvas-untracked-'));
+  execFileSync('git', ['init', '--quiet'], { cwd: projectRoot });
+  const syncDir = join(projectRoot, 'config', 'sync');
+  mkdirSync(syncDir, { recursive: true });
+  writeFileSync(join(syncDir, 'system.site.yml'), 'name: Fixture site\n');
+  writeFileSync(join(syncDir, 'system.theme.yml'), 'default: fixture_theme\n');
+  writeFileSync(
+    join(syncDir, 'canvas.content_template.node.page.full.yml'),
+    'status: true\nid: node.page.full\n'
+  );
+  writeFileSync(
+    join(syncDir, 'canvas.content_template.node.landing.full.yml'),
+    'status: false\nid: node.landing.full\n'
+  );
+  // Only the non-Canvas YAML is tracked: the enabled Canvas template is deliberately
+  // left out of the git index (never added / `git rm --cached`ed / .gitignored).
+  execFileSync(
+    'git',
+    ['add', 'config/sync/system.site.yml', 'config/sync/system.theme.yml'],
+    { cwd: projectRoot }
+  );
+
+  const evidence = trackedConfigEvidence(projectRoot, '../config/sync', '');
+  assert.equal(evidence.confirmed, true);
+  assert.equal(evidence.directory, 'config/sync');
+  assert.deepEqual(
+    [...evidence.yamlFiles].sort(),
+    ['config/sync/system.site.yml', 'config/sync/system.theme.yml'],
+    'the untracked Canvas template must not appear as Git-tracked config evidence'
+  );
+  assert.deepEqual(
+    evidence.activeCanvasTemplateConfigs,
+    ['config/sync/canvas.content_template.node.page.full.yml'],
+    'the disk scan must surface the enabled untracked template and skip the disabled one'
+  );
+
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const packetDir = join(projectRoot, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          activeCanvasTemplateConfigs: evidence.activeCanvasTemplateConfigs,
+          trackedConfigYamlFiles: [...evidence.yamlFiles]
+        })
+      });
+
+      assert.equal(report.valid, false);
+      assert.deepEqual(
+        report.drupalRuntime.canvasUnusedClaimContradictions,
+        ['config/sync/canvas.content_template.node.page.full.yml']
+      );
+      assert.match(report.errors.join('\n'), /Canvas-unused claim/);
+    }
+  );
+});
+
+test('an enabled Canvas template config is not a contradiction when the packet does not claim Canvas non-use', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-canvas-hybrid-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+        value.buildTypeDeclaration.type = 'structured_drupal_native_canvas';
+      });
+      mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+        value.canvasPlaceholderChecks.canvasIntentionallyUnusedAndDocumented = false;
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          activeCanvasTemplateConfigs: ['config/sync/canvas.content_template.node.page.full.yml']
+        })
+      });
+
+      assert.deepEqual(report.drupalRuntime.canvasUnusedClaimContradictions, []);
+      assert.deepEqual(report.drupalRuntime.canvasTemplateDispositionGaps, []);
+      assert.doesNotMatch(
+        report.errors.join('\n'),
+        /Canvas-unused claim|keep, close, or delete disposition/i
+      );
+    }
+  );
+});
+
+test('an active Canvas template outside the rebuild bundles needs a starter config entity disposition at live time', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      for (const withDisposition of [false, true]) {
+        const temp = mkdtempSync(join(tmpdir(), `live-canvas-disposition-${withDisposition}-`));
+        const packetDir = join(temp, 'review-packet');
+        copyTemplatePacket(packetDir);
+        writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+        addQualifyingReviewEvidence(packetDir, baseUrl);
+        if (withDisposition) {
+          mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
+            value.starterConfigEntitySweep.openUnreferencedEntities = [
+              {
+                configName: 'canvas.content_template.node.starter_demo.full',
+                kind: 'canvas_content_template',
+                referencedBy: [],
+                disposition: 'delete',
+                dispositionOwner: 'Fixture Maintainer',
+                rationale: 'The starter demo template is unreferenced and scheduled for deletion.'
+              }
+            ];
+          });
+        }
+
+        const report = await verifyLive({
+          packetDir,
+          targetUrl: baseUrl,
+          cwd: repoRoot,
+          environment: {},
+          drupalRuntime: injectedDrupalRuntime(baseUrl, {
+            activeCanvasTemplateConfigs: ['config/sync/canvas.content_template.node.starter_demo.full.yml']
+          })
+        });
+
+        if (withDisposition) {
+          assert.equal(report.valid, true, report.errors.join('\n'));
+          assert.deepEqual(report.drupalRuntime.canvasTemplateDispositionGaps, []);
+        } else {
+          assert.equal(report.valid, false);
+          assert.deepEqual(
+            report.drupalRuntime.canvasTemplateDispositionGaps,
+            ['config/sync/canvas.content_template.node.starter_demo.full.yml']
+          );
+          assert.match(
+            report.errors.join('\n'),
+            /starterConfigEntitySweep[\s\S]*canvas\.content_template\.node\.starter_demo\.full\.yml/i
+          );
+        }
+      }
     }
   );
 });

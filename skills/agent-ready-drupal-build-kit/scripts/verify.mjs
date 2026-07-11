@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -484,7 +484,24 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   return '';
 }
 
-function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
+function syncDirectoryYamlFiles(hostPath) {
+  const files = [];
+  const pending = [''];
+  while (pending.length > 0) {
+    const prefix = pending.pop();
+    for (const entry of readdirSync(prefix ? join(hostPath, prefix) : hostPath, { withFileTypes: true })) {
+      const entryPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (/\.ya?ml$/i.test(entry.name)) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files.sort();
+}
+
+export function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
     return { activeCanvasTemplateConfigs: [], confirmed: false, directory: '', yamlFiles: [] };
@@ -501,15 +518,20 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    const activeCanvasTemplateConfigs = yamlFiles
+    // The Canvas scan reads the sync directory on disk instead of the git index so an
+    // enabled template cannot evade detection by being left untracked (never added,
+    // `git rm --cached`ed, or .gitignored). Unreadable template files fail closed as
+    // active; a directory read failure falls through to the fail-closed catch below.
+    const activeCanvasTemplateConfigs = syncDirectoryYamlFiles(hostPath)
       .filter((path) => CANVAS_TEMPLATE_CONFIG_RE.test(path))
       .filter((path) => {
         try {
-          return !/^status:\s*false\b/m.test(readFileSync(join(projectRoot, path), 'utf8'));
+          return !/^status:\s*false\b/m.test(readFileSync(join(hostPath, path), 'utf8'));
         } catch {
           return true;
         }
-      });
+      })
+      .map((path) => `${directory}/${path}`);
     return { activeCanvasTemplateConfigs, confirmed: yamlFiles.length > 0, directory, yamlFiles };
   } catch {
     return { activeCanvasTemplateConfigs: [], confirmed: false, directory, yamlFiles: [] };
@@ -1139,13 +1161,35 @@ export async function verifyLive({
     : [])
     .map((path) => String(path).trim().replaceAll('\\', '/'))
     .filter(Boolean);
-  const contradictoryCanvasTemplateConfigs = canvasNonUseClaimed(patternMap, independentVerification)
+  const canvasUnusedClaimActive = canvasNonUseClaimed(patternMap, independentVerification);
+  const contradictoryCanvasTemplateConfigs = canvasUnusedClaimActive
     ? runtimeActiveCanvasTemplateConfigs.filter((path) =>
         canvasTemplateConfigTargetsRebuildBundle(path, patternMap, drupalReadback))
     : [];
   if (contradictoryCanvasTemplateConfigs.length > 0) {
     liveErrors.push(
       `Enabled Canvas template config contradicts the packet's Canvas-unused claim: ${contradictoryCanvasTemplateConfigs.join(', ')}. Disable or delete the template or declare Canvas the composition owner.`
+    );
+  }
+  // An active Canvas template exempted from the contradiction (it targets no declared
+  // rebuild bundle) is still an open-but-unreferenced starter config entity, so it must
+  // carry a recorded disposition instead of passing silently on attestation alone.
+  const sweptStarterConfigNames = new Set(
+    (Array.isArray(independentVerification?.starterConfigEntitySweep?.openUnreferencedEntities)
+      ? independentVerification.starterConfigEntitySweep.openUnreferencedEntities
+      : [])
+      .map((record) => String(record?.configName ?? '').trim())
+      .filter(Boolean)
+  );
+  const undispositionedCanvasTemplateConfigs = canvasUnusedClaimActive
+    ? runtimeActiveCanvasTemplateConfigs.filter((path) =>
+        !contradictoryCanvasTemplateConfigs.includes(path) &&
+        !sweptStarterConfigNames.has(path) &&
+        !sweptStarterConfigNames.has(basename(path).replace(/\.ya?ml$/i, '')))
+    : [];
+  if (undispositionedCanvasTemplateConfigs.length > 0) {
+    liveErrors.push(
+      `Active Canvas template config outside the declared rebuild bundles needs a keep, close, or delete disposition in independent-verification.json starterConfigEntitySweep.openUnreferencedEntities: ${undispositionedCanvasTemplateConfigs.join(', ')}.`
     );
   }
 
@@ -1291,6 +1335,7 @@ export async function verifyLive({
       ...inspectedDrupalRuntime,
       activeCanvasTemplateConfigs: runtimeActiveCanvasTemplateConfigs,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
+      canvasTemplateDispositionGaps: undispositionedCanvasTemplateConfigs,
       canvasUnusedClaimContradictions: contradictoryCanvasTemplateConfigs,
       configStatusClean: drupalRuntimeConfigStatusClean,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
