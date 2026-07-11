@@ -262,7 +262,7 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     baseUrl,
     confirmed: true,
     configStatusClean: true,
-    configSyncCommitted: true,
+    configSyncMatchesHead: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
     frontPage: '/',
@@ -1337,7 +1337,7 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
   );
 });
 
-test('CLI discovers the DDEV Drupal runtime and requires clean status plus committed Git-tracked config YAML', async () => {
+test('CLI discovers the DDEV Drupal runtime and requires clean status plus HEAD-matching tracked config YAML', async () => {
   let liveBaseUrl = '';
   await withHttpServer(
     (_request, response) => {
@@ -1419,11 +1419,11 @@ process.stdout.write(outputs.get(command) + '\\n');
         readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
       );
       assert.equal(stagedOnlyReport.completeLocalRebuildClaimAllowed, false);
-      assert.equal(stagedOnlyReport.drupalRuntime.configSyncCommitted, false);
-      assert.equal(stagedOnlyReport.drupalRuntime.configSyncTracked, false);
+      assert.equal(stagedOnlyReport.drupalRuntime.configSyncMatchesHead, false);
+      assert.equal(stagedOnlyReport.drupalRuntime.configSyncTracked, true);
       assert.match(
         stagedOnlyReport.completionBlockedReasons.join('\n'),
-        /staged but never committed.*no commit touching the active config sync directory/i
+        /config-sync YAML does not match HEAD/i
       );
 
       execFileSync(
@@ -1445,10 +1445,51 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.mode, 'ddev-host');
       assert.equal(cleanReport.drupalRuntime.siteUuidMatchesPacket, true);
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
-      assert.equal(cleanReport.drupalRuntime.configSyncCommitted, true);
+      assert.equal(cleanReport.drupalRuntime.configSyncMatchesHead, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
+
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'system.theme.yml'),
+        'default: changed_theme\nadmin: claro\n'
+      );
+      const modifiedResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
+      assert.equal(modifiedResult.status, 2, modifiedResult.stderr);
+      const modifiedReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(modifiedReport.drupalRuntime.configSyncTracked, true);
+      assert.equal(modifiedReport.drupalRuntime.configSyncMatchesHead, false);
+      assert.match(modifiedReport.completionBlockedReasons.join('\n'), /config-sync YAML does not match HEAD/i);
+
+      writeFileSync(
+        join(targetRoot, 'config', 'sync', 'system.theme.yml'),
+        'default: fixture_theme\nadmin: claro\n'
+      );
+      writeFileSync(join(targetRoot, 'config', 'sync', 'untracked.settings.yml'), 'enabled: true\n');
+      const untrackedYamlResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: cleanEnvironment
+      });
+      assert.equal(untrackedYamlResult.status, 2, untrackedYamlResult.stderr);
+      const untrackedYamlReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(untrackedYamlReport.drupalRuntime.configSyncTracked, true);
+      assert.equal(untrackedYamlReport.drupalRuntime.configSyncMatchesHead, false);
+      assert.match(untrackedYamlReport.completionBlockedReasons.join('\n'), /config-sync YAML does not match HEAD/i);
+
+      execFileSync('git', ['add', 'config/sync/untracked.settings.yml'], { cwd: targetRoot });
+      const stagedNewYamlResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: cleanEnvironment
+      });
+      assert.equal(stagedNewYamlResult.status, 2, stagedNewYamlResult.stderr);
+      const stagedNewYamlReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(stagedNewYamlReport.drupalRuntime.configSyncTracked, true);
+      assert.equal(stagedNewYamlReport.drupalRuntime.configSyncMatchesHead, false);
+      assert.match(stagedNewYamlReport.completionBlockedReasons.join('\n'), /config-sync YAML does not match HEAD/i);
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
