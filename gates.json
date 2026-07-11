@@ -155,7 +155,7 @@
     },
     {
       "id": "G-RECIPE-01",
-      "title": "Recipe discovery and default-owner decisions recorded",
+      "title": "Recipe discovery (on-disk and upstream availability) and default-owner decisions recorded",
       "phase": 2,
       "evidenceFile": "recipe-start-point.md",
       "checkedBy": "verify-script",

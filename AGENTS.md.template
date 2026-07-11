@@ -508,7 +508,7 @@ Known bounded Recipe families to check in the target project include:
 - `drupal_cms_ai` only when AI features are explicitly in scope.
 - content-type recipe candidates such as `drupal_cms_events`, `drupal_cms_person`, `drupal_cms_news`, `drupal_cms_blog`, `drupal_cms_page`, `drupal_cms_project`, and `drupal_cms_case_study` when the source has matching recurring objects. Verify exact recipe names in the target before relying on them.
 
-Verify recipe availability in the actual target with Composer/recipe discovery before relying on a recipe name. Record missing recipes as blocked or not applicable. Site-specific overlays should be small, reviewable, and tied to the pattern map.
+Verify recipe availability in the actual target with Composer/recipe discovery before relying on a recipe name. Discovery does not end at the on-disk `recipes/` directory: if a named `drupal_cms_*` candidate is absent from `recipes/` and the installed package list, check whether `drupal/<candidate>` is composer-installable (`ddev composer show -a 'drupal/<candidate>'` or its Packagist page) before recording it blocked, and record the upstream availability with the decision. A maintained upstream recipe package is preferred over hand-rolled equivalent config, so every blocked upstream-available candidate needs a `review-packet/open-decisions.md` row recording the composer-require-versus-hand-rolled-overlay decision. Ask-before-install guardrails route those candidates into one early batched human approval question; they never mean silently building custom config instead. Site-specific overlays should be small, reviewable, and tied to the pattern map.
 
 From the DDEV Drupal project root, collect recipe evidence with commands like:
 
@@ -516,6 +516,7 @@ From the DDEV Drupal project root, collect recipe evidence with commands like:
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
+ddev composer show -a 'drupal/drupal_cms_events'
 ```
 
 Apply a bounded Recipe only after recording why it fits the pattern map. From the host, the Drupal core Recipe runner shape for a standard DDEV `web` docroot is:
@@ -529,13 +530,13 @@ Inside a DDEV agent shell, run the equivalent from the Drupal webroot: `cd web &
 ## Content Modeling Requirements
 
 - Start from site goals, audiences, organizational requirements, and editor workflow, not only the source page tree.
-- For each recurring pattern, decide whether it is a content type, taxonomy vocabulary, media type, menu, block, View, form, or theme concern.
+- For each recurring pattern, decide whether it is a content type, taxonomy vocabulary, media type, menu, block, View, form, or theme concern. Time-boxed notices, alerts, and banners are recurring objects, not one-off blocks.
 - For each content type, define required fields, optional fields, cardinality, field type, widget, formatter, editor help text, validation expectations, and publication workflow.
 - Include separate display needs in the model. A hero image, listing thumbnail, inline image, and social-share image may be one shared media field or separate fields, but the decision must be explicit.
 - Separate content fields from presentation tokens. Editors should see meaningful choices such as `Release theme`, `Hero style`, or `Accent palette`, not raw implementation fields such as `Background gradient CSS`. Store raw CSS only in theme code/config or source evidence, not in node fields.
 - Do not put public navigation, footer links, CTA labels, or source-owned public copy only in Twig, templates, preprocess code, or import scripts when editors should maintain it through Drupal menus, fields, blocks, Canvas components, or config. If a string is generic UI chrome rather than source content, record that exception in the field-output matrix.
 - Plan Views at the same time as the content model. Record fields for teasers, exposed filters, contextual filters, sort criteria, related-content blocks, directories, search-like pages, and editorial/admin listings.
-- Use numeric/date/link/reference field types when visitors or editors need sorting, filtering, ranges, relationships, or governed reuse.
+- Map source semantics to typed fields, not plain strings: phone numbers -> `telephone`, event start/end and recurrence -> `smart_date` or `daterange`, postal addresses -> `address`, external URLs -> `link`; use numeric/date/reference types wherever visitors or editors need sorting, filtering, ranges, relationships, or governed reuse. Duplicate node titles inside one bundle are a cardinality smell: model a multi-value field or reference instead of cloned nodes.
 - Use taxonomy terms instead of free-text categories when categories power filters, landing pages, permissions, SEO, or governance.
 - Use references between content types for related articles, products, people, locations, events, testimonials, services, resources, and calls to action.
 - Model FAQ, advice/article, retailer/location, legal/footer, contact, and landing-page roles explicitly when the source has them.
@@ -646,7 +647,7 @@ Create `review-packet/open-decisions.md` at final handoff. This is the short lis
 
 This is not a permission slip to stop early. Before adding a decision here, ask whether the agent can resolve it with more build work, browser checks, Drupal readback, packet updates, route cleanup, imports, theme work, or editor-form fixes. If yes, fix it or record it as an implementation gap in `scoped-gap-list.md`, not as a human decision.
 
-Valid human-only decisions include production target selection, credentials and provider accounts, legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope items. Every `accepted_out_of_scope` item needs a named accepter, specific reason, and evidence. External blockers are not accepted completion; they keep the result blocked.
+Valid human-only decisions include production target selection, credentials and provider accounts, work that requires installing a package the run's guardrails forbid installing unprompted (batch every such candidate into one early approval question instead of silently hand-rolling around the guardrail), legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope items. Every `accepted_out_of_scope` item needs a named accepter, specific reason, and evidence. External blockers are not accepted completion; they keep the result blocked.
 
 Use the four-layer truth model:
 

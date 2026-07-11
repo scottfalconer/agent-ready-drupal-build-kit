@@ -1875,6 +1875,28 @@ async function validateDurableIntent(packetDir, errors) {
   }
 }
 
+const RECIPE_CANDIDATE_RE = /\bdrupal_cms_[a-z0-9_]+\b/g;
+const RECIPE_UPSTREAM_AVAILABILITY_VALUES = new Set(['installed', 'available', 'not-published', 'not_published']);
+
+function blockedRecipeCandidateRows(text) {
+  const rows = [];
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+      continue;
+    }
+    const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.replaceAll('`', '').trim());
+    const candidates = [...new Set(cells[0]?.match(RECIPE_CANDIDATE_RE) ?? [])];
+    if (candidates.length === 0 || !cells.some((cell) => cell.toLowerCase() === 'blocked')) {
+      continue;
+    }
+    const availability =
+      cells.map((cell) => cell.toLowerCase()).find((cell) => RECIPE_UPSTREAM_AVAILABILITY_VALUES.has(cell)) ?? '';
+    rows.push({ candidates, availability: availability.replace('_', '-') });
+  }
+  return rows;
+}
+
 async function validateRecipeStartPoint(packetDir, errors) {
   const path = join(packetDir, 'recipe-start-point.md');
   if (!existsSync(path)) {
@@ -1890,6 +1912,33 @@ async function validateRecipeStartPoint(packetDir, errors) {
   }
   if (!/default owner|default-owner|recipe.*default/i.test(text)) {
     errors.push('recipe-start-point.md must record the recipe default-owner decision before custom content-type overlays.');
+  }
+
+  // Discovery does not end at the on-disk recipes/ directory. A blocked candidate
+  // must record whether the maintained package exists upstream, and a blocked
+  // upstream-available candidate is a human composer-require-versus-hand-rolled
+  // decision, never a silent downgrade to custom config.
+  const blockedRows = blockedRecipeCandidateRows(text);
+  if (blockedRows.length > 0 && !/composer\s+show\s+(?:-a|--all)\b/.test(text)) {
+    errors.push("recipe-start-point.md must record upstream composer-installability discovery (composer show -a 'drupal/<candidate>' or a Packagist readback) for blocked recipe candidates.");
+  }
+  const decisionsPath = join(packetDir, 'open-decisions.md');
+  const decisionsText = existsSync(decisionsPath) ? await readFile(decisionsPath, 'utf8') : '';
+  for (const row of blockedRows) {
+    const label = row.candidates.join(' / ');
+    if (!row.availability) {
+      errors.push(`recipe-start-point.md marks ${label} blocked without recording upstream availability (installed, available, or not-published).`);
+      continue;
+    }
+    if (row.availability !== 'available') {
+      continue;
+    }
+    const hasDecisionRow = row.candidates.some((candidate) =>
+      new RegExp(`^\\|\\s*DEC-[^\\n]*\\b${candidate}\\b[^\\n]*\\|\\s*$`, 'im').test(decisionsText)
+    );
+    if (!hasDecisionRow) {
+      errors.push(`recipe-start-point.md marks upstream-available ${label} blocked without a matching open-decisions.md row recording the composer-require-versus-hand-rolled-overlay decision.`);
+    }
   }
 }
 

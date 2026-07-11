@@ -2003,6 +2003,88 @@ test('completed Markdown can retain instructional references to UNKNOWN without 
   assert.equal(report.completionEvidence.packetSupportsCompletion, true, JSON.stringify(report.completionEvidence, null, 2));
 });
 
+function recipeStartPointWithEventsRow(row) {
+  const recipe = readFileSync(join(templatesDir, 'recipe-start-point.template.md'), 'utf8');
+  return recipe.replace(
+    '| `drupal_cms_events` | Event content type/listing candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |',
+    row
+  );
+}
+
+test('blocked upstream-available recipe candidates fail closed without an open-decisions row', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-no-decision-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const recipe = recipeStartPointWithEventsRow(
+    '| `drupal_cms_events` | Event content type/listing candidate | blocked | available | absent from recipes/; upstream package exists | Guardrail forbids unprompted install. |'
+  ).replaceAll('composer show -a', 'composer show');
+  assert.doesNotMatch(recipe, /composer show -a/);
+  writeFileSync(join(packetDir, 'recipe-start-point.md'), recipe);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md must record upstream composer-installability discovery/
+  );
+  assert.match(
+    report.errors.join('\n'),
+    /marks upstream-available drupal_cms_events blocked without a matching open-decisions\.md row recording the composer-require-versus-hand-rolled-overlay decision/
+  );
+});
+
+test('blocked recipe candidates fail closed without recorded upstream availability', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-no-availability-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(
+    join(packetDir, 'recipe-start-point.md'),
+    recipeStartPointWithEventsRow(
+      '| `drupal_cms_events` | Event content type/listing candidate | blocked |  | no such path under recipes/ | Recorded blocked from disk discovery only. |'
+    )
+  );
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(
+    report.errors.join('\n'),
+    /recipe-start-point\.md marks drupal_cms_events blocked without recording upstream availability \(installed, available, or not-published\)/
+  );
+});
+
+test('blocked upstream-available recipe candidates pass with a matching open-decisions row', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blocked-recipe-with-decision-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  writeFileSync(
+    join(packetDir, 'recipe-start-point.md'),
+    recipeStartPointWithEventsRow(
+      "| `drupal_cms_events` | Event content type/listing candidate | blocked | available | composer show -a 'drupal/drupal_cms_events' resolves upstream; absent from recipes/ | Guardrail forbids unprompted install. |"
+    )
+  );
+  const decisions = readFileSync(join(templatesDir, 'open-decisions.template.md'), 'utf8').replace(
+    'Approve composer-installing blocked upstream-available recipe packages, naming each candidate',
+    'Approve composer-installing the blocked upstream-available `drupal_cms_events` recipe package'
+  );
+  writeFileSync(join(packetDir, 'open-decisions.md'), decisions);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.doesNotMatch(report.errors.join('\n'), /recipe-start-point\.md marks/);
+});
+
 test('every nonempty durable intent record must be current before completion', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'durable-intent-current-'));
   const packetDir = join(temp, 'review-packet');

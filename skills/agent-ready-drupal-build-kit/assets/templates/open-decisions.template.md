@@ -15,6 +15,8 @@ Do not use this file as a reason to stop early. Build, verify, fix, and item-blo
 
 Do not list normal implementation work here. Missing reachable content, broken routes, CSS defects, import retries, field/display mistakes, route alias bugs, editor-form defects, and incomplete packet evidence are work items, not human decisions.
 
+Work that requires installing a package the run's guardrails forbid installing unprompted is a valid human decision. Batch every such candidate (for example blocked upstream-available `drupal_cms_*` recipes) into one early approval question instead of silently hand-rolling equivalent config around the guardrail.
+
 ## Decisions
 
 | ID | Decision needed | Human owner | Current evidence | Options | Recommended default | Impact if deferred | Needed by gate | Status |
@@ -24,6 +26,7 @@ Do not list normal implementation work here. Missing reachable content, broken r
 | DEC-003 | Provide provider credentials or accept integration stubs | Operator/Owner | UNKNOWN | Provide credentials / keep local stub / remove integration | UNKNOWN | Forms, maps, search, analytics, commerce, CRM, email, or media providers remain blocked | scoped-gap-list.md | open |
 | DEC-004 | Accept, reject, or revise out-of-scope route/content dispositions | Owner/Maintainer | UNKNOWN | Keep / redirect / drop / unpublished import / owner decision required | UNKNOWN | Route and content parity cannot be finally accepted | route-matrix.json | open |
 | DEC-005 | Accept final go/no-go for maintainer and launch review | Owner/Maintainer | UNKNOWN | Accept local rebuild / request changes / block launch | UNKNOWN | Handoff cannot become launch approval | maintainer-review.md | open |
+| DEC-006 | Approve composer-installing blocked upstream-available recipe packages, naming each candidate | Owner/Operator | UNKNOWN | composer require the maintained recipe / hand-rolled overlay / drop the pattern | UNKNOWN | Blocked upstream-available candidates fail the recipe gate | recipe-start-point.md | open |
 
 ## Handoff Summary
 

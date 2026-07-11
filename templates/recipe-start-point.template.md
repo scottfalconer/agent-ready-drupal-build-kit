@@ -44,7 +44,10 @@ From the DDEV Drupal project root, collect recipe evidence with:
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
+ddev composer show -a 'drupal/drupal_cms_events'
 ```
+
+Discovery does not end at the on-disk `recipes/` directory. If a named `drupal_cms_*` candidate is absent from `recipes/` and the installed package list, check whether `drupal/<candidate>` is composer-installable (`ddev composer show -a 'drupal/<candidate>'` or its Packagist page) before recording it `blocked`, and record the upstream availability with the decision. A maintained upstream recipe package is preferred over hand-rolled equivalent config: every `blocked` candidate whose upstream availability is `available` needs a matching `open-decisions.md` row recording the composer-require-versus-hand-rolled-overlay decision for the human owner.
 
 Apply a recipe only after recording why it fits the pattern map:
 
@@ -56,27 +59,29 @@ Inside a DDEV agent shell, use `cd web && php core/scripts/drupal recipe ../reci
 
 Do not select or apply a different full site template here. Record the template only when it was already selected before site installation; normal post-audit assembly uses bounded Recipes and overlays on the installed substrate.
 
-| Candidate recipe | Fit | Decision | Evidence | Notes |
-| --- | --- | --- | --- | --- |
-| `drupal_cms_admin_ui` | Editorial/admin experience | UNKNOWN |  |  |
-| `drupal_cms_media` | Media handling | UNKNOWN |  |  |
-| `drupal_cms_search` | Public search/discovery | UNKNOWN |  |  |
-| `drupal_cms_forms` | Forms | UNKNOWN |  |  |
-| `drupal_cms_seo_basic` / `drupal_cms_seo_tools` | SEO metadata/checklist | UNKNOWN |  |  |
-| `drupal_cms_accessibility_tools` | Accessibility tooling | UNKNOWN |  |  |
-| `drupal_cms_privacy_basic` | Privacy/legal baseline | UNKNOWN |  |  |
-| `drupal_cms_authentication` | Authentication/login | UNKNOWN |  |  |
-| `drupal_cms_google_analytics` | Analytics | UNKNOWN |  |  |
-| `drupal_cms_ai` | AI features | UNKNOWN |  |  |
-| `drupal_cms_events` | Event content type/listing candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_person` | Person/staff/speaker/artist profile candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_news` | News/article content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_blog` | Blog/post content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_page` | Basic/landing page content candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_project` | Project/work/case item candidate | UNKNOWN |  | Verify exact name/path in target before use. |
-| `drupal_cms_case_study` | Case study content type candidate | UNKNOWN |  | Verify exact name/path in target before use. |
+| Candidate recipe | Fit | Decision | Upstream availability | Evidence | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `drupal_cms_admin_ui` | Editorial/admin experience | UNKNOWN |  |  |  |
+| `drupal_cms_media` | Media handling | UNKNOWN |  |  |  |
+| `drupal_cms_search` | Public search/discovery | UNKNOWN |  |  |  |
+| `drupal_cms_forms` | Forms | UNKNOWN |  |  |  |
+| `drupal_cms_seo_basic` / `drupal_cms_seo_tools` | SEO metadata/checklist | UNKNOWN |  |  |  |
+| `drupal_cms_accessibility_tools` | Accessibility tooling | UNKNOWN |  |  |  |
+| `drupal_cms_privacy_basic` | Privacy/legal baseline | UNKNOWN |  |  |  |
+| `drupal_cms_authentication` | Authentication/login | UNKNOWN |  |  |  |
+| `drupal_cms_google_analytics` | Analytics | UNKNOWN |  |  |  |
+| `drupal_cms_ai` | AI features | UNKNOWN |  |  |  |
+| `drupal_cms_events` | Event content type/listing candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_person` | Person/staff/speaker/artist profile candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_news` | News/article content type candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_blog` | Blog/post content type candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_page` | Basic/landing page content candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_project` | Project/work/case item candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
+| `drupal_cms_case_study` | Case study content type candidate | UNKNOWN |  |  | Verify exact name/path in target before use. |
 
 Decision values: `apply`, `reject`, `blocked`, `not_applicable`, `UNKNOWN`.
+
+Upstream availability values: `installed` (present in the target), `available` (composer-installable upstream but not installed), `not-published` (no maintained upstream package). Required for every `blocked` row, backed by `composer show -a` or Packagist evidence; leave blank otherwise.
 
 ## Site-Specific Overlay Boundary
 
@@ -98,6 +103,7 @@ ddev drush pm:list --status=enabled
 ddev drush config:export -y
 ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
+ddev composer show -a 'drupal/drupal_cms_events'
 ```
 
 Recipe discovery / apply evidence:
