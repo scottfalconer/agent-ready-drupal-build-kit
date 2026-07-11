@@ -8,6 +8,7 @@ import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1';
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
+export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const VIEWPORTS = Object.freeze([
   Object.freeze({ name: 'desktop', width: 1280, height: 800, mobile: false }),
@@ -114,6 +115,7 @@ class CdpPipe {
     this.pending = new Map();
     this.events = [];
     this.waiters = [];
+    this.listeners = new Set();
     this.buffer = Buffer.alloc(0);
     this.output.on('data', (chunk) => this.onData(chunk));
     child.once('exit', (code, signal) => this.failAll(new Error(`Headless browser exited (${code ?? signal ?? 'unknown'}).`)));
@@ -142,6 +144,11 @@ class CdpPipe {
         if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
         else pending.resolve(message.result ?? {});
         continue;
+      }
+      for (const listener of this.listeners) {
+        if (listener.method === message.method && (!listener.sessionId || listener.sessionId === message.sessionId)) {
+          listener.callback(message.params ?? {});
+        }
       }
       const waiterIndex = this.waiters.findIndex((waiter) =>
         waiter.method === message.method && (!waiter.sessionId || waiter.sessionId === message.sessionId)
@@ -197,6 +204,12 @@ class CdpPipe {
       }, this.timeoutMs);
       this.waiters.push(waiter);
     });
+  }
+
+  subscribe(method, sessionId, callback) {
+    const listener = { method, sessionId, callback };
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 }
 
@@ -532,6 +545,297 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     routes: captured,
     errors
   };
+}
+
+function networkRequestValue(params) {
+  const url = String(params?.request?.url ?? '').trim();
+  if (!url) return null;
+  return {
+    method: String(params?.request?.method ?? 'GET').trim().toUpperCase(),
+    resourceType: String(params?.type ?? 'Other').trim() || 'Other',
+    url: url.slice(0, 4096)
+  };
+}
+
+async function captureBeforeConsentRoute(cdp, baseUrl, path) {
+  let browserContextId = '';
+  let targetId = '';
+  const unsubscribers = [];
+  try {
+    ({ browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true }));
+    ({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId }));
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Runtime.enable', {}, sessionId);
+    await cdp.send('Network.enable', {}, sessionId);
+    await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    await cdp.send('Network.clearBrowserCookies', {}, sessionId);
+    const requests = [];
+    const inFlight = new Set();
+    let requestCount = 0;
+    unsubscribers.push(cdp.subscribe('Network.requestWillBeSent', sessionId, (params) => {
+      requestCount += 1;
+      if (params?.requestId) inFlight.add(params.requestId);
+      if (requests.length >= 2000) return;
+      const value = networkRequestValue(params);
+      if (value) requests.push(value);
+    }));
+    unsubscribers.push(cdp.subscribe('Network.loadingFinished', sessionId, (params) => {
+      if (params?.requestId) inFlight.delete(params.requestId);
+    }));
+    unsubscribers.push(cdp.subscribe('Network.loadingFailed', sessionId, (params) => {
+      if (params?.requestId) inFlight.delete(params.requestId);
+    }));
+    const requestedUrl = new URL(path.replace(/^\//, ''), new URL('/', baseUrl)).href;
+    const loaded = cdp.waitFor('Page.loadEventFired', sessionId);
+    const navigation = await cdp.send('Page.navigate', { url: requestedUrl }, sessionId);
+    if (navigation.errorText) throw new Error(`${path} navigation failed: ${navigation.errorText}`);
+    await loaded;
+    // Observe long enough to catch common delayed embed bootstraps, then require
+    // a bounded quiet period. A route that never settles fails closed rather
+    // than turning a truncated transcript into proof of absence.
+    const observationStarted = Date.now();
+    const observationFloorMs = 2000;
+    const networkQuietMs = 500;
+    const maximumObservationMs = 8000;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, observationFloorMs));
+    let quietSince = inFlight.size === 0 ? Date.now() : 0;
+    while (Date.now() - observationStarted < maximumObservationMs) {
+      if (inFlight.size === 0) {
+        if (!quietSince) quietSince = Date.now();
+        if (Date.now() - quietSince >= networkQuietMs) break;
+      } else {
+        quietSince = 0;
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+    if (!quietSince || Date.now() - quietSince < networkQuietMs || inFlight.size > 0) {
+      throw new Error(`${path} network did not settle within ${maximumObservationMs} ms; before-consent absence cannot be proven.`);
+    }
+    const location = await cdp.send('Runtime.evaluate', {
+      expression: 'location.href',
+      returnByValue: true
+    }, sessionId);
+    if (requestCount > 2000) {
+      throw new Error(`${path} emitted more than 2000 network requests before consent; capture is bounded and cannot be authoritative.`);
+    }
+    const unique = [...new Map(requests.map((request) => [
+      `${request.method}\0${request.resourceType}\0${request.url}`,
+      request
+    ])).values()].sort((left, right) =>
+      `${left.url}\0${left.resourceType}\0${left.method}`.localeCompare(`${right.url}\0${right.resourceType}\0${right.method}`)
+    );
+    return {
+      path,
+      requestedUrl,
+      finalUrl: String(location?.result?.value ?? requestedUrl),
+      isolation: {
+        browserContextFresh: true,
+        cacheDisabled: true,
+        consentInteractionPerformed: false,
+        method: 'new-incognito-browser-context',
+        storageCleared: true
+      },
+      observation: {
+        floorMs: observationFloorMs,
+        maximumMs: maximumObservationMs,
+        networkQuietMs,
+        settled: true
+      },
+      requests: unique
+    };
+  } finally {
+    for (const unsubscribe of unsubscribers) unsubscribe();
+    if (targetId) {
+      try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
+    }
+    if (browserContextId) {
+      try { await cdp.send('Target.disposeBrowserContext', { browserContextId }); } catch {}
+    }
+  }
+}
+
+export async function captureBeforeConsentNetwork({
+  baseUrl,
+  primaryRoutes,
+  environment = process.env,
+  browserExecutable
+} = {}) {
+  const checkedAt = new Date().toISOString();
+  const base = new URL(baseUrl);
+  const routes = [...new Set((Array.isArray(primaryRoutes) ? primaryRoutes : [])
+    .map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  const executable = browserExecutable === undefined
+    ? findBrowserExecutable(environment)
+    : String(browserExecutable ?? '').trim();
+  const unavailable = (message) => ({
+    schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
+    checkedAt,
+    status: 'unavailable',
+    authoritative: false,
+    captureMode: 'verifier-owned-cdp-network',
+    targetOrigin: base.origin,
+    browser: { executable: '', product: '' },
+    primaryRoutes: routes,
+    routes: [],
+    errors: [message]
+  });
+  if (!executable || !existsSync(executable)) {
+    return unavailable('No Chrome/Chromium executable was found for before-consent network capture. Set CHROME_PATH or install Chrome/Chromium.');
+  }
+  if (routes.length === 0) {
+    return { ...unavailable('No primary routes were available for before-consent network capture.'), status: 'blocked' };
+  }
+  const profile = join(tmpdir(), `agent-ready-consent-chrome-${process.pid}-${Date.now()}`);
+  mkdirSync(profile, { recursive: true });
+  const args = [
+    '--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--disable-extensions',
+    '--disable-sync', '--mute-audio', `--user-data-dir=${profile}`, 'about:blank'
+  ];
+  args.unshift('--ignore-certificate-errors');
+  if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
+  const child = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  const stderr = [];
+  child.stderr.on('data', (chunk) => {
+    if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
+  });
+  const cdp = new CdpPipe(child);
+  const captured = [];
+  const errors = [];
+  let product = '';
+  try {
+    const version = await cdp.send('Browser.getVersion');
+    product = String(version.product ?? '');
+    for (const path of routes) {
+      try {
+        captured.push(await captureBeforeConsentRoute(cdp, base, path));
+      } catch (error) {
+        errors.push(`${path}: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    errors.push(error.message);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
+      child.kill('SIGTERM');
+      await Promise.race([exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 2 });
+    } catch (error) {
+      errors.push(`Browser profile cleanup failed: ${error.message}`);
+    }
+  }
+  if (captured.length !== routes.length && stderr.length) {
+    errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
+  }
+  return {
+    schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
+    checkedAt,
+    status: errors.length === 0 ? 'captured' : 'blocked',
+    authoritative: errors.length === 0,
+    captureMode: 'verifier-owned-cdp-network',
+    targetOrigin: base.origin,
+    browser: { executable: basename(executable), product },
+    primaryRoutes: routes,
+    routes: captured,
+    errors
+  };
+}
+
+function beforeConsentCoverage(capture, targetOrigin = '') {
+  const expectedRoutes = [...new Set((capture?.primaryRoutes ?? []).map(normalizeRoute))].sort();
+  if (expectedRoutes.length === 0) throw new Error('Before-consent capture must identify every primary route.');
+  if (targetOrigin && capture?.targetOrigin !== targetOrigin) {
+    throw new Error('Before-consent capture target origin does not match the inspected target.');
+  }
+  const observed = new Set();
+  for (const route of capture?.routes ?? []) {
+    const path = normalizeRoute(route?.path);
+    if (observed.has(path)) throw new Error(`Before-consent capture duplicates ${path}.`);
+    if (!expectedRoutes.includes(path)) throw new Error(`Before-consent capture contains unexpected route ${path}.`);
+    observed.add(path);
+    const requested = new URL(route?.requestedUrl ?? 'about:blank');
+    if (requested.origin !== capture.targetOrigin || normalizeRoute(`${requested.pathname}${requested.search}`) !== path) {
+      throw new Error(`Before-consent capture ${path} is not bound to the inspected target route.`);
+    }
+    if (
+      route?.isolation?.browserContextFresh !== true ||
+      route?.isolation?.storageCleared !== true ||
+      route?.isolation?.cacheDisabled !== true ||
+      route?.isolation?.consentInteractionPerformed !== false ||
+      route?.isolation?.method !== 'new-incognito-browser-context'
+    ) {
+      throw new Error(`Before-consent capture ${path} did not use a fresh isolated browser context without consent interaction.`);
+    }
+    if (
+      route?.observation?.settled !== true ||
+      Number(route?.observation?.floorMs ?? 0) < 2000 ||
+      Number(route?.observation?.networkQuietMs ?? 0) < 500
+    ) {
+      throw new Error(`Before-consent capture ${path} did not complete the bounded observation and network-idle contract.`);
+    }
+    const finalUrl = new URL(route?.finalUrl ?? 'about:blank');
+    if (finalUrl.origin !== capture.targetOrigin) {
+      throw new Error(`Before-consent capture ${path} left the inspected target origin.`);
+    }
+    if (!Array.isArray(route.requests)) throw new Error(`Before-consent capture ${path} has no request list.`);
+  }
+  const missing = expectedRoutes.filter((path) => !observed.has(path));
+  if (missing.length) throw new Error(`Before-consent capture is incomplete; missing ${missing.join(', ')}.`);
+  return true;
+}
+
+export function finalizeBeforeConsentNetworkCapture({ capture, stateFingerprint, targetOrigin = '' } = {}) {
+  const state = String(stateFingerprint ?? '');
+  if (!HASH_RE.test(state)) throw new Error('Before-consent capture requires the exact result-state fingerprint.');
+  if (
+    capture?.schemaVersion !== BEFORE_CONSENT_NETWORK_SCHEMA ||
+    capture?.captureMode !== 'verifier-owned-cdp-network' ||
+    capture?.status !== 'captured' ||
+    capture?.authoritative !== true
+  ) {
+    throw new Error(`Verifier-owned before-consent browser/network capture is unavailable: ${(capture?.errors ?? []).join(' ') || capture?.status || 'missing'}`);
+  }
+  if (!Number.isFinite(Date.parse(String(capture.checkedAt ?? '')))) {
+    throw new Error('Before-consent capture must record a valid verification time.');
+  }
+  beforeConsentCoverage(capture, targetOrigin);
+  const finalized = { ...capture, resultStateFingerprint: state };
+  return { ...finalized, captureFingerprint: captureFingerprintValue(finalized) };
+}
+
+export function validateBeforeConsentNetworkCapture(capture, {
+  stateFingerprint = '',
+  targetOrigin = '',
+  primaryRoutes = []
+} = {}) {
+  if (
+    capture?.schemaVersion !== BEFORE_CONSENT_NETWORK_SCHEMA ||
+    capture?.captureMode !== 'verifier-owned-cdp-network' ||
+    capture?.status !== 'captured' ||
+    capture?.authoritative !== true
+  ) {
+    throw new Error(`Verifier-owned before-consent browser/network capture is unavailable: ${(capture?.errors ?? []).join(' ') || capture?.status || 'missing'}`);
+  }
+  if (!Number.isFinite(Date.parse(String(capture.checkedAt ?? '')))) {
+    throw new Error('Before-consent capture must record a valid verification time.');
+  }
+  beforeConsentCoverage(capture, targetOrigin);
+  if (stateFingerprint && capture.resultStateFingerprint !== stateFingerprint) {
+    throw new Error('Before-consent capture does not match the exact live result-state fingerprint.');
+  }
+  const expected = [...new Set(primaryRoutes.map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  if (expected.length && canonicalJson(expected) !== canonicalJson([...capture.primaryRoutes].sort())) {
+    throw new Error('Before-consent capture primary routes do not match the current route matrix.');
+  }
+  if (!HASH_RE.test(capture.captureFingerprint) || captureFingerprintValue(capture) !== capture.captureFingerprint) {
+    throw new Error('Before-consent capture fingerprint is invalid.');
+  }
+  return capture;
 }
 
 function captureFingerprintValue(capture) {

@@ -343,7 +343,7 @@
     },
     {
       "id": "G-PRIVACY-01",
-      "title": "Negative routes, legal links, and consent-controlled resources verified",
+      "title": "Negative routes, legal links, and verifier-owned before-consent network behavior verified",
       "phase": 6,
       "evidenceFile": "negative-route-consent.json",
       "checkedBy": "verify-script",

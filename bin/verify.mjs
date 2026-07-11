@@ -11,9 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { validatePacket } from './verify-packet.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
+  captureBeforeConsentNetwork,
   captureGlobalChrome,
   captureSummary,
-  finalizeGlobalChromeCapture
+  finalizeBeforeConsentNetworkCapture,
+  finalizeGlobalChromeCapture,
+  validateBeforeConsentNetworkCapture
 } from './global-chrome.mjs';
 import {
   buildSiteState,
@@ -2386,7 +2389,23 @@ function sameStringSet(left, right) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function verifyConsentReconciliation(declaration, runtime, routeChecks) {
+export function consentNetworkCaptureRequired(declaration) {
+  if (declaration?.discoveryStatus !== 'installed') return false;
+  return (Array.isArray(declaration?.applications) ? declaration.applications : []).some((application) =>
+    (application?.enabled !== true || application?.required !== true) &&
+    (Array.isArray(application?.controlledResources) ? application.controlledResources : []).some((resource) =>
+      !['selector', 'attachment'].includes(resource?.kind) && String(resource?.pattern ?? '').trim()
+    )
+  );
+}
+
+export function verifyConsentReconciliation(
+  declaration,
+  runtime,
+  routeChecks,
+  beforeConsentCapture = null,
+  { targetOrigin = '', primaryRoutes = [], stateFingerprint = '' } = {}
+) {
   const errors = [];
   const discoveryStatus = declaration?.discoveryStatus;
   const runtimeInventory = runtime ?? {
@@ -2444,12 +2463,28 @@ function verifyConsentReconciliation(declaration, runtime, routeChecks) {
   const authoredBrowserObservedUrls = beforeChecks.flatMap((check) =>
     Array.isArray(check.observedResourceUrls) ? check.observedResourceUrls : []
   );
-  // Packet browser transcripts remain useful authored evidence, but the live
-  // verifier did not observe those network requests and must not treat them as
-  // completion-authoritative. Server-rendered resources are independently
-  // observed here; optional/disabled browser-loaded resources fail closed until
-  // a verifier-owned fresh browser/network capture is implemented.
-  const observedUrls = [...new Set(serverRenderedUrls)];
+  // Packet browser transcripts remain diagnostic authored evidence. Only this
+  // run's verifier-owned CDP capture may supply browser-observed URLs.
+  const networkRequired = consentNetworkCaptureRequired(declaration);
+  let authoritativeBeforeConsentCapture = false;
+  let browserObservedRequests = [];
+  if (networkRequired) {
+    try {
+      const capture = validateBeforeConsentNetworkCapture(beforeConsentCapture, {
+        stateFingerprint,
+        targetOrigin,
+        primaryRoutes
+      });
+      authoritativeBeforeConsentCapture = true;
+      browserObservedRequests = capture.routes.flatMap((route) =>
+        route.requests.map((request) => ({ ...request, route: route.path }))
+      );
+    } catch (error) {
+      errors.push(`G-PRIVACY-01 requires verifier-owned fresh browser/network capture for optional or disabled controlled resources: ${error.message}`);
+    }
+  }
+  const browserObservedUrls = [...new Set(browserObservedRequests.map((request) => request.url))];
+  const observedUrls = [...new Set([...serverRenderedUrls, ...browserObservedUrls])];
   for (const application of discoveryStatus === 'installed'
     ? applications.filter((candidate) => String(candidate?.id ?? '').trim())
     : []) {
@@ -2460,19 +2495,13 @@ function verifyConsentReconciliation(declaration, runtime, routeChecks) {
       const state = application.enabled === true ? 'before consent' : 'while its consent application is disabled';
       errors.push(`Controlled resource for ${application.id} loaded ${state}: ${violating[0]}.`);
     }
-    if (
-      (application.controlledResources ?? []).length > 0 &&
-      (application.enabled !== true || application.required !== true)
-    ) {
-      errors.push(
-        `Consent application ${application.id} requires verifier-owned fresh browser/network capture before G-PRIVACY-01 can pass; packet-authored before-consent URLs and blocked IDs are non-authoritative.`
-      );
-    }
   }
   return {
     authoredBrowserObservedUrls,
-    authoritativeBeforeConsentCapture: false,
-    browserObservedUrls: [],
+    authoritativeBeforeConsentCapture,
+    beforeConsentCaptureFingerprint: authoritativeBeforeConsentCapture ? beforeConsentCapture.captureFingerprint : '',
+    browserObservedRequests,
+    browserObservedUrls,
     errors,
     passed: errors.length === 0,
     runtimeInventory,
@@ -2692,12 +2721,27 @@ export async function verifyLive({
     managerModules: [],
     reason: runtimeWasInjected ? '' : 'Consent inventory is unavailable.'
   };
-  const consentReconciliation = verifyConsentReconciliation(
-    negativeRouteConsent?.consent,
-    consentInventory,
-    [...routeChecks, ...targetRequiredRouteChecks]
-  );
-  liveErrors.push(...consentReconciliation.errors);
+  const consentNetworkApplicable = consentNetworkCaptureRequired(negativeRouteConsent?.consent);
+  const rawBeforeConsentNetworkCapture = consentNetworkApplicable && target && explicitTargetFetchAllowed && runtimeAuthoritativeForCompletion
+    ? await captureBeforeConsentNetwork({
+        baseUrl: target.url,
+        primaryRoutes,
+        environment
+      })
+    : {
+        schemaVersion: 'public-kit.before-consent-network-capture.1',
+        checkedAt: new Date().toISOString(),
+        status: consentNetworkApplicable ? 'unavailable' : 'not_applicable',
+        authoritative: false,
+        captureMode: 'verifier-owned-cdp-network',
+        targetOrigin: target?.url?.origin ?? '',
+        browser: { executable: '', product: '' },
+        primaryRoutes: primaryRoutes.map((route) => String(route?.targetPath ?? route)),
+        routes: [],
+        errors: consentNetworkApplicable
+          ? ['Verifier-owned before-consent capture is disabled for an injected or unavailable Drupal runtime.']
+          : []
+      };
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -2726,7 +2770,6 @@ export async function verifyLive({
     }
   }
 
-  const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
   const runtimeFrontPage = normalizePath(inspectedDrupalRuntime.frontPage);
@@ -2917,6 +2960,43 @@ export async function verifyLive({
       };
     }
   }
+  let beforeConsentNetworkCapture = rawBeforeConsentNetworkCapture;
+  if (consentNetworkApplicable && buildStateReady) {
+    try {
+      beforeConsentNetworkCapture = finalizeBeforeConsentNetworkCapture({
+        capture: rawBeforeConsentNetworkCapture,
+        stateFingerprint: buildState.fingerprint,
+        targetOrigin: target?.url?.origin ?? ''
+      });
+    } catch (error) {
+      beforeConsentNetworkCapture = {
+        schemaVersion: 'public-kit.before-consent-network-capture.1',
+        checkedAt: rawBeforeConsentNetworkCapture.checkedAt,
+        status: 'blocked',
+        authoritative: false,
+        captureMode: 'verifier-owned-cdp-network',
+        targetOrigin: target?.url?.origin ?? '',
+        resultStateFingerprint: buildState.fingerprint,
+        browser: rawBeforeConsentNetworkCapture.browser,
+        primaryRoutes: rawBeforeConsentNetworkCapture.primaryRoutes ?? [],
+        routes: [],
+        errors: [`Before-consent capture finalization failed: ${error.message}`]
+      };
+    }
+  }
+  const consentReconciliation = verifyConsentReconciliation(
+    negativeRouteConsent?.consent,
+    consentInventory,
+    [...routeChecks, ...targetRequiredRouteChecks],
+    beforeConsentNetworkCapture,
+    {
+      targetOrigin: target?.url?.origin ?? '',
+      primaryRoutes,
+      stateFingerprint: buildStateReady ? buildState.fingerprint : ''
+    }
+  );
+  liveErrors.push(...consentReconciliation.errors);
+  const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -2981,6 +3061,7 @@ export async function verifyLive({
     origin: target?.url.origin ?? '',
     routeChecks: routeEvidenceManifest,
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
+    beforeConsentNetworkCaptureFingerprint: beforeConsentNetworkCapture?.captureFingerprint ?? '',
     negativeRouteCheck: negativeRouteCheck
       ? { bodySha256: negativeRouteCheck.bodySha256 ?? '', path: negativeRouteCheck.path, status: negativeRouteCheck.status ?? 0 }
       : null,
@@ -3015,12 +3096,13 @@ export async function verifyLive({
     evidenceBinding: {
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 2
+      targetFingerprintInputVersion: 3
     },
     routeChecks,
     targetRequiredRouteChecks,
     globalChromeCapture,
     globalChromeCaptureSummary: captureSummary(globalChromeCapture),
+    beforeConsentNetworkCapture,
     negativeRouteCheck,
     accessWallChecks,
     legalPrivacyLinkChecks,
