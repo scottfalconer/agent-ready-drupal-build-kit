@@ -142,7 +142,103 @@
           "type": "module | theme",
           "path": "",
           "purpose": "",
-          "drupalNativeAlternativesReviewed": "",
+          "solutionLadders": [
+            {
+              "capabilityId": "",
+              "need": "",
+              "acceptanceCriteria": [
+                {
+                  "id": "",
+                  "criterion": ""
+                }
+              ],
+              "core": {
+                "reviewed": false,
+                "noCandidateFound": false,
+                "candidates": [
+                  {
+                    "name": "",
+                    "fit": "partial | rejected",
+                    "unmetCriteria": [],
+                    "reason": "",
+                    "evidence": ""
+                  }
+                ],
+                "conclusion": "",
+                "evidence": ""
+              },
+              "installedDrupalCms": {
+                "reviewed": false,
+                "disabledCapabilitiesChecked": false,
+                "noCandidateFound": false,
+                "capabilities": [
+                  {
+                    "name": "",
+                    "type": "module | submodule | recipe | config | service | theme | component",
+                    "enabled": false,
+                    "fit": "partial | rejected",
+                    "unmetCriteria": [],
+                    "reason": "",
+                    "evidence": ""
+                  }
+                ],
+                "conclusion": "",
+                "evidence": ""
+              },
+              "currentRecipes": {
+                "reviewed": false,
+                "checkedAt": "",
+                "noCandidateFound": false,
+                "candidates": [
+                  {
+                    "package": "",
+                    "version": "",
+                    "drupalCompatibility": "",
+                    "supportStatus": "supported | unknown | unsupported | obsolete",
+                    "securityAdvisoryCoverage": false,
+                    "fit": "partial | rejected",
+                    "unmetCriteria": [],
+                    "reason": "",
+                    "maintenanceEvidence": "",
+                    "evidence": ""
+                  }
+                ],
+                "conclusion": "",
+                "evidence": ""
+              },
+              "maintainedContrib": {
+                "reviewed": false,
+                "checkedAt": "",
+                "noCandidateFound": false,
+                "candidates": [
+                  {
+                    "project": "",
+                    "version": "",
+                    "drupalCompatibility": "",
+                    "maintenanceStatus": "maintained | unknown | unmaintained",
+                    "securityAdvisoryCoverage": false,
+                    "fit": "partial | rejected",
+                    "unmetCriteria": [],
+                    "reason": "",
+                    "maintenanceEvidence": "",
+                    "adoptionEvidence": "",
+                    "evidence": ""
+                  }
+                ],
+                "conclusion": "",
+                "evidence": ""
+              },
+              "customDecision": {
+                "whyCustomRemains": "",
+                "narrowestScope": "",
+                "revisitTrigger": "",
+                "acceptedBy": "",
+                "acceptedAt": "",
+                "evidence": "",
+                "accepted": false
+              }
+            }
+          ],
           "phpFileCount": 0,
           "qualityChecks": [
             {
@@ -158,11 +254,60 @@
           "accepted": false
         }
       ],
+      "sourceFiles": [
+        {
+          "id": "",
+          "extension": "",
+          "path": "",
+          "kind": "extension_metadata | shipped_config | sdc_component | procedural_php | php_class | twig_template | javascript | stylesheet | drupal_registration",
+          "sha256": "",
+          "surfaces": [
+            {
+              "id": "",
+              "kind": "whole_file | function | class | interface | trait | enum | drupal_behavior | registration",
+              "name": "",
+              "line": 0
+            }
+          ],
+          "capabilityBindings": [
+            {
+              "capabilityId": "",
+              "surfaceIds": [],
+              "responsibility": ""
+            }
+          ],
+          "reviewed": false
+        }
+      ],
+      "themeOwnershipReviewCompleted": false,
+      "themeOwnershipFindings": [
+        {
+          "id": "",
+          "extension": "",
+          "capabilityId": "",
+          "sourceSurfaceIds": [],
+          "kind": "hardcoded_internal_path | theme_meta_injection | handwritten_search_form | global_views_template_override",
+          "file": "",
+          "line": 0,
+          "column": 0,
+          "matchHash": "",
+          "disposition": "replace_with_drupal_owner | accepted_theme_exception | false_positive",
+          "drupalOwner": "menu | block | view | views_exposed_form | metatag | canvas_component | field | config | theme_exception | not_applicable",
+          "reason": "",
+          "offRoadDisposition": "",
+          "acceptedBy": "",
+          "evidence": "",
+          "reviewed": false
+        }
+      ],
       "routes": [
         {
           "name": "",
           "path": "",
           "extension": "",
+          "capabilityId": "",
+          "sourceFile": "",
+          "sourceSurfaceIds": [],
           "controller": "",
           "requirements": {},
           "routeParameters": {},
@@ -188,7 +333,14 @@
           "accepted": false
         }
       ],
-      "controllers": [],
+      "controllers": [
+        {
+          "path": "",
+          "extension": "",
+          "capabilityId": "",
+          "sourceSurfaceIds": []
+        }
+      ],
       "tests": [],
       "completed": false
     },

@@ -105,6 +105,7 @@
       "editorUser": "",
       "editorRole": "",
       "canvasOwnsPublicRoute": false,
+      "activePublicTheme": "",
       "declaredComponentModel": "",
       "componentInventoryMatchesDeclaration": false,
       "singleMonolithComponentDetected": false,
@@ -121,6 +122,45 @@
           "publicOutputChanged": false,
           "evidence": "",
           "status": "pass | needs-review | fail | blocked"
+        }
+      ],
+      "providerAssetChecks": [
+        {
+          "provider": "",
+          "componentIds": [],
+          "assetContractReviewed": false,
+          "requiredLibraries": [
+            {
+              "name": "",
+              "assetTypes": ["css | js"],
+              "disposition": "loaded_directly | equivalent_assets",
+              "contractEvidence": "",
+              "equivalenceEvidence": ""
+            }
+          ],
+          "loadedAssets": [
+            {
+              "url": "",
+              "type": "css | js",
+              "satisfiesLibraries": [],
+              "observedBy": "link_stylesheet | script_src",
+              "mappingEvidence": ""
+            }
+          ],
+          "effectivenessChecks": [
+            {
+              "method": "computed_style | interaction | visual_review",
+              "selector": "",
+              "expectation": "",
+              "observedResult": "",
+              "status": "pass | fail | blocked",
+              "evidence": ""
+            }
+          ],
+          "noLibrariesRequiredRationale": "",
+          "status": "pass | needs-review | fail | blocked",
+          "accepted": false,
+          "blockers": []
         }
       ],
       "editorScreenshot": "",

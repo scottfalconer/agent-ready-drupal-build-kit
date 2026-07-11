@@ -189,6 +189,34 @@ function renderedMetadata(html, finalUrl) {
   };
 }
 
+function renderedAssets(html, finalUrl) {
+  const absolute = (value) => {
+    try {
+      const url = new URL(String(value ?? '').trim(), finalUrl);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+        return '';
+      }
+      url.hash = '';
+      return url.href;
+    } catch {
+      return '';
+    }
+  };
+  const stylesheets = matchingTags(html, 'link', (attributes) =>
+    String(attributes.rel ?? '').toLowerCase().split(/\s+/).includes('stylesheet') && Boolean(attributes.href)
+  ).map((attributes) => ({
+    observedBy: 'link_stylesheet',
+    type: 'css',
+    url: absolute(attributes.href)
+  }));
+  const scripts = matchingTags(html, 'script', (attributes) => Boolean(attributes.src)).map((attributes) => ({
+    observedBy: 'script_src',
+    type: 'js',
+    url: absolute(attributes.src)
+  }));
+  return [...stylesheets, ...scripts].filter((asset) => asset.url);
+}
+
 function normalizePath(value) {
   const text = String(value ?? '').trim();
   if (!text) {
@@ -493,6 +521,308 @@ function routingRecords(text, file, extension) {
     .filter((route) => route.name && route.path);
 }
 
+function sourceLocation(text, index) {
+  const before = text.slice(0, Math.max(0, index));
+  const lastNewline = before.lastIndexOf('\n');
+  return {
+    column: index - lastNewline,
+    line: before.split('\n').length
+  };
+}
+
+function themeOwnershipFinding(extension, kind, file, text, index, matchedText) {
+  const location = sourceLocation(text, index);
+  const matchHash = `sha256:${sha256(normalizeText(matchedText))}`;
+  const identity = `${extension}\u0000${kind}\u0000${file}\u0000${location.line}\u0000${location.column}\u0000${matchHash}`;
+  return {
+    id: `THEME-${sha256(identity).slice(0, 16)}`,
+    extension,
+    kind,
+    file,
+    line: location.line,
+    column: location.column,
+    matchHash
+  };
+}
+
+function formLooksLikeHandwrittenSearch(form) {
+  const inputTags = form.match(/<input\b[^>]*>/gi) ?? [];
+  const textInputs = inputTags.filter((tag) => {
+    const type = tag.match(/\btype\s*=\s*['"]([^'"]+)['"]/i)?.[1]?.toLowerCase() ?? '';
+    return !type || ['search', 'text'].includes(type);
+  });
+  if (textInputs.length === 0) {
+    return false;
+  }
+  const commonSearchName = textInputs.some((tag) =>
+    /\bname\s*=\s*['"](?:keys|keywords|query|q|search|search_api_fulltext)['"]/i.test(tag)
+  );
+  const formTag = form.match(/^<form\b[^>]*>/i)?.[0] ?? '';
+  const searchAttribute = /\b(?:action|class|id|role)\s*=\s*(['"])[^'"]*search[^'"]*\1/i.test(formTag) ||
+    /\baction\s*=\s*(['"])[\s\S]*?\bpath\s*\([^)]*search[^)]*\)[\s\S]*?\1/i.test(formTag);
+  const searchLabelOrClass = /<label\b[^>]*>[\s\S]{0,500}?\bsearch\b/i.test(form) ||
+    /\bclass\s*=\s*(['"])[^'"]*search[^'"]*\1/i.test(form);
+  return textInputs.some((tag) => /\btype\s*=\s*['"]search['"]/i.test(tag)) ||
+    /\brole\s*=\s*['"]search['"]/i.test(formTag) ||
+    commonSearchName ||
+    searchAttribute ||
+    searchLabelOrClass;
+}
+
+function inspectThemeOwnership(extension, projectRoot, files) {
+  const findings = [];
+  const errors = [];
+  for (const file of files) {
+    const sharedPath = relative(projectRoot, file).split(sep).join('/');
+    const filename = basename(file).toLowerCase();
+    const pathSegments = sharedPath.toLowerCase().split('/');
+    if (pathSegments.some((segment) =>
+      ['test', 'tests', 'fixture', 'fixtures', 'test-data', 'test_data', 'testdata', 'tools', 'tooling'].includes(segment)
+    )) {
+      continue;
+    }
+    const globalViewsOverride = /^views-[a-z0-9_-]+\.html\.twig$/i.test(filename) && !filename.includes('--');
+    const eligibleSource = /\.(?:twig|php|theme)$/i.test(file);
+    if (!eligibleSource && !globalViewsOverride) {
+      continue;
+    }
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (error) {
+      errors.push(`Theme ownership scan could not read ${sharedPath}: ${error.message}`);
+      continue;
+    }
+
+    if (globalViewsOverride) {
+      findings.push(themeOwnershipFinding(
+        extension,
+        'global_views_template_override',
+        sharedPath,
+        text,
+        0,
+        filename
+      ));
+    }
+
+    for (const match of text.matchAll(/(['"])(\/(?!\/|#)[^'"\r\n]+)\1/g)) {
+      const internalPath = match[2].trim();
+      if (
+        /[<{]/.test(internalPath) ||
+        /^\/(?:core|modules|profiles|sites|themes)\//i.test(internalPath) ||
+        /\.(?:avif|css|gif|ico|jpe?g|js|map|png|svg|ttf|webp|woff2?)(?:[?#].*)?$/i.test(internalPath)
+      ) {
+        continue;
+      }
+      const pathOffset = match[0].indexOf(match[2]);
+      findings.push(themeOwnershipFinding(
+        extension,
+        'hardcoded_internal_path',
+        sharedPath,
+        text,
+        match.index + Math.max(0, pathOffset),
+        internalPath
+      ));
+    }
+
+    const metaMatch = text.match(/['"]#tag['"]\s*=>\s*['"]meta['"]/i);
+    if (metaMatch && /html_head|page_attachments|preprocess_html/i.test(text)) {
+      findings.push(themeOwnershipFinding(
+        extension,
+        'theme_meta_injection',
+        sharedPath,
+        text,
+        metaMatch.index,
+        metaMatch[0]
+      ));
+    }
+
+    for (const formMatch of text.matchAll(/<form\b[\s\S]{0,4000}?<\/form\s*>/gi)) {
+      if (!formLooksLikeHandwrittenSearch(formMatch[0])) {
+        continue;
+      }
+      findings.push(themeOwnershipFinding(
+        extension,
+        'handwritten_search_form',
+        sharedPath,
+        text,
+        formMatch.index,
+        formMatch[0]
+      ));
+    }
+  }
+  const uniqueFindings = [...new Map(findings.map((finding) => [finding.id, finding])).values()];
+  return {
+    errors,
+    findings: uniqueFindings.sort((left, right) =>
+      `${left.file}:${String(left.line).padStart(8, '0')}:${left.kind}`.localeCompare(
+        `${right.file}:${String(right.line).padStart(8, '0')}:${right.kind}`
+      )
+    )
+  };
+}
+
+const CUSTOM_SOURCE_EXCLUDED_SEGMENTS = new Set([
+  '.cache', '.ddev', '.git', '.github', '.idea', '.vscode', 'bower_components', 'build', 'coverage', 'dist', 'docs', 'fixture', 'fixtures',
+  'generated', 'node_modules', 'scripts', 'test', 'test-data', 'test_data', 'testdata', 'tests', 'tmp', 'tooling',
+  'tools', 'translations', 'vendor'
+]);
+
+function customSourceKind(extensionRelativePath) {
+  const normalized = extensionRelativePath.toLowerCase();
+  const filename = basename(normalized);
+  if (/\.info\.ya?ml$/.test(filename)) {
+    return 'extension_metadata';
+  }
+  if (/(?:^|\/)config\/(?:install|optional)\//.test(normalized)) {
+    return 'shipped_config';
+  }
+  if (/(?:^|\/)components?\/.*\.component\.ya?ml$/.test(normalized) || filename === 'component.yml') {
+    return 'sdc_component';
+  }
+  if (/\.(?:module|theme|install|inc)$/.test(filename)) {
+    return 'procedural_php';
+  }
+  if (/\.php$/.test(filename)) {
+    return 'php_class';
+  }
+  if (/\.html\.twig$/.test(filename)) {
+    return 'twig_template';
+  }
+  if (/\.(?:js|mjs|ts)$/.test(filename)) {
+    return 'javascript';
+  }
+  if (/\.(?:css|less|sass|scss)$/.test(filename)) {
+    return 'stylesheet';
+  }
+  if (/\.ya?ml$/.test(filename)) {
+    return 'drupal_registration';
+  }
+  return '';
+}
+
+function customSourceFileEligible(extensionRelativePath) {
+  const normalized = extensionRelativePath.split(sep).join('/');
+  const segments = normalized.toLowerCase().split('/');
+  const filename = basename(normalized).toLowerCase();
+  if (segments.some((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment))) {
+    return false;
+  }
+  if (filename.startsWith('.')) {
+    return false;
+  }
+  if (/\.(?:map|min\.css|min\.js)$/.test(filename) || /^(?:readme|changelog|license)(?:\.|$)/.test(filename)) {
+    return false;
+  }
+  return Boolean(customSourceKind(normalized));
+}
+
+function customSourceSurface(extension, path, kind, name, text, index = 0) {
+  const location = sourceLocation(text, index);
+  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}`;
+  return {
+    id: `SURFACE-${sha256(identity).slice(0, 16)}`,
+    kind,
+    name,
+    line: location.line
+  };
+}
+
+function yamlMappingChildren(text, rootKey) {
+  const lines = text.split('\n');
+  let offset = 0;
+  let rootIndent = -1;
+  let childIndent = -1;
+  const children = [];
+  for (const line of lines) {
+    const mapping = line.match(/^(\s*)(['"]?)([A-Za-z0-9_.\\-]+)\2:\s*(?:#.*)?$/);
+    const indent = line.match(/^\s*/)?.[0]?.length ?? 0;
+    if (rootIndent < 0) {
+      if (mapping?.[3] === rootKey) {
+        rootIndent = mapping[1].length;
+      }
+      offset += line.length + 1;
+      continue;
+    }
+    if (!line.trim() || line.trimStart().startsWith('#')) {
+      offset += line.length + 1;
+      continue;
+    }
+    if (indent <= rootIndent) {
+      break;
+    }
+    if (mapping) {
+      if (childIndent < 0) {
+        childIndent = mapping[1].length;
+      }
+      if (mapping[1].length === childIndent && !mapping[3].startsWith('_')) {
+        children.push({ index: offset + mapping[1].length, name: mapping[3] });
+      }
+    }
+    offset += line.length + 1;
+  }
+  return children;
+}
+
+function customSourceSurfaces(extension, sharedPath, kind, text) {
+  const surfaces = [];
+  if (kind === 'procedural_php') {
+    for (const match of text.matchAll(/\bfunction\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      surfaces.push(customSourceSurface(extension, sharedPath, 'function', match[1], text, match.index));
+    }
+  } else if (kind === 'php_class') {
+    for (const match of text.matchAll(/\b(?:abstract\s+|final\s+)?(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g)) {
+      surfaces.push(customSourceSurface(extension, sharedPath, match[1], match[2], text, match.index));
+    }
+  } else if (kind === 'javascript') {
+    for (const match of text.matchAll(/\bDrupal\.behaviors\.([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) {
+      surfaces.push(customSourceSurface(extension, sharedPath, 'drupal_behavior', match[1], text, match.index));
+    }
+  } else if (kind === 'drupal_registration') {
+    if (/\.services\.ya?ml$/i.test(sharedPath)) {
+      for (const registration of yamlMappingChildren(text, 'services')) {
+        surfaces.push(customSourceSurface(
+          extension,
+          sharedPath,
+          'registration',
+          registration.name,
+          text,
+          registration.index
+        ));
+      }
+    } else {
+      for (const match of text.matchAll(/^([A-Za-z0-9_.\\-]+):\s*(?:#.*)?$/gm)) {
+        if (!match[1].startsWith('_')) {
+          surfaces.push(customSourceSurface(extension, sharedPath, 'registration', match[1], text, match.index));
+        }
+      }
+    }
+  }
+  if (surfaces.length === 0) {
+    surfaces.push(customSourceSurface(extension, sharedPath, 'whole_file', basename(sharedPath), text));
+  }
+  return [...new Map(surfaces.map((surface) => [surface.id, surface])).values()];
+}
+
+function inspectCustomSourceFile(extension, extensionRoot, projectRoot, file) {
+  const extensionRelativePath = relative(extensionRoot, file);
+  if (!customSourceFileEligible(extensionRelativePath)) {
+    return null;
+  }
+  const sharedPath = relative(projectRoot, file).split(sep).join('/');
+  const kind = customSourceKind(extensionRelativePath);
+  const text = readFileSync(file, 'utf8');
+  const identity = `${extension}\u0000${sharedPath}`;
+  return {
+    id: `SOURCE-${sha256(identity).slice(0, 16)}`,
+    extension,
+    path: sharedPath,
+    kind,
+    sha256: `sha256:${sha256(text)}`,
+    surfaces: customSourceSurfaces(extension, sharedPath, kind, text)
+  };
+}
+
 export const CUSTOM_ROUTE_AUDIT_PHP = String.raw`
 $output = ['routes' => [], 'violations' => [], 'completed' => FALSE];
 $route_provider = \Drupal::service('router.route_provider');
@@ -751,7 +1081,9 @@ export function inspectCustomCode(projectRoot) {
   const extensions = [];
   const routes = [];
   const controllers = [];
+  const sourceFiles = [];
   const tests = [];
+  const themeOwnershipFindings = [];
   const errors = [];
   for (const [type, relativeRoot] of [
     ['module', join(docroot, 'modules', 'custom')],
@@ -782,10 +1114,23 @@ export function inspectCustomCode(projectRoot) {
         phpFileCount: files.filter((file) => /\.(?:php|module|install|inc|theme)$/i.test(file)).length,
         type
       });
+      if (type === 'theme') {
+        const themeOwnership = inspectThemeOwnership(entry.name, projectRoot, files);
+        errors.push(...themeOwnership.errors);
+        themeOwnershipFindings.push(...themeOwnership.findings);
+      }
       for (const file of files) {
         const sharedPath = relative(projectRoot, file).split(sep).join('/');
+        try {
+          const sourceFile = inspectCustomSourceFile(entry.name, extensionRoot, projectRoot, file);
+          if (sourceFile) {
+            sourceFiles.push(sourceFile);
+          }
+        } catch (error) {
+          errors.push(`Custom source inventory could not read ${sharedPath}: ${error.message}`);
+        }
         if (/\/src\/Controller\/.*\.php$/i.test(sharedPath)) {
-          controllers.push(sharedPath);
+          controllers.push({ extension: entry.name, path: sharedPath });
         }
         if (/\/tests\/.*\.(?:php|yml)$/i.test(sharedPath)) {
           tests.push(sharedPath);
@@ -802,11 +1147,13 @@ export function inspectCustomCode(projectRoot) {
   }
   return {
     completed: errors.length === 0,
-    controllers: controllers.sort(),
+    controllers: controllers.sort((left, right) => left.path.localeCompare(right.path)),
     errors,
     extensions: extensions.sort((left, right) => left.path.localeCompare(right.path)),
     routes: routes.sort((left, right) => `${left.file}:${left.name}`.localeCompare(`${right.file}:${right.name}`)),
-    tests: tests.sort()
+    sourceFiles: sourceFiles.sort((left, right) => left.path.localeCompare(right.path)),
+    tests: tests.sort(),
+    themeOwnershipFindings: themeOwnershipFindings.sort((left, right) => left.id.localeCompare(right.id))
   };
 }
 
@@ -1372,7 +1719,8 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
         errors: ['Tracked Drupal config was unavailable.']
       },
       aliasPolicyAudit: { completed: false, records: [], violations: [] },
-      customCodeInventory: { completed: false, controllers: [], extensions: [], routes: [], tests: [] },
+      customCodeInventory: { completed: false, controllers: [], extensions: [], routes: [], sourceFiles: [], tests: [] },
+      defaultTheme: '',
       displayPluginAudit: { completed: false, extraComponents: [], formComponents: [], viewComponents: [], viewDisplays: [], violations: [] },
       frontPage: '',
       mode: 'unavailable',
@@ -1387,6 +1735,9 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
   const uuidOutput = runDrush(projectRoot, environment, ['config:get', 'system.site', '--field=uuid']);
   const frontPage = cleanScalar(
     runDrush(projectRoot, environment, ['config:get', 'system.site', 'page.front', '--format=string'])
+  );
+  const defaultTheme = cleanScalar(
+    runDrush(projectRoot, environment, ['config:get', 'system.theme', 'default', '--format=string'])
   );
   const configSyncDirectory = cleanScalar(
     runDrush(projectRoot, environment, ['status', '--field=config-sync'])
@@ -1451,6 +1802,7 @@ function inspectDrupalRuntime(cwd, environment, customRouteBindings = [], aliasP
     configSyncDirectory,
     customCodeInventory,
     displayPluginAudit,
+    defaultTheme,
     drupalRoot,
     frontPage,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
@@ -1761,6 +2113,7 @@ async function verifyRoute(baseUrl, expected) {
     const actualH1 = elementText(response.body, 'h1');
     const actualTitle = elementText(response.body, 'title');
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
+    const actualAssets = renderedAssets(response.body, response.finalUrl);
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
       errors.push(`${expected.targetPath} returned status ${actualStatus}; expected ${expected.expectedStatus}.`);
@@ -1834,6 +2187,7 @@ async function verifyRoute(baseUrl, expected) {
       finalUrl: response.finalUrl,
       initialStatus: response.initialStatus,
       localTlsVerificationBypassed: response.localTlsVerificationBypassed,
+      loadedAssets: actualAssets,
       passed: errors.length === 0,
       redirects: response.redirects,
       requestedUrl: requestedUrl.href
@@ -1842,6 +2196,92 @@ async function verifyRoute(baseUrl, expected) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
     return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href };
   }
+}
+
+function packetBrowserArtifactValid(packetDir, value, { allowedScreenshots, effectiveness, publicRoute }) {
+  const text = String(value ?? '').trim();
+  if (!text || isAbsolute(text) || /^https?:\/\//i.test(text)) {
+    return false;
+  }
+  const evidenceRoot = resolve(packetDir, 'evidence', 'browser');
+  const evidencePath = resolve(packetDir, text);
+  try {
+    if (!(pathIsInside(evidenceRoot, evidencePath) &&
+      statSync(evidencePath).isFile() &&
+      statSync(evidencePath).size > 0)) {
+      return false;
+    }
+    if (/\.json$/i.test(evidencePath)) {
+      const artifact = JSON.parse(readFileSync(evidencePath, 'utf8'));
+      return normalizePath(artifact?.publicRoute) === publicRoute &&
+        artifact?.method === effectiveness?.method &&
+        String(artifact?.selector ?? '').trim() === String(effectiveness?.selector ?? '').trim() &&
+        String(artifact?.observedResult ?? '').trim() === String(effectiveness?.observedResult ?? '').trim();
+    }
+    return effectiveness?.method === 'visual_review' && allowedScreenshots.has(text);
+  } catch {
+    return false;
+  }
+}
+
+export function canvasAssetRuntimeErrors({ browserEvidence, packetDir, routeChecks, runtimeDefaultTheme }) {
+  const errors = [];
+  const checks = (Array.isArray(browserEvidence?.canvasAuthoringChecks)
+    ? browserEvidence.canvasAuthoringChecks
+    : []).filter((check) =>
+    check?.accepted === true && check?.canvasOwnsPublicRoute === true
+  );
+  for (const check of checks) {
+    const publicRoute = normalizePath(check?.publicRoute);
+    const route = (Array.isArray(routeChecks) ? routeChecks : []).find((candidate) =>
+      normalizePath(candidate?.finalUrl || candidate?.expectedFinalPath || candidate?.targetPath) === publicRoute
+    );
+    if (!publicRoute || !route) {
+      errors.push(`Canvas/component asset evidence for ${publicRoute || '(unknown route)'} has no matching live-fetched route.`);
+      continue;
+    }
+    if (!runtimeDefaultTheme || String(check?.activePublicTheme ?? '').trim() !== runtimeDefaultTheme) {
+      errors.push(`Canvas/component asset evidence for ${publicRoute} does not match live system.theme:default ${runtimeDefaultTheme || '(missing)'}.`);
+    }
+    const liveAssets = Array.isArray(route.loadedAssets) ? route.loadedAssets : [];
+    const allowedScreenshots = new Set([
+      check?.editorScreenshot,
+      check?.publicRouteBeforeEditScreenshot,
+      check?.publicRouteAfterEditScreenshot,
+      ...(Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [])
+        .filter((routeCheck) =>
+          normalizePath(routeCheck?.targetFinalUrl || routeCheck?.targetUrl) === publicRoute
+        )
+        .map((routeCheck) => routeCheck?.targetScreenshot)
+    ].map((path) => String(path ?? '').trim()).filter(Boolean));
+    for (const provider of Array.isArray(check?.providerAssetChecks) ? check.providerAssetChecks : []) {
+      for (const asset of Array.isArray(provider?.loadedAssets) ? provider.loadedAssets : []) {
+        let declaredUrl = '';
+        try {
+          declaredUrl = new URL(String(asset?.url ?? '')).href;
+        } catch {
+          // Packet validation reports malformed URLs separately.
+        }
+        if (!liveAssets.some((candidate) =>
+          candidate?.url === declaredUrl &&
+          candidate?.type === asset?.type &&
+          candidate?.observedBy === asset?.observedBy
+        )) {
+          errors.push(`Canvas/component provider ${provider?.provider || '(unknown provider)'} asset ${declaredUrl || asset?.url || '(missing URL)'} was not present in the live HTML for ${publicRoute}.`);
+        }
+      }
+      for (const effectiveness of Array.isArray(provider?.effectivenessChecks) ? provider.effectivenessChecks : []) {
+        if (!packetBrowserArtifactValid(packetDir, effectiveness?.evidence, {
+          allowedScreenshots,
+          effectiveness,
+          publicRoute
+        })) {
+          errors.push(`Canvas/component provider ${provider?.provider || '(unknown provider)'} effectiveness evidence for ${publicRoute} is not a non-empty packet-local browser artifact.`);
+        }
+      }
+    }
+  }
+  return errors;
 }
 
 function implementationQualityErrors(runtime, readback, routeMatrix, patternMap, independentVerification) {
@@ -1979,6 +2419,77 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
       }
     }
   }
+  const runtimeSourceFiles = Array.isArray(runtimeCustom.sourceFiles) ? runtimeCustom.sourceFiles : [];
+  const packetSourceFiles = Array.isArray(packetCustom.sourceFiles) ? packetCustom.sourceFiles : [];
+  const normalizedSourceSurfaces = (surfaces) => JSON.stringify(
+    (Array.isArray(surfaces) ? surfaces : [])
+      .map((surface) => ({
+        id: surface?.id,
+        kind: surface?.kind,
+        line: surface?.line,
+        name: surface?.name
+      }))
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)))
+  );
+  if (runtimeExtensions.length > 0 && runtimeSourceFiles.length === 0) {
+    errors.push('The live custom-code inventory found extensions but no eligible custom source files.');
+  }
+  for (const sourceFile of runtimeSourceFiles) {
+    const packetSourceFile = packetSourceFiles.find((record) =>
+      record?.id === sourceFile?.id &&
+      record?.extension === sourceFile?.extension &&
+      record?.path === sourceFile?.path
+    );
+    if (!packetSourceFile) {
+      errors.push(`Custom source file ${sourceFile?.path || '(unknown source file)'} is missing from drupal-readback.json.`);
+      continue;
+    }
+    if (
+      packetSourceFile.kind !== sourceFile.kind ||
+      packetSourceFile.sha256 !== sourceFile.sha256 ||
+      normalizedSourceSurfaces(packetSourceFile.surfaces) !== normalizedSourceSurfaces(sourceFile.surfaces)
+    ) {
+      errors.push(`Custom source file ${sourceFile.path} has stale kind, hash, or discovered-surface evidence in drupal-readback.json.`);
+    }
+  }
+  for (const sourceFile of packetSourceFiles) {
+    if (!runtimeSourceFiles.some((record) =>
+      record?.id === sourceFile?.id &&
+      record?.extension === sourceFile?.extension &&
+      record?.path === sourceFile?.path
+    )) {
+      errors.push(`Custom source file ${sourceFile?.path || '(unknown source file)'} is not present in the live custom-code scan.`);
+    }
+  }
+  const runtimeThemeFindings = Array.isArray(runtimeCustom.themeOwnershipFindings)
+    ? runtimeCustom.themeOwnershipFindings
+    : [];
+  const packetThemeFindings = Array.isArray(packetCustom.themeOwnershipFindings)
+    ? packetCustom.themeOwnershipFindings
+    : [];
+  if (runtimeExtensions.some((extension) => extension?.type === 'theme') && packetCustom.themeOwnershipReviewCompleted !== true) {
+    errors.push('drupal-readback.json did not complete the custom-theme ownership review.');
+  }
+  for (const finding of runtimeThemeFindings) {
+    const packetFinding = packetThemeFindings.find((record) =>
+      record?.reviewed === true &&
+      record?.id === finding.id &&
+      record?.extension === finding.extension &&
+      record?.kind === finding.kind &&
+      record?.file === finding.file &&
+      record?.line === finding.line &&
+      record?.column === finding.column &&
+      record?.matchHash === finding.matchHash
+    );
+    if (!packetFinding) {
+      errors.push(`Theme ownership finding ${finding.id || finding.file} is missing or stale in the accepted Drupal readback inventory.`);
+    }
+  }
+  for (const finding of packetThemeFindings) {
+    if (!runtimeThemeFindings.some((record) => record?.id === finding?.id)) {
+      errors.push(`Theme ownership finding ${finding?.id || finding?.file || '(unknown)'} is not present in the live custom-theme scan.`);
+    }
+  }
   const packetRoutes = Array.isArray(packetCustom.routes) ? packetCustom.routes : [];
   const routeMatrixRecords = [
     ...(Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : []),
@@ -2021,6 +2532,9 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
     if (normalizedObject(packetRoute.requirements) !== normalizedObject(route.requirements)) {
       errors.push(`Custom route ${route.name} requirements do not match the live Drupal route definition.`);
     }
+    if (route.discovery !== 'live_callback' && packetRoute.sourceFile !== route.file) {
+      errors.push(`Custom route ${route.name} source file does not match its live routing definition.`);
+    }
     const binding = packetRoute.routeMatrixBinding ?? {};
     const matrixBindingPresent = routeMatrixRecords.some((record) =>
       (binding.kind === 'concrete_path' && normalizePath(record?.targetPath) === normalizePath(binding.value)) ||
@@ -2030,9 +2544,19 @@ function implementationQualityErrors(runtime, readback, routeMatrix, patternMap,
       errors.push(`Custom route ${route.name} has no matching concrete-path or route-name binding in route-matrix.json.`);
     }
   }
-  for (const path of Array.isArray(runtimeCustom.controllers) ? runtimeCustom.controllers : []) {
-    if (!Array.isArray(packetCustom.controllers) || !packetCustom.controllers.includes(path)) {
-      errors.push(`Custom controller ${path} is missing from drupal-readback.json.`);
+  for (const controller of Array.isArray(runtimeCustom.controllers) ? runtimeCustom.controllers : []) {
+    const packetController = (Array.isArray(packetCustom.controllers) ? packetCustom.controllers : []).find((record) =>
+      record?.path === controller?.path && record?.extension === controller?.extension
+    );
+    if (!packetController) {
+      errors.push(`Custom controller ${controller?.path || '(unknown controller)'} is missing from drupal-readback.json.`);
+    }
+  }
+  for (const controller of Array.isArray(packetCustom.controllers) ? packetCustom.controllers : []) {
+    if (!(Array.isArray(runtimeCustom.controllers) ? runtimeCustom.controllers : []).some((record) =>
+      record?.path === controller?.path && record?.extension === controller?.extension
+    )) {
+      errors.push(`Custom controller ${controller?.path || '(unknown controller)'} is not present in the live custom-code scan.`);
     }
   }
   for (const path of Array.isArray(runtimeCustom.tests) ? runtimeCustom.tests : []) {
@@ -2212,6 +2736,13 @@ export async function verifyLive({
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
   }
+  const canvasRuntimeErrors = canvasAssetRuntimeErrors({
+    browserEvidence,
+    packetDir: absolutePacketDir,
+    routeChecks: [...routeChecks, ...targetRequiredRouteChecks],
+    runtimeDefaultTheme: inspectedDrupalRuntime.defaultTheme
+  });
+  liveErrors.push(...canvasRuntimeErrors);
   const drupalImplementationErrors = implementationQualityErrors(
     inspectedDrupalRuntime,
     drupalReadback,
@@ -2252,6 +2783,7 @@ export async function verifyLive({
 
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
+  const packetDefaultTheme = String(drupalReadback?.drupal?.defaultTheme ?? '').trim();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
   const runtimeFrontPage = normalizePath(inspectedDrupalRuntime.frontPage);
   const packetConfigSyncDirectory = sharedConfigSyncDirectory(drupalReadback?.drupal?.configSyncDirectory);
@@ -2273,6 +2805,9 @@ export async function verifyLive({
   const drupalRuntimeSiteUuidMatches =
     Boolean(packetSiteUuid) &&
     packetSiteUuid === String(inspectedDrupalRuntime.siteUuid ?? '').trim().toLowerCase();
+  const drupalRuntimeDefaultThemeMatches =
+    Boolean(packetDefaultTheme) &&
+    packetDefaultTheme === String(inspectedDrupalRuntime.defaultTheme ?? '').trim();
   const drupalRuntimeFrontPageMatches =
     Boolean(String(drupalReadback?.drupal?.frontPage ?? '').trim()) &&
     Boolean(String(inspectedDrupalRuntime.frontPage ?? '').trim()) &&
@@ -2297,6 +2832,7 @@ export async function verifyLive({
     inspectedDrupalRuntime.confirmed === true &&
     drupalRuntimeTargetMatches &&
     drupalRuntimeSiteUuidMatches &&
+    drupalRuntimeDefaultThemeMatches &&
     drupalRuntimeFrontPageMatches &&
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
@@ -2326,6 +2862,9 @@ export async function verifyLive({
   }
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
     completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
+  }
+  if (!drupalRuntimeDefaultThemeMatches) {
+    completionBlockedReasons.push('Current DDEV system.theme:default does not match drupal-readback.json defaultTheme.');
   }
   if (!drupalRuntimeTargetMatches) {
     completionBlockedReasons.push('Current DDEV runtime base URL does not match the live target origin.');
@@ -2401,6 +2940,7 @@ export async function verifyLive({
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
+      defaultThemeMatchesPacket: drupalRuntimeDefaultThemeMatches,
       frontPageMatchesPacket: drupalRuntimeFrontPageMatches,
       implementationQualityValid: drupalRuntimeImplementationQualityValid,
       siteUuidMatchesPacket: drupalRuntimeSiteUuidMatches,

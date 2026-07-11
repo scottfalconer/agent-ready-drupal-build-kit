@@ -9,6 +9,7 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  canvasAssetRuntimeErrors,
   CUSTOM_ROUTE_AUDIT_PHP,
   DISPLAY_PLUGIN_AUDIT_PHP,
   inspectCustomCode,
@@ -16,7 +17,12 @@ import {
   inspectTrackedCanvasTemplates,
   verifyLive
 } from '../bin/verify.mjs';
-import { canvasTemplateTargetsPublicOutput, MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  canvasProviderAssetGateReasons,
+  canvasTemplateTargetsPublicOutput,
+  MACHINE_GATE_EVALUATORS,
+  validatePacket
+} from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -36,6 +42,148 @@ function copyTemplatePacket(packetDir) {
   }
 }
 
+function acceptedSolutionLadder(
+  need = 'Expose a standards-compliant calendar capability.',
+  capabilityId = 'calendar_feed.export'
+) {
+  const evidence = 'evidence/independent-verification/claim-evidence.json';
+  return {
+    capabilityId,
+    need,
+    acceptanceCriteria: [{
+      id: 'stable_output',
+      criterion: 'Anonymous consumers receive the required stable capability output.'
+    }],
+    core: {
+      reviewed: true,
+      noCandidateFound: false,
+      candidates: [{
+        name: 'Drupal core Views and entity displays',
+        fit: 'rejected',
+        unmetCriteria: [],
+        reason: 'They do not produce the required interchange format.',
+        evidence
+      }],
+      conclusion: 'Core cannot satisfy the required interchange contract.',
+      evidence
+    },
+    installedDrupalCms: {
+      reviewed: true,
+      disabledCapabilitiesChecked: true,
+      noCandidateFound: false,
+      capabilities: [{
+        name: 'Example disabled feed submodule',
+        type: 'submodule',
+        enabled: false,
+        fit: 'partial',
+        unmetCriteria: ['stable_output'],
+        reason: 'It exposes a feed but not the required format.',
+        evidence
+      }],
+      conclusion: 'Installed and disabled capabilities do not meet the format criterion.',
+      evidence
+    },
+    currentRecipes: {
+      reviewed: true,
+      checkedAt: testCheckedAt,
+      noCandidateFound: false,
+      candidates: [{
+        package: 'drupal/example_events',
+        version: '2.0.0',
+        drupalCompatibility: '^11.4 || ^12',
+        supportStatus: 'supported',
+        securityAdvisoryCoverage: true,
+        fit: 'rejected',
+        unmetCriteria: [],
+        reason: 'The recipe models events but does not expose the required feed contract.',
+        maintenanceEvidence: evidence,
+        evidence
+      }],
+      conclusion: 'The current compatible Recipe does not own the required output.',
+      evidence
+    },
+    maintainedContrib: {
+      reviewed: true,
+      checkedAt: testCheckedAt,
+      noCandidateFound: false,
+      candidates: [{
+        project: 'drupal/example_feed',
+        version: '4.0.0',
+        drupalCompatibility: '^10 || ^11',
+        maintenanceStatus: 'maintained',
+        securityAdvisoryCoverage: true,
+        fit: 'partial',
+        unmetCriteria: ['stable_output'],
+        reason: 'It lacks the required cache invalidation contract.',
+        maintenanceEvidence: evidence,
+        adoptionEvidence: evidence,
+        evidence
+      }],
+      conclusion: 'The maintained compatible project misses one required acceptance criterion.',
+      evidence
+    },
+    customDecision: {
+      whyCustomRemains: 'Only the narrow interchange adapter remains unmet.',
+      narrowestScope: 'Serialize the existing Drupal event View into the required format.',
+      revisitTrigger: 'Remove the adapter when a compatible maintained owner meets every criterion.',
+      acceptedBy: 'Fixture Maintainer',
+      acceptedAt: testCheckedAt,
+      evidence,
+      accepted: true
+    }
+  };
+}
+
+function acceptedSourceFile({
+  capabilityId = 'calendar_feed.export',
+  extension = 'calendar_adapter',
+  hex = '1',
+  kind = 'php_class',
+  path = 'web/modules/custom/calendar_adapter/src/Adapter.php',
+  surfaceKind = 'class',
+  surfaceName = 'Adapter'
+} = {}) {
+  const digit = /^[a-f0-9]$/i.test(hex) ? hex.toLowerCase() : '1';
+  const surfaceId = `SURFACE-${digit.repeat(16)}`;
+  return {
+    id: `SOURCE-${digit.repeat(16)}`,
+    extension,
+    path,
+    kind,
+    sha256: `sha256:${digit.repeat(64)}`,
+    surfaces: [{ id: surfaceId, kind: surfaceKind, name: surfaceName, line: 1 }],
+    capabilityBindings: [{
+      capabilityId,
+      surfaceIds: [surfaceId],
+      responsibility: 'Implements the reviewed custom capability.'
+    }],
+    reviewed: true
+  };
+}
+
+function acceptedScannedSourceFiles(sourceFiles, capabilityId, responsibility = 'Implements the reviewed capability.') {
+  return sourceFiles.map((sourceFile) => ({
+    ...sourceFile,
+    capabilityBindings: [{
+      capabilityId,
+      surfaceIds: sourceFile.surfaces.map((surface) => surface.id),
+      responsibility
+    }],
+    reviewed: true
+  }));
+}
+
+function owningSurfaceIds(sourceFiles, path, line = 1) {
+  const sourceFile = sourceFiles.find((candidate) => candidate.path === path);
+  if (!sourceFile) {
+    return [];
+  }
+  const nearest = [...sourceFile.surfaces]
+    .filter((surface) => surface.line <= line)
+    .sort((left, right) => right.line - left.line)[0] ?? sourceFile.surfaces[0];
+  return nearest ? [nearest.id] : [];
+}
+
 test('every non-human gate has an explicit machine evaluator and a supported blocking scope', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
   const expected = gates.gates.filter((gate) => gate.checkedBy !== 'human').map((gate) => gate.id).sort();
@@ -50,10 +198,62 @@ test('custom-code inventory discovers extensions, routes, controllers, and tests
   const moduleRoot = join(projectRoot, 'web', 'modules', 'custom', 'calendar_feed');
   const themeRoot = join(projectRoot, 'web', 'themes', 'custom', 'public_theme');
   mkdirSync(join(moduleRoot, 'src', 'Controller'), { recursive: true });
+  mkdirSync(join(moduleRoot, 'src', 'EventSubscriber'), { recursive: true });
+  mkdirSync(join(moduleRoot, 'src', 'Plugin', 'Block'), { recursive: true });
+  mkdirSync(join(moduleRoot, 'config', 'schema'), { recursive: true });
+  mkdirSync(join(moduleRoot, 'scripts'), { recursive: true });
   mkdirSync(join(moduleRoot, 'tests', 'src', 'Functional'), { recursive: true });
-  mkdirSync(themeRoot, { recursive: true });
+  mkdirSync(join(themeRoot, 'css'), { recursive: true });
+  mkdirSync(join(themeRoot, 'js'), { recursive: true });
+  mkdirSync(join(themeRoot, 'templates'), { recursive: true });
   writeFileSync(join(moduleRoot, 'calendar_feed.info.yml'), 'name: Calendar feed\ntype: module\n');
   writeFileSync(join(themeRoot, 'public_theme.info.yml'), 'name: Public theme\ntype: theme\n');
+  writeFileSync(join(moduleRoot, 'calendar_feed.module'), `<?php
+function calendar_feed_node_insert($node): void {}
+function calendar_feed_cron(): void {}
+`);
+  writeFileSync(join(moduleRoot, 'calendar_feed.services.yml'), `services:
+    calendar_feed.subscriber:
+        class: Drupal\\calendar_feed\\EventSubscriber\\CalendarSubscriber
+    'calendar_feed.renderer':
+        class: Drupal\\calendar_feed\\CalendarRenderer
+`);
+  writeFileSync(join(moduleRoot, 'config', 'schema', 'calendar_feed.schema.yml'), 'calendar_feed.settings:\n  type: config_object\n');
+  writeFileSync(join(moduleRoot, 'scripts', 'build.mjs'), 'export default {};\n');
+  writeFileSync(join(moduleRoot, 'src', 'EventSubscriber', 'CalendarSubscriber.php'), '<?php\nfinal class CalendarSubscriber {}\n');
+  writeFileSync(join(moduleRoot, 'src', 'Plugin', 'Block', 'CalendarBlock.php'), '<?php\nfinal class CalendarBlock {}\n');
+  writeFileSync(join(themeRoot, 'js', 'site.js'), 'Drupal.behaviors.publicThemeMenu = {};\nDrupal.behaviors.publicThemeSearch = {};\n');
+  writeFileSync(join(themeRoot, 'js', 'module.mjs'), 'Drupal.behaviors.publicThemeModule = {};\n');
+  writeFileSync(join(themeRoot, 'css', 'style.css'), '.site-header { display: block; }\n');
+  writeFileSync(join(themeRoot, 'css', 'tokens.sass'), '$brand: #005a70\n');
+  writeFileSync(join(themeRoot, 'public_theme.theme'), `<?php
+function public_theme_page_attachments_alter(array &$attachments): void {
+  $attachments['#attached']['html_head'][] = [['#tag' => 'meta', '#attributes' => ['name' => 'description', 'content' => 'Example']], 'example_description'];
+}
+`);
+  writeFileSync(join(themeRoot, 'templates', 'page.html.twig'), `<a href="/section/example">Example</a>
+<form action="/search" role="search"><input name="keywords" type="search"><button>Search</button></form>
+`);
+  writeFileSync(join(themeRoot, 'templates', 'views-view-unformatted.html.twig'), '{{ rows }}\n');
+  writeFileSync(join(themeRoot, 'templates', 'views-mini-pager.html.twig'), '{{ items }}\n');
+  writeFileSync(join(themeRoot, 'templates', 'views-view-unformatted--news.html.twig'), '{{ rows }}\n');
+  const commonSearchNames = ['keys', 'keywords', 'query', 'q', 'search', 'search_api_fulltext'];
+  writeFileSync(
+    join(themeRoot, 'templates', 'search-forms.html.twig'),
+    `${commonSearchNames.map((name, index) => `<form action="{{ path('view.site_search.page_${index + 1}') }}"><input name="${name}" type="text"><button>Go</button></form>`).join('\n')}
+<form class="directory-search" action="{{ path('view.search_directory.page_1') }}"><label>Search directory</label><input name="term" type="text"><button>Go</button></form>\n`
+  );
+  const excludedThemeDirectories = [
+    'test', 'tests', 'fixture', 'fixtures', 'test-data', 'test_data', 'testdata', 'tools', 'tooling'
+  ];
+  for (const excludedDirectory of excludedThemeDirectories) {
+    const excludedRoot = join(themeRoot, excludedDirectory);
+    mkdirSync(excludedRoot, { recursive: true });
+    writeFileSync(
+      join(excludedRoot, 'views-view-table.html.twig'),
+      '<a href="/should-not-scan">Ignored</a><form action="/search"><input name="q" type="text"></form>\n'
+    );
+  }
   writeFileSync(join(moduleRoot, 'calendar_feed.routing.yml'), `calendar_feed.permission:\n  path: '/calendar.ics'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _permission: 'access calendar feed'\ncalendar_feed.anonymous_role:\n  path: '/calendar/public'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _role: 'anonymous'\ncalendar_feed.custom_access:\n  path: '/calendar/{calendar}'\n  defaults:\n    _controller: '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed'\n  requirements:\n    _custom_access: '\\Drupal\\calendar_feed\\Access\\CalendarAccess::access'\n`);
   writeFileSync(join(moduleRoot, 'src', 'Controller', 'CalendarController.php'), '<?php\n');
   writeFileSync(join(moduleRoot, 'tests', 'src', 'Functional', 'CalendarFeedTest.php'), '<?php\n');
@@ -68,9 +268,76 @@ test('custom-code inventory discovers extensions, routes, controllers, and tests
   ]);
   assert.equal(inventory.routes.find((route) => route.name === 'calendar_feed.custom_access').path, '/calendar/{calendar}');
   assert.equal(Object.hasOwn(inventory.routes[0], 'public'), false, 'filesystem YAML must not guess anonymous access');
-  assert.equal(inventory.extensions.find((extension) => extension.machineName === 'calendar_feed').phpFileCount, 2);
-  assert.match(inventory.controllers[0], /CalendarController\.php$/);
+  assert.equal(inventory.extensions.find((extension) => extension.machineName === 'calendar_feed').phpFileCount, 5);
+  assert.match(inventory.controllers[0].path, /CalendarController\.php$/);
+  assert.equal(inventory.controllers[0].extension, 'calendar_feed');
   assert.match(inventory.tests[0], /CalendarFeedTest\.php$/);
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('calendar_feed.module') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'calendar_feed_node_insert') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'calendar_feed_cron')
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('CalendarSubscriber.php') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'CalendarSubscriber')
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('CalendarBlock.php') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'CalendarBlock')
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('calendar_feed.services.yml') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'calendar_feed.subscriber') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'calendar_feed.renderer')
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('config/schema/calendar_feed.schema.yml') &&
+    sourceFile.surfaces.some((surface) => surface.name === 'calendar_feed.settings')
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) =>
+    sourceFile.path.endsWith('site.js') && sourceFile.surfaces.length === 2
+  ));
+  assert.ok(inventory.sourceFiles.some((sourceFile) => sourceFile.path.endsWith('module.mjs')));
+  assert.ok(inventory.sourceFiles.some((sourceFile) => sourceFile.path.endsWith('tokens.sass')));
+  assert.ok(inventory.sourceFiles.every((sourceFile) => !sourceFile.path.endsWith('scripts/build.mjs')));
+  assert.ok(inventory.sourceFiles.every((sourceFile) =>
+    !/(?:^|\/)(?:scripts|test|tests|fixture|fixtures|test-data|test_data|testdata|tools|tooling|vendor|dist|build)(?:\/|$)/.test(sourceFile.path)
+  ));
+  assert.deepEqual([...new Set(inventory.themeOwnershipFindings.map((finding) => finding.kind))].sort(), [
+    'global_views_template_override',
+    'handwritten_search_form',
+    'hardcoded_internal_path',
+    'theme_meta_injection'
+  ]);
+  assert.ok(inventory.themeOwnershipFindings.every((finding) => /^THEME-[a-f0-9]{16}$/.test(finding.id)));
+  assert.ok(inventory.themeOwnershipFindings.every((finding) => /^sha256:[a-f0-9]{64}$/.test(finding.matchHash)));
+  assert.equal(
+    inventory.themeOwnershipFindings.filter((finding) => finding.kind === 'theme_meta_injection').length,
+    1,
+    "the scanner must recognize Drupal render arrays shaped as ['#tag' => 'meta']"
+  );
+  assert.equal(
+    inventory.themeOwnershipFindings.filter((finding) => finding.kind === 'global_views_template_override').length,
+    2,
+    'all unsuffixed Views base templates are findings while suggested templates are excluded'
+  );
+  assert.equal(
+    inventory.themeOwnershipFindings.filter((finding) => finding.kind === 'handwritten_search_form').length,
+    8,
+    'common text search names plus search-like Twig path(), class, and label signals are detected'
+  );
+  assert.ok(
+    inventory.themeOwnershipFindings.every((finding) =>
+      !/(?:^|\/)(?:test|tests|fixture|fixtures|test-data|test_data|testdata|tools|tooling)(?:\/|$)/.test(finding.file)
+    ),
+    'theme test and fixture directories are excluded from runtime ownership findings'
+  );
+  assert.ok(
+    inventory.themeOwnershipFindings.every((finding) =>
+      !finding.file.endsWith('views-view-unformatted--news.html.twig')
+    ),
+    'a Views template suggestion is not treated as a global base override'
+  );
 });
 
 test('embedded Drupal audits cover live callback routes, real Requests, and registered extra fields', () => {
@@ -214,6 +481,208 @@ test('Canvas public targets honor row-only bundles and include public embedded n
     embeddedReadback,
     { contentTypes: [], structuredContentModel: { collectionOwnershipLedger: [] } }
   ), true);
+});
+
+test('Canvas provider assets require target-bound loaded libraries and browser effectiveness', () => {
+  const patternMap = {
+    compositionModel: {
+      canvasComponentModel: [{
+        accepted: true,
+        canvasOwnerDeclared: true,
+        publicRoute: '/landing',
+        componentList: ['sdc.example.hero', 'sdc.example.cta']
+      }]
+    }
+  };
+  const drupalReadback = { drupal: { defaultTheme: 'public_theme' } };
+  const browserEvidence = {
+    publicRouteChecks: ['desktop', 'mobile'].map((name) => ({
+      accepted: true,
+      targetFinalUrl: 'https://target.example/landing',
+      viewport: { name }
+    })),
+    canvasAuthoringChecks: [{
+      publicRoute: '/landing',
+      canvasOwnsPublicRoute: true,
+      activePublicTheme: 'public_theme',
+      providerAssetChecks: [{
+        provider: 'example_components',
+        componentIds: ['sdc.example.hero', 'sdc.example.cta'],
+        assetContractReviewed: true,
+        requiredLibraries: [{
+          name: 'example_components/global',
+          assetTypes: ['css', 'js'],
+          disposition: 'loaded_directly',
+          contractEvidence: 'The provider library definition requires CSS and JavaScript.',
+          equivalenceEvidence: ''
+        }],
+        loadedAssets: [
+          {
+            url: 'https://target.example/themes/example/global.css',
+            type: 'css',
+            satisfiesLibraries: ['example_components/global'],
+            observedBy: 'link_stylesheet',
+            mappingEvidence: 'The browser stylesheet link maps to the declared provider library.'
+          },
+          {
+            url: 'https://target.example/themes/example/global.js',
+            type: 'js',
+            satisfiesLibraries: ['example_components/global'],
+            observedBy: 'script_src',
+            mappingEvidence: 'The browser script source maps to the declared provider library.'
+          }
+        ],
+        effectivenessChecks: [
+          {
+            method: 'computed_style', selector: '.example-hero', expectation: 'Grid layout is active.',
+            observedResult: 'display: grid', status: 'pass', evidence: 'evidence/browser/canvas-style.json'
+          },
+          {
+            method: 'interaction', selector: '.example-cta', expectation: 'CTA behavior responds.',
+            observedResult: 'The interaction completed.', status: 'pass', evidence: 'evidence/browser/canvas-interaction.json'
+          }
+        ],
+        noLibrariesRequiredRationale: '',
+        status: 'pass',
+        accepted: true,
+        blockers: []
+      }],
+      status: 'pass',
+      accepted: true
+    }]
+  };
+
+  assert.deepEqual(canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }), []);
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].loadedAssets[0].observedBy = 'network';
+  assert.match(
+    canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }).join('\n'),
+    /provider asset contract/
+  );
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].loadedAssets[0].observedBy = 'link_stylesheet';
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].effectivenessChecks =
+    browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].effectivenessChecks
+      .filter((check) => check.method !== 'computed_style');
+  assert.match(
+    canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }).join('\n'),
+    /provider asset contract/
+  );
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].effectivenessChecks.push({
+    method: 'computed_style', selector: '.example-hero', expectation: 'Grid layout is active.',
+    observedResult: 'display: grid', status: 'pass', evidence: 'evidence/browser/canvas-style.json'
+  });
+  browserEvidence.canvasAuthoringChecks[0].activePublicTheme = 'other_theme';
+  assert.match(
+    canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }).join('\n'),
+    /provider asset contract/
+  );
+});
+
+test('live Canvas asset evidence rejects fake assets, stale themes, and missing artifacts', () => {
+  const packetDir = mkdtempSync(join(tmpdir(), 'canvas-runtime-assets-'));
+  mkdirSync(join(packetDir, 'evidence', 'browser'), { recursive: true });
+  writeFileSync(
+    join(packetDir, 'evidence', 'browser', 'canvas-style.json'),
+    '{"publicRoute":"/landing","method":"computed_style","selector":".example-hero","observedResult":"display: grid"}\n'
+  );
+  const browserEvidence = {
+    canvasAuthoringChecks: [{
+      publicRoute: '/landing',
+      canvasOwnsPublicRoute: true,
+      activePublicTheme: 'public_theme',
+      providerAssetChecks: [{
+        provider: 'example_components',
+        loadedAssets: [{
+          url: 'https://target.example/themes/example/global.css',
+          type: 'css',
+          observedBy: 'link_stylesheet'
+        }],
+        effectivenessChecks: [{
+          method: 'computed_style',
+          selector: '.example-hero',
+          observedResult: 'display: grid',
+          evidence: 'evidence/browser/canvas-style.json'
+        }]
+      }],
+      accepted: true
+    }]
+  };
+  const routeChecks = [{
+    finalUrl: 'https://target.example/landing',
+    loadedAssets: [{
+      url: 'https://target.example/themes/example/global.css',
+      type: 'css',
+      observedBy: 'link_stylesheet'
+    }]
+  }];
+
+  assert.deepEqual(canvasAssetRuntimeErrors({
+    browserEvidence, packetDir, routeChecks, runtimeDefaultTheme: 'public_theme'
+  }), []);
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].loadedAssets[0].url =
+    'https://target.example/themes/example/fake.css';
+  assert.match(canvasAssetRuntimeErrors({
+    browserEvidence, packetDir, routeChecks, runtimeDefaultTheme: 'public_theme'
+  }).join('\n'), /was not present in the live HTML/);
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].loadedAssets[0].url =
+    'https://target.example/themes/example/global.css';
+  assert.match(canvasAssetRuntimeErrors({
+    browserEvidence, packetDir, routeChecks, runtimeDefaultTheme: 'other_theme'
+  }).join('\n'), /does not match live system\.theme:default/);
+
+  browserEvidence.canvasAuthoringChecks[0].providerAssetChecks[0].effectivenessChecks[0].evidence =
+    'evidence/browser/missing.json';
+  assert.match(canvasAssetRuntimeErrors({
+    browserEvidence, packetDir, routeChecks, runtimeDefaultTheme: 'public_theme'
+  }).join('\n'), /not a non-empty packet-local browser artifact/);
+});
+
+test('packet completion blocks Canvas output without provider asset evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'canvas-provider-assets-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.buildTypeDeclaration.type = 'structured_drupal_native_canvas';
+    patternMap.compositionModel.canvasComponentModel = [{
+      sourceRoute: '/',
+      publicRoute: '/',
+      canvasOwnerDeclared: true,
+      componentList: ['sdc.example.hero'],
+      slotList: [],
+      props: [],
+      repeatableSectionsUseDrupalOwnedData: true,
+      oneMonolithicComponentRejected: true,
+      jsonOrNewlineBlobPropsRejected: true,
+      hardcodedPublicCopyRejected: true,
+      componentInventoryMatchesDeclaration: true,
+      accepted: true,
+      notes: ''
+    }];
+    patternMap.pageCompositionOwnership[0].selectedOwner = 'canvas_page';
+    patternMap.pageCompositionOwnership[0].canvasOwnsPublicRoute = true;
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browserEvidence) => {
+    browserEvidence.canvasAuthoringChecks = [{
+      publicRoute: '/',
+      canvasOwnsPublicRoute: true,
+      activePublicTheme: 'fixture_theme',
+      providerAssetChecks: [],
+      status: 'pass',
+      accepted: true
+    }];
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /Canvas\/component provider asset contract/
+  );
 });
 
 function writeJson(path, value) {
@@ -454,11 +923,13 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     configStatusClean: true,
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
+    defaultTheme: 'fixture_theme',
     customCodeInventory: {
       completed: true,
       controllers: [],
       extensions: [],
       routes: [],
+      sourceFiles: [],
       tests: []
     },
     displayPluginAudit: {
@@ -1272,6 +1743,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       applies: false,
       reason: 'The fixture project has no custom modules or themes.',
       extensions: [],
+      sourceFiles: [],
       routes: [],
       controllers: [],
       tests: [],
@@ -1704,7 +2176,7 @@ test('custom PHP extensions require coding-standards and static-analysis disposi
         type: 'module',
         path: 'web/modules/custom/calendar_feed',
         purpose: 'Expose a public calendar feed.',
-        drupalNativeAlternativesReviewed: 'Core and maintained contrib did not provide the required feed contract.',
+        solutionLadders: [acceptedSolutionLadder()],
         phpFileCount: 1,
         qualityChecks: [{
           kind: 'coding_standards',
@@ -1713,6 +2185,10 @@ test('custom PHP extensions require coding-standards and static-analysis disposi
         }],
         accepted: true
       }],
+      sourceFiles: [acceptedSourceFile({
+        extension: 'calendar_feed',
+        path: 'web/modules/custom/calendar_feed/calendar_feed.module'
+      })],
       routes: [],
       controllers: [],
       tests: [],
@@ -1725,7 +2201,343 @@ test('custom PHP extensions require coding-standards and static-analysis disposi
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /custom modules, themes, routes, controllers, tests/
+    /custom modules, themes, live source files\/surfaces, routes, controllers, tests/
+  );
+});
+
+test('custom extensions require the complete structured solution ladder', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'custom-solution-ladder-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const controllerSource = acceptedSourceFile({
+      extension: 'calendar_adapter',
+      path: 'web/modules/custom/calendar_adapter/src/Controller/AdapterController.php',
+      surfaceName: 'AdapterController'
+    });
+    controllerSource.surfaces.push({
+      id: 'SURFACE-2222222222222222',
+      kind: 'function',
+      name: 'calendar_adapter_secondary_behavior',
+      line: 20
+    });
+    controllerSource.capabilityBindings[0].surfaceIds.push('SURFACE-2222222222222222');
+    readback.implementationQuality.customCodeInventory = {
+      applies: true,
+      reason: 'A narrow custom capability module is present.',
+      extensions: [{
+        machineName: 'calendar_adapter',
+        type: 'module',
+        path: 'web/modules/custom/calendar_adapter',
+        purpose: 'Adapt an existing Drupal collection to an external contract.',
+        solutionLadders: [acceptedSolutionLadder()],
+        phpFileCount: 0,
+        qualityChecks: [],
+        accepted: true
+      }],
+      sourceFiles: [controllerSource],
+      routes: [],
+      controllers: [{
+        path: 'web/modules/custom/calendar_adapter/src/Controller/AdapterController.php',
+        extension: 'calendar_adapter',
+        capabilityId: 'calendar_feed.export',
+        sourceSurfaceIds: [controllerSource.surfaces[0].id]
+      }],
+      tests: [],
+      completed: true
+    };
+  });
+
+  const passing = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    passing.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder/
+  );
+  assert.doesNotMatch(
+    passing.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /custom modules, themes, live source files\/surfaces, routes, controllers, tests/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.sourceFiles[0].capabilityBindings[0].surfaceIds.pop();
+  });
+  const uncoveredSourceSurface = await validatePacket({ packetDir });
+  assert.match(
+    uncoveredSourceSurface.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /bind every live custom source file and discovered surface/
+  );
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.sourceFiles[0].capabilityBindings[0].surfaceIds.push('SURFACE-2222222222222222');
+  });
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.controllers[0].capabilityId = 'calendar_adapter.unknown';
+  });
+  const wrongControllerCapability = await validatePacket({ packetDir });
+  assert.match(
+    wrongControllerCapability.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /custom modules, themes, live source files\/surfaces, routes, controllers, tests/
+  );
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.controllers[0].capabilityId = 'calendar_feed.export';
+  });
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.extensions[0].solutionLadders[0].core = {
+      reviewed: true,
+      noCandidateFound: true,
+      candidates: [],
+      conclusion: 'Core discovery found no candidate for the exact output contract.',
+      evidence: 'evidence/independent-verification/claim-evidence.json'
+    };
+  });
+  const explicitNoCandidate = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    explicitNoCandidate.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.implementationQuality.customCodeInventory.extensions[0].solutionLadders = [
+      acceptedSolutionLadder('First capability.', 'calendar_adapter.shared'),
+      acceptedSolutionLadder('Second capability.', 'calendar_adapter.shared')
+    ];
+  });
+  const duplicateCapabilityIds = await validatePacket({ packetDir });
+  assert.match(
+    duplicateCapabilityIds.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /per stable capabilityId.*calendar_adapter/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const extension = readback.implementationQuality.customCodeInventory.extensions[0];
+    delete extension.solutionLadders;
+    extension.drupalNativeAlternativesReviewed = 'Core and contrib were reviewed.';
+  });
+  const freeTextOnly = await validatePacket({ packetDir });
+  assert.match(
+    freeTextOnly.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder.*calendar_adapter/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const extension = readback.implementationQuality.customCodeInventory.extensions[0];
+    extension.solutionLadders = [acceptedSolutionLadder()];
+    extension.solutionLadders[0].installedDrupalCms.disabledCapabilitiesChecked = false;
+  });
+  const skippedDisabledCapabilities = await validatePacket({ packetDir });
+  assert.match(
+    skippedDisabledCapabilities.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder.*calendar_adapter/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const extension = readback.implementationQuality.customCodeInventory.extensions[0];
+    extension.solutionLadders = [acceptedSolutionLadder()];
+    delete extension.solutionLadders[0].maintainedContrib.candidates[0].drupalCompatibility;
+  });
+  const missingDrupalCompatibility = await validatePacket({ packetDir });
+  assert.match(
+    missingDrupalCompatibility.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder.*calendar_adapter/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const ladder = acceptedSolutionLadder();
+    ladder.maintainedContrib.candidates[0].unmetCriteria = [];
+    readback.implementationQuality.customCodeInventory.extensions[0].solutionLadders = [ladder];
+  });
+  const partialWithoutCriterion = await validatePacket({ packetDir });
+  assert.match(
+    partialWithoutCriterion.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder.*calendar_adapter/
+  );
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    const ladder = acceptedSolutionLadder();
+    ladder.installedDrupalCms.capabilities[0].unmetCriteria = ['unknown_criterion'];
+    readback.implementationQuality.customCodeInventory.extensions[0].solutionLadders = [ladder];
+  });
+  const unknownCriterionReference = await validatePacket({ packetDir });
+  assert.match(
+    unknownCriterionReference.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /complete accepted solution ladder.*calendar_adapter/
+  );
+});
+
+test('live theme ownership findings require explicit review dispositions', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'theme-ownership-live-'));
+      const themeRoot = join(projectRoot, 'web', 'themes', 'custom', 'public_theme');
+      mkdirSync(join(themeRoot, 'templates'), { recursive: true });
+      writeFileSync(join(themeRoot, 'public_theme.info.yml'), 'name: Public theme\ntype: theme\n');
+      writeFileSync(
+        join(themeRoot, 'templates', 'page.html.twig'),
+        '<form action="/search" role="search"><input name="keywords" type="search"><button>Search</button></form>\n'
+      );
+      const scanned = inspectCustomCode(projectRoot);
+      assert.ok(scanned.themeOwnershipFindings.length > 0);
+
+      const temp = mkdtempSync(join(tmpdir(), 'theme-ownership-packet-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const dispositions = scanned.themeOwnershipFindings.map((finding) => ({
+        ...finding,
+        capabilityId: 'public_theme.presentation',
+        sourceSurfaceIds: owningSurfaceIds(scanned.sourceFiles, finding.file, finding.line),
+        disposition: 'replace_with_drupal_owner',
+        drupalOwner: finding.kind === 'handwritten_search_form' ? 'views_exposed_form' : 'config',
+        reason: 'The public behavior should be owned by configured Drupal UI.',
+        offRoadDisposition: 'OR-013 reviewed for replacement.',
+        acceptedBy: 'Fixture Maintainer',
+        evidence: 'evidence/independent-verification/claim-evidence.json',
+        reviewed: true
+      }));
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory = {
+          applies: true,
+          reason: 'A custom presentation theme is present.',
+          extensions: [{
+            machineName: 'public_theme',
+            type: 'theme',
+            path: 'web/themes/custom/public_theme',
+            purpose: 'Provide source-like visual presentation.',
+            solutionLadders: [acceptedSolutionLadder(
+              'Provide source-like branded presentation.',
+              'public_theme.presentation'
+            )],
+            phpFileCount: 0,
+            qualityChecks: [],
+            accepted: true
+          }],
+          sourceFiles: acceptedScannedSourceFiles(scanned.sourceFiles, 'public_theme.presentation'),
+          themeOwnershipReviewCompleted: true,
+          themeOwnershipFindings: dispositions,
+          routes: [],
+          controllers: [],
+          tests: [],
+          completed: true
+        };
+      });
+      const runtime = injectedDrupalRuntime(baseUrl, {
+        customCodeInventory: {
+          completed: true,
+          controllers: [],
+          errors: [],
+          extensions: scanned.extensions,
+          routeAuditCompleted: true,
+          routeAuditViolations: [],
+          routes: [],
+          sourceFiles: scanned.sourceFiles,
+          tests: [],
+          themeOwnershipFindings: scanned.themeOwnershipFindings
+        }
+      });
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.themeOwnershipFindings[0].capabilityId = 'other_theme.capability';
+      });
+      const wrongCapability = await validatePacket({ packetDir });
+      assert.match(
+        wrongCapability.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /custom theme ownership findings must be completely inventoried/
+      );
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.themeOwnershipFindings[0].capabilityId = 'public_theme.presentation';
+      });
+
+      const pendingRemediation = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(pendingRemediation.drupalRuntime.implementationQualityValid, true, pendingRemediation.errors.join('\n'));
+      assert.equal(pendingRemediation.packetVerification.completionEvidence.packetSupportsCompletion, false);
+      assert.match(
+        pendingRemediation.packetVerification.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /replace_with_drupal_owner.*pending remediation/
+      );
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        for (const finding of readback.implementationQuality.customCodeInventory.themeOwnershipFindings) {
+          finding.disposition = 'accepted_theme_exception';
+          finding.drupalOwner = 'theme_exception';
+          finding.reason = 'The maintainer accepted this narrow presentation-only theme ownership.';
+        }
+      });
+      const acceptedExceptions = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(acceptedExceptions.drupalRuntime.implementationQualityValid, true, acceptedExceptions.errors.join('\n'));
+      assert.doesNotMatch(
+        acceptedExceptions.packetVerification.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /replace_with_drupal_owner.*pending remediation/
+      );
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.sourceFiles[0].sha256 = `sha256:${'0'.repeat(64)}`;
+      });
+      const staleSourceHash = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(staleSourceHash.drupalRuntime.implementationQualityValid, false);
+      assert.match(staleSourceHash.errors.join('\n'), /stale kind, hash, or discovered-surface evidence/);
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.sourceFiles = acceptedScannedSourceFiles(
+          scanned.sourceFiles,
+          'public_theme.presentation'
+        );
+      });
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.themeOwnershipFindings.pop();
+      });
+      const missingFinding = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(missingFinding.drupalRuntime.implementationQualityValid, false);
+      assert.match(missingFinding.errors.join('\n'), /Theme ownership finding THEME-.*missing or stale/);
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.themeOwnershipFindings = [];
+      });
+      runtime.customCodeInventory.themeOwnershipFindings = [];
+      const remediated = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: runtime
+      });
+      assert.equal(remediated.drupalRuntime.implementationQualityValid, true, remediated.errors.join('\n'));
+      assert.doesNotMatch(
+        remediated.packetVerification.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /theme ownership|replace_with_drupal_owner/i
+      );
+    }
   );
 });
 
@@ -1776,6 +2588,41 @@ test('live custom-route review handles custom access, anonymous roles, and param
         }
       ];
       const controller = '\\Drupal\\calendar_feed\\Controller\\CalendarController::feed';
+      const routingSourceFile = acceptedSourceFile({
+        capabilityId: 'calendar_feed.routes',
+        extension: 'calendar_feed',
+        hex: '2',
+        kind: 'drupal_registration',
+        path: 'web/modules/custom/calendar_feed/calendar_feed.routing.yml',
+        surfaceKind: 'registration',
+        surfaceName: routeDefinitions[0].name
+      });
+      routingSourceFile.surfaces = routeDefinitions.map((route, index) => ({
+        id: `SURFACE-${String(index + 4).repeat(16)}`,
+        kind: 'registration',
+        name: route.name,
+        line: index + 1
+      }));
+      routingSourceFile.capabilityBindings[0].surfaceIds = routingSourceFile.surfaces.map((surface) => surface.id);
+      const routeSourceFiles = [
+        acceptedSourceFile({
+          capabilityId: 'calendar_feed.routes',
+          extension: 'calendar_feed',
+          hex: '1',
+          kind: 'extension_metadata',
+          path: 'web/modules/custom/calendar_feed/calendar_feed.info.yml',
+          surfaceKind: 'whole_file',
+          surfaceName: 'calendar_feed.info.yml'
+        }),
+        routingSourceFile,
+        acceptedSourceFile({
+          capabilityId: 'calendar_feed.routes',
+          extension: 'calendar_feed',
+          hex: '3',
+          path: 'web/modules/custom/calendar_feed/src/Controller/CalendarController.php',
+          surfaceName: 'CalendarController'
+        })
+      ];
       mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
         for (const route of routeDefinitions) {
           routeMatrix.targetRequiredRoutes.push({
@@ -1801,7 +2648,10 @@ test('live custom-route review handles custom access, anonymous roles, and param
             type: 'module',
             path: 'web/modules/custom/calendar_feed',
             purpose: 'Expose calendar capability routes.',
-            drupalNativeAlternativesReviewed: 'No maintained owner matched the route contract.',
+            solutionLadders: [acceptedSolutionLadder(
+              'Expose access-controlled calendar capability routes.',
+              'calendar_feed.routes'
+            )],
             phpFileCount: 1,
             qualityChecks: [
               {
@@ -1815,10 +2665,14 @@ test('live custom-route review handles custom access, anonymous roles, and param
             ],
             accepted: true
           }],
+          sourceFiles: routeSourceFiles,
           routes: routeDefinitions.map((route) => ({
             name: route.name,
             path: route.path,
             extension: 'calendar_feed',
+            capabilityId: 'calendar_feed.routes',
+            sourceFile: 'web/modules/custom/calendar_feed/calendar_feed.routing.yml',
+            sourceSurfaceIds: [routingSourceFile.surfaces.find((surface) => surface.name === route.name).id],
             controller,
             requirements: route.requirements,
             routeParameters: route.routeParameters,
@@ -1839,7 +2693,12 @@ test('live custom-route review handles custom access, anonymous roles, and param
             offRoadDisposition: 'OR-001 accepted capability route.',
             accepted: true
           })),
-          controllers: ['web/modules/custom/calendar_feed/src/Controller/CalendarController.php'],
+          controllers: [{
+            path: 'web/modules/custom/calendar_feed/src/Controller/CalendarController.php',
+            extension: 'calendar_feed',
+            capabilityId: 'calendar_feed.routes',
+            sourceSurfaceIds: [routeSourceFiles[2].surfaces[0].id]
+          }],
           tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php'],
           completed: true
         };
@@ -1869,7 +2728,10 @@ test('live custom-route review handles custom access, anonymous roles, and param
       const runtime = injectedDrupalRuntime(baseUrl, {
         customCodeInventory: {
           completed: true,
-          controllers: ['web/modules/custom/calendar_feed/src/Controller/CalendarController.php'],
+          controllers: [{
+            path: 'web/modules/custom/calendar_feed/src/Controller/CalendarController.php',
+            extension: 'calendar_feed'
+          }],
           errors: [],
           extensions: [{
             machineName: 'calendar_feed',
@@ -1901,6 +2763,7 @@ test('live custom-route review handles custom access, anonymous roles, and param
             anonymousAccess: route.anonymousAccessDisposition,
             representativePath: route.representativePath
           })),
+          sourceFiles: routeSourceFiles.map(({ capabilityBindings, reviewed, ...sourceFile }) => sourceFile),
           tests: ['web/modules/custom/calendar_feed/tests/src/Functional/CalendarFeedTest.php']
         }
       });
@@ -1914,6 +2777,34 @@ test('live custom-route review handles custom access, anonymous roles, and param
       });
       assert.equal(passingReport.liveTargetValid, true, passingReport.errors.join('\n'));
       assert.equal(passingReport.drupalRuntime.implementationQualityValid, true);
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.routes[0].sourceSurfaceIds = [
+          routingSourceFile.surfaces[1].id
+        ];
+      });
+      const wrongRouteSurface = await validatePacket({ packetDir });
+      assert.match(
+        wrongRouteSurface.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /custom modules, themes, live source files\/surfaces, routes, controllers, tests/
+      );
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.routes[0].sourceSurfaceIds = [
+          routingSourceFile.surfaces[0].id
+        ];
+      });
+
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.routes[0].capabilityId = 'calendar_feed.unknown';
+      });
+      const wrongRouteCapability = await validatePacket({ packetDir });
+      assert.match(
+        wrongRouteCapability.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /custom modules, themes, live source files\/surfaces, routes, controllers, tests/
+      );
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.implementationQuality.customCodeInventory.routes[0].capabilityId = 'calendar_feed.routes';
+      });
 
       runtime.customCodeInventory.extensions[0].qualityChecks[1] = {
         kind: 'static_analysis',
@@ -2285,6 +3176,7 @@ const outputs = new Map([
   ['status --field=root', 'web'],
   ['config:get system.site --field=uuid', '${testSiteUuid}'],
   ['config:get system.site page.front --format=string', '/'],
+  ['config:get system.theme default --format=string', 'fixture_theme'],
   ['status --field=config-sync', '../config/sync'],
   ['config:status --format=json', process.env.FAKE_DDEV_CONFIG_DIRTY === '1' ? '{"changed":true}' : '[]']
 ]);

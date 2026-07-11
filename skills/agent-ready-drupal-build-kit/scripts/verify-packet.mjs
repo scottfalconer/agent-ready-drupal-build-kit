@@ -285,6 +285,100 @@ function exactIdentityMatch(left, right) {
   return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
+function solutionStageInvalid(stage, candidateKey, candidateInvalid) {
+  const rawCandidates = arrayOrEmpty(stage?.[candidateKey]);
+  const candidates = substantiveObjects(rawCandidates);
+  return stage?.reviewed !== true ||
+    typeof stage?.noCandidateFound !== 'boolean' ||
+    rawCandidates.length !== candidates.length ||
+    stage.noCandidateFound !== (candidates.length === 0) ||
+    candidates.some(candidateInvalid) ||
+    !String(stage?.conclusion ?? '').trim() ||
+    !String(stage?.evidence ?? '').trim();
+}
+
+function customSolutionLadderInvalid(ladder) {
+  const rawAcceptanceCriteria = arrayOrEmpty(ladder?.acceptanceCriteria);
+  const acceptanceCriteria = substantiveObjects(rawAcceptanceCriteria);
+  const acceptanceCriterionIds = acceptanceCriteria.map((criterion) => criterion?.id);
+  const knownAcceptanceCriterionIds = new Set(acceptanceCriterionIds);
+  const candidateCriteriaInvalid = (candidate) => {
+    const rawUnmetCriteria = arrayOrEmpty(candidate?.unmetCriteria);
+    const unmetCriteria = rawUnmetCriteria.map((criterionId) => String(criterionId).trim()).filter(Boolean);
+    return rawUnmetCriteria.length !== unmetCriteria.length ||
+      new Set(unmetCriteria).size !== unmetCriteria.length ||
+      unmetCriteria.some((criterionId) => !knownAcceptanceCriterionIds.has(criterionId)) ||
+      (candidate?.fit === 'partial' && unmetCriteria.length === 0);
+  };
+  const candidateInvalid = (candidate) =>
+    !String(candidate?.name ?? '').trim() ||
+    !['partial', 'rejected'].includes(candidate?.fit) ||
+    !String(candidate?.reason ?? '').trim() ||
+    !String(candidate?.evidence ?? '').trim() ||
+    candidateCriteriaInvalid(candidate);
+  const coreInvalid = solutionStageInvalid(ladder?.core, 'candidates', candidateInvalid);
+  const installedInvalid = solutionStageInvalid(
+    ladder?.installedDrupalCms,
+    'capabilities',
+    (candidate) => candidateInvalid(candidate) ||
+      !['module', 'submodule', 'recipe', 'config', 'service', 'theme', 'component'].includes(candidate?.type) ||
+      typeof candidate?.enabled !== 'boolean'
+  ) || ladder?.installedDrupalCms?.disabledCapabilitiesChecked !== true;
+  const recipesInvalid = solutionStageInvalid(
+    ladder?.currentRecipes,
+    'candidates',
+    (candidate) =>
+      !String(candidate?.package ?? '').trim() ||
+      !String(candidate?.version ?? '').trim() ||
+      !String(candidate?.drupalCompatibility ?? '').trim() ||
+      !['supported', 'unknown', 'unsupported', 'obsolete'].includes(candidate?.supportStatus) ||
+      typeof candidate?.securityAdvisoryCoverage !== 'boolean' ||
+      !['partial', 'rejected'].includes(candidate?.fit) ||
+      !String(candidate?.reason ?? '').trim() ||
+      !String(candidate?.maintenanceEvidence ?? '').trim() ||
+      !String(candidate?.evidence ?? '').trim() ||
+      candidateCriteriaInvalid(candidate)
+  ) || !timestampIsFresh(ladder?.currentRecipes?.checkedAt);
+  const contribInvalid = solutionStageInvalid(
+    ladder?.maintainedContrib,
+    'candidates',
+    (candidate) =>
+      !String(candidate?.project ?? '').trim() ||
+      !String(candidate?.version ?? '').trim() ||
+      !String(candidate?.drupalCompatibility ?? '').trim() ||
+      !['maintained', 'unknown', 'unmaintained'].includes(candidate?.maintenanceStatus) ||
+      typeof candidate?.securityAdvisoryCoverage !== 'boolean' ||
+      !['partial', 'rejected'].includes(candidate?.fit) ||
+      !String(candidate?.reason ?? '').trim() ||
+      !String(candidate?.maintenanceEvidence ?? '').trim() ||
+      !String(candidate?.adoptionEvidence ?? '').trim() ||
+      !String(candidate?.evidence ?? '').trim() ||
+      candidateCriteriaInvalid(candidate)
+  ) || !timestampIsFresh(ladder?.maintainedContrib?.checkedAt);
+  const decision = ladder?.customDecision ?? {};
+  const decisionInvalid = !String(decision.whyCustomRemains ?? '').trim() ||
+    !String(decision.narrowestScope ?? '').trim() ||
+    !String(decision.revisitTrigger ?? '').trim() ||
+    !String(decision.acceptedBy ?? '').trim() ||
+    !timestampIsFresh(decision.acceptedAt) ||
+    !String(decision.evidence ?? '').trim() ||
+    decision.accepted !== true;
+  return !/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/.test(String(ladder?.capabilityId ?? '')) ||
+    !String(ladder?.need ?? '').trim() ||
+    acceptanceCriteria.length === 0 ||
+    acceptanceCriteria.length !== rawAcceptanceCriteria.length ||
+    acceptanceCriteria.some((criterion) =>
+      !/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/.test(String(criterion?.id ?? '')) ||
+      !String(criterion?.criterion ?? '').trim()
+    ) ||
+    new Set(acceptanceCriterionIds).size !== acceptanceCriterionIds.length ||
+    coreInvalid ||
+    installedInvalid ||
+    recipesInvalid ||
+    contribInvalid ||
+    decisionInvalid;
+}
+
 function canvasTargetKey(entityType, bundle, viewMode) {
   const parts = [entityType, bundle, viewMode].map((value) => String(value ?? '').trim().toLowerCase());
   return parts.every(Boolean) ? parts.join('.') : '';
@@ -827,6 +921,160 @@ function editorWorkflowMatchesBundle(check, bundle) {
   return exactIdentityMatch(check?.bundle, bundleName) && exactIdentityMatch(check?.entityType, entityType);
 }
 
+export function canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }) {
+  const reasons = [];
+  const activeTheme = String(drupalReadback?.drupal?.defaultTheme ?? '').trim();
+  const canvasContractRequired = (
+    /canvas|experience_builder/.test(String(patternMap?.buildTypeDeclaration?.type ?? '')) &&
+    !/canvas_unused/.test(String(patternMap?.buildTypeDeclaration?.type ?? ''))
+  ) || arrayOrEmpty(patternMap?.pageCompositionOwnership).some((owner) =>
+    owner?.accepted === true && /canvas|experience_builder/.test(String(owner?.selectedOwner ?? ''))
+  );
+  const canvasModels = substantiveObjects(patternMap?.compositionModel?.canvasComponentModel)
+    .filter((model) =>
+      model?.accepted === true &&
+      model?.canvasOwnerDeclared === true &&
+      normalizeRouteKey(model?.publicRoute)
+    );
+  const authoringChecks = substantiveObjects(browserEvidence?.canvasAuthoringChecks);
+  const publicRouteChecks = substantiveObjects(browserEvidence?.publicRouteChecks);
+  if (canvasContractRequired && canvasModels.length === 0) {
+    reasons.push('browser-evidence.json cannot prove Canvas/component provider assets because no accepted public Canvas component model is declared.');
+  }
+
+  for (const model of canvasModels) {
+    const publicRoute = normalizeRouteKey(model.publicRoute);
+    const declaredComponents = arrayOrEmpty(model.componentList)
+      .map((componentId) => String(componentId).trim())
+      .filter(Boolean);
+    const authoringCheck = authoringChecks.find((check) =>
+      normalizeRouteKey(check?.publicRoute) === publicRoute
+    );
+    const viewportNames = new Set(
+      publicRouteChecks
+        .filter((check) =>
+          check?.accepted === true &&
+          normalizeRouteKey(httpUrl(check?.targetFinalUrl || check?.targetUrl)?.pathname) === publicRoute
+        )
+        .map((check) => String(check?.viewport?.name ?? '').trim())
+    );
+    let invalid =
+      !activeTheme ||
+      declaredComponents.length === 0 ||
+      new Set(declaredComponents).size !== declaredComponents.length ||
+      !authoringCheck ||
+      authoringCheck?.status !== 'pass' ||
+      authoringCheck?.accepted !== true ||
+      authoringCheck?.canvasOwnsPublicRoute !== true ||
+      String(authoringCheck?.activePublicTheme ?? '').trim() !== activeTheme ||
+      !viewportNames.has('desktop') ||
+      !viewportNames.has('mobile');
+
+    const providers = substantiveObjects(authoringCheck?.providerAssetChecks);
+    const coveredComponents = [];
+    if (providers.length === 0) {
+      invalid = true;
+    }
+    for (const provider of providers) {
+      const componentIds = arrayOrEmpty(provider?.componentIds)
+        .map((componentId) => String(componentId).trim())
+        .filter(Boolean);
+      coveredComponents.push(...componentIds);
+      const requiredLibraries = substantiveObjects(provider?.requiredLibraries);
+      const loadedAssets = substantiveObjects(provider?.loadedAssets);
+      const effectivenessChecks = substantiveObjects(provider?.effectivenessChecks);
+      const requiredNames = requiredLibraries.map((library) => String(library?.name ?? '').trim());
+      const noLibrariesRationale = String(provider?.noLibrariesRequiredRationale ?? '').trim();
+      const noLibrariesRequired = requiredLibraries.length === 0;
+      if (
+        !String(provider?.provider ?? '').trim() ||
+        componentIds.length === 0 ||
+        new Set(componentIds).size !== componentIds.length ||
+        provider?.assetContractReviewed !== true ||
+        provider?.status !== 'pass' ||
+        provider?.accepted !== true ||
+        arrayOrEmpty(provider?.blockers).length > 0 ||
+        noLibrariesRequired !== Boolean(noLibrariesRationale) ||
+        new Set(requiredNames).size !== requiredNames.length
+      ) {
+        invalid = true;
+      }
+      for (const library of requiredLibraries) {
+        const assetTypes = arrayOrEmpty(library?.assetTypes)
+          .map((type) => String(type).trim())
+          .filter(Boolean);
+        if (
+          !String(library?.name ?? '').trim() ||
+          assetTypes.length === 0 ||
+          new Set(assetTypes).size !== assetTypes.length ||
+          assetTypes.some((type) => !['css', 'js'].includes(type)) ||
+          !['loaded_directly', 'equivalent_assets'].includes(library?.disposition) ||
+          !String(library?.contractEvidence ?? '').trim() ||
+          (library?.disposition === 'equivalent_assets' && !String(library?.equivalenceEvidence ?? '').trim())
+        ) {
+          invalid = true;
+        }
+        for (const assetType of assetTypes) {
+          if (!loadedAssets.some((asset) =>
+            asset?.type === assetType && arrayOrEmpty(asset?.satisfiesLibraries).includes(library.name)
+          )) {
+            invalid = true;
+          }
+        }
+      }
+      for (const asset of loadedAssets) {
+        const satisfiesLibraries = arrayOrEmpty(asset?.satisfiesLibraries)
+          .map((libraryName) => String(libraryName).trim())
+          .filter(Boolean);
+        if (
+          !httpUrl(asset?.url) ||
+          !['css', 'js'].includes(asset?.type) ||
+          satisfiesLibraries.length === 0 ||
+          new Set(satisfiesLibraries).size !== satisfiesLibraries.length ||
+          satisfiesLibraries.some((libraryName) => !requiredNames.includes(libraryName)) ||
+          !['link_stylesheet', 'script_src'].includes(asset?.observedBy) ||
+          (asset?.type === 'css' && asset?.observedBy !== 'link_stylesheet') ||
+          (asset?.type === 'js' && asset?.observedBy !== 'script_src') ||
+          !String(asset?.mappingEvidence ?? '').trim()
+        ) {
+          invalid = true;
+        }
+      }
+      if (
+        effectivenessChecks.length === 0 ||
+        effectivenessChecks.some((check) =>
+          !['computed_style', 'interaction', 'visual_review'].includes(check?.method) ||
+          !String(check?.selector ?? '').trim() ||
+          !String(check?.expectation ?? '').trim() ||
+          !String(check?.observedResult ?? '').trim() ||
+          check?.status !== 'pass' ||
+          !/^evidence\/browser\/.+/.test(String(check?.evidence ?? '').trim())
+        ) ||
+        (requiredLibraries.some((library) => arrayOrEmpty(library?.assetTypes).includes('css')) &&
+          !effectivenessChecks.some((check) => check?.method === 'computed_style' && check?.status === 'pass')) ||
+        (requiredLibraries.some((library) => arrayOrEmpty(library?.assetTypes).includes('js')) &&
+          !effectivenessChecks.some((check) => check?.method === 'interaction' && check?.status === 'pass')) ||
+        (noLibrariesRequired &&
+          !effectivenessChecks.some((check) => check?.method === 'visual_review' && check?.status === 'pass'))
+      ) {
+        invalid = true;
+      }
+    }
+    if (
+      new Set(coveredComponents).size !== coveredComponents.length ||
+      coveredComponents.length !== declaredComponents.length ||
+      coveredComponents.some((componentId) => !declaredComponents.includes(componentId)) ||
+      declaredComponents.some((componentId) => !coveredComponents.includes(componentId))
+    ) {
+      invalid = true;
+    }
+    if (invalid) {
+      reasons.push(`browser-evidence.json must prove the Canvas/component provider asset contract, loaded CSS/JavaScript, active theme, and browser-observed effectiveness for ${publicRoute}.`);
+    }
+  }
+  return reasons;
+}
+
 async function independentStructuredGateReasons({
   browserEvidence,
   drupalReadback,
@@ -873,6 +1121,9 @@ async function independentStructuredGateReasons({
     owner?.accepted === true && /canvas|experience_builder/.test(String(owner?.selectedOwner ?? ''))
   );
   const canvasEvidenceRequired = canvasBuild || publicCanvasOwner;
+  if (canvasEvidenceRequired) {
+    reasons.push(...canvasProviderAssetGateReasons({ browserEvidence, drupalReadback, patternMap }));
+  }
   if (
     privilegedEditorIdentity(independentVerification?.target?.editorUser) ||
     privilegedEditorIdentity(independentVerification?.target?.editorRole)
@@ -2919,9 +3170,208 @@ async function packetCompletionReadiness(packetDir, gates, records) {
 
   const customInventory = implementationQuality.customCodeInventory ?? {};
   const customExtensions = substantiveObjects(customInventory.extensions);
+  const rawCustomSourceFiles = arrayOrEmpty(customInventory.sourceFiles);
+  const customSourceFiles = substantiveObjects(rawCustomSourceFiles);
   const customRoutes = substantiveObjects(customInventory.routes);
-  const customControllers = arrayOrEmpty(customInventory.controllers).map((path) => String(path).trim()).filter(Boolean);
+  const customControllers = substantiveObjects(customInventory.controllers);
   const customTests = arrayOrEmpty(customInventory.tests).map((path) => String(path).trim()).filter(Boolean);
+  const themeExtensions = customExtensions.filter((extension) => extension?.type === 'theme');
+  const themeOwnershipFindings = substantiveObjects(customInventory.themeOwnershipFindings);
+  const sourceFileIds = new Set();
+  const sourceFilePaths = new Set();
+  const invalidCustomSourceFile = customSourceFiles.some((sourceFile) => {
+    const duplicateId = sourceFileIds.has(sourceFile?.id);
+    const pathKey = `${sourceFile?.extension ?? ''}\u0000${sourceFile?.path ?? ''}`;
+    const duplicatePath = sourceFilePaths.has(pathKey);
+    sourceFileIds.add(sourceFile?.id);
+    sourceFilePaths.add(pathKey);
+    const extension = customExtensions.find((candidate) => candidate?.machineName === sourceFile?.extension);
+    const capabilityIds = new Set(
+      substantiveObjects(extension?.solutionLadders).map((ladder) => ladder?.capabilityId)
+    );
+    const rawSurfaces = arrayOrEmpty(sourceFile?.surfaces);
+    const surfaces = substantiveObjects(rawSurfaces);
+    const surfaceIds = surfaces.map((surface) => surface?.id);
+    const knownSurfaceIds = new Set(surfaceIds);
+    const rawBindings = arrayOrEmpty(sourceFile?.capabilityBindings);
+    const bindings = substantiveObjects(rawBindings);
+    const boundSurfaceCounts = new Map(surfaceIds.map((surfaceId) => [surfaceId, 0]));
+    const bindingInvalid = bindings.some((binding) => {
+      const rawBindingSurfaces = arrayOrEmpty(binding?.surfaceIds);
+      const bindingSurfaces = rawBindingSurfaces.map((surfaceId) => String(surfaceId).trim()).filter(Boolean);
+      for (const surfaceId of bindingSurfaces) {
+        boundSurfaceCounts.set(surfaceId, (boundSurfaceCounts.get(surfaceId) ?? 0) + 1);
+      }
+      return !capabilityIds.has(binding?.capabilityId) ||
+        bindingSurfaces.length === 0 ||
+        rawBindingSurfaces.length !== bindingSurfaces.length ||
+        new Set(bindingSurfaces).size !== bindingSurfaces.length ||
+        bindingSurfaces.some((surfaceId) => !knownSurfaceIds.has(surfaceId)) ||
+        !String(binding?.responsibility ?? '').trim();
+    });
+    return duplicateId ||
+      duplicatePath ||
+      !/^SOURCE-[a-f0-9]{16}$/.test(String(sourceFile?.id ?? '')) ||
+      !extension ||
+      !String(sourceFile?.path ?? '').trim() ||
+      !['extension_metadata', 'shipped_config', 'sdc_component', 'procedural_php', 'php_class', 'twig_template', 'javascript', 'stylesheet', 'drupal_registration'].includes(sourceFile?.kind) ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(sourceFile?.sha256 ?? '')) ||
+      rawSurfaces.length === 0 ||
+      rawSurfaces.length !== surfaces.length ||
+      new Set(surfaceIds).size !== surfaceIds.length ||
+      surfaces.some((surface) =>
+        !/^SURFACE-[a-f0-9]{16}$/.test(String(surface?.id ?? '')) ||
+        !String(surface?.kind ?? '').trim() ||
+        !String(surface?.name ?? '').trim() ||
+        !Number.isInteger(surface?.line) || surface.line <= 0
+      ) ||
+      rawBindings.length === 0 ||
+      rawBindings.length !== bindings.length ||
+      bindingInvalid ||
+      [...boundSurfaceCounts.values()].some((count) => count !== 1) ||
+      sourceFile?.reviewed !== true;
+  });
+  const sourceSurfaceBinding = (extension, path, capabilityId, rawSurfaceIds) => {
+    const sourceFile = customSourceFiles.find((candidate) =>
+      candidate?.extension === extension && candidate?.path === path
+    );
+    const sourceSurfaceIds = arrayOrEmpty(rawSurfaceIds)
+      .map((surfaceId) => String(surfaceId).trim())
+      .filter(Boolean);
+    const knownSurfaces = new Map(
+      substantiveObjects(sourceFile?.surfaces).map((surface) => [surface?.id, surface])
+    );
+    const capabilitySurfaceIds = new Set(
+      substantiveObjects(sourceFile?.capabilityBindings)
+        .filter((binding) => binding?.capabilityId === capabilityId)
+        .flatMap((binding) => arrayOrEmpty(binding?.surfaceIds))
+    );
+    return {
+      sourceFile,
+      sourceSurfaceIds,
+      surfaces: sourceSurfaceIds.map((surfaceId) => knownSurfaces.get(surfaceId)).filter(Boolean),
+      valid: Boolean(sourceFile) &&
+        sourceSurfaceIds.length > 0 &&
+        sourceSurfaceIds.length === arrayOrEmpty(rawSurfaceIds).length &&
+        new Set(sourceSurfaceIds).size === sourceSurfaceIds.length &&
+        sourceSurfaceIds.every((surfaceId) =>
+          knownSurfaces.has(surfaceId) && capabilitySurfaceIds.has(surfaceId)
+        )
+    };
+  };
+  const sourceCapabilitiesForExtension = (extension) => new Set(
+    customSourceFiles
+      .filter((sourceFile) => sourceFile?.extension === extension)
+      .flatMap((sourceFile) => substantiveObjects(sourceFile?.capabilityBindings))
+      .map((binding) => binding?.capabilityId)
+  );
+  const themeFindingIds = new Set();
+  const invalidThemeOwnershipFinding = themeOwnershipFindings.some((finding) => {
+    const duplicate = themeFindingIds.has(finding?.id);
+    themeFindingIds.add(finding?.id);
+    const disposition = finding?.disposition;
+    const owner = finding?.drupalOwner;
+    const extension = themeExtensions.find((candidate) => candidate?.machineName === finding?.extension);
+    const capabilityIds = new Set(
+      substantiveObjects(extension?.solutionLadders).map((ladder) => ladder?.capabilityId)
+    );
+    const sourceBinding = sourceSurfaceBinding(
+      finding?.extension,
+      finding?.file,
+      finding?.capabilityId,
+      finding?.sourceSurfaceIds
+    );
+    const nearestOwningSurface = substantiveObjects(sourceBinding.sourceFile?.surfaces)
+      .filter((surface) => Number.isInteger(surface?.line) && surface.line <= finding?.line)
+      .sort((left, right) => right.line - left.line)[0];
+    const ownerMatchesDisposition =
+      (disposition === 'replace_with_drupal_owner' && !['theme_exception', 'not_applicable'].includes(owner)) ||
+      (disposition === 'accepted_theme_exception' && owner === 'theme_exception') ||
+      (disposition === 'false_positive' && owner === 'not_applicable');
+    return duplicate ||
+      !/^THEME-[a-f0-9]{16}$/.test(String(finding?.id ?? '')) ||
+      !extension ||
+      !capabilityIds.has(finding?.capabilityId) ||
+      !sourceBinding.valid ||
+      (sourceBinding.sourceFile?.kind === 'procedural_php' &&
+        nearestOwningSurface && !sourceBinding.sourceSurfaceIds.includes(nearestOwningSurface.id)) ||
+      !['hardcoded_internal_path', 'theme_meta_injection', 'handwritten_search_form', 'global_views_template_override'].includes(finding?.kind) ||
+      !String(finding?.file ?? '').trim() ||
+      !Number.isInteger(finding?.line) || finding.line <= 0 ||
+      !Number.isInteger(finding?.column) || finding.column <= 0 ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(finding?.matchHash ?? '')) ||
+      !['replace_with_drupal_owner', 'accepted_theme_exception', 'false_positive'].includes(disposition) ||
+      !['menu', 'block', 'view', 'views_exposed_form', 'metatag', 'canvas_component', 'field', 'config', 'theme_exception', 'not_applicable'].includes(owner) ||
+      !ownerMatchesDisposition ||
+      !String(finding?.reason ?? '').trim() ||
+      !String(finding?.offRoadDisposition ?? '').trim() ||
+      !String(finding?.acceptedBy ?? '').trim() ||
+      !String(finding?.evidence ?? '').trim() ||
+      finding?.reviewed !== true;
+  });
+  const invalidSolutionExtensions = customExtensions.filter((extension) => {
+    const rawLadders = arrayOrEmpty(extension?.solutionLadders);
+    const ladders = substantiveObjects(rawLadders);
+    const capabilityIds = ladders.map((ladder) => ladder?.capabilityId);
+    return rawLadders.length === 0 ||
+      rawLadders.length !== ladders.length ||
+      new Set(capabilityIds).size !== capabilityIds.length ||
+      ladders.some(customSolutionLadderInvalid);
+  });
+  if (customInventory.applies === true && invalidSolutionExtensions.length > 0) {
+    reasons.push(
+      `drupal-readback.json custom extensions need one complete accepted solution ladder per stable capabilityId for exact need, Drupal core, installed Drupal CMS capabilities including disabled submodules, current Recipes, maintained contrib, and why custom remains: ${invalidSolutionExtensions.map((extension) => extension?.machineName || '(unnamed extension)').join(', ')}.`
+    );
+  }
+  const extensionsMissingSourceCoverage = customExtensions.filter((extension) =>
+    !customSourceFiles.some((sourceFile) => sourceFile?.extension === extension?.machineName)
+  );
+  const unreferencedCapabilityExtensions = customExtensions.filter((extension) => {
+    const referenced = sourceCapabilitiesForExtension(extension?.machineName);
+    return substantiveObjects(extension?.solutionLadders).some((ladder) => !referenced.has(ladder?.capabilityId));
+  });
+  if (
+    customInventory.applies === true && (
+      rawCustomSourceFiles.length !== customSourceFiles.length ||
+      invalidCustomSourceFile ||
+      extensionsMissingSourceCoverage.length > 0 ||
+      unreferencedCapabilityExtensions.length > 0
+    )
+  ) {
+    reasons.push('drupal-readback.json must bind every live custom source file and discovered surface exactly once to an owning extension capability; file hashes and source identities must be current, and every declared capability must own at least one visible source surface.');
+  }
+  if (
+    (themeExtensions.length > 0 && customInventory.themeOwnershipReviewCompleted !== true) ||
+    (themeExtensions.length === 0 && themeOwnershipFindings.length > 0) ||
+    invalidThemeOwnershipFinding
+  ) {
+    reasons.push('drupal-readback.json custom theme ownership findings must be completely inventoried and dispositioned to a Drupal owner, an accepted theme exception, or a reviewed false positive.');
+  }
+  const pendingThemeRemediations = themeOwnershipFindings.filter((finding) =>
+    finding?.disposition === 'replace_with_drupal_owner'
+  );
+  if (pendingThemeRemediations.length > 0) {
+    reasons.push(`Custom theme ownership findings marked replace_with_drupal_owner are pending remediation and block completion until the runtime scan no longer finds them: ${pendingThemeRemediations.map((finding) => finding?.id || '(unnamed finding)').join(', ')}.`);
+  }
+  const customControllerInvalid = (controller) => {
+    const extension = customExtensions.find((candidate) => candidate?.machineName === controller?.extension);
+    const capabilityIds = new Set(
+      substantiveObjects(extension?.solutionLadders).map((ladder) => ladder?.capabilityId)
+    );
+    const sourceBinding = sourceSurfaceBinding(
+      controller?.extension,
+      controller?.path,
+      controller?.capabilityId,
+      controller?.sourceSurfaceIds
+    );
+    return !String(controller?.path ?? '').trim() ||
+      !extension ||
+      !capabilityIds.has(controller?.capabilityId) ||
+      !sourceBinding.valid ||
+      !sourceBinding.surfaces.some((surface) =>
+        ['class', 'interface', 'trait', 'enum', 'whole_file'].includes(surface?.kind)
+      );
+  };
   const routeMatrixRecords = [
     ...arrayOrEmpty(routeMatrix?.routes),
     ...arrayOrEmpty(routeMatrix?.primaryRoutes),
@@ -2935,10 +3385,25 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       String(testException.acceptedBy ?? '').trim() &&
       String(testException.evidence ?? '').trim()
     );
+    const extension = customExtensions.find((candidate) => candidate?.machineName === route?.extension);
+    const capabilityIds = new Set(
+      substantiveObjects(extension?.solutionLadders).map((ladder) => ladder?.capabilityId)
+    );
+    const sourceBinding = sourceSurfaceBinding(
+      route?.extension,
+      route?.sourceFile,
+      route?.capabilityId,
+      route?.sourceSurfaceIds
+    );
     return (
       !String(route?.name ?? '').trim() ||
       !normalizeRouteKey(route?.path) ||
       !String(route?.extension ?? '').trim() ||
+      !capabilityIds.has(route?.capabilityId) ||
+      !String(route?.sourceFile ?? '').trim() ||
+      !sourceBinding.valid ||
+      (/\.routing\.ya?ml$/i.test(String(route?.sourceFile ?? '')) &&
+        !sourceBinding.surfaces.some((surface) => surface?.kind === 'registration' && surface?.name === route?.name)) ||
       !isJsonObject(route?.requirements) ||
       !isJsonObject(route?.routeParameters) ||
       !/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/i.test(String(route?.requestMethod ?? '').trim()) ||
@@ -2971,12 +3436,15 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     (customInventory.applies === false && (
       !String(customInventory.reason ?? '').trim() ||
       customExtensions.length > 0 ||
+      customSourceFiles.length > 0 ||
       customRoutes.length > 0 ||
       customControllers.length > 0 ||
-      customTests.length > 0
+      customTests.length > 0 ||
+      themeOwnershipFindings.length > 0
     )) ||
     (customInventory.applies === true && (
       customExtensions.length === 0 ||
+      customSourceFiles.length === 0 ||
       customExtensions.some((extension) => {
         const qualityChecks = substantiveObjects(extension?.qualityChecks);
         const checkHasDisposition = (kind) => qualityChecks.some((check) => {
@@ -2996,18 +3464,17 @@ async function packetCompletionReadiness(packetDir, gates, records) {
           !['module', 'theme'].includes(String(extension?.type ?? '').trim()) ||
           !String(extension?.path ?? '').trim() ||
           !String(extension?.purpose ?? '').trim() ||
-          !String(extension?.drupalNativeAlternativesReviewed ?? '').trim() ||
           !Number.isInteger(extension?.phpFileCount) ||
           extension.phpFileCount < 0 ||
           (extension.phpFileCount > 0 && (!checkHasDisposition('coding_standards') || !checkHasDisposition('static_analysis'))) ||
           extension?.accepted !== true;
       }) ||
       customRoutes.some(customRouteInvalid) ||
-      (customControllers.length > 0 && customRoutes.length === 0)
+      customControllers.some(customControllerInvalid)
     )) ||
     arrayOrEmpty(implementationQuality.blockers).length > 0
   ) {
-    reasons.push('drupal-readback.json must truthfully inventory custom modules, themes, routes, controllers, tests, and route-level access/cache/sanitization/DI review, or explicitly prove custom code is not applicable.');
+    reasons.push('drupal-readback.json must truthfully inventory custom modules, themes, live source files/surfaces, routes, controllers, tests, and route-level access/cache/sanitization/DI review, or explicitly prove custom code is not applicable.');
   }
 
   const aliasPolicies = substantiveObjects(drupalRouting.publicBundleAliasPolicies);
