@@ -266,6 +266,16 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
     configSyncDirectory: '../config/sync',
     configSyncTracked: true,
     frontPage: '/',
+    liveNextCycleCensus: {
+      schemaVersion: 'public-kit.live-next-cycle-census.1',
+      confirmed: true,
+      metadataOnly: true,
+      privateContentRead: false,
+      candidateCount: 0,
+      fields: [],
+      taxonomyDimensions: [],
+      workflows: []
+    },
     mode: 'test-injected',
     project: 'fixture',
     reason: '',
@@ -1577,6 +1587,18 @@ if (args[0] !== 'drush') {
   process.stderr.write('Unexpected fake DDEV command: ' + args.join(' ') + '\\n');
   process.exit(1);
 }
+if (args[1] === 'php:eval') {
+  process.stdout.write(JSON.stringify({
+    schemaVersion: 'public-kit.live-next-cycle-census.1',
+    metadataOnly: true,
+    privateContentRead: false,
+    candidateCount: 0,
+    fields: [],
+    taxonomyDimensions: [],
+    workflows: []
+  }) + '\\n');
+  process.exit(0);
+}
 const command = args.slice(1).join(' ');
 const outputs = new Map([
   ['status --field=bootstrap', 'Successful'],
@@ -2335,6 +2357,103 @@ test('live verification independently checks that the cleaned next-cycle probe U
       }
     );
   }
+});
+
+test('live model census rejects authored N/A with omitted temporal fields and accepts a confirmed empty live model', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'next-cycle-live-census-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const validNaReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(validNaReport.liveNextCycleReconciliation.censusTrusted, true);
+      assert.equal(validNaReport.liveNextCycleReconciliation.liveApplies, false);
+      assert.equal(validNaReport.liveTargetValid, true, validNaReport.errors.join('\n'));
+
+      const tremegaCandidates = [
+        {
+          key: 'node.happy_hour_event.field_event_date',
+          entityType: 'node',
+          bundle: 'happy_hour_event',
+          machineName: 'field_event_date',
+          fieldType: 'datetime',
+          required: true,
+          cardinality: 1,
+          optionCount: 0,
+          signalKinds: ['date', 'date_type'],
+          targetVocabularies: []
+        },
+        {
+          key: 'node.performer.field_festival_year',
+          entityType: 'node',
+          bundle: 'performer',
+          machineName: 'field_festival_year',
+          fieldType: 'entity_reference',
+          required: true,
+          cardinality: 1,
+          optionCount: 0,
+          signalKinds: ['taxonomy', 'year'],
+          targetVocabularies: ['festival_year']
+        },
+        {
+          key: 'node.performer.field_schedule_day',
+          entityType: 'node',
+          bundle: 'performer',
+          machineName: 'field_schedule_day',
+          fieldType: 'list_string',
+          required: false,
+          cardinality: 1,
+          optionCount: 2,
+          signalKinds: ['date', 'day', 'schedule'],
+          targetVocabularies: []
+        }
+      ];
+      const omittedLiveReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: true,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 4,
+            fields: tremegaCandidates,
+            taxonomyDimensions: [{
+              key: 'taxonomy.festival_year',
+              vocabulary: 'festival_year',
+              signalKinds: ['year']
+            }],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(omittedLiveReport.liveNextCycleReconciliation.liveApplies, true);
+      assert.equal(omittedLiveReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(omittedLiveReport.nextCycleCleanupCheck.applicable, true);
+      assert.equal(omittedLiveReport.nextCycleCleanupCheck.passed, false);
+      assert.equal(omittedLiveReport.liveTargetValid, false);
+      assert.match(
+        omittedLiveReport.errors.join('\n'),
+        /cannot use N\/A.*field_event_date.*field_festival_year.*field_schedule_day/i
+      );
+    }
+  );
 });
 
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {
