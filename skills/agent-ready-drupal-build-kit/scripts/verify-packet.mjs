@@ -288,6 +288,14 @@ function compositionOwnersMatch(declared, actual) {
   return exactIdentityMatch(declared, actual);
 }
 
+// Content-addressed hex hashes and UUIDs in a public alias mean the importer, not
+// the title, named the route (for example /documents/source-4f1d9e2ab7c30586).
+function machineGeneratedAliasValue(value) {
+  return /(?:^|[/_-])(?:[0-9a-f]{12,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=$|[/._-])/i.test(
+    String(value ?? '').trim()
+  );
+}
+
 function authoredCompletionClaim(record) {
   return isJsonObject(record?.summary) && record.summary.completeLocalRebuildClaimAllowed === true;
 }
@@ -1200,6 +1208,44 @@ async function independentStructuredGateReasons({
       reasons.push(`browser-evidence.json needs a passing non-admin editor workflow mapped to node.${bundleName}.`);
     }
   }
+
+  const aliasPatternRecords = substantiveObjects(patternMap?.displayConfig?.pathautoPatterns)
+    .filter((record) => record?.accepted === true);
+  const manualAliasPolicyBundles = new Set(aliasPatternRecords.filter((record) =>
+    record.aliasSource === 'manual_alias_policy' &&
+    String(record.manualAliasPolicyOwner ?? '').trim() &&
+    String(record.manualAliasPolicyRationale ?? '').trim()
+  ).map((record) => identityKey(record.bundle)));
+  for (const bundleName of requiredNodeBundles) {
+    const aliasRecord = aliasPatternRecords.find((record) =>
+      exactIdentityMatch(record.entityType || 'node', 'node') && exactIdentityMatch(record.bundle, bundleName)
+    );
+    const declaredPattern = aliasRecord?.aliasSource === 'pathauto_pattern' &&
+      String(aliasRecord.pattern ?? '').trim() &&
+      String(aliasRecord.aliasPrefix ?? '').trim();
+    const manualPolicy = aliasRecord?.aliasSource === 'manual_alias_policy' &&
+      manualAliasPolicyBundles.has(identityKey(aliasRecord.bundle));
+    if (!aliasRecord || (!declaredPattern && !manualPolicy)) {
+      reasons.push(`pattern-map.json displayConfig.pathautoPatterns must cover node bundle ${bundleName} with an accepted Pathauto pattern and alias prefix, or a manual-alias policy naming an owner and rationale.`);
+    }
+  }
+  for (const record of aliasPatternRecords) {
+    if (machineGeneratedAliasValue(record.pattern) || machineGeneratedAliasValue(record.aliasPrefix)) {
+      reasons.push(`pattern-map.json declares a machine-generated alias pattern for bundle ${record.bundle || '(bundle)'}; public bundles need human-readable, title-derived aliases.`);
+    }
+  }
+  for (const entry of arrayOrEmpty(drupalReadback?.routing?.aliases)) {
+    const alias = String((isJsonObject(entry) ? entry.alias : entry) ?? '').trim();
+    const aliasBundle = isJsonObject(entry) ? String(entry.bundle ?? '').trim() : '';
+    if (
+      alias &&
+      machineGeneratedAliasValue(alias) &&
+      !(aliasBundle && manualAliasPolicyBundles.has(identityKey(aliasBundle)))
+    ) {
+      reasons.push(`drupal-readback.json alias ${alias} looks machine-generated; public content needs a human-readable, title-derived alias or an accepted manual-alias policy for its bundle.`);
+    }
+  }
+
   if (fieldBundles.length === 0 || fieldChecks.length === 0) {
     reasons.push('independent-verification.json must contain passing field-output falsification evidence.');
   }

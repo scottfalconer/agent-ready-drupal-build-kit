@@ -26,6 +26,7 @@ const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const MAX_RECOMMENDED_TITLE_LENGTH = 65;
 
 class UsageError extends Error {}
 
@@ -183,6 +184,23 @@ function renderedMetadata(html, finalUrl) {
     openGraphImage: absolute(openGraphImages[0]?.content),
     openGraphImageCount: openGraphImages.length
   };
+}
+
+// A rendered <title> segmented as "Page | Site | Site" means the importer stored the
+// source site's <title> suffix and the metatag pattern appended the site name again.
+function repeatedTitleSegment(title) {
+  const segments = normalizeText(title)
+    .split(/\s*\|\s*|\s+[–—-]\s+/)
+    .map((segment) => segment.trim().toLowerCase())
+    .filter((segment) => segment.length > 1);
+  const seen = new Set();
+  for (const segment of segments) {
+    if (seen.has(segment)) {
+      return segment;
+    }
+    seen.add(segment);
+  }
+  return '';
 }
 
 function normalizePath(value) {
@@ -824,9 +842,72 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
+function firstPathSegment(path) {
+  return normalizePath(path).split('/').filter(Boolean)[0] ?? '';
+}
+
+// Editor-created content must land in the same alias structure as the content already in
+// its bundle; a probe node with a root-level or /node/{id} route proves the alias
+// architecture is import-script-imposed rather than owned by Pathauto config.
+function probeAliasConsistencyErrors({ browserEvidence, drupalReadback, patternMap }) {
+  const errors = [];
+  const aliasRecords = (Array.isArray(patternMap?.displayConfig?.pathautoPatterns)
+    ? patternMap.displayConfig.pathautoPatterns
+    : []).filter((record) => record && typeof record === 'object' && record.accepted === true);
+  const bundleKey = (value) => normalizeText(value).toLowerCase();
+  const existingBundlePrefixes = new Map();
+  for (const entry of Array.isArray(drupalReadback?.routing?.aliases) ? drupalReadback.routing.aliases : []) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const bundle = bundleKey(entry.bundle);
+    const segment = firstPathSegment(entry.alias);
+    if (bundle && segment) {
+      const segments = existingBundlePrefixes.get(bundle) ?? new Set();
+      segments.add(segment);
+      existingBundlePrefixes.set(bundle, segments);
+    }
+  }
+  const createChecks = (Array.isArray(browserEvidence?.editorWorkflowChecks) ? browserEvidence.editorWorkflowChecks : [])
+    .filter((check) => check?.workflow === 'create' && bundleKey(check?.entityType) === 'node' && bundleKey(check?.bundle));
+  for (const check of createChecks) {
+    const bundle = normalizeText(check.bundle);
+    const record = aliasRecords.find((candidate) =>
+      bundleKey(candidate.entityType || 'node') === 'node' && bundleKey(candidate.bundle) === bundleKey(bundle)
+    );
+    if (!record) {
+      errors.push(`browser-evidence.json editor create workflow for node.${bundle} has no accepted pattern-map.json pathautoPatterns record to verify the generated alias against.`);
+      continue;
+    }
+    if (record.aliasSource === 'manual_alias_policy') {
+      continue;
+    }
+    const createdPath = normalizePath(check.createdContentPath);
+    if (!createdPath) {
+      errors.push(`browser-evidence.json editor create workflow for node.${bundle} must record createdContentPath so the probe alias can be checked against the bundle alias structure.`);
+      continue;
+    }
+    if (/^\/node\/\d+(?:\/|$)/.test(createdPath)) {
+      errors.push(`node.${bundle} editor probe landed on the raw route ${createdPath}; the declared Pathauto pattern did not generate an alias for editor-created content.`);
+      continue;
+    }
+    const prefix = normalizePath(record.aliasPrefix);
+    if (prefix && prefix !== '/' && createdPath !== prefix && !createdPath.startsWith(`${prefix}/`)) {
+      errors.push(`node.${bundle} editor probe alias ${createdPath} does not match the declared bundle alias prefix ${prefix}; editor-created and imported content must share one alias structure.`);
+      continue;
+    }
+    const existingSegments = existingBundlePrefixes.get(bundleKey(bundle));
+    if (existingSegments && !existingSegments.has(firstPathSegment(createdPath))) {
+      errors.push(`node.${bundle} editor probe alias ${createdPath} does not share the alias prefix structure of existing ${bundle} content (${[...existingSegments].map((segment) => `/${segment}`).join(', ')}).`);
+    }
+  }
+  return errors;
+}
+
 async function verifyRoute(baseUrl, expected) {
   const requestedUrl = new URL(expected.targetPath.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
+  const warnings = [];
   if (!expected.accepted) {
     errors.push(`${expected.targetPath} is not accepted in route-matrix.json.`);
   }
@@ -898,6 +979,13 @@ async function verifyRoute(baseUrl, expected) {
         `${expected.targetPath} title was ${JSON.stringify(actualTitle)}; expected ${JSON.stringify(expected.expectedTitle)}.`
       );
     }
+    const repeatedSegment = repeatedTitleSegment(actualTitle);
+    if (repeatedSegment) {
+      errors.push(`${expected.targetPath} rendered <title> ${JSON.stringify(actualTitle)} repeats the segment ${JSON.stringify(repeatedSegment)}; strip the source site's <title> suffix from stored SEO titles so the site name is not appended twice.`);
+    }
+    if (normalizeText(actualTitle).length > MAX_RECOMMENDED_TITLE_LENGTH) {
+      warnings.push(`${expected.targetPath} rendered <title> is ${normalizeText(actualTitle).length} characters; titles longer than ${MAX_RECOMMENDED_TITLE_LENGTH} characters are usually truncated in search results.`);
+    }
     if (expected.renderedSeo) {
       const seo = expected.renderedSeo;
       if (actualMetadata.canonicalCount !== 1 || !actualMetadata.canonicalUrl) {
@@ -942,11 +1030,12 @@ async function verifyRoute(baseUrl, expected) {
       localTlsVerificationBypassed: response.localTlsVerificationBypassed,
       passed: errors.length === 0,
       redirects: response.redirects,
-      requestedUrl: requestedUrl.href
+      requestedUrl: requestedUrl.href,
+      warnings
     };
   } catch (error) {
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
-    return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href };
+    return { ...expected, errors, passed: false, requestedUrl: requestedUrl.href, warnings };
   }
 }
 
@@ -1006,6 +1095,7 @@ export async function verifyLive({
     // Packet validation already records malformed or missing required JSON.
   }
   const liveErrors = routeMatrixError ? [routeMatrixError] : [];
+  const liveWarnings = [];
   const declaredSource = String(routeMatrix.sourceBaseUrl ?? '').trim();
   const declaredTarget = String(routeMatrix.targetBaseUrl ?? '').trim();
   if (!declaredSource) {
@@ -1081,6 +1171,7 @@ export async function verifyLive({
     : [];
   for (const route of routeChecks) {
     liveErrors.push(...route.errors);
+    liveWarnings.push(...(route.warnings ?? []));
   }
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
@@ -1090,6 +1181,7 @@ export async function verifyLive({
     : [];
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
+    liveWarnings.push(...(route.warnings ?? []));
   }
 
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
@@ -1116,6 +1208,9 @@ export async function verifyLive({
     } catch (error) {
       liveErrors.push(error.message);
     }
+  }
+  if (target && (packetSupportsCompletion || packetClaimsQualifyingReview)) {
+    liveErrors.push(...probeAliasConsistencyErrors({ browserEvidence, drupalReadback, patternMap }));
   }
 
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
@@ -1276,7 +1371,10 @@ export async function verifyLive({
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
-    warnings: sharedPacketReport.warnings
+    warnings: [
+      ...sharedPacketReport.warnings,
+      ...liveWarnings.map((warning) => sharedMessage(warning, absolutePacketDir))
+    ]
   };
 }
 
@@ -1299,6 +1397,9 @@ async function main() {
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
 
+  for (const warning of report.warnings ?? []) {
+    process.stderr.write(`warning: ${warning}\n`);
+  }
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
     for (const error of report.errors) {

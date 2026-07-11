@@ -811,6 +811,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     canonicalDecisions: [{ route: '/', decision: 'self canonical', accepted: true }],
     blockedEvidence: []
   };
+  patternMap.displayConfig.pathautoPatterns = [
+    {
+      entityType: 'node',
+      bundle: 'page',
+      aliasSource: 'pathauto_pattern',
+      pattern: '/[node:title]',
+      aliasPrefix: '/',
+      manualAliasPolicyOwner: '',
+      manualAliasPolicyRationale: '',
+      accepted: true,
+      notes: 'The fixture front page is the bundle alias root.'
+    }
+  ];
   patternMap.reviewStatus = 'reviewed';
   writeJson(patternMapPath, patternMap);
 
@@ -949,6 +962,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       resultScreenshot: 'evidence/blind-adversarial-review/target-mobile.png',
       fieldsAndWidgetsVerified: ['title', 'body'],
       publicOutputAffected: '/',
+      createdContentPath: '/',
       visualOrBehaviorResult: 'Public output changed.',
       status: 'pass',
       acceptedExceptions: [],
@@ -1539,6 +1553,252 @@ test('completion fails closed when structured gate evidence or applicability dis
     assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
     assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
   }
+});
+
+test('per-bundle alias coverage and alias quality fail closed in packet completion readiness', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'alias-coverage-regressions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'missing-bundle-coverage',
+      file: 'pattern-map.json',
+      expected: /pathautoPatterns must cover node bundle page/i,
+      mutate: (value) => { value.displayConfig.pathautoPatterns = []; }
+    },
+    {
+      name: 'manual-policy-without-owner',
+      file: 'pattern-map.json',
+      expected: /pathautoPatterns must cover node bundle page/i,
+      mutate: (value) => {
+        value.displayConfig.pathautoPatterns[0].aliasSource = 'manual_alias_policy';
+        value.displayConfig.pathautoPatterns[0].manualAliasPolicyOwner = '';
+        value.displayConfig.pathautoPatterns[0].manualAliasPolicyRationale = 'Hand-managed aliases.';
+      }
+    },
+    {
+      name: 'machine-generated-declared-pattern',
+      file: 'pattern-map.json',
+      expected: /machine-generated alias pattern for bundle page/i,
+      mutate: (value) => {
+        value.displayConfig.pathautoPatterns[0].pattern = '/documents/source-4f1d9e2ab7c30586';
+        value.displayConfig.pathautoPatterns[0].aliasPrefix = '/documents';
+      }
+    },
+    {
+      name: 'machine-generated-readback-alias',
+      file: 'drupal-readback.json',
+      expected: /alias \/documents\/source-4f1d9e2ab7c30586 looks machine-generated/i,
+      mutate: (value) => {
+        value.routing.aliases = [{ path: '/node/9', alias: '/documents/source-4f1d9e2ab7c30586', bundle: 'document' }];
+      }
+    }
+  ];
+
+  for (const { name, file, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, file), mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const policyPacket = join(temp, 'manual-policy-covered');
+  cpSync(canonicalPacket, policyPacket, { recursive: true });
+  mutateJson(join(policyPacket, 'drupal-readback.json'), (value) => {
+    value.routing.aliases = [{ path: '/node/9', alias: '/documents/source-4f1d9e2ab7c30586', bundle: 'document' }];
+  });
+  mutateJson(join(policyPacket, 'pattern-map.json'), (value) => {
+    value.displayConfig.pathautoPatterns.push({
+      entityType: 'node',
+      bundle: 'document',
+      aliasSource: 'manual_alias_policy',
+      pattern: '',
+      aliasPrefix: '',
+      manualAliasPolicyOwner: 'Named Maintainer',
+      manualAliasPolicyRationale: 'Imported archive documents keep their source slugs until the archive is renamed.',
+      accepted: true,
+      notes: ''
+    });
+  });
+  const policyReport = await validatePacket({ packetDir: policyPacket });
+  assert.doesNotMatch(
+    policyReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /looks machine-generated/i,
+    'an accepted manual-alias policy for the attributed bundle must cover its recorded aliases'
+  );
+  assert.equal(
+    policyReport.completionEvidence.packetSupportsCompletion,
+    true,
+    policyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('editor probe aliases must land in the declared bundle alias structure', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'probe-alias-regressions-'));
+      const canonicalPacket = join(temp, 'canonical');
+      copyTemplatePacket(canonicalPacket);
+      writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(canonicalPacket, baseUrl);
+
+      const cases = [
+        {
+          name: 'raw-node-route-fallback',
+          expected: /node\.page editor probe landed on the raw route \/node\/42/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].createdContentPath = '/node/42';
+            });
+          }
+        },
+        {
+          name: 'missing-created-content-path',
+          expected: /node\.page must record createdContentPath/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].createdContentPath = '';
+            });
+          }
+        },
+        {
+          name: 'declared-prefix-mismatch',
+          expected: /probe alias \/qa-test-news does not match the declared bundle alias prefix \/news/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+              patternMap.displayConfig.pathautoPatterns[0].pattern = '/news/[node:title]';
+              patternMap.displayConfig.pathautoPatterns[0].aliasPrefix = '/news';
+            });
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].createdContentPath = '/qa-test-news';
+            });
+          }
+        },
+        {
+          name: 'existing-bundle-structure-mismatch',
+          expected: /probe alias \/qa-test-page does not share the alias prefix structure of existing page content \(\/about\)/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+              readback.routing.aliases = [{ path: '/node/5', alias: '/about/our-team', bundle: 'page' }];
+            });
+            mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+              browser.editorWorkflowChecks[0].createdContentPath = '/qa-test-page';
+            });
+          }
+        },
+        {
+          name: 'no-alias-record-for-probed-bundle',
+          expected: /node\.page has no accepted pattern-map\.json pathautoPatterns record/i,
+          mutate: (packetDir) => {
+            mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+              patternMap.displayConfig.pathautoPatterns = [];
+            });
+          }
+        }
+      ];
+
+      for (const { name, expected, mutate } of cases) {
+        const packetDir = join(temp, name);
+        cpSync(canonicalPacket, packetDir, { recursive: true });
+        mutate(packetDir);
+        const report = await verifyLive({
+          packetDir,
+          targetUrl: baseUrl,
+          cwd: repoRoot,
+          environment: {},
+          drupalRuntime: injectedDrupalRuntime(baseUrl)
+        });
+        assert.equal(report.valid, false, name);
+        assert.equal(report.liveTargetValid, false, name);
+        assert.match(report.errors.join('\n'), expected, name);
+      }
+
+      const policyPacket = join(temp, 'manual-policy-probe');
+      cpSync(canonicalPacket, policyPacket, { recursive: true });
+      mutateJson(join(policyPacket, 'pattern-map.json'), (patternMap) => {
+        patternMap.displayConfig.pathautoPatterns[0].aliasSource = 'manual_alias_policy';
+        patternMap.displayConfig.pathautoPatterns[0].pattern = '';
+        patternMap.displayConfig.pathautoPatterns[0].aliasPrefix = '';
+        patternMap.displayConfig.pathautoPatterns[0].manualAliasPolicyOwner = 'Named Maintainer';
+        patternMap.displayConfig.pathautoPatterns[0].manualAliasPolicyRationale =
+          'Editors assign curated aliases by hand for this bundle.';
+      });
+      mutateJson(join(policyPacket, 'browser-evidence.json'), (browser) => {
+        browser.editorWorkflowChecks[0].createdContentPath = '/hand-picked-alias';
+      });
+      const policyReport = await verifyLive({
+        packetDir: policyPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(policyReport.valid, true, policyReport.errors.join('\n'));
+    }
+  );
+});
+
+test('rendered title double-branding hard-fails while long titles only warn', async () => {
+  let scenario = { title: 'Target site' };
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>${scenario.title}</title></head><body><h1>Target home</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const doubledTitle = 'Welcome | Example Town | Example Town';
+      scenario = { title: doubledTitle };
+      const doubledTemp = mkdtempSync(join(tmpdir(), 'live-title-doubled-'));
+      const doubledPacket = join(doubledTemp, 'review-packet');
+      copyTemplatePacket(doubledPacket);
+      const doubledMatrix = liveRouteMatrix(baseUrl);
+      doubledMatrix.homepageParity.targetTitle = doubledTitle;
+      doubledMatrix.routes[0].targetTitle = doubledTitle;
+      writeJson(join(doubledPacket, 'route-matrix.json'), doubledMatrix);
+
+      const doubledReport = await verifyLive({
+        packetDir: doubledPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(doubledReport.valid, false, 'a packet claiming the doubled title as expected must still fail');
+      assert.equal(doubledReport.routeChecks[0].passed, false);
+      assert.match(doubledReport.errors.join('\n'), /repeats the segment "example town"/i);
+
+      const longTitle = 'Comprehensive guide to municipal permit applications and zoning reviews';
+      assert.ok(longTitle.length > 65, 'fixture title must exceed the recommended length');
+      scenario = { title: longTitle };
+      const longTemp = mkdtempSync(join(tmpdir(), 'live-title-long-'));
+      const longPacket = join(longTemp, 'review-packet');
+      copyTemplatePacket(longPacket);
+      const longMatrix = liveRouteMatrix(baseUrl);
+      longMatrix.homepageParity.targetTitle = longTitle;
+      longMatrix.routes[0].targetTitle = longTitle;
+      writeJson(join(longPacket, 'route-matrix.json'), longMatrix);
+
+      const longReport = await verifyLive({
+        packetDir: longPacket,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(longReport.valid, true, longReport.errors.join('\n'));
+      assert.equal(longReport.routeChecks[0].passed, true, longReport.routeChecks[0].errors.join('\n'));
+      assert.match(longReport.warnings.join('\n'), /longer than 65 characters are usually truncated/i);
+    }
+  );
 });
 
 test('conditionally applicable hard gates fail closed when their verifier evidence is missing or blocked', async () => {

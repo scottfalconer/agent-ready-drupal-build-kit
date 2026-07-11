@@ -207,7 +207,19 @@
   "displayConfig": {
     "formDisplays": [],
     "viewDisplays": [],
-    "pathautoPatterns": [],
+    "pathautoPatterns": [
+      {
+        "entityType": "node | taxonomy_term | media | other",
+        "bundle": "",
+        "aliasSource": "pathauto_pattern | manual_alias_policy",
+        "pattern": "",
+        "aliasPrefix": "",
+        "manualAliasPolicyOwner": "",
+        "manualAliasPolicyRationale": "",
+        "accepted": false,
+        "notes": ""
+      }
+    ],
     "imageStyles": []
   },
   "architectureGuards": {

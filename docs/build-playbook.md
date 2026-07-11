@@ -504,20 +504,17 @@ Check public visitor behavior separately from CMS readback.
 
 ## Path Aliases and Pathauto
 
-Pathauto can generate useful aliases, but it can also overwrite or diverge from preserved source paths.
+Alias architecture must be config-owned, not import-script-imposed. Every public bundle needs a record in `pattern-map.json` `displayConfig.pathautoPatterns`: either an accepted Pathauto pattern with its alias prefix (for example `/news/[node:title]` with prefix `/news`), or a manual-alias policy naming an owner and rationale. The packet verifier fails completion for any used bundle with neither.
 
-For each important route, decide:
+Editor-created content must land in the same alias structure as content already in its bundle. The live verifier compares each editor create-probe's recorded `createdContentPath` against the bundle's declared alias prefix and existing aliases, and fails on a prefix mismatch or a raw `/node/{id}` fallback — an import script that writes aliases directly while Pathauto covers only starter bundles produces exactly that drift.
 
-- preserve source alias;
-- generate new Drupal alias;
-- redirect old source route;
-- retire route.
+Public bundles get human-readable, title-derived aliases. Machine-generated slugs such as `/documents/source-4f1d9e2ab7c30586` fail verification unless the bundle's accepted manual-alias policy covers them.
 
-Run a route/alias smoke check for every representative top-level source route and listing route. For condition/product/advice sites, this usually includes routes like `/`, condition hubs, product listings, advice listings, product details, article details, where-to-buy, search, contact, legal, privacy, and cookie pages when present. Record intended canonicalization, including trailing-slash behavior and Pathauto-generated alternates.
-
-Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
+For each important route, decide: preserve the source alias, generate a new Drupal alias, redirect the old source route, or retire the route. Run a route/alias smoke check for every representative top-level source route and listing route, and record intended canonicalization, including trailing-slash behavior and Pathauto-generated alternates.
 
 Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/seasonal-range`, either preserve, redirect, or explicitly retire the source-style route.
+
+SEO-title import hygiene: strip the source site's `<title>` suffix before storing SEO title fields — the metatag pattern appends the site name again, and the live verifier hard-fails any route whose rendered `<title>` repeats a site-name segment. Titles longer than ~65 characters draw a warning only. Bundles whose pages render as little more than a title plus an external link need an explicit index/noindex decision recorded in `pattern-map.json` `seoMetadata`.
 
 Detail-route checks must prove rendered content, not only HTTP status. For product/article/legal routes, record title or H1, canonical/alias behavior, and the presence of load-bearing fields such as product type, review status, safety/disclosure copy, retailer/provider links, and media/placeholders where relevant.
 
