@@ -32,6 +32,9 @@ Options:
   --packet-only        Run structural packet lint only; never authorizes completion
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_CRITICAL_ASSET_BYTES = 20 * 1024 * 1024;
+const MAX_CRITICAL_ASSET_REQUESTS = 160;
+const MAX_CRITICAL_ASSET_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -441,7 +444,7 @@ function localTlsHost(hostname) {
   );
 }
 
-function requestOnce(url) {
+function requestOnce(url, maxBodyBytes = MAX_BODY_BYTES) {
   return new Promise((resolveRequest, rejectRequest) => {
     const client = url.protocol === 'https:' ? https : http;
     const allowLocalCertificate = url.protocol === 'https:' && localTlsHost(url.hostname);
@@ -479,8 +482,8 @@ function requestOnce(url) {
         const chunks = [];
         let size = 0;
         const declaredLength = Number(response.headers['content-length']);
-        if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
-          fail(new Error(`Response body exceeds the ${MAX_BODY_BYTES} byte limit.`));
+        if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
+          fail(new Error(`Response body exceeds the ${maxBodyBytes} byte limit.`));
           response.destroy();
           return;
         }
@@ -488,8 +491,8 @@ function requestOnce(url) {
           if (settled) {
             return;
           }
-          if (size + chunk.length > MAX_BODY_BYTES) {
-            fail(new Error(`Response body exceeds the ${MAX_BODY_BYTES} byte limit.`));
+          if (size + chunk.length > maxBodyBytes) {
+            fail(new Error(`Response body exceeds the ${maxBodyBytes} byte limit.`));
             response.destroy();
             return;
           }
@@ -497,8 +500,10 @@ function requestOnce(url) {
           size += chunk.length;
         });
         response.on('end', () => {
+          const bodyBytes = Buffer.concat(chunks);
           finish(resolveRequest, {
-            body: Buffer.concat(chunks).toString('utf8'),
+            body: bodyBytes.toString('utf8'),
+            bodyBytes,
             headers: response.headers,
             localTlsVerificationBypassed: allowLocalCertificate,
             status: response.statusCode ?? 0
@@ -513,7 +518,161 @@ function requestOnce(url) {
   });
 }
 
-async function requestFollowingRedirects(startUrl) {
+function criticalAssetCandidates(html, finalUrl) {
+  const base = new URL(finalUrl);
+  const candidates = [];
+  const add = (value, role, expectedType = '') => {
+    const text = String(value ?? '').trim();
+    if (!text) {
+      return;
+    }
+    try {
+      const url = new URL(text, base);
+      url.hash = '';
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin !== base.origin) {
+        return;
+      }
+      candidates.push({ expectedType, role, url });
+    } catch {
+      // Malformed asset URLs are already represented in route semantics. Only
+      // fetch well-formed same-origin HTTP(S) resources here.
+    }
+  };
+
+  for (const attributes of matchingTags(html, 'link', (item) => Boolean(item.href))) {
+    const relations = String(attributes.rel ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (relations.includes('stylesheet')) {
+      add(attributes.href, 'stylesheet', 'style');
+    }
+    if (relations.includes('preload')) {
+      add(attributes.href, `preload:${String(attributes.as ?? 'unknown').toLowerCase()}`, String(attributes.as ?? ''));
+    }
+  }
+  for (const attributes of matchingTags(html, 'script', (item) => Boolean(item.src))) {
+    add(attributes.src, 'script', 'script');
+  }
+  for (const tagName of ['img', 'source']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      if (tagName === 'img' || String(attributes.type ?? '').toLowerCase().startsWith('image/')) {
+        add(attributes.src, `${tagName}:src`, 'image');
+      }
+      if (attributes.srcset) {
+        for (const candidate of attributes.srcset.split(',')) {
+          const [url, descriptor = ''] = candidate.trim().split(/\s+/, 2);
+          add(url, `${tagName}:srcset:${descriptor}`, 'image');
+        }
+      }
+    }
+  }
+  for (const tagName of ['video', 'audio']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      add(attributes.poster, `${tagName}:poster`, 'image');
+    }
+  }
+
+  const unique = new Map();
+  for (const candidate of candidates) {
+    const key = candidate.url.href;
+    const current = unique.get(key);
+    if (current) {
+      current.roles.add(candidate.role);
+      current.expectedTypes.add(candidate.expectedType);
+    } else {
+      unique.set(key, {
+        expectedTypes: new Set([candidate.expectedType]),
+        roles: new Set([candidate.role]),
+        url: candidate.url
+      });
+    }
+  }
+  return [...unique.values()].sort((left, right) => comparePortable(left.url.href, right.url.href));
+}
+
+function assetContentTypeMatches(contentType, expectedTypes) {
+  const normalized = String(contentType ?? '').split(';', 1)[0].trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const matches = (expected) => {
+    switch (String(expected).toLowerCase()) {
+      case 'style':
+        return normalized === 'text/css';
+      case 'script':
+      case 'worker':
+        return /^(?:application|text)\/(?:javascript|ecmascript|x-javascript)$/.test(normalized);
+      case 'image':
+        return normalized.startsWith('image/');
+      case 'font':
+        return normalized.startsWith('font/') || normalized === 'application/font-woff' || normalized === 'application/font-woff2';
+      case 'audio':
+      case 'video':
+        return normalized.startsWith(`${String(expected).toLowerCase()}/`);
+      case 'document':
+        return normalized === 'text/html' || normalized === 'application/xhtml+xml';
+      case 'track':
+        return normalized === 'text/vtt';
+      case 'fetch':
+      case '':
+      case 'unknown':
+        return normalized !== 'text/html';
+      default:
+        return normalized !== 'text/html';
+    }
+  };
+  return [...expectedTypes].every(matches);
+}
+
+async function inspectCriticalAssets(html, finalUrl, context) {
+  const errors = [];
+  const manifest = [];
+  for (const candidate of criticalAssetCandidates(html, finalUrl)) {
+    if (!context.cache.has(candidate.url.href)) {
+      if (context.cache.size >= MAX_CRITICAL_ASSET_REQUESTS) {
+        errors.push(`Critical same-origin asset inventory exceeds the ${MAX_CRITICAL_ASSET_REQUESTS} request limit.`);
+        break;
+      }
+      context.cache.set(candidate.url.href, requestFollowingRedirects(candidate.url, {
+        maxBodyBytes: MAX_CRITICAL_ASSET_BYTES
+      }));
+    }
+    try {
+      const response = await context.cache.get(candidate.url.href);
+      const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
+      if (!context.counted.has(candidate.url.href)) {
+        context.counted.add(candidate.url.href);
+        context.totalBytes += bytes.length;
+      }
+      if (context.totalBytes > MAX_CRITICAL_ASSET_TOTAL_BYTES) {
+        errors.push(`Critical same-origin asset bytes exceed the ${MAX_CRITICAL_ASSET_TOTAL_BYTES} byte total limit.`);
+        break;
+      }
+      if (response.status < 200 || response.status >= 300) {
+        errors.push(`${candidate.url.pathname} critical asset returned HTTP ${response.status}.`);
+      }
+      const contentType = response.headers['content-type'] ?? '';
+      if (!assetContentTypeMatches(contentType, candidate.expectedTypes)) {
+        errors.push(`${candidate.url.pathname} critical asset has content type ${JSON.stringify(String(contentType))}, incompatible with ${[...candidate.roles].join(', ')}.`);
+      }
+      manifest.push({
+        contentType: String(contentType).split(';', 1)[0].trim().toLowerCase(),
+        path: intrinsicUrl(response.finalUrl, finalUrl, { asset: true }),
+        roles: [...candidate.roles].sort(comparePortable),
+        sha256: `sha256:${sha256(bytes)}`,
+        size: bytes.length
+      });
+    } catch (error) {
+      errors.push(`${candidate.url.pathname} critical asset could not be fetched: ${error.message}`);
+    }
+  }
+  manifest.sort((left, right) => comparePortable(`${left.path}\0${left.roles.join(',')}`, `${right.path}\0${right.roles.join(',')}`));
+  return {
+    errors,
+    fingerprint: stateSha256(manifest),
+    manifest
+  };
+}
+
+async function requestFollowingRedirects(startUrl, { maxBodyBytes = MAX_BODY_BYTES } = {}) {
   let current = new URL(startUrl);
   current.hash = '';
   const allowedOrigin = current.origin;
@@ -521,7 +680,7 @@ async function requestFollowingRedirects(startUrl) {
   let localTlsVerificationBypassed = false;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await requestOnce(current);
+    const response = await requestOnce(current, maxBodyBytes);
     localTlsVerificationBypassed ||= response.localTlsVerificationBypassed;
     const location = response.headers.location;
     if (REDIRECT_STATUSES.has(response.status) && location) {
@@ -1977,7 +2136,7 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected) {
+async function verifyRoute(baseUrl, expected, criticalAssetContext) {
   const requestedUrl = new URL(expected.targetPath, new URL('/', baseUrl));
   requestedUrl.hash = '';
   const errors = [];
@@ -2022,6 +2181,8 @@ async function verifyRoute(baseUrl, expected) {
     const actualTitle = elementText(response.body, 'title');
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
     const intrinsicSemantics = intrinsicRouteSemantics(response.body, response.finalUrl);
+    const criticalAssets = await inspectCriticalAssets(response.body, response.finalUrl, criticalAssetContext);
+    errors.push(...criticalAssets.errors.map((error) => `${expected.targetPath}: ${error}`));
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
       errors.push(`${expected.targetPath} returned status ${actualStatus}; expected ${expected.expectedStatus}.`);
@@ -2090,6 +2251,7 @@ async function verifyRoute(baseUrl, expected) {
       actualMetadata,
       actualTitle,
       bodySha256: `sha256:${sha256(response.body)}`,
+      criticalAssets,
       intrinsicSemantics,
       errors,
       finalStatus: response.status,
@@ -2233,6 +2395,7 @@ export async function verifyLive({
     }
   }
 
+  const criticalAssetContext = { cache: new Map(), counted: new Set(), totalBytes: 0 };
   const primaryRoutes = Array.isArray(routeMatrix.primaryRoutes) ? routeMatrix.primaryRoutes : [];
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
@@ -2240,7 +2403,8 @@ export async function verifyLive({
   const routeChecks = target && explicitTargetFetchAllowed
     ? await Promise.all(primaryRoutes.map((route) => verifyRoute(
         target.url,
-        expectedRoute(routeMatrix, route, browserEvidence)
+        expectedRoute(routeMatrix, route, browserEvidence),
+        criticalAssetContext
       )))
     : [];
   for (const route of routeChecks) {
@@ -2250,7 +2414,11 @@ export async function verifyLive({
     ? routeMatrix.targetRequiredRoutes
     : [];
   const targetRequiredRouteChecks = target && explicitTargetFetchAllowed
-    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(target.url, expectedTargetRequiredRoute(route))))
+    ? await Promise.all(targetRequiredRoutes.map((route) => verifyRoute(
+        target.url,
+        expectedTargetRequiredRoute(route),
+        criticalAssetContext
+      )))
     : [];
   for (const route of targetRequiredRouteChecks) {
     liveErrors.push(...route.errors);
@@ -2338,6 +2506,8 @@ export async function verifyLive({
   const routeStateManifest = [...routeChecks, ...targetRequiredRouteChecks]
     .map((route) => ({
       canonicalPath: normalizeRouteKey(route.actualMetadata?.canonicalUrl),
+      criticalAssetManifest: route.criticalAssets?.manifest ?? [],
+      criticalAssetManifestSha256: route.criticalAssets?.fingerprint ?? '',
       finalPath: normalizeRouteKey(route.finalUrl),
       h1: route.actualH1 ?? '',
       initialStatus: route.initialStatus ?? 0,

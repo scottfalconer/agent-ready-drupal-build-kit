@@ -1173,7 +1173,12 @@ test('intrinsic route state ignores target origin and volatile form tokens while
     let origin = '';
     let requestNumber = 0;
     return withHttpServer(
-      (_request, response) => {
+      (request, response) => {
+        if (new URL(request.url, 'http://fixture.invalid').pathname === '/hero.jpg') {
+          response.writeHead(200, { 'content-type': 'image/jpeg' });
+          response.end(Buffer.from('stable-fixture-image-bytes'));
+          return;
+        }
         requestNumber += 1;
         const token = `${tokenSeed}-${requestNumber}-${'x'.repeat(32)}`;
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -1233,6 +1238,93 @@ test('intrinsic route state ignores target origin and volatile form tokens while
 
   const changedFragment = await capture('fourth', 'meaningful-campaign-identifier-123456789', 'all-speakers');
   assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedFragment.intrinsicSemantics.linkTargetsSha256);
+});
+
+test('critical same-origin rendered asset bytes are bounded, validated, and state-bound', async () => {
+  let stylesheet = 'body{color:#111}';
+  let stylesheetRequests = 0;
+  await withHttpServer(
+    (request, response) => {
+      const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
+      if (pathname === '/site.css') {
+        stylesheetRequests += 1;
+        response.writeHead(200, { 'content-type': 'text/css; charset=utf-8' });
+        response.end(stylesheet);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head>
+        <title>Target site</title>
+        <link rel="stylesheet" href="/site.css?v=stable-url">
+        <script src="https://provider.example/external.js"></script>
+      </head><body><h1>Target home</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'critical-route-assets-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const inspect = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      const first = await inspect();
+      assert.equal(first.liveTargetValid, true, first.errors.join('\n'));
+      assert.equal(first.routeChecks[0].criticalAssets.manifest.length, 1);
+      assert.equal(first.routeChecks[0].criticalAssets.manifest[0].contentType, 'text/css');
+      assert.equal(first.routeChecks[0].criticalAssets.manifest[0].path, 'local:/site.css?v=%7Basset-cache-buster%7D');
+      assert.match(first.routeChecks[0].criticalAssets.manifest[0].sha256, /^sha256:[a-f0-9]{64}$/);
+      assert.equal(first.buildState.routeManifest[0].criticalAssetManifest.length, 1);
+
+      stylesheet = 'body{color:#222}';
+      const second = await inspect();
+      assert.equal(second.liveTargetValid, true, second.errors.join('\n'));
+      assert.notEqual(
+        first.routeChecks[0].criticalAssets.manifest[0].sha256,
+        second.routeChecks[0].criticalAssets.manifest[0].sha256
+      );
+      assert.notEqual(
+        first.buildState.componentFingerprints.routeManifest,
+        second.buildState.componentFingerprints.routeManifest
+      );
+    }
+  );
+  assert.equal(stylesheetRequests, 2, 'the shared asset cache should fetch one stylesheet once per verification run');
+});
+
+test('critical same-origin rendered assets fail closed on HTTP and content-type errors', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
+      if (pathname === '/broken.css') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><title>Missing</title>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title><link rel="stylesheet" href="/broken.css"></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'critical-route-assets-invalid-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.routeChecks[0].errors.join('\n'), /broken\.css critical asset returned HTTP 404/i);
+      assert.match(report.routeChecks[0].errors.join('\n'), /content type .*text\/html.*incompatible/i);
+    }
+  );
 });
 
 test('declared query route variants are fetched and state-bound distinctly while fragments are ignored', async () => {

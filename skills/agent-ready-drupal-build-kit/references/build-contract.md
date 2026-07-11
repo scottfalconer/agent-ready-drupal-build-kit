@@ -663,6 +663,7 @@ Before calling the local build successful, record:
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - rendered SEO evidence for every primary route, including exactly one usable canonical, non-empty meta description, and `og:image` where applicable. Every `not_applicable` disposition needs reviewed rationale and evidence;
 - anonymous public route checks;
+- bounded same-origin critical-asset checks for rendered stylesheets, scripts, images/srcset candidates, posters, and declared preloads. Hash served bytes, reject failed or content-type-incompatible responses, and keep third-party provider bytes outside the intrinsic state digest;
 - visual parity checks for homepage, listing, detail, navigation, footer, and major responsive states;
 - functional parity checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
