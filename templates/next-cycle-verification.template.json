@@ -1,0 +1,98 @@
+{
+  "schemaVersion": "public-kit.next-cycle-verification.1",
+  "site": "",
+  "checkedAt": "",
+  "applicability": {
+    "reviewed": false,
+    "applies": null,
+    "reason": ""
+  },
+  "discovery": {
+    "commands": [],
+    "fieldDefinitionsInspected": false,
+    "taxonomyVocabulariesInspected": false,
+    "workflowsInspected": false,
+    "recurringPublicModels": [
+      {
+        "entityType": "",
+        "bundle": "",
+        "publicRoutes": [],
+        "reviewed": false,
+        "dimensions": [
+          {
+            "id": "",
+            "kind": "date | datetime | year | season | period | taxonomy",
+            "machineName": "",
+            "configName": "",
+            "latestCurrentValue": "",
+            "latestCurrentComparable": null
+          }
+        ],
+        "noTemporalCycleDimensionRationale": ""
+      }
+    ],
+    "evidence": ""
+  },
+  "leastPrivilegeEditor": {
+    "editorUser": "",
+    "editorRole": "",
+    "leastPrivilegeRoleConfirmed": false,
+    "permissionChecks": [
+      {
+        "capability": "create_cycle_value | select_cycle_value | create_taxonomy_term | use_taxonomy_term | publish_content",
+        "permission": "",
+        "granted": false,
+        "status": "pass | fail | blocked",
+        "evidence": ""
+      }
+    ]
+  },
+  "futurePeriodOrTermProbe": {
+    "dimensionId": "",
+    "operation": "created | selected_existing",
+    "value": "",
+    "comparable": null,
+    "editorUser": "",
+    "editorRole": "",
+    "status": "pass | fail | blocked",
+    "evidence": ""
+  },
+  "futureContentProbe": {
+    "probeId": "",
+    "entityType": "",
+    "bundle": "",
+    "editorUser": "",
+    "editorRole": "",
+    "createdAt": "",
+    "futureDate": "",
+    "published": false,
+    "workflowTransition": {
+      "type": "moderation | publication_status",
+      "fromState": "",
+      "toState": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    },
+    "publicUrl": "",
+    "anonymousStatus": null,
+    "outputMarker": "",
+    "outputObserved": false,
+    "status": "pass | fail | blocked",
+    "evidence": ""
+  },
+  "cleanup": {
+    "probeId": "",
+    "checkedAt": "",
+    "probeContentDeleted": false,
+    "periodOrTermCleanup": "deleted | not_created",
+    "contentResidueCount": null,
+    "revisionResidueCount": null,
+    "aliasResidueCount": null,
+    "periodOrTermResidueCount": null,
+    "publicUrlStatusAfterCleanup": null,
+    "status": "pass | fail | blocked",
+    "evidence": ""
+  },
+  "blockers": [],
+  "notes": ""
+}

@@ -232,6 +232,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.deepEqual([...new Set(gates.gates.map((gate) => gate.blocking))].sort(), ['handoff', 'launch']);
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
+  assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
 });
 
 test('gates.json defines checker semantics, including the non-authoritative human-record rule', () => {
@@ -503,6 +504,16 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
       reason: ''
     },
     frontPage: '/',
+    liveNextCycleCensus: {
+      schemaVersion: 'public-kit.live-next-cycle-census.1',
+      confirmed: true,
+      metadataOnly: true,
+      privateContentRead: false,
+      candidateCount: 0,
+      fields: [],
+      taxonomyDimensions: [],
+      workflows: []
+    },
     mode: 'test-injected',
     project: 'fixture',
     reason: '',
@@ -865,6 +876,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   independent.packetFreshnessChecks = [
     'route-matrix.json',
     'browser-evidence.json',
+    'next-cycle-verification.json',
     'drupal-readback.json',
     'field-output-matrix.json',
     'negative-route-consent.json',
@@ -1375,6 +1387,44 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   writeJson(readbackPath, readback);
 
   writeJson(join(packetDir, 'negative-route-consent.json'), negativeRouteConsentRecord(targetBaseUrl));
+  const nextCycleEvidenceDir = join(packetDir, 'evidence', 'next-cycle');
+  mkdirSync(nextCycleEvidenceDir, { recursive: true });
+  writeJson(join(nextCycleEvidenceDir, 'discovery.json'), {
+    schemaVersion: 'public-kit.next-cycle-discovery-evidence.1',
+    targetBaseUrl,
+    checkedAt: testCheckedAt,
+    commands: [
+      'drush php:eval field definitions',
+      'drush php:eval taxonomy vocabularies',
+      'drush php:eval workflows and role permissions'
+    ],
+    recurringPublicModels: [],
+    temporalCycleDimensionsFound: 0
+  });
+  writeJson(join(packetDir, 'next-cycle-verification.json'), {
+    schemaVersion: 'public-kit.next-cycle-verification.1',
+    site: targetBaseUrl,
+    checkedAt: testCheckedAt,
+    applicability: {
+      reviewed: true,
+      applies: false,
+      reason: 'The fixture has no recurring public model or temporal/cycle dimension.'
+    },
+    discovery: {
+      commands: [
+        'drush php:eval field definitions',
+        'drush php:eval taxonomy vocabularies',
+        'drush php:eval workflows and role permissions'
+      ],
+      fieldDefinitionsInspected: true,
+      taxonomyVocabulariesInspected: true,
+      workflowsInspected: true,
+      recurringPublicModels: [],
+      evidence: 'discovery.json'
+    },
+    blockers: [],
+    notes: ''
+  });
 
   addQualifyingMarkdownEvidence(packetDir, sourceBaseUrl, targetBaseUrl);
 
@@ -1837,6 +1887,172 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
     writeFileSync(join(blindEvidenceDir, `source-search-${viewport}.png`), screenshotPng(40 + index, width, height));
     writeFileSync(join(blindEvidenceDir, `target-search-${viewport}.png`), screenshotPng(50 + index, width, height));
   }
+}
+
+function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
+  const evidenceDir = join(packetDir, 'evidence', 'next-cycle');
+  mkdirSync(evidenceDir, { recursive: true });
+  const createdAt = testCheckedAt;
+  const futureDate = new Date(Date.parse(testCheckedAt) + 365 * 24 * 60 * 60 * 1000).toISOString();
+  const evidenceRecord = {
+    schemaVersion: 'public-kit.next-cycle-probe-evidence.1',
+    targetBaseUrl,
+    checkedAt: testCheckedAt,
+    editorUser: 'editor',
+    editorRole: 'content editor',
+    probeId: 'next-cycle-probe-42',
+    result: 'pass'
+  };
+  writeJson(join(evidenceDir, 'discovery.json'), {
+    ...evidenceRecord,
+    commands: ['field definitions', 'taxonomy vocabularies', 'workflows and permissions'],
+    temporalCycleDimensionsFound: 1
+  });
+  writeJson(join(evidenceDir, 'probe.json'), {
+    ...evidenceRecord,
+    futureValue: '2027',
+    futureDate,
+    publicUrl: `${targetBaseUrl}/__next-cycle-probe-42`,
+    anonymousStatus: 200,
+    outputMarker: 'Next cycle probe 2027'
+  });
+  writeJson(join(evidenceDir, 'cleanup.json'), {
+    ...evidenceRecord,
+    contentResidueCount: 0,
+    revisionResidueCount: 0,
+    aliasResidueCount: 0,
+    periodOrTermResidueCount: 0,
+    publicUrlStatusAfterCleanup: 410
+  });
+  writeJson(join(packetDir, 'next-cycle-verification.json'), {
+    schemaVersion: 'public-kit.next-cycle-verification.1',
+    site: targetBaseUrl,
+    checkedAt: testCheckedAt,
+    applicability: {
+      reviewed: true,
+      applies: true,
+      reason: 'The recurring event model has a festival-year dimension.'
+    },
+    discovery: {
+      commands: [
+        'drush php:eval field definitions',
+        'drush php:eval taxonomy vocabularies',
+        'drush php:eval workflows and role permissions'
+      ],
+      fieldDefinitionsInspected: true,
+      taxonomyVocabulariesInspected: true,
+      workflowsInspected: true,
+      recurringPublicModels: [
+        {
+          entityType: 'node',
+          bundle: 'event',
+          publicRoutes: ['/events'],
+          reviewed: true,
+          dimensions: [
+            {
+              id: 'event-year',
+              kind: 'year',
+              machineName: 'field_year',
+              configName: 'field.field.node.event.field_year',
+              latestCurrentValue: '2026',
+              latestCurrentComparable: 2026
+            }
+          ],
+          noTemporalCycleDimensionRationale: ''
+        }
+      ],
+      evidence: 'discovery.json'
+    },
+    leastPrivilegeEditor: {
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      leastPrivilegeRoleConfirmed: true,
+      permissionChecks: [
+        {
+          capability: 'select_cycle_value',
+          permission: 'select future festival year',
+          granted: true,
+          status: 'pass',
+          evidence: 'probe.json'
+        },
+        {
+          capability: 'publish_content',
+          permission: 'create and publish event content',
+          granted: true,
+          status: 'pass',
+          evidence: 'probe.json'
+        }
+      ]
+    },
+    futurePeriodOrTermProbe: {
+      dimensionId: 'event-year',
+      operation: 'selected_existing',
+      value: '2027',
+      comparable: 2027,
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      status: 'pass',
+      evidence: 'probe.json'
+    },
+    futureContentProbe: {
+      probeId: 'next-cycle-probe-42',
+      entityType: 'node',
+      bundle: 'event',
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      createdAt,
+      futureDate,
+      published: true,
+      workflowTransition: {
+        type: 'publication_status',
+        fromState: 'unpublished',
+        toState: 'published',
+        status: 'pass',
+        evidence: 'probe.json'
+      },
+      publicUrl: `${targetBaseUrl}/__next-cycle-probe-42`,
+      anonymousStatus: 200,
+      outputMarker: 'Next cycle probe 2027',
+      outputObserved: true,
+      status: 'pass',
+      evidence: 'probe.json'
+    },
+    cleanup: {
+      probeId: 'next-cycle-probe-42',
+      checkedAt: testCheckedAt,
+      probeContentDeleted: true,
+      periodOrTermCleanup: 'not_created',
+      contentResidueCount: 0,
+      revisionResidueCount: 0,
+      aliasResidueCount: 0,
+      periodOrTermResidueCount: 0,
+      publicUrlStatusAfterCleanup: 410,
+      status: 'pass',
+      evidence: 'cleanup.json'
+    },
+    blockers: [],
+    notes: ''
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    browser.editorWorkflowChecks.push({
+      workflow: 'create',
+      entityType: 'node',
+      bundle: 'event',
+      editorUser: 'editor',
+      editorRole: 'content editor',
+      drupalRoute: '/node/add/event',
+      taskPerformed: 'Created and published the future-cycle Event probe.',
+      formScreenshot: 'evidence/blind-adversarial-review/target-desktop.png',
+      resultScreenshot: 'evidence/blind-adversarial-review/target-mobile.png',
+      fieldsAndWidgetsVerified: ['title', 'field_year', 'field_event_date'],
+      publicOutputAffected: '/events',
+      visualOrBehaviorResult: 'The future event appeared anonymously before cleanup.',
+      status: 'pass',
+      acceptedExceptions: [],
+      accepted: true,
+      blockers: []
+    });
+  });
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -3354,6 +3570,18 @@ if (args[1] === 'php:eval') {
     }) + '\\n');
     process.exit(0);
   }
+  if (args[2].includes('public-kit.live-next-cycle-census.1')) {
+    process.stdout.write(JSON.stringify({
+      schemaVersion: 'public-kit.live-next-cycle-census.1',
+      metadataOnly: true,
+      privateContentRead: false,
+      candidateCount: 0,
+      fields: [],
+      taxonomyDimensions: [],
+      workflows: []
+    }) + '\\n');
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     schemaVersion: 'public-kit.drupal-entity-inventory.5',
     fingerprint: 'sha256:${'a'.repeat(64)}',
@@ -4611,6 +4839,7 @@ test('a coherent but stale packet cannot authorize current local completion', as
     'route-matrix.json',
     'parity-report.json',
     'browser-evidence.json',
+    'next-cycle-verification.json',
     'independent-verification.json',
     'blind-adversarial-review.json',
     'drupal-readback.json',
@@ -4625,6 +4854,406 @@ test('a coherent but stale packet cannot authorize current local completion', as
   assert.match(
     report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
     /newest completion evidence is older than seven days/i
+  );
+});
+
+test('next-cycle verification requires discovery, a least-privilege future publish probe, and residue-free cleanup', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'next-cycle-gate-'));
+  const naPacket = join(temp, 'not-applicable');
+  copyTemplatePacket(naPacket);
+  writeJson(join(naPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(naPacket, 'https://target.example');
+  const naReport = await validatePacket({ packetDir: naPacket });
+  assert.equal(naReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(naReport.completionEvidence, null, 2));
+
+  const canonicalPacket = join(temp, 'qualifying');
+  cpSync(naPacket, canonicalPacket, { recursive: true });
+  addQualifyingNextCycleEvidence(canonicalPacket, 'https://target.example');
+  const qualifyingReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    qualifyingReport.completionEvidence.packetSupportsCompletion,
+    true,
+    JSON.stringify(qualifyingReport.completionEvidence, null, 2)
+  );
+  const dateOnlyPacket = join(temp, 'qualifying-date-only');
+  cpSync(canonicalPacket, dateOnlyPacket, { recursive: true });
+  let futureDateOnly = '';
+  mutateJson(join(dateOnlyPacket, 'next-cycle-verification.json'), (value) => {
+    futureDateOnly = value.futureContentProbe.futureDate.slice(0, 10);
+    value.futureContentProbe.futureDate = futureDateOnly;
+  });
+  mutateJson(join(dateOnlyPacket, 'evidence', 'next-cycle', 'probe.json'), (value) => {
+    value.futureDate = futureDateOnly;
+  });
+  const dateOnlyReport = await validatePacket({ packetDir: dateOnlyPacket });
+  assert.equal(dateOnlyReport.completionEvidence.packetSupportsCompletion, true, 'Drupal date-only values are valid future dates');
+
+  const cases = [
+    {
+      name: 'n-a-cannot-hide-discovered-dimension',
+      expected: /cannot use N\/A when discovery found/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.applicability.applies = false;
+        value.applicability.reason = 'Claimed not applicable despite discovery.';
+      })
+    },
+    {
+      name: 'admin-role-cannot-run-probe',
+      expected: /least-privilege non-admin editor identity/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.leastPrivilegeEditor.editorRole = 'administrator';
+      })
+    },
+    {
+      name: 'browser-proof-must-cover-probed-bundle',
+      expected: /same recurring entity type and bundle/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'browser-evidence.json'), (value) => {
+        value.editorWorkflowChecks = value.editorWorkflowChecks.filter((check) => check.bundle !== 'event');
+      })
+    },
+    {
+      name: 'future-value-must-exceed-current',
+      expected: /beyond the latest current comparable value/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.futurePeriodOrTermProbe.comparable = 2026;
+      })
+    },
+    {
+      name: 'future-content-must-publish',
+      expected: /future-dated non-admin publish transition and anonymous public output/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.futureContentProbe.published = false;
+      })
+    },
+    {
+      name: 'taxonomy-permission-is-required',
+      expected: /create_taxonomy_term/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.discovery.recurringPublicModels[0].dimensions[0].kind = 'taxonomy';
+        value.futurePeriodOrTermProbe.operation = 'created';
+        value.cleanup.periodOrTermCleanup = 'deleted';
+      })
+    },
+    {
+      name: 'cleanup-residue-fails-closed',
+      expected: /zero content, revision, alias, and period\/term residue/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.cleanup.revisionResidueCount = 1;
+      })
+    },
+    {
+      name: 'missing-machine-evidence-fails-closed',
+      expected: /packet-local machine evidence/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'next-cycle-verification.json'), (value) => {
+        value.discovery.evidence = 'missing.json';
+      })
+    },
+    {
+      name: 'generic-text-is-not-machine-evidence',
+      expected: /structured JSON bound to the target, commands, timestamp/i,
+      mutate: (packetDir) => {
+        writeFileSync(join(packetDir, 'evidence', 'next-cycle', 'discovery.json'), 'looks good\n');
+      }
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutate(packetDir);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+});
+
+test('next-cycle N/A cannot omit a temporal field on a declared recurring public model', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'next-cycle-derived-dimension-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
+    value.structuredContentModel.recurringSourceObjects = [{
+      sourceObject: 'Event',
+      drupalOwner: 'content_type',
+      bundleOrConfigName: 'event',
+      requiredFields: ['field_event_date'],
+      relationships: [],
+      collectionOwner: '',
+      detailRouteOwner: 'entity_view_display',
+      editorVerification: {
+        nonAdminEditorCanCreate: true,
+        appearsInPublicListingOrDetailWithoutCodeChange: true,
+        evidence: 'evidence/blind-adversarial-review/editor-task.json'
+      },
+      accepted: true,
+      notes: ''
+    }];
+  });
+  mutateJson(join(packetDir, 'field-output-matrix.json'), (value) => {
+    value.bundles.push({
+      entityType: 'node',
+      bundle: 'event',
+      fields: [{
+        machineName: 'field_event_date',
+        editorLabel: 'Event date',
+        required: true,
+        fieldType: 'datetime',
+        widget: 'datetime_default',
+        formatter: 'datetime_default',
+        publicRenderLocations: ['/events'],
+        affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false,
+        presentationBoundary: 'content_fact',
+        editorOnlyRationale: '',
+        accepted: true,
+        notes: ''
+      }]
+    });
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must identify temporal\/cycle field node\.event\.field_event_date/i
+  );
+});
+
+test('live verification independently checks that the cleaned next-cycle probe URL is gone', async () => {
+  for (const cleanupStatus of [410, 200]) {
+    await withHttpServer(
+      (request, response) => {
+        if (request.url === '/__next-cycle-probe-42') {
+          response.writeHead(cleanupStatus, { 'content-type': 'text/plain; charset=utf-8' });
+          response.end(cleanupStatus === 410 ? 'gone' : 'residue');
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(fixtureTargetHtml(request));
+      },
+      async (baseUrl) => {
+        const temp = mkdtempSync(join(tmpdir(), `next-cycle-live-${cleanupStatus}-`));
+        const packetDir = join(temp, 'review-packet');
+        copyTemplatePacket(packetDir);
+        writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+        addQualifyingReviewEvidence(packetDir, baseUrl);
+        addQualifyingNextCycleEvidence(packetDir, baseUrl);
+
+        const report = await verifyLive({
+          packetDir,
+          cwd: repoRoot,
+          environment: {},
+          targetUrl: baseUrl,
+          drupalRuntime: injectedDrupalRuntime(baseUrl)
+        });
+
+        assert.equal(report.nextCycleCleanupCheck.actualStatus, cleanupStatus);
+        assert.equal(report.nextCycleCleanupCheck.passed, cleanupStatus === 410);
+        assert.equal(report.liveTargetValid, cleanupStatus === 410);
+        if (cleanupStatus === 200) {
+          assert.match(report.errors.join('\n'), /cleanup URL returned 200; expected 410/i);
+        }
+      }
+    );
+  }
+});
+
+test('live model census rejects authored N/A with omitted temporal fields and accepts a confirmed empty live model', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'next-cycle-live-census-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const validNaReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(validNaReport.liveNextCycleReconciliation.censusTrusted, true);
+      assert.equal(validNaReport.liveNextCycleReconciliation.liveApplies, false);
+      assert.equal(validNaReport.liveTargetValid, true, validNaReport.errors.join('\n'));
+
+      const tremegaCandidates = [
+        {
+          key: 'node.happy_hour_event.field_event_date',
+          entityType: 'node',
+          bundle: 'happy_hour_event',
+          machineName: 'field_event_date',
+          fieldType: 'datetime',
+          required: true,
+          cardinality: 1,
+          optionCount: 0,
+          signalKinds: ['date', 'date_type'],
+          targetVocabularies: []
+        },
+        {
+          key: 'node.performer.field_festival_year',
+          entityType: 'node',
+          bundle: 'performer',
+          machineName: 'field_festival_year',
+          fieldType: 'entity_reference',
+          required: true,
+          cardinality: 1,
+          optionCount: 0,
+          signalKinds: ['taxonomy', 'year'],
+          targetVocabularies: ['festival_year']
+        },
+        {
+          key: 'node.performer.field_schedule_day',
+          entityType: 'node',
+          bundle: 'performer',
+          machineName: 'field_schedule_day',
+          fieldType: 'list_string',
+          required: false,
+          cardinality: 1,
+          optionCount: 2,
+          signalKinds: ['date', 'day', 'schedule'],
+          targetVocabularies: []
+        }
+      ];
+      const omittedLiveReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: true,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 4,
+            fields: tremegaCandidates,
+            taxonomyDimensions: [{
+              key: 'taxonomy.festival_year',
+              vocabulary: 'festival_year',
+              signalKinds: ['year']
+            }],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(omittedLiveReport.liveNextCycleReconciliation.liveApplies, true);
+      assert.equal(omittedLiveReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(omittedLiveReport.nextCycleCleanupCheck.applicable, true);
+      assert.equal(omittedLiveReport.nextCycleCleanupCheck.passed, false);
+      assert.equal(omittedLiveReport.liveTargetValid, false);
+      assert.match(
+        omittedLiveReport.errors.join('\n'),
+        /cannot use N\/A.*field_event_date.*field_festival_year.*field_schedule_day/i
+      );
+    }
+  );
+});
+
+test('live model census fails closed for authored applicability when the census is untrusted or incomplete', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const status = request.url === '/__next-cycle-probe-42' ? 410 : 200;
+      response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(status === 410 ? 'removed' : fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'next-cycle-live-census-fail-closed-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      addQualifyingNextCycleEvidence(packetDir, baseUrl);
+
+      const untrustedReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: false,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 0,
+            fields: [],
+            taxonomyDimensions: [],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(untrustedReport.liveNextCycleReconciliation.authoredApplies, true);
+      assert.equal(untrustedReport.liveNextCycleReconciliation.censusTrusted, false);
+      assert.equal(untrustedReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(untrustedReport.liveTargetValid, false);
+      assert.match(
+        untrustedReport.errors.join('\n'),
+        /requires a successful read-only Drush live model census/i
+      );
+
+      const incompleteReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: true,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 2,
+            fields: [
+              {
+                key: 'node.event.field_year',
+                entityType: 'node',
+                bundle: 'event',
+                machineName: 'field_year',
+                fieldType: 'integer',
+                required: true,
+                cardinality: 1,
+                optionCount: 0,
+                signalKinds: ['year'],
+                targetVocabularies: []
+              },
+              {
+                key: 'node.event.field_season',
+                entityType: 'node',
+                bundle: 'event',
+                machineName: 'field_season',
+                fieldType: 'list_string',
+                required: false,
+                cardinality: 1,
+                optionCount: 4,
+                signalKinds: ['season'],
+                targetVocabularies: []
+              }
+            ],
+            taxonomyDimensions: [],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(incompleteReport.liveNextCycleReconciliation.censusTrusted, true);
+      assert.deepEqual(
+        incompleteReport.liveNextCycleReconciliation.unreviewedLiveCandidateKeys,
+        ['node.event.field_season']
+      );
+      assert.equal(incompleteReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(incompleteReport.liveTargetValid, false);
+      assert.match(
+        incompleteReport.errors.join('\n'),
+        /authored applicability omits live Drupal temporal\/cycle candidates.*field_season/i
+      );
+    }
   );
 });
 
@@ -6525,6 +7154,9 @@ test('every completion-bearing packet artifact is bound to the inspected source 
         }, 'browser-evidence.json'],
         ['drupal-readback.json', /drupal-readback\.json site origin/, (value) => { value.site = 'https://stale-target.example/'; }],
         ['field-output-matrix.json', /field-output-matrix\.json site origin/, (value) => { value.site = 'https://stale-target.example/'; }],
+        ['next-cycle-verification.json', /next-cycle-verification\.json site origin/, (value) => {
+          value.site = 'https://stale-target.example/';
+        }],
         ['pattern-map.json', /pattern-map\.json sourceSite origin/, (value) => { value.sourceSite = 'https://wrong-source.example/'; }],
         ['source-audit.json', /source-audit\.json site\.baseUrl origin/, (value) => {
           value.site.baseUrl = 'https://wrong-source.example/';

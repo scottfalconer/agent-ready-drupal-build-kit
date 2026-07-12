@@ -3147,6 +3147,216 @@ function inspectDrupalEntityInventory(projectRoot, environment, liveSurfaceInven
   }
 }
 
+const LIVE_NEXT_CYCLE_CENSUS_PHP = String.raw`
+$signalKinds = static function ($value): array {
+  $text = strtolower((string) $value);
+  $text = preg_replace('/[_\\-.]+/', ' ', $text) ?: $text;
+  $patterns = [
+    'date' => '/\\b(date|dated|datetime|calendar|january|february|march|april|may|june|july|august|september|october|november|december)\\b/',
+    'day' => '/\\b(day|daily|weekday|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b/',
+    'year' => '/\\b(year|annual|annually|(?:19|20)\\d{2})\\b/',
+    'season' => '/\\b(season|seasonal|spring|summer|autumn|fall|winter)\\b/',
+    'period' => '/\\b(period|cycle|edition|quarter|quarterly|month|monthly|week|weekly|term|timeframe)\\b/',
+    'schedule' => '/\\b(schedule|scheduled|timetable|agenda)\\b/',
+    'time' => '/\\b(time|start|end|duration|interval)\\b/',
+  ];
+  $found = [];
+  foreach ($patterns as $kind => $pattern) {
+    if (preg_match($pattern, $text) === 1) {
+      $found[] = $kind;
+    }
+  }
+  return $found;
+};
+
+$entityTypeManager = \Drupal::entityTypeManager();
+$vocabularyMetadata = [];
+if ($entityTypeManager->hasDefinition('taxonomy_vocabulary')) {
+  foreach ($entityTypeManager->getStorage('taxonomy_vocabulary')->loadMultiple() as $vocabulary) {
+    $id = (string) $vocabulary->id();
+    $kinds = $signalKinds($id . ' ' . (string) $vocabulary->label());
+    $vocabularyMetadata[$id] = $kinds;
+  }
+}
+
+$fields = [];
+foreach ($entityTypeManager->getStorage('field_config')->loadMultiple() as $field) {
+  $fieldName = (string) $field->getName();
+  $fieldType = (string) $field->getType();
+  $entityType = (string) $field->getTargetEntityTypeId();
+  $bundle = (string) $field->getTargetBundle();
+  if ($entityType === 'user') {
+    continue;
+  }
+
+  // Machine names, labels, field types, and configured option labels are schema
+  // metadata. Free-form descriptions are intentionally excluded because prose
+  // such as "keep this up-to-date" creates noisy false positives.
+  $kinds = $signalKinds($fieldName . ' ' . (string) $field->label());
+  if (preg_match('/(?:date|time|timestamp|duration|interval|range)/i', $fieldType) === 1) {
+    $kinds[] = 'date_type';
+  }
+
+  $optionCount = 0;
+  $optionSignalKinds = [];
+  if (preg_match('/^(?:list_|string$|integer$)/', $fieldType) === 1) {
+    $allowedValues = $field->getFieldStorageDefinition()->getSetting('allowed_values');
+    if (is_array($allowedValues)) {
+      $optionCount = count($allowedValues);
+      foreach ($allowedValues as $key => $option) {
+        $optionText = is_array($option)
+          ? implode(' ', array_map('strval', array_intersect_key($option, ['value' => TRUE, 'label' => TRUE])))
+          : (string) $key . ' ' . (string) $option;
+        $optionSignalKinds = array_merge($optionSignalKinds, $signalKinds($optionText));
+      }
+    }
+  }
+
+  $targetVocabularies = [];
+  if ($fieldType === 'entity_reference' && $field->getSetting('handler') === 'default:taxonomy_term') {
+    $configuredTargets = $field->getSetting('handler_settings')['target_bundles'] ?? [];
+    if (is_array($configuredTargets)) {
+      foreach ($configuredTargets as $key => $value) {
+        $vocabularyId = is_string($key) ? $key : (string) $value;
+        if ($vocabularyId !== '') {
+          $targetVocabularies[] = $vocabularyId;
+          if (!empty($vocabularyMetadata[$vocabularyId])) {
+            $kinds[] = 'taxonomy';
+            $kinds = array_merge($kinds, $vocabularyMetadata[$vocabularyId]);
+          }
+        }
+      }
+    }
+  }
+
+  $kinds = array_values(array_unique(array_merge($kinds, $optionSignalKinds)));
+  sort($kinds);
+  $targetVocabularies = array_values(array_unique($targetVocabularies));
+  sort($targetVocabularies);
+  if ($kinds === []) {
+    continue;
+  }
+  $fields[] = [
+    'key' => $entityType . '.' . $bundle . '.' . $fieldName,
+    'entityType' => $entityType,
+    'bundle' => $bundle,
+    'machineName' => $fieldName,
+    'fieldType' => $fieldType,
+    'required' => $field->isRequired(),
+    'cardinality' => (int) $field->getFieldStorageDefinition()->getCardinality(),
+    'optionCount' => $optionCount,
+    'signalKinds' => $kinds,
+    'targetVocabularies' => $targetVocabularies,
+  ];
+}
+usort($fields, static fn(array $a, array $b): int => $a['key'] <=> $b['key']);
+
+$taxonomyDimensions = [];
+foreach ($vocabularyMetadata as $id => $kinds) {
+  if ($kinds === []) {
+    continue;
+  }
+  sort($kinds);
+  $taxonomyDimensions[] = [
+    'key' => 'taxonomy.' . $id,
+    'vocabulary' => $id,
+    'signalKinds' => array_values(array_unique($kinds)),
+  ];
+}
+usort($taxonomyDimensions, static fn(array $a, array $b): int => $a['key'] <=> $b['key']);
+
+$workflows = [];
+if ($entityTypeManager->hasDefinition('workflow')) {
+  foreach ($entityTypeManager->getStorage('workflow')->loadMultiple() as $workflow) {
+    try {
+      $plugin = $workflow->getTypePlugin();
+      $configuration = $plugin->getConfiguration();
+      $bundleKeys = [];
+      foreach (($configuration['entity_types'] ?? []) as $workflowEntityType => $bundles) {
+        foreach ((array) $bundles as $workflowBundle) {
+          $bundleKeys[] = (string) $workflowEntityType . '.' . (string) $workflowBundle;
+        }
+      }
+      sort($bundleKeys);
+      $workflows[] = [
+        'id' => (string) $workflow->id(),
+        'type' => (string) $workflow->getTypePlugin()->getPluginId(),
+        'bundleKeys' => array_values(array_unique($bundleKeys)),
+        'stateCount' => count($plugin->getStates()),
+        'transitionCount' => count($plugin->getTransitions()),
+      ];
+    }
+    catch (\Throwable) {
+      // A broken workflow is reported by Drupal elsewhere; keep this census read-only.
+    }
+  }
+}
+usort($workflows, static fn(array $a, array $b): int => $a['id'] <=> $b['id']);
+
+print json_encode([
+  'schemaVersion' => 'public-kit.live-next-cycle-census.1',
+  'metadataOnly' => TRUE,
+  'privateContentRead' => FALSE,
+  'candidateCount' => count($fields) + count($taxonomyDimensions),
+  'fields' => $fields,
+  'taxonomyDimensions' => $taxonomyDimensions,
+  'workflows' => $workflows,
+], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+`;
+
+function parseLiveNextCycleCensus(result) {
+  if (result?.ok !== true) {
+    return {
+      candidateCount: 0,
+      confirmed: false,
+      fields: [],
+      metadataOnly: true,
+      privateContentRead: false,
+      reason: 'The read-only Drush live model census did not run.',
+      schemaVersion: 'public-kit.live-next-cycle-census.1',
+      taxonomyDimensions: [],
+      workflows: []
+    };
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    const fields = Array.isArray(parsed?.fields) ? parsed.fields : [];
+    const taxonomyDimensions = Array.isArray(parsed?.taxonomyDimensions) ? parsed.taxonomyDimensions : [];
+    const workflows = Array.isArray(parsed?.workflows) ? parsed.workflows : [];
+    if (
+      parsed?.schemaVersion !== 'public-kit.live-next-cycle-census.1' ||
+      parsed?.metadataOnly !== true ||
+      parsed?.privateContentRead !== false ||
+      Number(parsed?.candidateCount) !== fields.length + taxonomyDimensions.length
+    ) {
+      throw new Error('Unexpected census schema or count.');
+    }
+    return {
+      candidateCount: fields.length + taxonomyDimensions.length,
+      confirmed: true,
+      fields,
+      metadataOnly: true,
+      privateContentRead: false,
+      reason: '',
+      schemaVersion: parsed.schemaVersion,
+      taxonomyDimensions,
+      workflows
+    };
+  } catch {
+    return {
+      candidateCount: 0,
+      confirmed: false,
+      fields: [],
+      metadataOnly: true,
+      privateContentRead: false,
+      reason: 'The read-only Drush live model census returned invalid JSON or metadata.',
+      schemaVersion: 'public-kit.live-next-cycle-census.1',
+      taxonomyDimensions: [],
+      workflows: []
+    };
+  }
+}
+
 function cleanScalar(value) {
   return String(value ?? '').trim().replace(/^(?:['"])(.*)(?:['"])$/s, '$1').trim();
 }
@@ -3784,6 +3994,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
       },
       frontPage: '',
       identityReadbackFailed: false,
+      liveNextCycleCensus: parseLiveNextCycleCensus({ ok: false, output: '' }),
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
       siteUuid: '',
@@ -3852,6 +4063,9 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     true,
     [...webOrigins]
   );
+  const liveNextCycleCensus = parseLiveNextCycleCensus(
+    readDrush(['php:eval', LIVE_NEXT_CYCLE_CENSUS_PHP])
+  );
   return {
     baseUrl,
     confirmed,
@@ -3869,6 +4083,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     drushCommandFailures,
     frontPage,
     identityReadbackFailed,
+    liveNextCycleCensus,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
     reason: confirmed
@@ -4284,6 +4499,7 @@ function completionEvidenceTargetErrors({
   fieldOutputMatrix,
   independentVerification,
   negativeRouteConsent,
+  nextCycleVerification,
   parityReport,
   patternMap,
   sourceAudit,
@@ -4300,12 +4516,21 @@ function completionEvidenceTargetErrors({
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
   requiredOriginMatch(errors, 'drupal-readback.json site', drupalReadback?.site, targetOrigin);
   requiredOriginMatch(errors, 'negative-route-consent.json site', negativeRouteConsent?.site, targetOrigin);
+  requiredOriginMatch(errors, 'next-cycle-verification.json site', nextCycleVerification?.site, targetOrigin);
   requiredOriginMatch(
     errors,
     'independent-verification.json target.baseUrl',
     independentVerification?.target?.baseUrl,
     targetOrigin
   );
+  if (nextCycleVerification?.applicability?.applies === true) {
+    requiredOriginMatch(
+      errors,
+      'next-cycle-verification.json futureContentProbe.publicUrl',
+      nextCycleVerification?.futureContentProbe?.publicUrl,
+      targetOrigin
+    );
+  }
   requiredOriginMatch(
     errors,
     'independent-verification.json target.adminUrl',
@@ -4984,6 +5209,146 @@ export async function scheduleLiveRouteChecks({
   };
 }
 
+function authoredNextCycleDimensionKeys(nextCycleVerification) {
+  const keys = new Set();
+  const models = Array.isArray(nextCycleVerification?.discovery?.recurringPublicModels)
+    ? nextCycleVerification.discovery.recurringPublicModels
+    : [];
+  for (const model of models) {
+    for (const dimension of (Array.isArray(model?.dimensions) ? model.dimensions : [])) {
+      const entityType = String(model?.entityType ?? '').trim();
+      const bundle = String(model?.bundle ?? '').trim();
+      const machineName = String(dimension?.machineName ?? '').trim();
+      if (entityType && bundle && machineName) {
+        keys.add(`${entityType}.${bundle}.${machineName}`);
+      }
+      const configName = String(dimension?.configName ?? '').trim();
+      const fieldConfig = configName.match(/^field\.field\.([^.]+)\.([^.]+)\.(.+)$/);
+      if (fieldConfig) {
+        keys.add(`${fieldConfig[1]}.${fieldConfig[2]}.${fieldConfig[3]}`);
+      }
+      const vocabulary = String(dimension?.vocabulary ?? dimension?.vocabularyId ?? '').trim();
+      if (vocabulary) {
+        keys.add(`taxonomy.${vocabulary}`);
+      }
+      const vocabularyConfig = configName.match(/^taxonomy\.vocabulary\.(.+)$/);
+      if (vocabularyConfig) {
+        keys.add(`taxonomy.${vocabularyConfig[1]}`);
+      }
+    }
+  }
+  return [...keys].sort();
+}
+
+function reconcileLiveNextCycleCensus(nextCycleVerification, census, { required = false } = {}) {
+  const authoredApplies = nextCycleVerification?.applicability?.applies === true;
+  const fields = Array.isArray(census?.fields) ? census.fields : [];
+  const taxonomyDimensions = Array.isArray(census?.taxonomyDimensions) ? census.taxonomyDimensions : [];
+  const liveCandidateKeys = [...new Set([...fields, ...taxonomyDimensions]
+    .map((record) => String(record?.key ?? '').trim())
+    .filter(Boolean))].sort();
+  const censusTrusted =
+    census?.confirmed === true &&
+    census?.schemaVersion === 'public-kit.live-next-cycle-census.1' &&
+    census?.metadataOnly === true &&
+    census?.privateContentRead === false &&
+    Number(census?.candidateCount) === fields.length + taxonomyDimensions.length &&
+    liveCandidateKeys.length === fields.length + taxonomyDimensions.length;
+  const authoredDimensionKeys = authoredNextCycleDimensionKeys(nextCycleVerification);
+  const authoredSet = new Set(authoredDimensionKeys);
+  const unreviewedLiveCandidateKeys = liveCandidateKeys.filter((key) => !authoredSet.has(key));
+  const errors = [];
+
+  if (required && !censusTrusted) {
+    errors.push(
+      'G-EDITOR-02 requires a successful read-only Drush live model census before authored next-cycle applicability can support completion.'
+    );
+  }
+  if (!authoredApplies && censusTrusted && liveCandidateKeys.length > 0) {
+    errors.push(
+      `G-EDITOR-02 cannot use N/A because the live Drupal model has temporal/cycle candidates omitted from the packet: ${liveCandidateKeys.join(', ')}.`
+    );
+  }
+  if (authoredApplies && censusTrusted && unreviewedLiveCandidateKeys.length > 0) {
+    errors.push(
+      `G-EDITOR-02 authored applicability omits live Drupal temporal/cycle candidates: ${unreviewedLiveCandidateKeys.join(', ')}.`
+    );
+  }
+
+  return {
+    authoredApplies,
+    authoredDimensionKeys,
+    censusRequired: required,
+    censusTrusted,
+    errors,
+    liveApplies: censusTrusted && liveCandidateKeys.length > 0,
+    liveCandidateKeys,
+    passed: errors.length === 0,
+    unreviewedLiveCandidateKeys
+  };
+}
+
+async function verifyNextCycleCleanup(
+  baseUrl,
+  nextCycleVerification,
+  liveReconciliation = null,
+  liveHttpContext = null
+) {
+  if (nextCycleVerification?.applicability?.applies !== true) {
+    if (liveReconciliation?.liveApplies === true) {
+      return {
+        applicable: true,
+        authoredApplicable: false,
+        errors: [],
+        passed: false,
+        reason: 'Live model census requires next-cycle evidence, but the packet declared N/A.'
+      };
+    }
+    return { applicable: false, errors: [], passed: true };
+  }
+  const errors = [];
+  const declaredUrl = String(nextCycleVerification?.futureContentProbe?.publicUrl ?? '').trim();
+  const expectedStatus = Number(nextCycleVerification?.cleanup?.publicUrlStatusAfterCleanup);
+  let requestedUrl;
+  try {
+    requestedUrl = parseHttpUrl(declaredUrl, 'next-cycle-verification.json futureContentProbe.publicUrl');
+  } catch (error) {
+    errors.push(error.message);
+    return { applicable: true, errors, passed: false, requestedUrl: declaredUrl };
+  }
+  if (requestedUrl.origin !== baseUrl.origin) {
+    errors.push(`Next-cycle cleanup URL origin ${requestedUrl.origin} does not match ${baseUrl.origin}.`);
+  }
+  if (![404, 410].includes(expectedStatus)) {
+    errors.push('Next-cycle cleanup must declare publicUrlStatusAfterCleanup as 404 or 410.');
+  }
+  try {
+    const response = await requestFollowingRedirects(requestedUrl, { liveHttpContext });
+    if (response.redirects.length > 0) {
+      errors.push('Next-cycle cleanup URL still redirects; alias or redirect residue remains.');
+    }
+    if (new URL(response.finalUrl).origin !== baseUrl.origin) {
+      errors.push(`Next-cycle cleanup URL left the target origin and resolved to ${new URL(response.finalUrl).origin}.`);
+    }
+    if (response.status !== expectedStatus) {
+      errors.push(`Next-cycle cleanup URL returned ${response.status}; expected ${expectedStatus}.`);
+    }
+    return {
+      actualStatus: response.status,
+      applicable: true,
+      bodySha256: `sha256:${sha256(response.body)}`,
+      errors,
+      finalUrl: response.finalUrl,
+      passed: errors.length === 0,
+      redirects: response.redirects,
+      requestedUrl: requestedUrl.href
+    };
+  } catch (error) {
+    errors.push(`Next-cycle cleanup URL could not be fetched: ${error.message}`);
+    return { applicable: true, errors, passed: false, requestedUrl: requestedUrl.href };
+  }
+}
+
 export async function verifyLive({
   packetDir = 'review-packet',
   targetUrl = '',
@@ -5011,6 +5376,7 @@ export async function verifyLive({
   let drupalReadback = null;
   let browserEvidence = null;
   let fieldOutputMatrix = null;
+  let nextCycleVerification = null;
   let parityReport = null;
   let patternMap = null;
   let sourceAudit = null;
@@ -5030,6 +5396,9 @@ export async function verifyLive({
     );
     fieldOutputMatrix = JSON.parse(
       await readFile(join(absolutePacketDir, 'field-output-matrix.json'), 'utf8')
+    );
+    nextCycleVerification = JSON.parse(
+      await readFile(join(absolutePacketDir, 'next-cycle-verification.json'), 'utf8')
     );
     parityReport = JSON.parse(
       await readFile(join(absolutePacketDir, 'parity-report.json'), 'utf8')
@@ -5076,6 +5445,19 @@ export async function verifyLive({
     patternMap
   );
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
+  const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
+  const packetClaimsQualifyingReview =
+    independentVerification?.summary?.verdict === 'pass' ||
+    ['good', 'good_enough'].includes(blindReview?.summary?.verdict);
+  const liveNextCycleCensusRequired =
+    (runtimeAuthoritativeForCompletion && (packetSupportsCompletion || packetClaimsQualifyingReview)) ||
+    (runtimeWasInjected && Object.prototype.hasOwnProperty.call(inspectedDrupalRuntime, 'liveNextCycleCensus'));
+  const liveNextCycleReconciliation = reconcileLiveNextCycleCensus(
+    nextCycleVerification,
+    inspectedDrupalRuntime.liveNextCycleCensus,
+    { required: liveNextCycleCensusRequired }
+  );
+  liveErrors.push(...liveNextCycleReconciliation.errors);
   const runtimeWebOrigins = new Set(Array.isArray(inspectedDrupalRuntime.webOrigins)
     ? inspectedDrupalRuntime.webOrigins
     : []);
@@ -5246,6 +5628,42 @@ export async function verifyLive({
     }
   }
   liveErrors.push(...redirectMaterializationChecks.flatMap((check) => check.errors));
+  let nextCycleCleanupCheck;
+  if (target && explicitTargetFetchAllowed) {
+    try {
+      nextCycleCleanupCheck = nextCycleVerification?.applicability?.applies === true
+        ? await liveHttpContext.runTask(
+            'next-cycle-cleanup',
+            () => verifyNextCycleCleanup(
+              target.url,
+              nextCycleVerification,
+              liveNextCycleReconciliation,
+              liveHttpContext
+            )
+          )
+        : await verifyNextCycleCleanup(
+            target.url,
+            nextCycleVerification,
+            liveNextCycleReconciliation,
+            liveHttpContext
+          );
+    } catch (error) {
+      nextCycleCleanupCheck = {
+        applicable: true,
+        errors: [`Next-cycle cleanup verification could not be scheduled: ${error.message}`],
+        passed: false
+      };
+    }
+  } else {
+    nextCycleCleanupCheck = {
+      applicable:
+        nextCycleVerification?.applicability?.applies === true ||
+        liveNextCycleReconciliation.liveApplies === true,
+      errors: [],
+      passed: false
+    };
+  }
+  liveErrors.push(...nextCycleCleanupCheck.errors);
   for (const error of liveHttpContext.errors) {
     if (!liveErrors.includes(error)) {
       liveErrors.push(error);
@@ -5364,10 +5782,6 @@ export async function verifyLive({
           : []
       };
 
-  const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
-  const packetClaimsQualifyingReview =
-    independentVerification?.summary?.verdict === 'pass' ||
-    ['good', 'good_enough'].includes(blindReview?.summary?.verdict);
   if (target && (packetSupportsCompletion || packetClaimsQualifyingReview) && declaredSource) {
     try {
       const sourceUrl = parseHttpUrl(declaredSource, 'route-matrix.json sourceBaseUrl');
@@ -5379,6 +5793,7 @@ export async function verifyLive({
           fieldOutputMatrix,
           independentVerification,
           negativeRouteConsent,
+          nextCycleVerification,
           parityReport,
           patternMap,
           sourceAudit,
@@ -5754,7 +6169,16 @@ export async function verifyLive({
         target: check.target
       }))
     },
-    routeChecks: routeEvidenceManifest
+    routeChecks: routeEvidenceManifest,
+    nextCycleCleanup: {
+      bodySha256: nextCycleCleanupCheck.bodySha256 ?? '',
+      finalUrl: nextCycleCleanupCheck.finalUrl ?? '',
+      status: nextCycleCleanupCheck.actualStatus ?? 0
+    },
+    liveNextCycleCensus: {
+      candidateKeys: liveNextCycleReconciliation.liveCandidateKeys,
+      confirmed: liveNextCycleReconciliation.censusTrusted
+    }
   });
   const sharedPacketReport = {
     ...sharedValue(packetReport, absolutePacketDir),
@@ -5779,6 +6203,7 @@ export async function verifyLive({
         }
       : null,
     evidenceBinding: {
+      liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
       targetFingerprintInputVersion: 5
@@ -5810,6 +6235,8 @@ export async function verifyLive({
     redirectMaterializationChecks: sharedValue(redirectMaterializationChecks, absolutePacketDir),
     liveHttpBudget,
     liveRouteBudget: liveRouteSchedule.budget,
+    nextCycleCleanupCheck,
+    liveNextCycleReconciliation,
     liveTargetValid,
     buildState,
     drupalRuntime: {
