@@ -16,7 +16,8 @@ import {
   captureSummary,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
-  validateBeforeConsentNetworkCapture
+  validateBeforeConsentNetworkCapture,
+  verifierAxeCompletionErrors
 } from './global-chrome.mjs';
 import {
   buildSiteState,
@@ -188,7 +189,9 @@ function verifierFingerprint() {
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
-    join(KIT_ROOT, 'gates.json')
+    join(scriptDirectory, 'global-chrome.mjs'),
+    join(KIT_ROOT, 'gates.json'),
+    join(KIT_ROOT, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ]
     .filter((path) => existsSync(path))
     .map((path) => relative(KIT_ROOT, path));
@@ -5690,7 +5693,7 @@ export async function verifyLive({
   } catch (error) {
     liveErrors.push(`Global chrome lifecycle context could not be read: ${error.message}`);
   }
-  const rawGlobalChromeCapture = chromeContext.lifecyclePresent && fetchChecksEnabled && runtimeAuthoritativeForCompletion
+  const rawGlobalChromeCapture = fetchChecksEnabled && runtimeAuthoritativeForCompletion
     ? await captureGlobalChrome({
         baseUrl: target.url,
         primaryRoutes,
@@ -5710,9 +5713,7 @@ export async function verifyLive({
         routes: [],
         budget: null,
         warnings: [],
-        errors: [chromeContext.lifecyclePresent
-          ? 'Verifier-owned browser capture is disabled for an injected or unavailable runtime.'
-          : 'No lifecycle baseline exists yet; the next live verifier run will establish the global chrome anchor.']
+        errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
       };
   let negativeRouteCheck = null;
   if (fetchChecksEnabled) {
@@ -6068,6 +6069,8 @@ export async function verifyLive({
     }
   );
   liveErrors.push(...consentReconciliation.errors);
+  const verifierOwnedAxeErrors = verifierAxeCompletionErrors(globalChromeCapture);
+  const verifierOwnedAxeSupportsCompletion = verifierOwnedAxeErrors.length === 0;
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
@@ -6086,6 +6089,7 @@ export async function verifyLive({
     packetReport.valid &&
     liveTargetValid &&
     packetSupportsCompletion &&
+    verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion;
   const completionBlockedReasons = [];
   if (!packetReport.valid) {
@@ -6103,6 +6107,7 @@ export async function verifyLive({
   if (!packetReport.completionEvidence?.packetCompletionReady) {
     completionBlockedReasons.push('Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.');
   }
+  completionBlockedReasons.push(...verifierOwnedAxeErrors);
   const runtimeDrushCommandFailures = Array.isArray(inspectedDrupalRuntime.drushCommandFailures)
     ? inspectedDrupalRuntime.drushCommandFailures.filter(Boolean)
     : [];
@@ -6203,6 +6208,7 @@ export async function verifyLive({
     beforeConsentNetworkCapture,
     absolutePacketDir
   );
+  const globalChromeCaptureSummary = captureSummary(globalChromeCapture);
   const sharedConsentReconciliation = sharedValue(consentReconciliation, absolutePacketDir);
   if (sharedConsentReconciliation.authoritativeBeforeConsentCapture === true) {
     sharedConsentReconciliation.beforeConsentCaptureFingerprint = sharedBeforeConsentCapture.captureFingerprint;
@@ -6246,7 +6252,13 @@ export async function verifyLive({
     routeChecks: routeChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     globalChromeCapture,
-    globalChromeCaptureSummary: captureSummary(globalChromeCapture),
+    globalChromeCaptureSummary,
+    verifierOwnedAccessibility: {
+      authority: 'verifier-owned-global-chrome',
+      ...globalChromeCaptureSummary.verifierAxe,
+      passed: verifierOwnedAxeSupportsCompletion,
+      errors: verifierOwnedAxeErrors
+    },
     beforeConsentNetworkCapture: sharedBeforeConsentCapture,
     negativeRouteCheck: sharedValue(negativeRouteCheck, absolutePacketDir),
     accessWallChecks: sharedValue(accessWallChecks, absolutePacketDir),

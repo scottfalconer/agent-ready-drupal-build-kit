@@ -384,7 +384,12 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(34 files\)/);
+  assert.match(result.stdout, /is in sync \(37 files\)/);
+  assert.ok(readFileSync(
+    join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
+  ).equals(readFileSync(
+    join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
+  )));
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -421,7 +426,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(34 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(37 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

@@ -3476,14 +3476,17 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
 
 test('CLI discovers the DDEV Drupal runtime and requires clean status plus HEAD-matching tracked config YAML', async () => {
   let liveBaseUrl = '';
+  let verifierAxeViolation = false;
   await withHttpServer(
     (_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      response.end(`<!doctype html><html><head>
+      response.end(`<!doctype html><html lang="en"><head>
         <title>Target site</title>
         <link rel="canonical" href="${liveBaseUrl}/">
         <meta name="description" content="Fixture homepage description.">
-      </head><body><h1>Target home</h1></body></html>`);
+        <meta name="viewport" content="width=device-width">
+        ${verifierAxeViolation ? '<style>.verifier-axe-fixture{color:#777;background:#888}</style>' : ''}
+      </head><body><main><h1>Target home</h1><p class="verifier-axe-fixture">Verifier-owned accessibility fixture.</p></main></body></html>`);
     },
     async (baseUrl) => {
       liveBaseUrl = baseUrl;
@@ -3727,6 +3730,9 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.verdict, 'complete-local-rebuild');
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
+      assert.equal(cleanReport.verifierOwnedAccessibility.passed, true);
+      assert.equal(cleanReport.verifierOwnedAccessibility.sourceVersion, '4.10.3');
+      assert.equal(cleanReport.verifierOwnedAccessibility.routeViewportCount, 2);
       assert.equal(cleanReport.lifecycle.initialBaseline.status, 'passed');
       assert.equal(cleanReport.lifecycle.relation, 'matches-initial-baseline');
       assert.equal(cleanReport.lifecycle.currentStateVerified, true);
@@ -3737,6 +3743,23 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(baseline.schemaVersion, 'public-kit.initial-baseline.1');
       assert.equal(baseline.status, 'passed');
       assert.equal(baseline.siteStateFingerprint, cleanReport.buildState.fingerprint);
+
+      // The packet still contains its authored passing axe reports. A fresh
+      // verifier-owned browser violation must independently block completion.
+      verifierAxeViolation = true;
+      const axeViolationResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
+      assert.equal(axeViolationResult.status, 2, axeViolationResult.stderr);
+      const axeViolationReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(axeViolationReport.packetVerification.completionEvidence.packetSupportsCompletion, true);
+      assert.equal(axeViolationReport.verifierOwnedAccessibility.passed, false);
+      assert.equal(axeViolationReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        axeViolationReport.completionBlockedReasons.join('\n'),
+        /unresolved WCAG 2\.2 A\/AA.*color-contrast/i
+      );
+      verifierAxeViolation = false;
 
       const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }

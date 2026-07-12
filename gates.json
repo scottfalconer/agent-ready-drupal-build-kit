@@ -222,7 +222,7 @@
     },
     {
       "id": "G-A11Y-01",
-      "title": "Real-browser accessibility checks have no unresolved or undispositioned handoff defects",
+      "title": "Verifier-owned real-browser axe checks have no unresolved WCAG 2.2 A/AA violations",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",
