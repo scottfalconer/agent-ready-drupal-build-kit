@@ -5088,11 +5088,19 @@ export function verifyConsentReconciliation(
     const violating = observedUrls.filter((url) =>
       (application.controlledResources ?? []).some((resource) => controlledResourceMatches(resource, url))
     );
-    if (violating.length > 0) {
+    const essentialWithoutConsent = application.required === true &&
+      application.essentialWithoutConsent === true &&
+      String(application.essentialServiceRationale ?? '').trim() &&
+      Array.isArray(application.essentialServiceEvidence) &&
+      application.essentialServiceEvidence.length > 0;
+    if (application.required === true && !essentialWithoutConsent) {
+      errors.push(`Required consent application ${application.id} lacks an explicit evidence-backed essential-without-consent classification; required=true cannot disable observation or authorize loading.`);
+    }
+    if (violating.length > 0 && !essentialWithoutConsent) {
       const state = application.enabled !== true
         ? 'while its consent application is disabled'
         : application.required === true
-          ? 'before consent even though its consent application is marked required; required=true cannot exempt a declared controlled resource'
+          ? 'before consent while its required application lacks an evidence-backed essential-service classification'
           : 'before consent';
       errors.push(`Controlled resource for ${application.id} loaded ${state}: ${violating[0]}.`);
     }

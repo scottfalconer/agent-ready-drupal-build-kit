@@ -267,7 +267,24 @@ test('all-enabled required analytics and marketing apps cannot bypass pre-consen
     context
   );
   assert.equal(noRequests.authoritativeBeforeConsentCapture, true);
-  assert.equal(noRequests.passed, true, noRequests.errors.join('\n'));
+  assert.equal(noRequests.passed, false);
+  assert.match(noRequests.errors.join('\n'), /required consent application analytics lacks.*essential-without-consent/i);
+
+  const essentialDeclaration = structuredClone(declaration);
+  for (const application of essentialDeclaration.applications) {
+    application.essentialWithoutConsent = true;
+    application.essentialServiceRationale = 'Fixture-only essential service classification.';
+    application.essentialServiceEvidence = ['evidence/essential-service.json'];
+  }
+  const justifiedNoRequests = verifyConsentReconciliation(
+    essentialDeclaration,
+    runtime,
+    [{ renderedResourceUrls: [] }],
+    beforeConsentCaptureFixture(),
+    context
+  );
+  assert.equal(justifiedNoRequests.authoritativeBeforeConsentCapture, true);
+  assert.equal(justifiedNoRequests.passed, true, justifiedNoRequests.errors.join('\n'));
 
   const capture = beforeConsentCaptureFixture({
     requests: [{
@@ -287,7 +304,7 @@ test('all-enabled required analytics and marketing apps cannot bypass pre-consen
   assert.equal(observedRequest.passed, false);
   assert.match(
     observedRequest.errors.join('\n'),
-    /analytics loaded before consent.*marked required.*required=true cannot exempt.*analytics\.example\/collect\.js/i
+    /analytics lacks.*essential-without-consent.*analytics loaded before consent.*lacks an evidence-backed essential-service classification.*analytics\.example\/collect\.js/is
   );
 });
 
