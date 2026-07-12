@@ -14,6 +14,11 @@ const VIEWPORTS = Object.freeze([
   Object.freeze({ name: 'desktop', width: 1280, height: 800, mobile: false }),
   Object.freeze({ name: 'mobile', width: 390, height: 844, mobile: true })
 ]);
+export const BROWSER_CAPTURE_LIMITS = Object.freeze({
+  deadlineMs: 120_000,
+  maxRoutes: 64,
+  operationTimeoutMs: 20_000
+});
 const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
   maximumPageHeightRatio: 1.6,
@@ -22,6 +27,114 @@ const FIXED_THRESHOLDS = Object.freeze({
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
+
+function boundedPositiveLimit(value, ceiling, label) {
+  if (value === undefined) return ceiling;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer.`);
+  }
+  return Math.min(value, ceiling);
+}
+
+export function createBrowserCaptureBudget({
+  label = 'Browser capture',
+  limits = {},
+  now = Date.now,
+  routeCount = 0,
+  viewportCount = 1
+} = {}) {
+  if (!Number.isSafeInteger(routeCount) || routeCount < 0) {
+    throw new Error(`${label} routeCount must be a non-negative safe integer.`);
+  }
+  if (!Number.isSafeInteger(viewportCount) || viewportCount <= 0) {
+    throw new Error(`${label} viewportCount must be a positive safe integer.`);
+  }
+  if (typeof now !== 'function') throw new Error(`${label} clock must be a function.`);
+  const boundedLimits = Object.freeze({
+    deadlineMs: boundedPositiveLimit(limits.deadlineMs, BROWSER_CAPTURE_LIMITS.deadlineMs, `${label} deadlineMs`),
+    maxRoutes: boundedPositiveLimit(limits.maxRoutes, BROWSER_CAPTURE_LIMITS.maxRoutes, `${label} maxRoutes`),
+    operationTimeoutMs: boundedPositiveLimit(
+      limits.operationTimeoutMs,
+      BROWSER_CAPTURE_LIMITS.operationTimeoutMs,
+      `${label} operationTimeoutMs`
+    )
+  });
+  const startedAt = now();
+  if (!Number.isFinite(startedAt)) throw new Error(`${label} clock must return a finite timestamp.`);
+  let deadlineExceeded = false;
+  const deadlineMessage = () => `${label} exceeded its ${boundedLimits.deadlineMs} ms total wall-clock deadline.`;
+  const deadlineError = () => {
+    deadlineExceeded = true;
+    return new Error(deadlineMessage());
+  };
+  const elapsedMs = () => Math.max(0, Math.floor(now() - startedAt));
+  const remainingMs = () => {
+    const remaining = boundedLimits.deadlineMs - elapsedMs();
+    if (remaining <= 0) throw deadlineError();
+    return remaining;
+  };
+  return Object.freeze({
+    label,
+    limits: boundedLimits,
+    assertRouteLimit() {
+      if (routeCount > boundedLimits.maxRoutes) {
+        throw new Error(
+          `${label} requires ${routeCount} routes, exceeding the ${boundedLimits.maxRoutes} route limit; no browser checks were run.`
+        );
+      }
+    },
+    assertWithinDeadline() {
+      remainingMs();
+    },
+    deadlineError,
+    hasExceededDeadline() {
+      return deadlineExceeded;
+    },
+    operationTiming() {
+      const remaining = remainingMs();
+      return {
+        deadlineLimited: remaining <= boundedLimits.operationTimeoutMs,
+        timeoutMs: Math.max(1, Math.min(remaining, boundedLimits.operationTimeoutMs))
+      };
+    },
+    metrics({ attempted = false, capturedCount = 0 } = {}) {
+      return {
+        attempted,
+        capturedRouteViewportCount: capturedCount,
+        deadlineExceeded,
+        deadlineMs: boundedLimits.deadlineMs,
+        elapsedMs: elapsedMs(),
+        maxRoutes: boundedLimits.maxRoutes,
+        operationTimeoutMs: boundedLimits.operationTimeoutMs,
+        routeCount,
+        scheduledRouteViewportCount: routeCount * viewportCount,
+        viewportCount
+      };
+    }
+  });
+}
+
+export function cleanupBrowserProfile(profile, {
+  maxRetries = 5,
+  remove = rmSync,
+  retryDelayMs = 50
+} = {}) {
+  try {
+    remove(profile, {
+      recursive: true,
+      force: true,
+      maxRetries: boundedPositiveLimit(maxRetries, 10, 'Browser profile cleanup maxRetries'),
+      retryDelay: boundedPositiveLimit(retryDelayMs, 250, 'Browser profile cleanup retryDelayMs')
+    });
+    return { deferred: false, warnings: [] };
+  } catch (error) {
+    const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+    return {
+      deferred: true,
+      warnings: [`Browser profile cleanup was deferred after bounded retries (${code}).`]
+    };
+  }
+}
 
 function normalizeRoute(value) {
   const text = String(value ?? '').trim();
@@ -106,10 +219,11 @@ export function findBrowserExecutable(environment = process.env) {
 }
 
 class CdpPipe {
-  constructor(child, timeoutMs = 20_000) {
+  constructor(child, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
     this.child = child;
     this.input = child.stdio[3];
     this.output = child.stdio[4];
+    this.budget = budget;
     this.timeoutMs = timeoutMs;
     this.nextId = 1;
     this.pending = new Map();
@@ -178,20 +292,34 @@ class CdpPipe {
   }
 
   send(method, params = {}, sessionId = '') {
+    let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
+    try {
+      if (this.budget) timing = this.budget.operationTiming();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const id = this.nextId++;
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
     return new Promise((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        rejectPromise(new Error(`${method} timed out after ${this.timeoutMs} ms.`));
-      }, this.timeoutMs);
+        rejectPromise(timing.deadlineLimited
+          ? this.budget.deadlineError()
+          : new Error(`${method} timed out after ${timing.timeoutMs} ms.`));
+      }, timing.timeoutMs);
       this.pending.set(id, { method, resolve: resolvePromise, reject: rejectPromise, timeout });
       this.input.write(`${JSON.stringify(message)}\0`);
     });
   }
 
   waitFor(method, sessionId = '') {
+    let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
+    try {
+      if (this.budget) timing = this.budget.operationTiming();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const queuedIndex = this.events.findIndex((event) =>
       event.method === method && (!sessionId || event.sessionId === sessionId)
     );
@@ -200,8 +328,10 @@ class CdpPipe {
       const waiter = { method, sessionId, resolve: resolvePromise, reject: rejectPromise };
       waiter.timeout = setTimeout(() => {
         this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
-        rejectPromise(new Error(`${method} event timed out after ${this.timeoutMs} ms.`));
-      }, this.timeoutMs);
+        rejectPromise(timing.deadlineLimited
+          ? this.budget.deadlineError()
+          : new Error(`${method} event timed out after ${timing.timeoutMs} ms.`));
+      }, timing.timeoutMs);
       this.waiters.push(waiter);
     });
   }
@@ -223,37 +353,32 @@ function signalBrowserProcessGroup(child, signal) {
 }
 
 async function shutdownBrowser(child) {
-  if (!child) return true;
+  if (!child) return '';
   if (
     child.exitCode !== null &&
     child.stdio.every((stream) => !stream || stream.destroyed)
-  ) return true;
+  ) return '';
   let closed = false;
   const closedPromise = new Promise((resolvePromise) => child.once('close', () => {
     closed = true;
     resolvePromise();
   }));
-  signalBrowserProcessGroup(child, 'SIGTERM');
-  await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))]);
-  // Chrome may let its parent exit before profile-writing descendants. Kill the
-  // isolated process group as a final bounded cleanup step, then give file
-  // handles a moment to close before removing the ephemeral profile.
-  signalBrowserProcessGroup(child, 'SIGKILL');
-  if (!closed) await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))]);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
-  return closed || child.stdio.every((stream) => !stream || stream.destroyed);
-}
-
-function removeBrowserProfile(profile, warnings) {
   try {
-    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    signalBrowserProcessGroup(child, 'SIGTERM');
+    await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000))]);
+    // The Chrome parent may exit before profile-writing descendants. Always
+    // signal the isolated process group before removing its ephemeral profile.
+    signalBrowserProcessGroup(child, 'SIGKILL');
+    if (!closed) {
+      await Promise.race([closedPromise, new Promise((resolvePromise) => setTimeout(resolvePromise, 500))]);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
   } catch (error) {
-    warnings.push(`Browser profile cleanup was deferred after browser shutdown: ${error.message}`);
-    const retry = setTimeout(() => {
-      try { rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch {}
-    }, 1000);
-    retry.unref();
+    return `Browser shutdown failed: ${error.message}`;
   }
+  return closed || child.stdio.every((stream) => !stream || stream.destroyed)
+    ? ''
+    : 'Browser shutdown failed: the headless browser did not close after bounded SIGTERM and SIGKILL.';
 }
 
 function collectorExpression(contract, mobile) {
@@ -436,7 +561,10 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   );
   const url = new URL(path.replace(/^\//, ''), new URL('/', baseUrl)).href;
   const loaded = cdp.waitFor('Page.loadEventFired', sessionId);
-  const navigation = await cdp.send('Page.navigate', { url }, sessionId);
+  const navigation = await cdp.send('Page.navigate', { url }, sessionId).catch((error) => {
+    void loaded.catch(() => {});
+    throw error;
+  });
   if (navigation.errorText) throw new Error(`${path} navigation failed: ${navigation.errorText}`);
   await loaded;
   await cdp.send('Runtime.evaluate', {
@@ -476,13 +604,49 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   };
 }
 
-export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {}, environment = process.env } = {}) {
+export async function captureGlobalChrome({
+  baseUrl,
+  primaryRoutes,
+  contract = {},
+  environment = process.env,
+  limits = {},
+  now = Date.now,
+  profileCleanup = cleanupBrowserProfile
+} = {}) {
   const normalizedContract = normalizeGlobalChromeContract(contract);
   const checkedAt = new Date().toISOString();
-  const routes = [...new Set((Array.isArray(primaryRoutes) ? primaryRoutes : [])
-    .map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
-  const executable = findBrowserExecutable(environment);
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  const budget = createBrowserCaptureBudget({
+    label: 'Global chrome capture',
+    limits,
+    now,
+    routeCount: routeInputs.length,
+    viewportCount: VIEWPORTS.length
+  });
   const base = new URL(baseUrl);
+  let routes = [];
+  try {
+    budget.assertRouteLimit();
+    budget.assertWithinDeadline();
+    routes = [...new Set(routeInputs.map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  } catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: '', product: '' },
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics(),
+      warnings: [],
+      errors: [error.message]
+    };
+  }
+  const executable = findBrowserExecutable(environment);
   if (!executable) {
     return {
       schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
@@ -495,6 +659,8 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       browser: { executable: '', product: '' },
       primaryRoutes: routes,
       routes: [],
+      budget: budget.metrics(),
+      warnings: [],
       errors: ['No Chrome/Chromium executable was found. Set CHROME_PATH or install Chrome/Chromium.']
     };
   }
@@ -510,7 +676,28 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       browser: { executable: basename(executable), product: '' },
       primaryRoutes: routes,
       routes: [],
+      budget: budget.metrics(),
+      warnings: [],
       errors: ['No primary routes were available for global chrome capture.']
+    };
+  }
+  try {
+    budget.assertWithinDeadline();
+  } catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: basename(executable), product: '' },
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics(),
+      warnings: [],
+      errors: [error.message]
     };
   }
   const profile = join(tmpdir(), `agent-ready-chrome-${process.pid}-${Date.now()}`);
@@ -531,7 +718,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
   child.stderr.on('data', (chunk) => {
     if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
   });
-  const cdp = new CdpPipe(child);
+  const cdp = new CdpPipe(child, budget);
   const captured = [];
   const errors = [];
   const warnings = [];
@@ -545,23 +732,37 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Network.enable', {}, sessionId);
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    captureLoop:
     for (const path of routes) {
       for (const viewport of VIEWPORTS) {
         try {
+          budget.assertWithinDeadline();
           const capture = await captureRoute(cdp, sessionId, base, path, viewport, normalizedContract);
           captured.push(capture);
           for (const violation of capture.signals.maskViolations ?? []) errors.push(`${path} ${viewport.name}: ${violation}`);
         } catch (error) {
           errors.push(`${path} ${viewport.name}: ${error.message}`);
+          if (budget.hasExceededDeadline()) break captureLoop;
         }
       }
     }
-    await cdp.send('Target.closeTarget', { targetId });
+    if (!budget.hasExceededDeadline()) await cdp.send('Target.closeTarget', { targetId });
   } catch (error) {
     errors.push(error.message);
   } finally {
-    if (!(await shutdownBrowser(child))) errors.push('Headless browser process group did not close after bounded shutdown.');
-    removeBrowserProfile(profile, warnings);
+    const shutdownError = await shutdownBrowser(child);
+    if (shutdownError) {
+      errors.push(shutdownError);
+      warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
+    } else {
+      try {
+        const cleanup = profileCleanup(profile);
+        warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
+      } catch (error) {
+        const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+        warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
+      }
+    }
   }
   if (captured.length !== routes.length * VIEWPORTS.length && stderr.length) {
     errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
@@ -577,8 +778,9 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     browser: { executable: basename(executable), product },
     primaryRoutes: routes,
     routes: captured,
-    errors,
-    warnings
+    budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
+    warnings,
+    errors
   };
 }
 
@@ -592,7 +794,17 @@ function networkRequestValue(params) {
   };
 }
 
-async function captureBeforeConsentRoute(cdp, baseUrl, path) {
+async function waitWithinBrowserCaptureBudget(budget, durationMs) {
+  const timing = budget.operationTiming();
+  if (timing.deadlineLimited && timing.timeoutMs <= durationMs) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, timing.timeoutMs));
+    throw budget.deadlineError();
+  }
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, durationMs));
+  budget.assertWithinDeadline();
+}
+
+async function captureBeforeConsentRoute(cdp, baseUrl, path, budget) {
   let browserContextId = '';
   let targetId = '';
   const unsubscribers = [];
@@ -633,16 +845,17 @@ async function captureBeforeConsentRoute(cdp, baseUrl, path) {
     const observationFloorMs = 2000;
     const networkQuietMs = 500;
     const maximumObservationMs = 8000;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, observationFloorMs));
+    await waitWithinBrowserCaptureBudget(budget, observationFloorMs);
     let quietSince = inFlight.size === 0 ? Date.now() : 0;
     while (Date.now() - observationStarted < maximumObservationMs) {
+      budget.assertWithinDeadline();
       if (inFlight.size === 0) {
         if (!quietSince) quietSince = Date.now();
         if (Date.now() - quietSince >= networkQuietMs) break;
       } else {
         quietSince = 0;
       }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      await waitWithinBrowserCaptureBudget(budget, 100);
     }
     if (!quietSince || Date.now() - quietSince < networkQuietMs || inFlight.size > 0) {
       throw new Error(`${path} network did not settle within ${maximumObservationMs} ms; before-consent absence cannot be proven.`);
@@ -694,32 +907,69 @@ export async function captureBeforeConsentNetwork({
   baseUrl,
   primaryRoutes,
   environment = process.env,
-  browserExecutable
+  browserExecutable,
+  limits = {},
+  now = Date.now,
+  profileCleanup = cleanupBrowserProfile
 } = {}) {
   const checkedAt = new Date().toISOString();
   const base = new URL(baseUrl);
-  const routes = [...new Set((Array.isArray(primaryRoutes) ? primaryRoutes : [])
-    .map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  const budget = createBrowserCaptureBudget({
+    label: 'Before-consent network capture',
+    limits,
+    now,
+    routeCount: routeInputs.length,
+    viewportCount: 1
+  });
+  let routes = [];
+  try {
+    budget.assertRouteLimit();
+    budget.assertWithinDeadline();
+    routes = [...new Set(routeInputs.map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  } catch (error) {
+    return {
+      schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-cdp-network',
+      targetOrigin: base.origin,
+      browser: { executable: '', product: '' },
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics(),
+      warnings: [],
+      errors: [error.message]
+    };
+  }
   const executable = browserExecutable === undefined
     ? findBrowserExecutable(environment)
     : String(browserExecutable ?? '').trim();
-  const unavailable = (message) => ({
+  const unavailable = (message, status = 'unavailable') => ({
     schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
     checkedAt,
-    status: 'unavailable',
+    status,
     authoritative: false,
     captureMode: 'verifier-owned-cdp-network',
     targetOrigin: base.origin,
     browser: { executable: '', product: '' },
     primaryRoutes: routes,
     routes: [],
+    budget: budget.metrics(),
+    warnings: [],
     errors: [message]
   });
   if (!executable || !existsSync(executable)) {
     return unavailable('No Chrome/Chromium executable was found for before-consent network capture. Set CHROME_PATH or install Chrome/Chromium.');
   }
   if (routes.length === 0) {
-    return { ...unavailable('No primary routes were available for before-consent network capture.'), status: 'blocked' };
+    return unavailable('No primary routes were available for before-consent network capture.', 'blocked');
+  }
+  try {
+    budget.assertWithinDeadline();
+  } catch (error) {
+    return unavailable(error.message, 'blocked');
   }
   const profile = join(tmpdir(), `agent-ready-consent-chrome-${process.pid}-${Date.now()}`);
   mkdirSync(profile, { recursive: true });
@@ -738,7 +988,7 @@ export async function captureBeforeConsentNetwork({
   child.stderr.on('data', (chunk) => {
     if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
   });
-  const cdp = new CdpPipe(child);
+  const cdp = new CdpPipe(child, budget);
   const captured = [];
   const errors = [];
   const warnings = [];
@@ -746,18 +996,33 @@ export async function captureBeforeConsentNetwork({
   try {
     const version = await cdp.send('Browser.getVersion');
     product = String(version.product ?? '');
+    captureLoop:
     for (const path of routes) {
       try {
-        captured.push(await captureBeforeConsentRoute(cdp, base, path));
+        budget.assertWithinDeadline();
+        captured.push(await captureBeforeConsentRoute(cdp, base, path, budget));
       } catch (error) {
         errors.push(`${path}: ${error.message}`);
+        if (budget.hasExceededDeadline()) break captureLoop;
       }
     }
+    budget.assertWithinDeadline();
   } catch (error) {
     errors.push(error.message);
   } finally {
-    if (!(await shutdownBrowser(child))) errors.push('Headless browser process group did not close after bounded shutdown.');
-    removeBrowserProfile(profile, warnings);
+    const shutdownError = await shutdownBrowser(child);
+    if (shutdownError) {
+      errors.push(shutdownError);
+      warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
+    } else {
+      try {
+        const cleanup = profileCleanup(profile);
+        warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
+      } catch (error) {
+        const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+        warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
+      }
+    }
   }
   if (captured.length !== routes.length && stderr.length) {
     errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
@@ -772,14 +1037,31 @@ export async function captureBeforeConsentNetwork({
     browser: { executable: basename(executable), product },
     primaryRoutes: routes,
     routes: captured,
-    errors,
-    warnings
+    budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
+    warnings,
+    errors
   };
 }
 
 function beforeConsentCoverage(capture, targetOrigin = '') {
   const expectedRoutes = [...new Set((capture?.primaryRoutes ?? []).map(normalizeRoute))].sort();
   if (expectedRoutes.length === 0) throw new Error('Before-consent capture must identify every primary route.');
+  const budget = capture?.budget;
+  if (
+    budget?.attempted !== true ||
+    budget?.deadlineExceeded !== false ||
+    budget?.routeCount !== expectedRoutes.length ||
+    budget?.viewportCount !== 1 ||
+    budget?.scheduledRouteViewportCount !== expectedRoutes.length ||
+    budget?.capturedRouteViewportCount !== expectedRoutes.length ||
+    !Number.isSafeInteger(budget?.deadlineMs) || budget.deadlineMs <= 0 || budget.deadlineMs > BROWSER_CAPTURE_LIMITS.deadlineMs ||
+    !Number.isSafeInteger(budget?.maxRoutes) || budget.maxRoutes <= 0 || budget.maxRoutes > BROWSER_CAPTURE_LIMITS.maxRoutes ||
+    !Number.isSafeInteger(budget?.operationTimeoutMs) || budget.operationTimeoutMs <= 0 ||
+      budget.operationTimeoutMs > BROWSER_CAPTURE_LIMITS.operationTimeoutMs ||
+    !Number.isSafeInteger(budget?.elapsedMs) || budget.elapsedMs < 0
+  ) {
+    throw new Error('Before-consent capture lacks valid verifier-owned route, deadline, and completion budget metrics.');
+  }
   if (targetOrigin && capture?.targetOrigin !== targetOrigin) {
     throw new Error('Before-consent capture target origin does not match the inspected target.');
   }
@@ -1140,6 +1422,8 @@ export function captureSummary(capture) {
     stateFingerprint: capture?.resultStateFingerprint ?? '',
     captureFingerprint: capture?.captureFingerprint ?? '',
     routeViewportCount: Array.isArray(capture?.routes) ? capture.routes.length : 0,
+    budget: capture?.budget ?? null,
+    warnings: Array.isArray(capture?.warnings) ? capture.warnings : [],
     errors: Array.isArray(capture?.errors) ? capture.errors : []
   };
 }

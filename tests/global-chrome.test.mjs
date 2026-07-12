@@ -6,9 +6,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  BROWSER_CAPTURE_LIMITS,
   captureBeforeConsentNetwork,
   captureGlobalChrome,
+  cleanupBrowserProfile,
   compareGlobalChromeCaptures,
+  createBrowserCaptureBudget,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
   findBrowserExecutable,
@@ -17,10 +20,152 @@ import {
   validateBeforeConsentNetworkCapture,
   validateScreenshotArtifacts
 } from '../bin/global-chrome.mjs';
-import { verifyConsentReconciliation } from '../bin/verify.mjs';
+import { consentNetworkCaptureRequired, verifyConsentReconciliation } from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
 const state = (seed) => `sha256:${seed.repeat(64)}`;
+
+test('browser capture budget enforces an absolute route ceiling and aggregate deadline', () => {
+  let clock = 1_000;
+  const routeBudget = createBrowserCaptureBudget({
+    label: 'Fixture capture',
+    limits: { maxRoutes: BROWSER_CAPTURE_LIMITS.maxRoutes + 10 },
+    now: () => clock,
+    routeCount: BROWSER_CAPTURE_LIMITS.maxRoutes + 1,
+    viewportCount: 2
+  });
+  assert.throws(
+    () => routeBudget.assertRouteLimit(),
+    new RegExp(`exceeding the ${BROWSER_CAPTURE_LIMITS.maxRoutes} route limit`, 'i')
+  );
+  assert.equal(routeBudget.metrics().scheduledRouteViewportCount, (BROWSER_CAPTURE_LIMITS.maxRoutes + 1) * 2);
+
+  const deadlineBudget = createBrowserCaptureBudget({
+    label: 'Fixture capture',
+    limits: { deadlineMs: 50 },
+    now: () => clock,
+    routeCount: 1,
+    viewportCount: 2
+  });
+  clock += 40;
+  assert.deepEqual(deadlineBudget.operationTiming(), { deadlineLimited: true, timeoutMs: 10 });
+  clock += 10;
+  assert.throws(() => deadlineBudget.assertWithinDeadline(), /50 ms total wall-clock deadline/i);
+  assert.equal(deadlineBudget.metrics().deadlineExceeded, true);
+});
+
+test('global chrome capture fails closed before browser launch when route or wall-clock bounds are exceeded', async () => {
+  const tooManyRoutes = await captureGlobalChrome({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: Array.from({ length: BROWSER_CAPTURE_LIMITS.maxRoutes + 1 }, (_, index) => `/route-${index}`)
+  });
+  assert.equal(tooManyRoutes.status, 'blocked');
+  assert.equal(tooManyRoutes.authoritative, false);
+  assert.equal(tooManyRoutes.budget.attempted, false);
+  assert.equal(tooManyRoutes.budget.routeCount, BROWSER_CAPTURE_LIMITS.maxRoutes + 1);
+  assert.match(tooManyRoutes.errors.join('\n'), /route limit; no browser checks were run/i);
+
+  const clockValues = [0, 11, 11];
+  const expired = await captureGlobalChrome({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: ['/'],
+    limits: { deadlineMs: 10 },
+    now: () => clockValues.shift() ?? 11
+  });
+  assert.equal(expired.status, 'blocked');
+  assert.equal(expired.authoritative, false);
+  assert.equal(expired.budget.deadlineExceeded, true);
+  assert.equal(expired.budget.deadlineMs, 10);
+  assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
+
+test('before-consent capture reuses the browser route ceiling and aggregate deadline', async () => {
+  const tooManyRoutes = await captureBeforeConsentNetwork({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: Array.from({ length: BROWSER_CAPTURE_LIMITS.maxRoutes + 1 }, (_, index) => `/route-${index}`),
+    browserExecutable: '/definitely/not/a/browser'
+  });
+  assert.equal(tooManyRoutes.status, 'blocked');
+  assert.equal(tooManyRoutes.authoritative, false);
+  assert.equal(tooManyRoutes.budget.attempted, false);
+  assert.equal(tooManyRoutes.budget.routeCount, BROWSER_CAPTURE_LIMITS.maxRoutes + 1);
+  assert.equal(tooManyRoutes.budget.viewportCount, 1);
+  assert.match(tooManyRoutes.errors.join('\n'), /route limit; no browser checks were run/i);
+
+  const clockValues = [0, 11, 11];
+  const expired = await captureBeforeConsentNetwork({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: ['/'],
+    browserExecutable: '/definitely/not/a/browser',
+    limits: { deadlineMs: 10 },
+    now: () => clockValues.shift() ?? 11
+  });
+  assert.equal(expired.status, 'blocked');
+  assert.equal(expired.authoritative, false);
+  assert.equal(expired.budget.deadlineExceeded, true);
+  assert.equal(expired.budget.deadlineMs, 10);
+  assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
+
+test('selector-only and attachment-only optional consent apps require verifier-owned capture', () => {
+  const declaration = (kind, { enabled = true, required = false } = {}) => ({
+    discoveryStatus: 'installed',
+    managers: [{ id: 'klaro', module: 'klaro', configNames: [`klaro.application.${kind}`] }],
+    applications: [{
+      id: kind,
+      managerId: 'klaro',
+      configName: `klaro.application.${kind}`,
+      enabled,
+      required,
+      controlledResources: [{ kind, pattern: kind === 'selector' ? '#external-media' : 'remote_video' }]
+    }]
+  });
+  assert.equal(consentNetworkCaptureRequired(declaration('selector')), true);
+  assert.equal(consentNetworkCaptureRequired(declaration('attachment', { enabled: false, required: false })), true);
+  assert.equal(consentNetworkCaptureRequired(declaration('selector', { enabled: true, required: true })), false);
+
+  for (const kind of ['selector', 'attachment']) {
+    const record = declaration(kind, { enabled: kind === 'selector', required: false });
+    const application = record.applications[0];
+    const reconciliation = verifyConsentReconciliation(record, {
+      confirmed: true,
+      detected: true,
+      managerModules: ['klaro'],
+      configNames: [application.configName],
+      applications: [{
+        id: application.id,
+        configName: application.configName,
+        enabled: application.enabled,
+        required: application.required,
+        resources: application.controlledResources
+      }]
+    }, [{ renderedResourceUrls: [] }], null, {
+      targetOrigin: 'https://fixture.ddev.site',
+      primaryRoutes: ['/'],
+      stateFingerprint: state('e')
+    });
+    assert.equal(reconciliation.passed, false, `${kind} capture unexpectedly passed`);
+    assert.match(reconciliation.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
+    assert.equal(reconciliation.authoritativeBeforeConsentCapture, false);
+  }
+});
+
+test('profile cleanup uses bounded retries and reports a deferred warning without leaking its path', () => {
+  let options;
+  const result = cleanupBrowserProfile('/sensitive/local/profile', {
+    remove(_profile, receivedOptions) {
+      options = receivedOptions;
+      const error = new Error('directory still changing: /sensitive/local/profile');
+      error.code = 'ENOTEMPTY';
+      throw error;
+    }
+  });
+  assert.equal(result.deferred, true);
+  assert.deepEqual(result.warnings, ['Browser profile cleanup was deferred after bounded retries (ENOTEMPTY).']);
+  assert.equal(result.warnings.join('\n').includes('/sensitive/local/profile'), false);
+  assert.equal(options.maxRetries, 5);
+  assert.equal(options.retryDelay, 50);
+});
 
 function captureFixture(stateFingerprint, mutate = () => {}) {
   const contract = normalizeGlobalChromeContract({ dynamicRegionSelectors: ['[data-dynamic]'] });
@@ -209,9 +354,15 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     const raw = await captureGlobalChrome({
       baseUrl,
       primaryRoutes: ['/', '/missing-brand'],
-      contract: { dynamicRegionSelectors: ['[data-dynamic]'] }
+      contract: { dynamicRegionSelectors: ['[data-dynamic]'] },
+      profileCleanup(profile) {
+        const cleanup = cleanupBrowserProfile(profile);
+        return { ...cleanup, warnings: [...cleanup.warnings, 'Fixture deferred cleanup warning.'] };
+      }
     });
     assert.equal(raw.status, 'captured', raw.errors.join('\n'));
+    assert.equal(raw.authoritative, true);
+    assert.ok(raw.warnings.includes('Fixture deferred cleanup warning.'));
     assert.deepEqual(raw.routes.map((route) => `${route.path}:${route.viewport.name}`), [
       '/:desktop', '/:mobile', '/missing-brand:desktop', '/missing-brand:mobile'
     ]);
@@ -256,6 +407,17 @@ test('verifier-owned consent capture catches delayed JS requests and proves no-l
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
     const raw = await captureBeforeConsentNetwork({ baseUrl, primaryRoutes: ['/', '/clean'] });
     assert.equal(raw.status, 'captured', raw.errors.join('\n'));
+    assert.deepEqual(
+      {
+        attempted: raw.budget.attempted,
+        captured: raw.budget.capturedRouteViewportCount,
+        deadlineExceeded: raw.budget.deadlineExceeded,
+        routeCount: raw.budget.routeCount,
+        scheduled: raw.budget.scheduledRouteViewportCount,
+        viewportCount: raw.budget.viewportCount
+      },
+      { attempted: true, captured: 2, deadlineExceeded: false, routeCount: 2, scheduled: 2, viewportCount: 1 }
+    );
     assert.ok(raw.routes.every((route) => route.isolation.browserContextFresh));
     assert.ok(raw.routes.every((route) => route.isolation.consentInteractionPerformed === false));
     assert.ok(raw.routes.every((route) => route.observation.floorMs >= 2000 && route.observation.settled));
