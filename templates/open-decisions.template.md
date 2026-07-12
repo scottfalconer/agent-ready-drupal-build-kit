@@ -15,6 +15,19 @@ Do not use this file as a reason to stop early. Build, verify, fix, and item-blo
 
 Do not list normal implementation work here. Missing reachable content, broken routes, CSS defects, import retries, field/display mistakes, route alias bugs, editor-form defects, and incomplete packet evidence are work items, not human decisions.
 
+Builder-accepted deviations require a presented ratification decision. If `off-road-inventory.md` contains `OR-` rows, the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, route count reconciliation uses `owner_approved_exclusion`, or composition verification accepts an owner fallback, list each decision here; the verifier rejects an unrelated decision row or a contradictory `Decisions still open: None` declaration. It reports any recorded human choice as self-attested and does not authenticate the approver.
+
+Put each stable deviation reference in the decision row's **Current evidence** cell so the verifier can bind the decision to the exact item:
+
+- off-road row: `OR-001`;
+- blind defect: its required ID, such as `DEF-001`;
+- omitted primary route: `omitted-route:/source-path`;
+- parity exclusion: `parity-exclusion:<token-safe-id-or-route>` (add an ID when the description contains spaces);
+- repeated-item count exclusion: `count-exclusion:/source-path->/target-path:item-type-slug` (for example, `gallery image` becomes `gallery-image`).
+- accepted composition-owner fallback: `composition-deviation:/target-path`.
+
+References are exact tokens: `OR-0010` does not satisfy `OR-001`.
+
 ## Decisions
 
 | ID | Decision needed | Human owner | Current evidence | Options | Recommended default | Impact if deferred | Needed by gate | Status |
@@ -36,4 +49,5 @@ Do not list normal implementation work here. Missing reachable content, broken r
 
 - Use `UNKNOWN` only as a value placeholder for evidence that is genuinely not available.
 - Every open decision should name a human owner, current evidence, options, and the gate it affects.
+- Use one of these Status values: `open`, `pending`, `blocked`, `deferred`, `accepted`, `rejected`, `resolved`, or `not_applicable`.
 - If no human-only decisions remain, say so explicitly and explain what evidence supports that.

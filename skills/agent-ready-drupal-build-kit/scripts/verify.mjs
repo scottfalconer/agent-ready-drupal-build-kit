@@ -1227,7 +1227,7 @@ export async function verifyLive({
     completionBlockedReasons.push('Blind adversarial review evidence does not support completion.');
   }
   if (!packetReport.completionEvidence?.packetCompletionReady) {
-    completionBlockedReasons.push('Required packet evidence is still template-like, unresolved, or not accepted.');
+    completionBlockedReasons.push('Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.');
   }
   const runtimeDrushCommandFailures = Array.isArray(inspectedDrupalRuntime.drushCommandFailures)
     ? inspectedDrupalRuntime.drushCommandFailures.filter(Boolean)
@@ -1323,7 +1323,13 @@ export async function verifyLive({
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
+    recordedHumanGateStatus: sharedPacketReport.recordedHumanGateStatus,
     completeLocalRebuildClaimAllowed,
+    verdict: completeLocalRebuildClaimAllowed
+      ? 'complete-local-rebuild'
+      : packetReport.valid && liveTargetValid
+        ? 'machine-incomplete'
+        : 'blocked',
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
@@ -1361,9 +1367,14 @@ async function main() {
   if (args.packetOnly) {
     process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
   } else if (report.completeLocalRebuildClaimAllowed) {
-    process.stdout.write(`Live target and packet verification passed; complete local rebuild claim authorized. Report: ${args.out}\n`);
+    const independence = report.packetVerification?.completionEvidence?.independence ?? {};
+    const independenceSummary = [
+      ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
+    ].join(', ') || 'not-declared';
+    const recordedHumanStatus = report.recordedHumanGateStatus?.localRebuildStatus ?? 'pending';
+    process.stdout.write(`Live target and packet verification passed; complete local rebuild machine claim authorized (independence evidence: ${independenceSummary}; recorded local-rebuild operator/maintainer status: ${recordedHumanStatus}, self-attested record only). Report: ${args.out}\n`);
   } else {
-    process.stderr.write(`Live target checks passed, but completion remains blocked by required review evidence. Report: ${args.out}\n`);
+    process.stderr.write(`Live target checks passed, but complete local rebuild machine authorization remains blocked by required machine evidence. Report: ${args.out}\n`);
     process.exitCode = 2;
   }
 }
