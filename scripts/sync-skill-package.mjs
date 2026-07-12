@@ -67,6 +67,10 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
     { source: join(repoRoot, 'docs', 'cookbook.md'), destination: join(skillRoot, 'references', 'cookbook.md') },
+    ...['axe.min.js', 'LICENSE', 'LICENSE-3RD-PARTY.txt'].map((name) => ({
+      source: join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', name),
+      destination: join(skillRoot, 'assets', 'vendor', 'axe-core', '4.10.3', name)
+    })),
     ...gates.reviewPacketFiles.map((packetFile) => {
       const name = templateName(packetFile);
       return {

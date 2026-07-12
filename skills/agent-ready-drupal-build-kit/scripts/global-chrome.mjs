@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
@@ -9,7 +10,30 @@ export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1'
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
 export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
+export const VERIFIER_AXE_SCHEMA = 'public-kit.verifier-axe.1';
+export const VERIFIER_AXE_VERSION = '4.10.3';
+export const VERIFIER_AXE_TAGS = Object.freeze([
+  'wcag2a',
+  'wcag2aa',
+  'wcag21a',
+  'wcag21aa',
+  'wcag22a',
+  'wcag22aa'
+]);
+const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+const VERIFIER_AXE_SOURCE_PATH = join(
+  SCRIPT_DIRECTORY,
+  '..',
+  'assets',
+  'vendor',
+  'axe-core',
+  VERIFIER_AXE_VERSION,
+  'axe.min.js'
+);
+const VERIFIER_AXE_SOURCE = readFileSync(VERIFIER_AXE_SOURCE_PATH, 'utf8');
+export const VERIFIER_AXE_SOURCE_SHA256 = sha256(VERIFIER_AXE_SOURCE);
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
+const AXE_WCAG_TAG_RE = /^wcag(?:2|21|22)(?:a|aa)$/i;
 const VIEWPORTS = Object.freeze([
   Object.freeze({ name: 'desktop', width: 1280, height: 800, mobile: false }),
   Object.freeze({ name: 'mobile', width: 390, height: 844, mobile: true })
@@ -553,6 +577,83 @@ function collectorExpression(contract, mobile) {
   })})`;
 }
 
+function sameHttpDocument(left, right) {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return leftUrl.origin === rightUrl.origin &&
+      leftUrl.pathname === rightUrl.pathname &&
+      leftUrl.search === rightUrl.search;
+  } catch {
+    return false;
+  }
+}
+
+function verifierAxeSummary(report) {
+  const wcagViolations = (Array.isArray(report?.violations) ? report.violations : []).filter((violation) =>
+    (Array.isArray(violation?.tags) ? violation.tags : []).some((tag) => AXE_WCAG_TAG_RE.test(String(tag))) &&
+    Array.isArray(violation?.nodes) && violation.nodes.length > 0
+  );
+  return {
+    passRuleCount: Array.isArray(report?.passes) ? report.passes.length : 0,
+    incompleteRuleCount: Array.isArray(report?.incomplete) ? report.incomplete.length : 0,
+    inapplicableRuleCount: Array.isArray(report?.inapplicable) ? report.inapplicable.length : 0,
+    violationRuleCount: wcagViolations.length,
+    violationNodeCount: wcagViolations.reduce((count, violation) => count + violation.nodes.length, 0),
+    violationRuleIds: wcagViolations.map((violation) => String(violation?.id ?? 'unknown-rule')).sort()
+  };
+}
+
+function rawVerifierAxeRecord(report, finalUrl) {
+  const errors = [];
+  if (!report || typeof report !== 'object' || Array.isArray(report)) {
+    errors.push('axe-core returned no structured result.');
+  } else {
+    if (String(report?.testEngine?.name ?? '').toLowerCase() !== 'axe-core' ||
+        String(report?.testEngine?.version ?? '') !== VERIFIER_AXE_VERSION) {
+      errors.push(`axe-core result did not report the pinned ${VERIFIER_AXE_VERSION} engine.`);
+    }
+    if (!sameHttpDocument(report?.url, finalUrl)) {
+      errors.push('axe-core result URL does not match the browser route that was inspected.');
+    }
+    if (!Number.isFinite(Date.parse(String(report?.timestamp ?? '')))) {
+      errors.push('axe-core result does not contain a valid execution timestamp.');
+    }
+    for (const resultType of ['passes', 'incomplete', 'inapplicable', 'violations']) {
+      if (!Array.isArray(report?.[resultType])) {
+        errors.push(`axe-core result is missing its ${resultType} array.`);
+      }
+    }
+  }
+  return {
+    schemaVersion: VERIFIER_AXE_SCHEMA,
+    status: errors.length === 0 ? 'executed' : 'failed',
+    source: {
+      version: VERIFIER_AXE_VERSION,
+      sha256: VERIFIER_AXE_SOURCE_SHA256
+    },
+    ruleScope: {
+      type: 'tag',
+      values: [...VERIFIER_AXE_TAGS]
+    },
+    report,
+    summary: verifierAxeSummary(report),
+    errors
+  };
+}
+
+function verifierAxeExpression() {
+  return `(async () => {
+    if (!globalThis.axe || typeof globalThis.axe.run !== 'function') {
+      throw new Error('Pinned axe-core source was not installed in the page.');
+    }
+    return globalThis.axe.run(document, {
+      runOnly: { type: 'tag', values: ${JSON.stringify(VERIFIER_AXE_TAGS)} },
+      resultTypes: ['passes', 'incomplete', 'inapplicable', 'violations']
+    });
+  })()`;
+}
+
 async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: viewport.width,
@@ -580,6 +681,14 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
     awaitPromise: true,
     returnByValue: true
   }, sessionId);
+  const axeEvaluation = await cdp.send('Runtime.evaluate', {
+    expression: verifierAxeExpression(),
+    awaitPromise: true,
+    returnByValue: true
+  }, sessionId);
+  if (axeEvaluation.exceptionDetails || !axeEvaluation.result?.value) {
+    throw new Error(`${path} ${viewport.name} verifier-owned axe-core execution failed.`);
+  }
   const evaluated = await cdp.send('Runtime.evaluate', {
     expression: collectorExpression(contract, viewport.mobile),
     awaitPromise: true,
@@ -589,6 +698,10 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
     throw new Error(`${path} ${viewport.name} signal collection failed.`);
   }
   const signals = evaluated.result.value;
+  const axe = rawVerifierAxeRecord(axeEvaluation.result.value, signals.finalUrl);
+  if (axe.status !== 'executed') {
+    throw new Error(`${path} ${viewport.name} verifier-owned axe-core result failed validation: ${axe.errors.join(' ')}`);
+  }
   const metrics = await cdp.send('Page.getLayoutMetrics', {}, sessionId);
   const content = metrics.cssContentSize || metrics.contentSize || { width: viewport.width, height: viewport.height };
   const screenshotWidth = Math.max(viewport.width, Math.min(4000, Math.ceil(content.width || viewport.width)));
@@ -602,6 +715,7 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   return {
     path,
     viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+    axe,
     signals,
     screenshot: {
       base64: screenshot.data,
@@ -740,6 +854,9 @@ export async function captureGlobalChrome({
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Network.enable', {}, sessionId);
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `${VERIFIER_AXE_SOURCE}\n//# sourceURL=agent-ready-axe-core-${VERIFIER_AXE_VERSION}.js`
+    }, sessionId);
     captureLoop:
     for (const path of routes) {
       for (const viewport of VIEWPORTS) {
@@ -1226,12 +1343,36 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
     const routeKey = sha256(`${route.path}\0${route.viewport?.name}`).slice(7, 23);
     const directory = join(packet, 'evidence', 'lifecycle', 'chrome', 'runs', state.slice(7, 23));
     const path = join(directory, `${route.viewport.name}-${routeKey}-${digest.slice(7, 23)}.png`);
-    plans.push({ bytes, digest, directory, path, route });
+    const rawAxe = route?.axe;
+    if (
+      rawAxe?.schemaVersion !== VERIFIER_AXE_SCHEMA ||
+      rawAxe?.status !== 'executed' ||
+      rawAxe?.source?.version !== VERIFIER_AXE_VERSION ||
+      rawAxe?.source?.sha256 !== VERIFIER_AXE_SOURCE_SHA256 ||
+      !rawAxe?.report ||
+      (Array.isArray(rawAxe?.errors) && rawAxe.errors.length > 0)
+    ) {
+      throw new Error(`Global chrome ${route.path} ${route.viewport?.name} lacks a successful verifier-owned axe-core result.`);
+    }
+    const validatedAxe = rawVerifierAxeRecord(rawAxe.report, route?.signals?.finalUrl);
+    if (validatedAxe.status !== 'executed') {
+      throw new Error(`Global chrome ${route.path} ${route.viewport?.name} axe-core result is invalid: ${validatedAxe.errors.join(' ')}`);
+    }
+    if (
+      canonicalJson(rawAxe.ruleScope) !== canonicalJson(validatedAxe.ruleScope) ||
+      canonicalJson(rawAxe.summary) !== canonicalJson(validatedAxe.summary)
+    ) {
+      throw new Error(`Global chrome ${route.path} ${route.viewport?.name} axe-core scope or summary was modified.`);
+    }
+    const axeBytes = Buffer.from(`${JSON.stringify(rawAxe.report, null, 2)}\n`, 'utf8');
+    const axeDigest = sha256(axeBytes);
+    const axePath = join(directory, `axe-${route.viewport.name}-${routeKey}-${axeDigest.slice(7, 23)}.json`);
+    plans.push({ axeBytes, axeDigest, axePath, bytes, digest, directory, path, route });
   }
   const finalizedRoutes = [];
   for (const plan of plans) {
     ensureSafeDirectory(packet, plan.directory, 'Global chrome screenshot directory');
-    const { bytes, digest, path, route } = plan;
+    const { axeBytes, axeDigest, axePath, bytes, digest, path, route } = plan;
     if (existsSync(path)) {
       const metadata = lstatSync(path);
       if (metadata.isSymbolicLink() || !metadata.isFile() || !inside(realpathSync(packet), realpathSync(path))) {
@@ -1241,9 +1382,29 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
     } else {
       writeFileSync(path, bytes, { flag: 'wx' });
     }
+    if (existsSync(axePath)) {
+      const metadata = lstatSync(axePath);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || !inside(realpathSync(packet), realpathSync(axePath))) {
+        throw new Error(`Existing verifier-owned axe report must be a packet-local regular file: ${axePath}`);
+      }
+      if (!readFileSync(axePath).equals(axeBytes)) {
+        throw new Error(`Existing verifier-owned axe report bytes differ: ${axePath}`);
+      }
+    } else {
+      writeFileSync(axePath, axeBytes, { flag: 'wx' });
+    }
     const portablePath = relative(packet, path).split(sep).join('/');
+    const portableAxePath = relative(packet, axePath).split(sep).join('/');
     finalizedRoutes.push({
       ...route,
+      axe: {
+        ...route.axe,
+        report: {
+          path: portableAxePath,
+          sha256: axeDigest,
+          size: axeBytes.length
+        }
+      },
       screenshot: {
         path: portablePath,
         sha256: digest,
@@ -1284,12 +1445,71 @@ export function validateGlobalChromeCapture(capture, { stateFingerprint = '', re
           !Number.isSafeInteger(route.screenshot?.size) || route.screenshot.size <= 0) {
         throw new Error(`Global chrome ${path} ${route.viewport.name} lacks computed signals or screenshot evidence.`);
       }
+      const axe = route?.axe;
+      if (axe !== undefined && (
+        axe?.schemaVersion !== VERIFIER_AXE_SCHEMA ||
+        axe?.status !== 'executed' ||
+        axe?.source?.version !== VERIFIER_AXE_VERSION ||
+        axe?.source?.sha256 !== VERIFIER_AXE_SOURCE_SHA256 ||
+        canonicalJson(axe?.ruleScope) !== canonicalJson({ type: 'tag', values: [...VERIFIER_AXE_TAGS] }) ||
+        !String(axe?.report?.path ?? '').trim() ||
+        !HASH_RE.test(String(axe?.report?.sha256 ?? '')) ||
+        !Number.isSafeInteger(axe?.report?.size) ||
+        axe.report.size <= 0 ||
+        !Number.isSafeInteger(axe?.summary?.violationRuleCount) ||
+        !Number.isSafeInteger(axe?.summary?.violationNodeCount) ||
+        !Array.isArray(axe?.summary?.violationRuleIds) ||
+        !Array.isArray(axe?.errors) ||
+        axe.errors.length > 0
+      )) {
+        throw new Error(`Global chrome ${path} ${route.viewport.name} lacks state-bound verifier-owned axe-core evidence.`);
+      }
     }
   }
   if (!HASH_RE.test(capture.captureFingerprint) || captureFingerprintValue(capture) !== capture.captureFingerprint) {
     throw new Error('Global chrome capture fingerprint is invalid.');
   }
   return capture;
+}
+
+export function verifierAxeCompletionErrors(capture) {
+  const errors = [];
+  if (
+    capture?.schemaVersion !== GLOBAL_CHROME_CAPTURE_SCHEMA ||
+    capture?.status !== 'captured' ||
+    capture?.authoritative !== true
+  ) {
+    return [`Verifier-owned axe-core coverage is unavailable: ${(capture?.errors ?? []).join(' ') || capture?.status || 'missing'}`];
+  }
+  try {
+    captureCoverage(capture);
+  } catch (error) {
+    return [`Verifier-owned axe-core route/viewport coverage is incomplete: ${error.message}`];
+  }
+  for (const route of capture.routes ?? []) {
+    const label = `${normalizeRoute(route.path)} ${route.viewport?.name ?? 'unknown-viewport'}`;
+    const axe = route?.axe;
+    if (
+      axe?.schemaVersion !== VERIFIER_AXE_SCHEMA ||
+      axe?.status !== 'executed' ||
+      axe?.source?.version !== VERIFIER_AXE_VERSION ||
+      axe?.source?.sha256 !== VERIFIER_AXE_SOURCE_SHA256 ||
+      !HASH_RE.test(String(axe?.report?.sha256 ?? '')) ||
+      !String(axe?.report?.path ?? '').trim()
+    ) {
+      errors.push(`${label} is missing a successful state-bound verifier-owned axe-core result.`);
+      continue;
+    }
+    if (Number(axe?.summary?.violationNodeCount ?? 0) > 0) {
+      const ids = Array.isArray(axe?.summary?.violationRuleIds) && axe.summary.violationRuleIds.length > 0
+        ? axe.summary.violationRuleIds.join(', ')
+        : 'unknown-rule';
+      errors.push(
+        `${label} has ${axe.summary.violationNodeCount} unresolved WCAG 2.2 A/AA axe-core violation node(s) across: ${ids}.`
+      );
+    }
+  }
+  return errors;
 }
 
 function routeIndex(capture) {
@@ -1425,17 +1645,59 @@ export function validateScreenshotArtifacts(packetDir, capture) {
     if (bytes.length !== route.screenshot.size || sha256(bytes) !== route.screenshot.sha256) {
       throw new Error(`Global chrome screenshot bytes do not match their manifest: ${route.screenshot.path}`);
     }
+    // Historical global-chrome anchors created before verifier-owned axe remain
+    // readable for visual regression. A fresh completion run separately
+    // requires axe on every route/viewport through verifierAxeCompletionErrors().
+    if (!route.axe) {
+      continue;
+    }
+    const axePath = resolve(packet, String(route.axe?.report?.path ?? ''));
+    if (!inside(packet, axePath) || !existsSync(axePath) || lstatSync(axePath).isSymbolicLink() || !statSync(axePath).isFile() ||
+        !inside(realPacket, realpathSync(axePath))) {
+      throw new Error(`Verifier-owned axe report is missing or outside the packet: ${route.axe?.report?.path ?? ''}`);
+    }
+    const axeBytes = readFileSync(axePath);
+    if (axeBytes.length !== route.axe.report.size || sha256(axeBytes) !== route.axe.report.sha256) {
+      throw new Error(`Verifier-owned axe report bytes do not match their manifest: ${route.axe.report.path}`);
+    }
+    let axeReport;
+    try {
+      axeReport = JSON.parse(axeBytes.toString('utf8'));
+    } catch {
+      throw new Error(`Verifier-owned axe report is not valid JSON: ${route.axe.report.path}`);
+    }
+    const validatedAxe = rawVerifierAxeRecord(axeReport, route?.signals?.finalUrl);
+    if (
+      validatedAxe.status !== 'executed' ||
+      canonicalJson(validatedAxe.summary) !== canonicalJson(route.axe.summary) ||
+      canonicalJson(validatedAxe.ruleScope) !== canonicalJson(route.axe.ruleScope)
+    ) {
+      throw new Error(`Verifier-owned axe report does not match its route manifest: ${route.axe.report.path}`);
+    }
   }
   return true;
 }
 
 export function captureSummary(capture) {
+  const axeErrors = verifierAxeCompletionErrors(capture);
   return {
     status: capture?.status ?? 'missing',
     authoritative: capture?.authoritative === true,
     stateFingerprint: capture?.resultStateFingerprint ?? '',
     captureFingerprint: capture?.captureFingerprint ?? '',
     routeViewportCount: Array.isArray(capture?.routes) ? capture.routes.length : 0,
+    verifierAxe: {
+      sourceVersion: VERIFIER_AXE_VERSION,
+      sourceSha256: VERIFIER_AXE_SOURCE_SHA256,
+      routeViewportCount: Array.isArray(capture?.routes)
+        ? capture.routes.filter((route) => route?.axe?.status === 'executed').length
+        : 0,
+      violationNodeCount: Array.isArray(capture?.routes)
+        ? capture.routes.reduce((count, route) => count + Number(route?.axe?.summary?.violationNodeCount ?? 0), 0)
+        : 0,
+      passed: axeErrors.length === 0,
+      errors: axeErrors
+    },
     budget: capture?.budget ?? null,
     warnings: Array.isArray(capture?.warnings) ? capture.warnings : [],
     errors: Array.isArray(capture?.errors) ? capture.errors : []

@@ -7,6 +7,10 @@ import test from 'node:test';
 
 import {
   BROWSER_CAPTURE_LIMITS,
+  VERIFIER_AXE_SCHEMA,
+  VERIFIER_AXE_SOURCE_SHA256,
+  VERIFIER_AXE_TAGS,
+  VERIFIER_AXE_VERSION,
   captureBeforeConsentNetwork,
   captureGlobalChrome,
   cleanupBrowserProfile,
@@ -18,7 +22,8 @@ import {
   globalChromeImpact,
   normalizeGlobalChromeContract,
   validateBeforeConsentNetworkCapture,
-  validateScreenshotArtifacts
+  validateScreenshotArtifacts,
+  verifierAxeCompletionErrors
 } from '../bin/global-chrome.mjs';
 import {
   consentNetworkCaptureRequired,
@@ -177,6 +182,7 @@ function captureFixture(stateFingerprint, mutate = () => {}) {
     path: '/',
     viewport: { name: viewport, width: viewport === 'desktop' ? 1280 : 390, height: viewport === 'desktop' ? 800 : 844 },
     signals: {
+      finalUrl: 'https://fixture.ddev.site/',
       maskViolations: [],
       roles: {
         brand: { present: true, visible: true, identity: { href: '/', image: '/logo.svg', alt: 'Fixture', text: '' } },
@@ -296,6 +302,33 @@ function rawCaptureFixture() {
   delete raw.resultStateFingerprint;
   raw.routes = raw.routes.map((route) => ({
     ...route,
+    axe: {
+      schemaVersion: VERIFIER_AXE_SCHEMA,
+      status: 'executed',
+      source: { version: VERIFIER_AXE_VERSION, sha256: VERIFIER_AXE_SOURCE_SHA256 },
+      ruleScope: { type: 'tag', values: [...VERIFIER_AXE_TAGS] },
+      report: {
+        testEngine: { name: 'axe-core', version: VERIFIER_AXE_VERSION },
+        testEnvironment: { userAgent: 'Fixture Browser', windowWidth: route.viewport.width, windowHeight: route.viewport.height },
+        testRunner: { name: 'axe' },
+        toolOptions: { runOnly: { type: 'tag', values: [...VERIFIER_AXE_TAGS] } },
+        timestamp: '2026-07-11T20:00:00Z',
+        url: route.signals.finalUrl,
+        passes: [{ id: 'document-title', tags: ['wcag2a'], nodes: [{}] }],
+        incomplete: [],
+        inapplicable: [],
+        violations: []
+      },
+      summary: {
+        passRuleCount: 1,
+        incompleteRuleCount: 0,
+        inapplicableRuleCount: 0,
+        violationRuleCount: 0,
+        violationNodeCount: 0,
+        violationRuleIds: []
+      },
+      errors: []
+    },
     screenshot: {
       base64: png,
       width: route.screenshot.width,
@@ -318,6 +351,17 @@ test('finalization fails before writing for incomplete captures and symlinked ev
   );
   assert.equal(existsSync(join(incompletePacket, 'evidence')), false);
 
+  const missingAxeRoot = mkdtempSync(join(tmpdir(), 'global-chrome-missing-axe-'));
+  const missingAxePacket = join(missingAxeRoot, 'review-packet');
+  mkdirSync(missingAxePacket, { recursive: true });
+  const missingAxe = rawCaptureFixture();
+  delete missingAxe.routes[0].axe;
+  assert.throws(
+    () => finalizeGlobalChromeCapture({ capture: missingAxe, packetDir: missingAxePacket, stateFingerprint: state('f') }),
+    /lacks a successful verifier-owned axe-core result/i
+  );
+  assert.equal(existsSync(join(missingAxePacket, 'evidence')), false);
+
   const symlinkRoot = mkdtempSync(join(tmpdir(), 'global-chrome-symlink-'));
   const symlinkPacket = join(symlinkRoot, 'review-packet');
   const outside = join(symlinkRoot, 'outside');
@@ -331,14 +375,40 @@ test('finalization fails before writing for incomplete captures and symlinked ev
   assert.equal(existsSync(join(outside, 'lifecycle')), false);
 });
 
+test('state-bound verifier-owned axe results preserve and block WCAG violations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'global-chrome-axe-violation-'));
+  const packetDir = join(root, 'review-packet');
+  mkdirSync(packetDir, { recursive: true });
+  const raw = rawCaptureFixture();
+  const desktop = raw.routes.find((route) => route.viewport.name === 'desktop');
+  desktop.axe.report.violations = [{
+    id: 'color-contrast',
+    impact: 'serious',
+    tags: ['wcag2aa', 'wcag143'],
+    nodes: [{ target: ['.notice'], html: '<p class="notice">Notice</p>', failureSummary: 'Insufficient contrast.' }]
+  }];
+  desktop.axe.summary = {
+    ...desktop.axe.summary,
+    violationRuleCount: 1,
+    violationNodeCount: 1,
+    violationRuleIds: ['color-contrast']
+  };
+
+  const finalized = finalizeGlobalChromeCapture({ capture: raw, packetDir, stateFingerprint: state('f') });
+  const errors = verifierAxeCompletionErrors(finalized);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /unresolved WCAG 2\.2 A\/AA.*color-contrast/i);
+  assert.equal(validateScreenshotArtifacts(packetDir, finalized), true);
+});
+
 test('CDP pipe captures desktop/mobile screenshots and computed signals without a browser-driver dependency', {
   skip: findBrowserExecutable() ? false : 'Chrome/Chromium is not installed in this runtime.'
 }, async () => {
   const server = createServer((request, response) => {
     const missingBrand = request.url?.startsWith('/missing-brand');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>
-      body{margin:0} header,footer{padding:20px} main{min-height:700px}.menu-toggle{display:none}
+    response.end(`<!doctype html><html lang="en"><head><title>Global chrome fixture</title><meta name="viewport" content="width=device-width"><style>
+      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}.menu-toggle{display:none}
       @media(max-width:600px){.menu-toggle{display:block}#main-nav{display:none}#main-nav.open{display:block}}
     </style></head><body>
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
@@ -376,6 +446,8 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     assert.ok(raw.routes.every((route) => route.signals.maskedRegionCount === 1));
     assert.ok(raw.routes.every((route) => route.signals.placeholderHrefs.length === 0));
     assert.ok(raw.routes.every((route) => route.signals.meaningfulHrefs.some((link) => link.href === 'mailto:team@example.com')));
+    assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
+    assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
     assert.equal(raw.routes.find((route) => route.path === '/' && route.viewport.name === 'mobile').signals.mobileMenu.activationWorks, true);
     const project = mkdtempSync(join(tmpdir(), 'global-chrome-cdp-'));
     const packetDir = join(project, 'review-packet');
@@ -383,6 +455,9 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     const finalized = finalizeGlobalChromeCapture({ capture: raw, packetDir, stateFingerprint: state('f') });
     assert.equal(finalized.resultStateFingerprint, state('f'));
     assert.equal(finalized.routes.length, 4);
+    assert.ok(finalized.routes.every((route) => route.axe.report.path.endsWith('.json')));
+    assert.ok(finalized.routes.every((route) => route.axe.report.sha256.startsWith('sha256:')));
+    assert.deepEqual(verifierAxeCompletionErrors(finalized), []);
     assert.equal(validateScreenshotArtifacts(packetDir, finalized), true);
   } finally {
     await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
