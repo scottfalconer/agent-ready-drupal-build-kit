@@ -51,6 +51,8 @@ If you already have a clean DDEV Drupal CMS project, skip the installer and inst
 
 Expect an iterative local build, not a single short chat response. Small sites can still take multiple agent passes because the agent must build the Drupal target, capture evidence, run verifier checks, fix gaps, and produce independent and blind-review artifacts. If the run stops mid-way, resume from the target Drupal project workspace and ask the agent to continue from `review-packet/`, current Drupal readback, and the last verifier output instead of starting over.
 
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling. The initial rebuild remains done if the site is later changed. The installed kit can remain in the project to guide repairs and extensions and report whether the latest inspected state is unclassified, evidence-recorded, or fully verified.
+
 ## One Prompt
 
 Copy the prompt from [USAGE.md](USAGE.md). Replace the bracketed source URL and send it to the agent.
@@ -68,6 +70,20 @@ You will not hand-edit anything yourself. The agent does the setup and review lo
 9. it produces `open-decisions.md` with only the decisions a human can make;
 10. it uses the installed skill's packet templates, creates `review-packet/` with the evidence, and runs the target-local live verifier before handoff.
 
+## Continue From The Verified Foundation
+
+After the initial rebuild passes, do not restart the source-rebuild workflow for every request. Ask the agent to continue in the same Drupal project. It should inspect lifecycle status, classify the work before editing, and collect evidence for every surface the change can affect. `status` reads the last inspected cached state; it does not inspect the live Drupal runtime:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
+```
+
+These examples use host `node`; when Node is available only in DDEV, use `ddev exec node` in place of the leading `node`.
+
+A repair addresses an original omission, regression, or defect. An extension adds new scope such as a feature, content model, integration, or composed experience. The original baseline remains passed in either case. If lifecycle `status` is not fresh, run the default verifier before `begin`; use `--adopt-current` when that inspection exposes existing drift. Begin the record before editing and declare each anonymous route expected to change with `--route`, or explicitly use `--no-public-route` for work with no anonymous route effect; omission is not an opt-out. Every concrete route must also be in the packet route matrix so the verifier actually fetches it. After implementation, run the full verifier once to refresh the exact live-state fingerprint; exit `2` can be expected while the changed state awaits lifecycle evidence. Then `complete` performs another fresh live inspection and records integrity-bound, authored evidence for the exact result. This targeted result is `evidence_recorded`, not independent verification or a new completion certificate. Every generated acceptance criterion needs its own evidence claim. After abandonment, refresh the live state and revert or explicitly adopt any leftover edits before beginning again.
+
+Detected component impact can add required checks; agents must not remove or narrow those checks. Use `--adopt-current` only to classify edits that already exist; it always adds conservative `unknown` impact. Use `lifecycle.mjs abandon --reason "..."` when an active record will not be completed. After targeted evidence is recorded, a meaningful release-sized set of changes may use `verify.mjs --change` to re-evaluate the current packet/live state against the original full verifier gates and optionally create a fresh checkpoint. The command validates existing evidence; it does not itself recreate source crawls or blind reviews. See [docs/site-lifecycle.md](docs/site-lifecycle.md).
+
 ## Workspace Topology
 
 Here is the shape you will end up with. Everything belongs to one DDEV project:
@@ -79,6 +95,7 @@ drupal-project/                                  # the One Line Installer target
   AGENTS.md                                      # coexisting managed regions
   config/
   review-packet/                                 # evidence and handoff packet
+    evidence/lifecycle/                          # historical baseline and later change state
   web/
 ```
 

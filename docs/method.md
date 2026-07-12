@@ -23,6 +23,7 @@ The kit is strongest when it produces a real Drupal site that looks, functions, 
 13. Collect target config, rendered page, browser QA, accessibility, performance, security, and editorial evidence.
 14. Run independent verification and, from the host at the target Drupal project, `ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet`. Inside the DDEV agent container, omit `ddev exec`. The default verifier must inspect the current DDEV target, fetch primary and target-required routes, reject non-success responses, inspect rendered primary-route SEO, and independently confirm Git-tracked config YAML. Use `scripts/verify-packet.mjs` only for structural lint; packet-only data and injected test runtimes cannot certify the site.
 15. Promote to launch candidate only when every handoff gate has passed and every launch-blocking gate in `gates.json` has accepted evidence.
+16. Preserve the first successful full verification as a create-once, integrity-checked historical baseline under kit tooling. For later work, begin a repair or extension before editing from the latest verified or evidence-recorded anchor, let detected impact widen required checks, record targeted authored evidence as `evidence_recorded`, and optionally re-evaluate the current packet/live state against the full original verifier gates for a newer checkpoint without rewriting the initial milestone.
 
 ## Evidence Rules
 
@@ -46,3 +47,5 @@ The kit is strongest when it produces a real Drupal site that looks, functions, 
 - Controller-rendered mimicry is an architecture risk unless the packet explains why Drupal content, Views, blocks, menus, and config are insufficient.
 - Architecture evidence should include managed-media decisions for source assets, exported form/view displays for custom content types, Views/menu/alias ownership for collection and navigation routes, Pathauto or explicit alias strategy, and any custom-controller justification.
 - A complete-local-rebuild verdict remains separate from production readiness and launch approval.
+- A strongly bound initial-rebuild verdict remains historically passed when the site evolves. Current-state verification is separate and must be supported by an unchanged fingerprint or evidence-bound repair, extension, or checkpoint.
+- Post-baseline changes need impact-targeted evidence, not an automatic rerun of every source, blind-review, editor, and launch check. Targeted completion performs a fresh inspection and integrity-binds authored semantic evidence; it does not independently evaluate that evidence or issue a new completion certificate. Undeclared detected changes remain unclassified, and detected impact must not be narrowed.

@@ -304,6 +304,57 @@ The default verifier fetches only the detected DDEV project. An explicit `--targ
 
 This verdict covers the complete local rebuild only. Production deployment, hardening, credentials, legal/privacy acceptance, rollback, and launch approval remain separate gates.
 
+## Site Lifecycle After The Initial Pass
+
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling in `review-packet/evidence/lifecycle/`. It records the exact Drupal state inspected for the initial complete-local-rebuild claim. The initial rebuild remains done. Do not overwrite that record or reinterpret later changes as proof that the original milestone did not pass. The adjacent integrity certificate detects unsupported edits under kit tooling; it is not cryptographic immutability or tamper-proof storage.
+
+After a baseline exists, answer two questions separately:
+
+1. Did the initial rebuild pass? A strongly bound initial baseline remains `passed`.
+2. What is known about the latest inspected derived state? It may match the historical baseline, match a later fully verified checkpoint, match an evidence-recorded change, contain an active change, or contain unclassified changes.
+
+Before post-baseline work, inspect lifecycle state. `status` reports the last inspected cached state; it does not inspect the live Drupal runtime. Commands below use host `node`; use `ddev exec node` instead when Node is available only inside DDEV:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/lifecycle.mjs status --packet review-packet
+```
+
+If `currentStateFresh` is false, run the default verifier before `begin`. Exit `2` may identify already-existing drift; classify that state explicitly with `--adopt-current`.
+
+Classify one coherent active change before implementation:
+
+- `repair`: corrects an omission, defect, or regression against the original rebuild contract. Reference the applicable source, route, baseline claim, or gate in its acceptance criteria.
+- `extension`: adds scope that the original source rebuild did not require. Use the human's new acceptance criteria, then regression-test affected baseline surfaces.
+
+Create the record before editing with `lifecycle.mjs begin --id <change-id> --kind repair|extension --summary "..." --acceptance "..." --route </affected-path>`. It records `baseAnchorId` from the latest fully verified or evidence-recorded anchor. Do not use the change kind as a substitute for impact analysis. Record affected content, content model, composition, global presentation, routing/navigation, access/workflow, code/dependencies, integrations, every anonymous route expected to change, and editor workflows as applicable. Use explicit `--no-public-route` only when the change intentionally has no anonymous route effect; omission of both choices is rejected. If changes already exist, use `--adopt-current` explicitly; adopted work always adds conservative `unknown` impact. If the active change will not be completed, close it with `lifecycle.mjs abandon --id <change-id> --reason "..."` rather than deleting or rewriting its record.
+
+Verification after the baseline is impact-targeted:
+
+- always bind evidence to the current Drupal identity and exact resulting state;
+- prove the declared acceptance criteria and affected anonymous routes;
+- rerun editor, field-output, config, composition, accessibility, SEO, security, or code checks when the change can affect them;
+- check primary-route header, navigation, footer, branding, and responsive behavior after global theme, block, display, or page-region changes;
+- widen the required checks when detected component impact exceeds the declared surfaces; never remove or narrow checks selected by detected impact;
+- leave the current state unclassified when detected changes are not covered by the active record.
+
+After implementation, run the default full verifier once to refresh the exact current live-state fingerprint:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
+```
+
+Exit `2` can be expected while the changed state awaits lifecycle evidence. Every concrete affected route must be present in the packet's primary or target-required route matrix and pass the fresh anonymous fetch. Write a separate `public-kit.change-verification.1` JSON containing a passing evidence claim for every stable acceptance-criterion ID and every generated non-machine check. Copy `baseFingerprint` from `begin` and `resultFingerprint` from `.buildState.fingerprint` in the fresh live-verification report; the input may include `conservative-full-regression` proactively if derived impact widens. Then run `lifecycle.mjs complete --packet review-packet --id <change-id> --verification <path>`. `complete` performs its own fresh live inspection, derives the machine checks, snapshots referenced evidence bytes, and records the result as `evidence_recorded`. The authored semantic evidence is integrity-bound to the base and exact resulting fingerprints, but the kit does not independently evaluate it. It is not a new completion certificate. After abandonment, run the default verifier again and either revert leftover edits or classify them with `--adopt-current` before beginning another change.
+
+Only after targeted evidence is recorded may `verify.mjs --packet review-packet --change <change-id>` run the conservative path. It re-evaluates the current packet/live state against the full original verifier gates and binds that report without synthesizing passing semantic checks from targeted evidence. It validates existing source, editor, independent, and blind-review artifacts rather than recreating them, so refresh any artifact whose claim can be affected before running it.
+
+A full source crawl, full blind adversarial review, and every original editor task are not mandatory for every localized change. Rerun the evidence whose claims can be affected, or run a fresh full checkpoint when renewed whole-site confidence is warranted:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet --change <change-id> --checkpoint <checkpoint-id>
+```
+
+A checkpoint is optional and never replaces the historical initial baseline. Do not require a Git commit as the definition of state, Canvas when the site does not use it, or production/launch gates for ordinary local extension work. Read `[KIT_LOCAL_PATH]/references/site-lifecycle.md` for the detailed lifecycle model.
+
 ## Required Review Loop
 
 Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
@@ -353,7 +404,7 @@ If browser evidence is missing or failing, return to the review loop. A target t
 
 ## Completion Contract
 
-The final handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required.
+The initial-rebuild handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required. After that milestone passes, later lifecycle reporting must preserve the initial result and separately report whether the last inspected cached state is unchanged, under repair or extension, evidence-recorded, fully verified by a later original-gate run, or unclassified.
 
 The following are not acceptable final states:
 
@@ -744,6 +795,7 @@ Gate records, with machine evidence, pending human status, or blocked stubs as a
 - independent verification;
 - live verifier report under `evidence/live-verification.json`;
 - packet verifier report under `evidence/packet-verification.json`;
+- generated lifecycle evidence under `evidence/lifecycle/` after the first successful full verification;
 - Drupal readback;
 - field-output matrix;
 - launch checklist.

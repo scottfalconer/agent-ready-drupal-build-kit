@@ -1,20 +1,123 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, parse, resolve } from 'node:path';
+import { dirname, join, parse, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { exportedSeoUrlPortabilityFindings, verifyLive } from '../bin/verify.mjs';
+import {
+  DRUPAL_ENTITY_INVENTORY_EVAL,
+  DRUPAL_RUNTIME_FACTS_EVAL,
+  exportedSeoUrlPortabilityFindings,
+  stateBoundRuntimeFacts,
+  verifyLive
+} from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+
+test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /ContentEntityTypeInterface/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /accessCheck\(FALSE\)/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /count\(\$batch\) < 100/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /getTranslationLanguages/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /fopen\(\$uri, 'rb'\)/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /hash_update_stream/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /\$scheme === 'public'/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /getRevisionTable/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /getRevisionMetadataKey\('revision_default'\)/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /loadMultipleRevisions/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'revisionCount'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'publicAuthorUserDigest'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /\['name', 'status', 'user_picture', 'langcode'\]/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /pass\|password\|mail\|email/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'rawPerItemRowsEmitted'\s*=>\s*FALSE/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'user'\s*=>\s*'excluded as a broad root/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'webform_submission'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'contact_message'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'search_api_task'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'commerce_order'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /declared_editorial_roots/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /declared_public_fields/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /public_route_paths/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /entity_reference_revisions/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'file', 'image'/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /transitive-public-reference/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /referenced-file-presentation-state/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /condition\('entity_type', 'file'\)/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /latest-non-default/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'missingDeclaredRoots'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'closureCounts'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'excludedEntityTypes'\s*=>/);
+  assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /hash_file\('sha256'/);
+  assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /allRevisions\(\)/);
+  assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /'items'\s*=>/);
+  assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /loadMultiple\(\s*\)/);
+  const declaredRootQuery = DRUPAL_ENTITY_INVENTORY_EVAL.slice(
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('foreach ($declared_editorial_roots as'),
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('sort($missing_declared_roots')
+  );
+  assert.doesNotMatch(declaredRootQuery, /getKey\('status'\)|condition\(\$status_key/);
+  const infrastructureQuery = DRUPAL_ENTITY_INVENTORY_EVAL.slice(
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('foreach ($infrastructure_type_policy as'),
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('$privacy_safe_user_values')
+  );
+  assert.match(infrastructureQuery, /getKey\('status'\)/);
+  assert.match(infrastructureQuery, /condition\(\$status_key, TRUE\)/);
+});
+
+test('Drupal runtime identity emits digest-only active config, schema, settings, and database-update facts', () => {
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /Drupal::VERSION/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /PHP_VERSION/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /system\.schema/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /Settings::getAll/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /Settings::getHashSalt/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /hash_hmac\('sha256'/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /configFactory\(\)/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /getRawData\(\)/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /effectiveActiveConfigSha256/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /update\.post_update_registry/);
+  assert.match(DRUPAL_RUNTIME_FACTS_EVAL, /pendingDatabaseUpdateCount/);
+  assert.doesNotMatch(DRUPAL_RUNTIME_FACTS_EVAL, /effectiveSettingsSha256/);
+  assert.doesNotMatch(DRUPAL_RUNTIME_FACTS_EVAL, /print json_encode\(\$settings/);
+});
+
+test('machine-local runtime changes are evidence-only while Drupal-owned runtime state stays intrinsic', () => {
+  const facts = {
+    coreVersion: '11.3.0',
+    activeConfigEntryCount: 123,
+    effectiveActiveConfigSha256: `sha256:${'1'.repeat(64)}`,
+    systemSchemaEntryCount: 45,
+    systemSchemaSha256: `sha256:${'2'.repeat(64)}`,
+    databaseUpdateStatusConfirmed: true,
+    pendingDatabaseUpdateCount: 0,
+    databaseUpdatesPending: false,
+    phpVersion: '8.3.0',
+    databaseDriver: 'mysql',
+    effectiveSettingsEntryCount: 12,
+    effectiveSettingsHmacSha256: `sha256:${'3'.repeat(64)}`,
+    configSplitDirectories: ['/var/www/html/config/dev']
+  };
+  const baseline = stateBoundRuntimeFacts(facts);
+  const moved = stateBoundRuntimeFacts({
+    ...facts,
+    phpVersion: '8.4.0',
+    databaseDriver: 'pgsql',
+    effectiveSettingsHmacSha256: `sha256:${'4'.repeat(64)}`,
+    configSplitDirectories: ['/opt/drupal/config/dev']
+  });
+
+  assert.deepEqual(moved.intrinsic, baseline.intrinsic);
+  assert.notEqual(moved.environmentBinding.fingerprint, baseline.environmentBinding.fingerprint);
+  assert.equal(JSON.stringify(baseline.intrinsic).includes('phpVersion'), false);
+  assert.equal(JSON.stringify(baseline.intrinsic).includes('effectiveSettings'), false);
+});
 
 function templateName(packetFile) {
   const parsed = parse(packetFile);
@@ -1586,8 +1689,10 @@ test('default verifier fetches the declared real target and binds primary-route 
 
       const report = await verifyLive({
         packetDir,
+        targetUrl: baseUrl,
         cwd: repoRoot,
-        environment: { DDEV_PRIMARY_URL: baseUrl }
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
       });
 
       assert.equal(report.valid, true, report.errors.join('\n'));
@@ -1596,7 +1701,7 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.equal(report.routeChecks[0].passed, true, report.routeChecks[0].errors.join('\n'));
       assert.match(report.routeChecks[0].bodySha256, /^sha256:[a-f0-9]{64}$/);
       assert.match(report.target.targetFingerprint, /^sha256:[a-f0-9]{64}$/);
-      assert.equal(report.target.resolutionSource, 'ddev-environment');
+      assert.equal(report.target.resolutionSource, 'explicit');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
@@ -2202,6 +2307,310 @@ test('live verifier enforces redirect and final-path contracts for every accepte
   );
 });
 
+test('host-mode target discovery ignores ambient DDEV variables and uses matching ddev describe output', async () => {
+  await withHttpServer(
+    (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const root = mkdtempSync(join(tmpdir(), 'ambient-ddev-host-'));
+      mkdirSync(join(root, '.ddev'), { recursive: true });
+      mkdirSync(join(root, 'web'), { recursive: true });
+      writeFileSync(join(root, '.ddev', 'config.yaml'), 'name: ambient-fixture\ntype: drupal11\ndocroot: web\n');
+      const fakeBin = join(root, 'fake-bin');
+      mkdirSync(fakeBin);
+      const fakeDdev = join(fakeBin, 'ddev');
+      writeFileSync(fakeDdev, `#!/usr/bin/env node
+if (process.argv[2] === 'describe' && process.argv[3] === '-j') {
+  process.stdout.write(JSON.stringify({ raw: { primary_url: process.env.FAKE_DDEV_URL } }));
+  process.exit(0);
+}
+process.exit(1);
+`);
+      chmodSync(fakeDdev, 0o755);
+      const packetDir = join(root, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const report = await verifyLive({
+        packetDir,
+        cwd: root,
+        environment: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          DDEV_PRIMARY_URL: 'https://stale-other-project.ddev.site',
+          DDEV_PROJECT: 'ambient-fixture',
+          DDEV_SITENAME: 'ambient-fixture',
+          FAKE_DDEV_URL: baseUrl
+        },
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.target.resolutionSource, 'ddev-describe');
+      assert.equal(new URL(report.target.resolvedBaseUrl).origin, baseUrl);
+      assert.equal(report.liveTargetValid, true, report.errors.join('\n'));
+    }
+  );
+});
+
+test('intrinsic route state ignores target origin and volatile form tokens while raw evidence remains bound', async () => {
+  const capture = async (tokenSeed, campaign = 'meaningful-campaign-identifier-123456789', fragment = 'featured-speaker') => {
+    let origin = '';
+    let requestNumber = 0;
+    return withHttpServer(
+      (_request, response) => {
+        requestNumber += 1;
+        const token = `${tokenSeed}-${requestNumber}-${'x'.repeat(32)}`;
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head>
+          <title>Target site</title>
+          <link rel="canonical" href="${origin}/">
+        </head><body>
+          <h1>Target home</h1>
+          <a href="${origin}/people?page=2">People</a>
+          <a href="${origin}/people?campaign=${campaign}#${fragment}">Campaign</a>
+          <a href="${origin}/account?form_token=${token}">Account</a>
+          <img src="${origin}/hero.jpg?v=${token}" alt="Hero">
+          <form action="${origin}/search" method="post">
+            <input type="hidden" name="form_build_id" value="${token}">
+            <input type="search" name="keys">
+          </form>
+        </body></html>`);
+      },
+      async (baseUrl) => {
+        origin = baseUrl;
+        const temp = mkdtempSync(join(tmpdir(), 'intrinsic-route-state-'));
+        const packetDir = join(temp, 'review-packet');
+        copyTemplatePacket(packetDir);
+        writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+        const report = await verifyLive({
+          packetDir,
+          targetUrl: baseUrl,
+          cwd: repoRoot,
+          environment: {},
+          drupalRuntime: injectedDrupalRuntime(baseUrl)
+        });
+        return {
+          bodySha256: report.routeChecks[0].bodySha256,
+          intrinsicSemantics: report.routeChecks[0].intrinsicSemantics,
+          siteStateFingerprint: report.buildState.fingerprint,
+          targetIdentityFingerprint: report.buildState.componentFingerprints.targetIdentity,
+          routeStateFingerprint: report.buildState.componentFingerprints.routeManifest,
+          targetFingerprint: report.target.targetFingerprint
+        };
+      }
+    );
+  };
+
+  const first = await capture('first');
+  const second = await capture('second');
+  assert.notEqual(first.bodySha256, second.bodySha256);
+  assert.notEqual(first.targetFingerprint, second.targetFingerprint);
+  assert.equal(first.targetIdentityFingerprint, second.targetIdentityFingerprint);
+  assert.equal(first.routeStateFingerprint, second.routeStateFingerprint);
+  assert.equal(first.siteStateFingerprint, second.siteStateFingerprint);
+  assert.equal(first.intrinsicSemantics.fingerprint, second.intrinsicSemantics.fingerprint);
+  assert.deepEqual(first.intrinsicSemantics, second.intrinsicSemantics);
+
+  const changedLongQuery = await capture('third', 'meaningful-campaign-identifier-987654321');
+  assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedLongQuery.intrinsicSemantics.linkTargetsSha256);
+  assert.notEqual(first.routeStateFingerprint, changedLongQuery.routeStateFingerprint);
+
+  const changedFragment = await capture('fourth', 'meaningful-campaign-identifier-123456789', 'all-speakers');
+  assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedFragment.intrinsicSemantics.linkTargetsSha256);
+});
+
+test('declared query route variants are fetched and state-bound distinctly while fragments are ignored', async () => {
+  const requestedTargets = [];
+  let origin = '';
+  await withHttpServer(
+    (request, response) => {
+      requestedTargets.push(request.url);
+      const requestUrl = new URL(request.url, origin);
+      const searchRoute = requestUrl.pathname === '/search';
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head>
+        <title>${searchRoute ? 'Search results' : 'Target site'}</title>
+        <link rel="canonical" href="${origin}${searchRoute ? '/search' : request.url}">
+        <meta name="description" content="${searchRoute ? 'Filtered search results.' : 'Fixture homepage description.'}">
+      </head><body><h1>${searchRoute ? 'Search results' : 'Target home'}</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      origin = baseUrl;
+      const temp = mkdtempSync(join(tmpdir(), 'query-route-state-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const addQueryRoute = (primaryTarget, recordTarget) => {
+        routeMatrix.primaryRoutes.push({
+          sourcePath: recordTarget,
+          targetPath: primaryTarget,
+          sourceIntent: 'Filtered search results',
+          targetIntent: 'Filtered search results',
+          matchesBrowserRenderedSource: true,
+          accepted: true,
+          notes: ''
+        });
+        routeMatrix.routes.push({
+          sourcePath: recordTarget,
+          targetPath: recordTarget,
+          targetStatus: 200,
+          targetFinalPath: recordTarget,
+          targetTitle: 'Search results',
+          targetH1: 'Search results',
+          expectedRedirect: false,
+          accepted: true,
+          notes: ''
+        });
+      };
+      addQueryRoute('/search?type=speaker&year=2026#ignored-fragment', '/search?type=speaker&year=2026');
+      addQueryRoute('/search?year=2026&type=speaker', '/search?year=2026&type=speaker');
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        const homepageChecks = [...browser.publicRouteChecks];
+        for (const query of ['/search?type=speaker&year=2026', '/search?year=2026&type=speaker']) {
+          for (const homepage of homepageChecks) {
+            const check = structuredClone(homepage);
+            check.routeRole = 'search';
+            check.sourceUrl = `${routeMatrix.sourceBaseUrl}${query}`;
+            check.sourceFinalUrl = `${routeMatrix.sourceBaseUrl}${query}`;
+            check.targetUrl = `${baseUrl}${query}`;
+            check.targetFinalUrl = `${baseUrl}${query}`;
+            check.renderedSignals.sourceTitle = 'Search results';
+            check.renderedSignals.targetTitle = 'Search results';
+            check.renderedSignals.sourceH1 = 'Search results';
+            check.renderedSignals.targetH1 = 'Search results';
+            check.renderedSeoSignals.targetCanonicalUrl = `${baseUrl}/search`;
+            check.renderedSeoSignals.targetMetaDescription = 'Filtered search results.';
+            check.renderedSeoSignals.metaDescriptionStatus = 'present';
+            check.renderedSeoSignals.accepted = true;
+            browser.publicRouteChecks.push(check);
+          }
+        }
+      });
+
+      const inspect = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      const first = await inspect();
+      assert.equal(first.liveTargetValid, true, first.errors.join('\n'));
+      assert.equal(
+        first.routeChecks.filter((route) => route.targetPath.startsWith('/search'))
+          .every((route) => route.actualMetadata.canonicalUrl === `${baseUrl}/search`),
+        true
+      );
+      assert.equal(requestedTargets.includes('/search?type=speaker&year=2026'), true);
+      assert.equal(requestedTargets.includes('/search?year=2026&type=speaker'), true);
+      assert.equal(requestedTargets.some((target) => target.includes('#')), false);
+      const queryRouteChecks = first.routeChecks.filter((route) => route.targetPath === '/search');
+      assert.equal(queryRouteChecks.length, 2);
+      assert.equal(
+        queryRouteChecks.every((route) => /^\/search\?query-sha256=[a-f0-9]{64}$/.test(route.requestTarget)),
+        true
+      );
+      assert.equal(new Set(queryRouteChecks.map((route) => route.requestTarget)).size, 2);
+      const queryRouteStates = first.buildState.routeManifest.filter((route) => route.path.startsWith('/search'));
+      assert.equal(queryRouteStates.length, 2);
+      assert.equal(
+        queryRouteStates.every((route) => /^\/search\?query-sha256=[a-f0-9]{64}$/.test(route.path)),
+        true
+      );
+      assert.equal(new Set(queryRouteStates.map((route) => route.path)).size, 2);
+
+      routeMatrix.primaryRoutes[2].targetPath = '/search?type=workshop&year=2026';
+      routeMatrix.primaryRoutes[2].sourcePath = '/search?type=workshop&year=2026';
+      routeMatrix.routes[2].targetPath = '/search?type=workshop&year=2026';
+      routeMatrix.routes[2].sourcePath = '/search?type=workshop&year=2026';
+      routeMatrix.routes[2].targetFinalPath = '/search?type=workshop&year=2026';
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      const changedQuery = await inspect();
+      assert.equal(changedQuery.liveTargetValid, true, changedQuery.errors.join('\n'));
+      assert.equal(requestedTargets.includes('/search?type=workshop&year=2026'), true);
+      assert.notEqual(
+        first.buildState.componentFingerprints.routeManifest,
+        changedQuery.buildState.componentFingerprints.routeManifest
+      );
+    }
+  );
+});
+
+test('packet evidence recursively binds claim files while generated lifecycle/output files stay outside intrinsic state', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'packet-evidence-binding-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const browser = JSON.parse(readFileSync(join(packetDir, 'browser-evidence.json'), 'utf8'));
+      const screenshot = join(packetDir, browser.publicRouteChecks[0].sourceScreenshot);
+      const outPath = join(packetDir, 'evidence', 'custom-live-output.json');
+      writeJson(outPath, { generation: 1 });
+
+      const inspect = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        outPath,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      const first = await inspect();
+      const firstManifest = first.buildState.evidenceBindings.packetEvidenceManifest;
+      assert.equal(firstManifest.fingerprint, first.buildState.evidenceBindings.packetFingerprint);
+      assert.equal(
+        firstManifest.entries.some((entry) => entry.path === relative(packetDir, screenshot).replaceAll('\\', '/')),
+        true
+      );
+      assert.equal(firstManifest.entries.some((entry) => entry.path === 'evidence/custom-live-output.json'), false);
+      assert.equal(firstManifest.entries.some((entry) => entry.path.startsWith('evidence/lifecycle/')), false);
+      writeFileSync(screenshot, screenshotPng(199));
+      const changedEvidence = await inspect();
+      assert.notEqual(
+        first.buildState.evidenceBindings.packetFingerprint,
+        changedEvidence.buildState.evidenceBindings.packetFingerprint
+      );
+      assert.equal(first.buildState.fingerprint, changedEvidence.buildState.fingerprint);
+
+      writeJson(outPath, { generation: 2, selfReferenceMustNotChangeFingerprint: true });
+      writeJson(join(packetDir, 'evidence', 'live-verification.json'), { generated: true });
+      writeJson(join(packetDir, 'evidence', 'packet-verification.json'), { generated: true });
+      mkdirSync(join(packetDir, 'evidence', 'lifecycle'), { recursive: true });
+      writeJson(join(packetDir, 'evidence', 'lifecycle', 'current-state.json'), { generated: true });
+      const generatedOnly = await inspect();
+      assert.equal(
+        changedEvidence.buildState.evidenceBindings.packetFingerprint,
+        generatedOnly.buildState.evidenceBindings.packetFingerprint
+      );
+      assert.equal(changedEvidence.buildState.fingerprint, generatedOnly.buildState.fingerprint);
+    }
+  );
+});
+
+test('live verification rejects a symlinked review packet before reading packet inputs', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'symlinked-live-packet-'));
+  const actualPacket = join(temp, 'actual-packet');
+  const linkedPacket = join(temp, 'linked-packet');
+  copyTemplatePacket(actualPacket);
+  symlinkSync(actualPacket, linkedPacket);
+
+  await assert.rejects(
+    verifyLive({ packetDir: linkedPacket, cwd: repoRoot, environment: {} }),
+    /real directory.*symbolic link/i
+  );
+});
+
 test('live route verification rejects identity mismatches and accepts a declared same-origin redirect', async () => {
   let scenario = { status: 200, h1: 'Target home', title: 'Target site' };
   await withHttpServer(
@@ -2521,9 +2930,11 @@ test('CLI discovers the DDEV Drupal runtime and requires clean status plus HEAD-
       mkdirSync(join(targetRoot, '.ddev'), { recursive: true });
       mkdirSync(join(targetRoot, 'web'), { recursive: true });
       mkdirSync(join(targetRoot, 'config', 'sync'), { recursive: true });
+      mkdirSync(join(targetRoot, 'config', 'split', 'local'), { recursive: true });
       writeFileSync(join(targetRoot, '.ddev', 'config.yaml'), 'name: fake-runtime\ntype: drupal11\ndocroot: web\n');
       writeFileSync(join(targetRoot, 'config', 'sync', 'system.site.yml'), `uuid: ${testSiteUuid}\n`);
       writeFileSync(join(targetRoot, 'config', 'sync', 'system.theme.yml'), 'default: fixture_theme\nadmin: claro\n');
+      writeFileSync(join(targetRoot, 'config', 'split', 'local', 'system.logging.yml'), 'error_level: verbose\n');
 
       const fakeBin = join(targetRoot, 'fake-bin');
       mkdirSync(fakeBin);
@@ -2537,6 +2948,54 @@ if (args[0] === 'describe' && args[1] === '-j') {
 if (args[0] !== 'drush') {
   process.stderr.write('Unexpected fake DDEV command: ' + args.join(' ') + '\\n');
   process.exit(1);
+}
+if (args[1] === 'php:eval') {
+  if (args[2].includes('public-kit.drupal-runtime-facts.2')) {
+    process.stdout.write(JSON.stringify({
+      schemaVersion: 'public-kit.drupal-runtime-facts.2',
+      fingerprint: 'sha256:${'d'.repeat(64)}',
+      coreVersion: '11.2.0',
+      phpVersion: '8.3.0',
+      databaseDriver: 'mysql',
+      activeConfigEntryCount: 800,
+      effectiveActiveConfigSha256: 'sha256:${'8'.repeat(64)}',
+      systemSchemaEntryCount: 12,
+      systemSchemaSha256: 'sha256:${'e'.repeat(64)}',
+      effectiveSettingsEntryCount: 8,
+      effectiveSettingsHmacSha256: 'sha256:${'f'.repeat(64)}',
+      databaseUpdateStatusConfirmed: true,
+      pendingDatabaseUpdateCount: 0,
+      databaseUpdatesPending: false,
+      configSplitDirectories: ['../config/split/local']
+    }) + '\\n');
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify({
+    schemaVersion: 'public-kit.drupal-entity-inventory.4',
+    fingerprint: 'sha256:${'a'.repeat(64)}',
+    entityTypeCount: 1,
+    closureCounts: { entityCount: 1, entityTypeCount: 1 },
+    excludedEntityTypes: { user: 'private authentication and login state' },
+    missingDeclaredRoots: process.env.FAKE_DDEV_MISSING_ROOT === '1' ? ['node.page'] : [],
+    missingManagedFileCount: 0,
+    policy: { rawPerItemRowsEmitted: false },
+    publicAuthorUserDigest: {
+      count: 1,
+      translationCount: 1,
+      fingerprint: 'sha256:${'9'.repeat(64)}'
+    },
+    types: {
+      node: {
+        count: 1,
+        translationCount: 1,
+        revisionCount: 1,
+        revisionTranslationCount: 1,
+        missingManagedFileCount: 0,
+        fingerprint: 'sha256:${'b'.repeat(64)}',
+      }
+    }
+  }) + '\\n');
+  process.exit(0);
 }
 const command = args.slice(1).join(' ');
 if (command.startsWith('config:get') && command.includes('--field')) {
@@ -2593,7 +3052,26 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.match(untrackedReport.completionBlockedReasons.join('\n'), /Git-tracked.*YAML/i);
 
       execFileSync('git', ['init', '-q'], { cwd: targetRoot });
-      execFileSync('git', ['add', 'config/sync/system.site.yml', 'config/sync/system.theme.yml'], { cwd: targetRoot });
+      execFileSync('git', [
+        'add',
+        'config/sync/system.site.yml',
+        'config/sync/system.theme.yml',
+        'config/split/local/system.logging.yml'
+      ], { cwd: targetRoot });
+      mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+        readback.drupal.trackedConfigYamlFiles.reverse();
+        readback.drupal.trackedConfigYamlFiles.push('config/split/local/system.logging.yml');
+      });
+
+      const missingRootResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_MISSING_ROOT: '1' }
+      });
+      assert.equal(missingRootResult.status, 2, missingRootResult.stderr);
+      const missingRootReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(missingRootReport.drupalRuntime.entityInventory.confirmed, false);
+      assert.match(missingRootReport.completionBlockedReasons.join('\n'), /declared roots were missing.*node\.page/i);
 
       const stagedOnlyResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(stagedOnlyResult.status, 2, stagedOnlyResult.stderr);
@@ -2631,11 +3109,61 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.configStatusClean, true);
       assert.equal(cleanReport.drupalRuntime.configSyncMatchesHead, true);
       assert.equal(cleanReport.drupalRuntime.configSyncTracked, true);
+      assert.deepEqual(cleanReport.drupalRuntime.configSplitDirectories, ['config/split/local']);
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
       assert.equal(cleanReport.verdict, 'complete-local-rebuild');
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
+      assert.equal(cleanReport.lifecycle.initialBaseline.status, 'passed');
+      assert.equal(cleanReport.lifecycle.relation, 'matches-initial-baseline');
+      assert.equal(cleanReport.lifecycle.currentStateVerified, true);
+      assert.equal(cleanReport.lifecycle.initialBaseline.siteStateFingerprint, cleanReport.buildState.fingerprint);
+      const baselinePath = join(packetDir, 'evidence', 'lifecycle', 'initial-baseline.json');
+      const originalBaseline = readFileSync(baselinePath, 'utf8');
+      const baseline = JSON.parse(originalBaseline);
+      assert.equal(baseline.schemaVersion, 'public-kit.initial-baseline.1');
+      assert.equal(baseline.status, 'passed');
+      assert.equal(baseline.siteStateFingerprint, cleanReport.buildState.fingerprint);
+
+      const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
+      });
+      assert.equal(dirtyResult.status, 2, dirtyResult.stderr);
+      const dirtyReport = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
+      assert.equal(dirtyReport.valid, true, dirtyReport.errors.join('\n'));
+      assert.equal(dirtyReport.drupalRuntime.configStatusClean, false);
+      assert.equal(dirtyReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(dirtyReport.completionBlockedReasons.join('\n'), /config status is not clean/i);
+      assert.equal(dirtyReport.lifecycle.initialBaseline.status, 'passed');
+      assert.equal(dirtyReport.buildState.fingerprint, cleanReport.buildState.fingerprint);
+      assert.equal(dirtyReport.lifecycle.relation, 'matches-initial-baseline');
+      assert.equal(dirtyReport.lifecycle.currentStateVerified, false);
+      assert.equal(readFileSync(baselinePath, 'utf8'), originalBaseline);
+
+      const failedReadbackResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: { ...cleanEnvironment, FAKE_DDEV_UUID_READBACK_FAILS: '1' }
+      });
+      assert.equal(failedReadbackResult.status, 2, failedReadbackResult.stderr);
+      const failedReadbackReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      assert.equal(failedReadbackReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(failedReadbackReport.drupalRuntime.identityReadbackFailed, true);
+      assert.match(
+        failedReadbackReport.drupalRuntime.drushCommandFailures.join('\n'),
+        /drush config:get system\.site uuid --format=string.*exit 1.*Command "config:get" is not defined\./
+      );
+      assert.match(
+        failedReadbackReport.drupalRuntime.reason,
+        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string/
+      );
+      const failedReadbackBlockedReasons = failedReadbackReport.completionBlockedReasons.join('\n');
+      assert.match(
+        failedReadbackBlockedReasons,
+        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string.*Command "config:get" is not defined\./
+      );
+      assert.doesNotMatch(failedReadbackBlockedReasons, /runtime identity does not match/i);
 
       writeFileSync(
         join(targetRoot, 'config', 'sync', 'system.theme.yml'),
@@ -2678,39 +3206,23 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(stagedNewYamlReport.drupalRuntime.configSyncMatchesHead, false);
       assert.match(stagedNewYamlReport.completionBlockedReasons.join('\n'), /config-sync YAML does not match HEAD/i);
 
-      const dirtyResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
-        env: { ...cleanEnvironment, FAKE_DDEV_CONFIG_DIRTY: '1' }
+      writeFileSync(join(targetRoot, 'config', 'sync', 'system.performance.yml'), 'cache:\n  page:\n    max_age: 900\n');
+      execFileSync('git', ['add', 'config/sync/system.performance.yml'], { cwd: targetRoot });
+      const extraTrackedConfigResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
+        env: cleanEnvironment
       });
-      assert.equal(dirtyResult.status, 2, dirtyResult.stderr);
-      const dirtyReport = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
-      assert.equal(dirtyReport.valid, true, dirtyReport.errors.join('\n'));
-      assert.equal(dirtyReport.drupalRuntime.configStatusClean, false);
-      assert.equal(dirtyReport.completeLocalRebuildClaimAllowed, false);
-      assert.match(dirtyReport.completionBlockedReasons.join('\n'), /config status is not clean/i);
-
-      const failedReadbackResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
-        env: { ...cleanEnvironment, FAKE_DDEV_UUID_READBACK_FAILS: '1' }
-      });
-      assert.equal(failedReadbackResult.status, 2, failedReadbackResult.stderr);
-      const failedReadbackReport = JSON.parse(
+      assert.equal(extraTrackedConfigResult.status, 2, extraTrackedConfigResult.stderr);
+      const extraTrackedConfigReport = JSON.parse(
         readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
       );
-      assert.equal(failedReadbackReport.completeLocalRebuildClaimAllowed, false);
-      assert.equal(failedReadbackReport.drupalRuntime.identityReadbackFailed, true);
-      assert.match(
-        failedReadbackReport.drupalRuntime.drushCommandFailures.join('\n'),
-        /drush config:get system\.site uuid --format=string.*exit 1.*Command "config:get" is not defined\./
-      );
-      assert.match(
-        failedReadbackReport.drupalRuntime.reason,
-        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string/
-      );
-      const failedReadbackBlockedReasons = failedReadbackReport.completionBlockedReasons.join('\n');
-      assert.match(
-        failedReadbackBlockedReasons,
-        /Drush runtime inspection command failed.*config:get system\.site uuid --format=string.*Command "config:get" is not defined\./
-      );
-      assert.doesNotMatch(failedReadbackBlockedReasons, /runtime identity does not match/i);
+      assert.equal(extraTrackedConfigReport.drupalRuntime.configStatusClean, true);
+      assert.equal(extraTrackedConfigReport.drupalRuntime.trackedConfigReadbackMatches, false);
+      assert.equal(extraTrackedConfigReport.completeLocalRebuildClaimAllowed, false);
+      assert.match(extraTrackedConfigReport.completionBlockedReasons.join('\n'), /Git-tracked config evidence/i);
+      assert.equal(extraTrackedConfigReport.lifecycle.initialBaseline.status, 'passed');
+      assert.equal(extraTrackedConfigReport.lifecycle.relation, 'changed-since-latest-anchor');
+      assert.equal(extraTrackedConfigReport.lifecycle.currentStateVerified, false);
+      assert.equal(readFileSync(baselinePath, 'utf8'), originalBaseline);
     }
   );
 });
@@ -5935,7 +6447,7 @@ test('default mode does not trust the packet target URL as runtime discovery', a
   assert.equal(requestCount, 0);
 });
 
-test('default CLI exits 2 when live checks pass but completion evidence is incomplete', async () => {
+test('default CLI ignores an ambient DDEV URL outside a matching project/container', async () => {
   await withHttpServer(
     (_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html' });
@@ -5953,12 +6465,12 @@ test('default CLI exits 2 when live checks pass but completion evidence is incom
         packetDir
       ], repoRoot, { env: { ...process.env, DDEV_PRIMARY_URL: baseUrl } });
 
-      assert.equal(result.status, 2, result.stderr);
-      assert.match(result.stderr, /machine authorization remains blocked by required machine evidence/);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /No live target URL found/);
       const report = JSON.parse(readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8'));
-      assert.equal(report.valid, true);
+      assert.equal(report.valid, false);
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
-      assert.equal(report.verdict, 'machine-incomplete');
+      assert.equal(report.verdict, 'blocked');
       assert.equal(report.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(report.packetDir, 'review-packet');
       assert.doesNotMatch(JSON.stringify(report), new RegExp(temp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
