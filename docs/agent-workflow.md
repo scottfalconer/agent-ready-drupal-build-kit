@@ -42,7 +42,7 @@
 ## Phase 5: Hand Off
 
 - Hand off blocked gates by role.
-- Keep external blockers blocked; they do not replace primary-route coverage. Any accepted out-of-scope blind-review item needs a named accepter, specific reason, and evidence.
+- Keep external blockers blocked; they do not replace primary-route coverage. Any accepted out-of-scope blind-review item needs a recorded accepter label, specific reason, and evidence. Local attribution is self-attested; authenticated approval is separate.
 - Keep launch blockers separate from accepted launch evidence.
 - Ask maintainers to review architecture, not to rubber-stamp generated output.
 

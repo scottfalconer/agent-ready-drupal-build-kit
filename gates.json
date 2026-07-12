@@ -1,5 +1,11 @@
 {
   "schemaVersion": "public-kit.gates.1",
+  "checkedBySemantics": {
+    "human": "A human-facing packet record may contain a typed name and decision, but those fields are builder-writable. The local verifier reports them as self-attested record status, does not authenticate a person or infer independence from different strings, and does not use them to determine machine completion, verdict, or exit code. Authenticated human approval belongs in a separate external workflow when required.",
+    "verify-script": "The installed verifier scripts evaluate this gate mechanically from packet and live-target evidence.",
+    "verifier": "A fresh independent verifier context records this gate's evidence and the packet verifier checks it mechanically; its independence declarations are builder-writable and reported as self-attested.",
+    "blind-verifier": "A blind reviewer context that did not build the target records this gate's evidence from the brief, target, and source-of-truth materials only; its independence declarations are builder-writable and reported as self-attested."
+  },
   "reviewPacketFiles": [
     "source-audit.json",
     "pattern-map.json",
@@ -141,7 +147,7 @@
     },
     {
       "id": "G-ROUTE-01",
-      "title": "Full source route inventory or accepted route boundary",
+      "title": "Full source route inventory with representative route-role coverage or accepted boundary",
       "phase": 1,
       "evidenceFile": "route-matrix.json",
       "checkedBy": "verify-script",
@@ -173,7 +179,7 @@
     },
     {
       "id": "G-ROUTE-05",
-      "title": "Target-required routes resolve as intended",
+      "title": "Accepted routes cover server-rendered response links and expected external redirects",
       "phase": 6,
       "evidenceFile": "route-matrix.json",
       "checkedBy": "verifier",
@@ -198,6 +204,30 @@
     {
       "id": "G-BROWSER-02",
       "title": "First-fold and brand-defining assets verified",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-DETAIL-01",
+      "title": "Representative public detail routes render load-bearing fields under the declared owner",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-A11Y-01",
+      "title": "Real-browser accessibility checks have no unresolved or undispositioned handoff defects",
+      "phase": 6,
+      "evidenceFile": "browser-evidence.json",
+      "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-FORM-01",
+      "title": "Anonymous public forms validate, reach their intended outcome, and disposition abuse protection",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",
@@ -320,7 +350,7 @@
       "title": "Human-only open decisions are presented in final handoff",
       "phase": 6,
       "evidenceFile": "open-decisions.md",
-      "checkedBy": "human",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {
@@ -341,7 +371,7 @@
     },
     {
       "id": "G-SEO-01",
-      "title": "Rendered SEO/social metadata verified or blocked",
+      "title": "Rendered SEO/social metadata and exported SEO URL portability verified",
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",
