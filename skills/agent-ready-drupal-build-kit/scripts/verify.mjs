@@ -272,6 +272,21 @@ function sharedRouteCheck(route, absolutePacketDir) {
   };
 }
 
+export function sharedBeforeConsentNetworkCapture(capture, absolutePacketDir) {
+  const shared = sharedValue(capture, absolutePacketDir);
+  if (!capture?.captureFingerprint) {
+    return shared;
+  }
+  validateBeforeConsentNetworkCapture(capture, {
+    stateFingerprint: capture.resultStateFingerprint,
+    targetOrigin: capture.targetOrigin,
+    primaryRoutes: capture.primaryRoutes
+  });
+  const fingerprintInput = { ...shared };
+  delete fingerprintInput.captureFingerprint;
+  return { ...shared, captureFingerprint: stateSha256(fingerprintInput) };
+}
+
 function normalizeText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -6184,6 +6199,14 @@ export async function verifyLive({
     ...sharedValue(packetReport, absolutePacketDir),
     packetDir: sharedPacketDirName(absolutePacketDir)
   };
+  const sharedBeforeConsentCapture = sharedBeforeConsentNetworkCapture(
+    beforeConsentNetworkCapture,
+    absolutePacketDir
+  );
+  const sharedConsentReconciliation = sharedValue(consentReconciliation, absolutePacketDir);
+  if (sharedConsentReconciliation.authoritativeBeforeConsentCapture === true) {
+    sharedConsentReconciliation.beforeConsentCaptureFingerprint = sharedBeforeConsentCapture.captureFingerprint;
+  }
 
   return {
     schemaVersion: 'public-kit.live-verification.1',
@@ -6224,11 +6247,11 @@ export async function verifyLive({
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     globalChromeCapture,
     globalChromeCaptureSummary: captureSummary(globalChromeCapture),
-    beforeConsentNetworkCapture: sharedValue(beforeConsentNetworkCapture, absolutePacketDir),
+    beforeConsentNetworkCapture: sharedBeforeConsentCapture,
     negativeRouteCheck: sharedValue(negativeRouteCheck, absolutePacketDir),
     accessWallChecks: sharedValue(accessWallChecks, absolutePacketDir),
     legalPrivacyLinkChecks: sharedValue(legalPrivacyLinkChecks, absolutePacketDir),
-    consentReconciliation: sharedValue(consentReconciliation, absolutePacketDir),
+    consentReconciliation: sharedConsentReconciliation,
     browserRepresentativeRouteChecks: browserRepresentativeRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     serverRenderedResponseSurface: sharedValue(serverRenderedResponseSurface, absolutePacketDir),
     redirectMappingConflicts: redirectMaterialization.conflicts,
