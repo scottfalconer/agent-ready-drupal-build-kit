@@ -35,7 +35,8 @@
   ],
   "generatedEvidenceDirectories": [
     "evidence/lifecycle/changes",
-    "evidence/lifecycle/checkpoints"
+    "evidence/lifecycle/checkpoints",
+    "evidence/lifecycle/chrome"
   ],
   "changeChecks": {
     "state-bound": "The kit freshly inspected the result fingerprint and bound it to the recorded base and change intent.",
@@ -46,7 +47,7 @@
     "drupal-ownership": "New public or editorial behavior has an explicit Drupal data, composition, and editor owner.",
     "accessibility-regression": "Affected routes have accessibility evidence without a baseline-route regression.",
     "canvas-model": "Canvas component and configuration inventory, canonical data ownership, and non-admin save/publish behavior are evidenced.",
-    "global-chrome-regression": "Shared PageRegion, header, navigation, footer, and branding output remains correct on baseline routes.",
+    "global-chrome-regression": "Verifier-owned desktop/mobile captures prove shared PageRegion, header, navigation, footer, branding, meaningful links, and material layout remain correct on baseline primary routes.",
     "affected-public-output": "Changed Drupal-owned content or media appears on every declared affected anonymous route.",
     "editor-workflow": "A representative non-admin editor completed the affected Drupal-owned task.",
     "dependency-safety": "Dependency audit, database-update status, and affected runtime smoke evidence are recorded.",
