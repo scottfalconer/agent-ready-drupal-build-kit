@@ -384,7 +384,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(31 files\)/);
+  assert.match(result.stdout, /is in sync \(32 files\)/);
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -421,7 +421,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(31 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(32 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

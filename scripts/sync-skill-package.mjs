@@ -96,6 +96,10 @@ function copyPlan(assetsOnly) {
         source: join(repoRoot, 'bin', 'lifecycle.mjs'),
         destination: join(skillRoot, 'scripts', 'lifecycle.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'global-chrome.mjs'),
+        destination: join(skillRoot, 'scripts', 'global-chrome.mjs')
       }
     );
   }
