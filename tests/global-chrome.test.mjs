@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   BROWSER_CAPTURE_LIMITS,
   captureGlobalChrome,
+  cleanupBrowserProfile,
   compareGlobalChromeCaptures,
   createBrowserCaptureBudget,
   finalizeGlobalChromeCapture,
@@ -72,6 +73,23 @@ test('global chrome capture fails closed before browser launch when route or wal
   assert.equal(expired.budget.deadlineExceeded, true);
   assert.equal(expired.budget.deadlineMs, 10);
   assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
+
+test('profile cleanup uses bounded retries and reports a deferred warning without leaking its path', () => {
+  let options;
+  const result = cleanupBrowserProfile('/sensitive/local/profile', {
+    remove(_profile, receivedOptions) {
+      options = receivedOptions;
+      const error = new Error('directory still changing: /sensitive/local/profile');
+      error.code = 'ENOTEMPTY';
+      throw error;
+    }
+  });
+  assert.equal(result.deferred, true);
+  assert.deepEqual(result.warnings, ['Browser profile cleanup was deferred after bounded retries (ENOTEMPTY).']);
+  assert.equal(result.warnings.join('\n').includes('/sensitive/local/profile'), false);
+  assert.equal(options.maxRetries, 5);
+  assert.equal(options.retryDelay, 50);
 });
 
 function captureFixture(stateFingerprint, mutate = () => {}) {
@@ -261,9 +279,15 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     const raw = await captureGlobalChrome({
       baseUrl,
       primaryRoutes: ['/', '/missing-brand'],
-      contract: { dynamicRegionSelectors: ['[data-dynamic]'] }
+      contract: { dynamicRegionSelectors: ['[data-dynamic]'] },
+      profileCleanup(profile) {
+        const cleanup = cleanupBrowserProfile(profile);
+        return { ...cleanup, warnings: [...cleanup.warnings, 'Fixture deferred cleanup warning.'] };
+      }
     });
     assert.equal(raw.status, 'captured', raw.errors.join('\n'));
+    assert.equal(raw.authoritative, true);
+    assert.ok(raw.warnings.includes('Fixture deferred cleanup warning.'));
     assert.deepEqual(raw.routes.map((route) => `${route.path}:${route.viewport.name}`), [
       '/:desktop', '/:mobile', '/missing-brand:desktop', '/missing-brand:mobile'
     ]);

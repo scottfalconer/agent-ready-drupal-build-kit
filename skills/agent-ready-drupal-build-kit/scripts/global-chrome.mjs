@@ -113,6 +113,64 @@ export function createBrowserCaptureBudget({
   });
 }
 
+export function cleanupBrowserProfile(profile, {
+  maxRetries = 5,
+  remove = rmSync,
+  retryDelayMs = 50
+} = {}) {
+  try {
+    remove(profile, {
+      recursive: true,
+      force: true,
+      maxRetries: boundedPositiveLimit(maxRetries, 10, 'Browser profile cleanup maxRetries'),
+      retryDelay: boundedPositiveLimit(retryDelayMs, 250, 'Browser profile cleanup retryDelayMs')
+    });
+    return { deferred: false, warnings: [] };
+  } catch (error) {
+    const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+    return {
+      deferred: true,
+      warnings: [`Browser profile cleanup was deferred after bounded retries (${code}).`]
+    };
+  }
+}
+
+function browserRunning(child) {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function waitForBrowserExit(child, timeoutMs) {
+  if (!browserRunning(child)) return Promise.resolve(true);
+  return new Promise((resolvePromise) => {
+    const onExit = () => {
+      clearTimeout(timeout);
+      resolvePromise(true);
+    };
+    const timeout = setTimeout(() => {
+      child.off('exit', onExit);
+      resolvePromise(!browserRunning(child));
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
+async function shutdownBrowser(child) {
+  if (!browserRunning(child)) return '';
+  try {
+    child.kill('SIGTERM');
+    await waitForBrowserExit(child, 1_000);
+    if (browserRunning(child)) {
+      child.kill('SIGKILL');
+      await waitForBrowserExit(child, 500);
+    }
+  } catch (error) {
+    return `Browser shutdown failed: ${error.message}`;
+  }
+  return browserRunning(child)
+    ? 'Browser shutdown failed: the headless browser did not exit after SIGTERM and SIGKILL.'
+    : '';
+}
+
 function normalizeRoute(value) {
   const text = String(value ?? '').trim();
   if (!text.startsWith('/') || text.startsWith('//')) throw new Error(`Global chrome route must be root-relative: ${text}`);
@@ -537,7 +595,8 @@ export async function captureGlobalChrome({
   contract = {},
   environment = process.env,
   limits = {},
-  now = Date.now
+  now = Date.now,
+  profileCleanup = cleanupBrowserProfile
 } = {}) {
   const normalizedContract = normalizeGlobalChromeContract(contract);
   const checkedAt = new Date().toISOString();
@@ -568,6 +627,7 @@ export async function captureGlobalChrome({
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
+      warnings: [],
       errors: [error.message]
     };
   }
@@ -585,6 +645,7 @@ export async function captureGlobalChrome({
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
+      warnings: [],
       errors: ['No Chrome/Chromium executable was found. Set CHROME_PATH or install Chrome/Chromium.']
     };
   }
@@ -601,6 +662,7 @@ export async function captureGlobalChrome({
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
+      warnings: [],
       errors: ['No primary routes were available for global chrome capture.']
     };
   }
@@ -619,6 +681,7 @@ export async function captureGlobalChrome({
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
+      warnings: [],
       errors: [error.message]
     };
   }
@@ -640,6 +703,7 @@ export async function captureGlobalChrome({
   const cdp = new CdpPipe(child, budget);
   const captured = [];
   const errors = [];
+  const warnings = [];
   let product = '';
   try {
     const version = await cdp.send('Browser.getVersion');
@@ -668,20 +732,18 @@ export async function captureGlobalChrome({
   } catch (error) {
     errors.push(error.message);
   } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-      child.kill('SIGTERM');
-      await Promise.race([exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 1000))]);
-      if (child.exitCode === null && child.signalCode === null) {
-        const killed = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-        child.kill('SIGKILL');
-        await Promise.race([killed, new Promise((resolvePromise) => setTimeout(resolvePromise, 500))]);
+    const shutdownError = await shutdownBrowser(child);
+    if (shutdownError) {
+      errors.push(shutdownError);
+      warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
+    } else {
+      try {
+        const cleanup = profileCleanup(profile);
+        warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
+      } catch (error) {
+        const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+        warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
       }
-    }
-    try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 2 });
-    } catch (error) {
-      errors.push(`Browser profile cleanup failed: ${error.message}`);
     }
   }
   if (captured.length !== routes.length * VIEWPORTS.length && stderr.length) {
@@ -699,6 +761,7 @@ export async function captureGlobalChrome({
     primaryRoutes: routes,
     routes: captured,
     budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
+    warnings,
     errors
   };
 }
@@ -975,6 +1038,7 @@ export function captureSummary(capture) {
     captureFingerprint: capture?.captureFingerprint ?? '',
     routeViewportCount: Array.isArray(capture?.routes) ? capture.routes.length : 0,
     budget: capture?.budget ?? null,
+    warnings: Array.isArray(capture?.warnings) ? capture.warnings : [],
     errors: Array.isArray(capture?.errors) ? capture.errors : []
   };
 }
