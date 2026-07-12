@@ -9,10 +9,13 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  createCriticalAssetContext,
+  createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
   DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
+  inspectCriticalAssets,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
   verifyLive
@@ -2462,7 +2465,12 @@ test('intrinsic route state ignores target origin and volatile form tokens while
     let origin = '';
     let requestNumber = 0;
     return withHttpServer(
-      (_request, response) => {
+      (request, response) => {
+        if (new URL(request.url, 'http://fixture.invalid').pathname === '/hero.jpg') {
+          response.writeHead(200, { 'content-type': 'image/jpeg' });
+          response.end('stable-hero-bytes');
+          return;
+        }
         requestNumber += 1;
         const token = `${tokenSeed}-${requestNumber}-${'x'.repeat(32)}`;
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -2522,6 +2530,180 @@ test('intrinsic route state ignores target origin and volatile form tokens while
 
   const changedFragment = await capture('fourth', 'meaningful-campaign-identifier-123456789', 'all-speakers');
   assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedFragment.intrinsicSemantics.linkTargetsSha256);
+});
+
+test('critical same-origin rendered asset bytes are bounded, validated, and state-bound', async () => {
+  let stylesheet = 'body{color:#111}';
+  let stylesheetRequests = 0;
+  await withHttpServer(
+    (request, response) => {
+      const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
+      if (pathname === '/site.css') {
+        stylesheetRequests += 1;
+        response.writeHead(200, { 'content-type': 'text/css; charset=utf-8' });
+        response.end(stylesheet);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head>
+        <title>Target site</title>
+        <link rel="stylesheet" href="/site.css?v=stable-url">
+        <script src="https://provider.example/external.js"></script>
+      </head><body><h1>Target home</h1></body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'critical-route-assets-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const inspect = () => verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      const first = await inspect();
+      assert.equal(first.liveTargetValid, true, first.errors.join('\n'));
+      assert.equal(first.routeChecks[0].criticalAssets.manifest.length, 1);
+      assert.equal(first.routeChecks[0].criticalAssets.manifest[0].contentType, 'text/css');
+      assert.equal(first.routeChecks[0].criticalAssets.manifest[0].path, 'local:/site.css?v=%7Basset-cache-buster%7D');
+      assert.match(first.routeChecks[0].criticalAssets.manifest[0].sha256, /^sha256:[a-f0-9]{64}$/);
+      assert.equal(first.buildState.routeManifest[0].criticalAssetManifest.length, 1);
+      assert.deepEqual(first.criticalAssetInspection, {
+        distinctRequestCount: 1,
+        totalBytes: Buffer.byteLength(stylesheet),
+        limits: {
+          requestCount: 160,
+          perAssetBytes: 20 * 1024 * 1024,
+          totalBytes: 100 * 1024 * 1024,
+          concurrency: 12,
+          wallClockMs: 90_000
+        },
+        sharesLiveHttpBudget: true
+      });
+      assert.equal(first.liveHttpBudget.tasksByKind['critical-asset'], 1);
+
+      stylesheet = 'body{color:#222}';
+      const second = await inspect();
+      assert.equal(second.liveTargetValid, true, second.errors.join('\n'));
+      assert.notEqual(
+        first.routeChecks[0].criticalAssets.manifest[0].sha256,
+        second.routeChecks[0].criticalAssets.manifest[0].sha256
+      );
+      assert.notEqual(
+        first.buildState.componentFingerprints.routeManifest,
+        second.buildState.componentFingerprints.routeManifest
+      );
+    }
+  );
+  assert.equal(stylesheetRequests, 2, 'the shared asset cache should fetch one stylesheet once per verification run');
+});
+
+test('critical asset inspection shares global concurrency and wall-clock bounds', async () => {
+  let active = 0;
+  let maximumActive = 0;
+  await withHttpServer(
+    (request, response) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      setTimeout(() => {
+        response.writeHead(200, { connection: 'close', 'content-type': 'text/css' });
+        response.end(`/* ${request.url} */`);
+        active -= 1;
+      }, 200);
+    },
+    async (baseUrl) => {
+      const html = `<!doctype html><html><head>${Array.from(
+        { length: 6 },
+        (_, index) => `<link rel="stylesheet" href="/slow-${index}.css">`
+      ).join('')}</head><body></body></html>`;
+      const liveHttpContext = createLiveHttpContext({
+        concurrency: 2,
+        deadlineMs: 50,
+        maxRequests: 160,
+        maxTasks: 160
+      });
+      const context = createCriticalAssetContext({ liveHttpContext });
+      const started = Date.now();
+      const result = await inspectCriticalAssets(html, `${baseUrl}/`, context);
+      const elapsed = Date.now() - started;
+
+      assert.ok(elapsed < 500, `critical assets exceeded aggregate deadline: ${elapsed}ms`);
+      assert.ok(maximumActive <= 2, `critical asset concurrency reached ${maximumActive}`);
+      assert.equal(result.manifest.length, 0);
+      assert.match(result.errors.join('\n'), /total wall-clock deadline/i);
+      assert.equal(liveHttpContext.metrics().deadlineExceeded, true);
+    }
+  );
+});
+
+test('critical asset byte reservations stop queued fetches at the aggregate limit', async () => {
+  let requests = 0;
+  await withHttpServer(
+    (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { 'content-type': 'text/css' });
+      response.end('12345678');
+    },
+    async (baseUrl) => {
+      const html = `<!doctype html><html><head>${Array.from(
+        { length: 6 },
+        (_, index) => `<link rel="stylesheet" href="/asset-${index}.css">`
+      ).join('')}</head><body></body></html>`;
+      const liveHttpContext = createLiveHttpContext({
+        concurrency: 4,
+        deadlineMs: 1_000,
+        maxRequests: 10,
+        maxTasks: 10
+      });
+      const context = createCriticalAssetContext({
+        liveHttpContext,
+        maxAssetBytes: 10,
+        maxRequests: 10,
+        maxTotalBytes: 10
+      });
+      const result = await inspectCriticalAssets(html, `${baseUrl}/`, context);
+
+      assert.equal(context.totalBytes, 8);
+      assert.equal(result.manifest.length, 1);
+      assert.equal(requests, 2, 'assets queued beyond the remaining aggregate bytes must not be fetched');
+      assert.match(result.errors.join('\n'), /response body exceeds the 2 byte limit/i);
+      assert.match(result.errors.join('\n'), /bytes exceed the 10 byte total limit/i);
+    }
+  );
+});
+
+test('critical same-origin rendered assets fail closed on HTTP and content-type errors', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const pathname = new URL(request.url, 'http://fixture.invalid').pathname;
+      if (pathname === '/broken.css') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><title>Missing</title>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title><link rel="stylesheet" href="/broken.css"></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'critical-route-assets-invalid-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.liveTargetValid, false);
+      assert.match(report.routeChecks[0].errors.join('\n'), /broken\.css critical asset returned HTTP 404/i);
+      assert.match(report.routeChecks[0].errors.join('\n'), /content type .*text\/html.*incompatible/i);
+    }
+  );
 });
 
 test('declared query route variants are fetched and state-bound distinctly while fragments are ignored', async () => {
