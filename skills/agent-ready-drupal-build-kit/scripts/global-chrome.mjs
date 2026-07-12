@@ -13,6 +13,11 @@ const VIEWPORTS = Object.freeze([
   Object.freeze({ name: 'desktop', width: 1280, height: 800, mobile: false }),
   Object.freeze({ name: 'mobile', width: 390, height: 844, mobile: true })
 ]);
+export const BROWSER_CAPTURE_LIMITS = Object.freeze({
+  deadlineMs: 120_000,
+  maxRoutes: 64,
+  operationTimeoutMs: 20_000
+});
 const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
   maximumPageHeightRatio: 1.6,
@@ -21,6 +26,92 @@ const FIXED_THRESHOLDS = Object.freeze({
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
+
+function boundedPositiveLimit(value, ceiling, label) {
+  if (value === undefined) return ceiling;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer.`);
+  }
+  return Math.min(value, ceiling);
+}
+
+export function createBrowserCaptureBudget({
+  label = 'Browser capture',
+  limits = {},
+  now = Date.now,
+  routeCount = 0,
+  viewportCount = 1
+} = {}) {
+  if (!Number.isSafeInteger(routeCount) || routeCount < 0) {
+    throw new Error(`${label} routeCount must be a non-negative safe integer.`);
+  }
+  if (!Number.isSafeInteger(viewportCount) || viewportCount <= 0) {
+    throw new Error(`${label} viewportCount must be a positive safe integer.`);
+  }
+  if (typeof now !== 'function') throw new Error(`${label} clock must be a function.`);
+  const boundedLimits = Object.freeze({
+    deadlineMs: boundedPositiveLimit(limits.deadlineMs, BROWSER_CAPTURE_LIMITS.deadlineMs, `${label} deadlineMs`),
+    maxRoutes: boundedPositiveLimit(limits.maxRoutes, BROWSER_CAPTURE_LIMITS.maxRoutes, `${label} maxRoutes`),
+    operationTimeoutMs: boundedPositiveLimit(
+      limits.operationTimeoutMs,
+      BROWSER_CAPTURE_LIMITS.operationTimeoutMs,
+      `${label} operationTimeoutMs`
+    )
+  });
+  const startedAt = now();
+  if (!Number.isFinite(startedAt)) throw new Error(`${label} clock must return a finite timestamp.`);
+  let deadlineExceeded = false;
+  const deadlineMessage = () => `${label} exceeded its ${boundedLimits.deadlineMs} ms total wall-clock deadline.`;
+  const deadlineError = () => {
+    deadlineExceeded = true;
+    return new Error(deadlineMessage());
+  };
+  const elapsedMs = () => Math.max(0, Math.floor(now() - startedAt));
+  const remainingMs = () => {
+    const remaining = boundedLimits.deadlineMs - elapsedMs();
+    if (remaining <= 0) throw deadlineError();
+    return remaining;
+  };
+  return Object.freeze({
+    label,
+    limits: boundedLimits,
+    assertRouteLimit() {
+      if (routeCount > boundedLimits.maxRoutes) {
+        throw new Error(
+          `${label} requires ${routeCount} routes, exceeding the ${boundedLimits.maxRoutes} route limit; no browser checks were run.`
+        );
+      }
+    },
+    assertWithinDeadline() {
+      remainingMs();
+    },
+    deadlineError,
+    hasExceededDeadline() {
+      return deadlineExceeded;
+    },
+    operationTiming() {
+      const remaining = remainingMs();
+      return {
+        deadlineLimited: remaining <= boundedLimits.operationTimeoutMs,
+        timeoutMs: Math.max(1, Math.min(remaining, boundedLimits.operationTimeoutMs))
+      };
+    },
+    metrics({ attempted = false, capturedCount = 0 } = {}) {
+      return {
+        attempted,
+        capturedRouteViewportCount: capturedCount,
+        deadlineExceeded,
+        deadlineMs: boundedLimits.deadlineMs,
+        elapsedMs: elapsedMs(),
+        maxRoutes: boundedLimits.maxRoutes,
+        operationTimeoutMs: boundedLimits.operationTimeoutMs,
+        routeCount,
+        scheduledRouteViewportCount: routeCount * viewportCount,
+        viewportCount
+      };
+    }
+  });
+}
 
 function normalizeRoute(value) {
   const text = String(value ?? '').trim();
@@ -105,10 +196,11 @@ export function findBrowserExecutable(environment = process.env) {
 }
 
 class CdpPipe {
-  constructor(child, timeoutMs = 20_000) {
+  constructor(child, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
     this.child = child;
     this.input = child.stdio[3];
     this.output = child.stdio[4];
+    this.budget = budget;
     this.timeoutMs = timeoutMs;
     this.nextId = 1;
     this.pending = new Map();
@@ -171,20 +263,34 @@ class CdpPipe {
   }
 
   send(method, params = {}, sessionId = '') {
+    let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
+    try {
+      if (this.budget) timing = this.budget.operationTiming();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const id = this.nextId++;
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
     return new Promise((resolvePromise, rejectPromise) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        rejectPromise(new Error(`${method} timed out after ${this.timeoutMs} ms.`));
-      }, this.timeoutMs);
+        rejectPromise(timing.deadlineLimited
+          ? this.budget.deadlineError()
+          : new Error(`${method} timed out after ${timing.timeoutMs} ms.`));
+      }, timing.timeoutMs);
       this.pending.set(id, { method, resolve: resolvePromise, reject: rejectPromise, timeout });
       this.input.write(`${JSON.stringify(message)}\0`);
     });
   }
 
   waitFor(method, sessionId = '') {
+    let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
+    try {
+      if (this.budget) timing = this.budget.operationTiming();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const queuedIndex = this.events.findIndex((event) =>
       event.method === method && (!sessionId || event.sessionId === sessionId)
     );
@@ -193,8 +299,10 @@ class CdpPipe {
       const waiter = { method, sessionId, resolve: resolvePromise, reject: rejectPromise };
       waiter.timeout = setTimeout(() => {
         this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
-        rejectPromise(new Error(`${method} event timed out after ${this.timeoutMs} ms.`));
-      }, this.timeoutMs);
+        rejectPromise(timing.deadlineLimited
+          ? this.budget.deadlineError()
+          : new Error(`${method} event timed out after ${timing.timeoutMs} ms.`));
+      }, timing.timeoutMs);
       this.waiters.push(waiter);
     });
   }
@@ -380,7 +488,10 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   );
   const url = new URL(path.replace(/^\//, ''), new URL('/', baseUrl)).href;
   const loaded = cdp.waitFor('Page.loadEventFired', sessionId);
-  const navigation = await cdp.send('Page.navigate', { url }, sessionId);
+  const navigation = await cdp.send('Page.navigate', { url }, sessionId).catch((error) => {
+    void loaded.catch(() => {});
+    throw error;
+  });
   if (navigation.errorText) throw new Error(`${path} navigation failed: ${navigation.errorText}`);
   await loaded;
   await cdp.send('Runtime.evaluate', {
@@ -420,13 +531,47 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   };
 }
 
-export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {}, environment = process.env } = {}) {
+export async function captureGlobalChrome({
+  baseUrl,
+  primaryRoutes,
+  contract = {},
+  environment = process.env,
+  limits = {},
+  now = Date.now
+} = {}) {
   const normalizedContract = normalizeGlobalChromeContract(contract);
   const checkedAt = new Date().toISOString();
-  const routes = [...new Set((Array.isArray(primaryRoutes) ? primaryRoutes : [])
-    .map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
-  const executable = findBrowserExecutable(environment);
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  const budget = createBrowserCaptureBudget({
+    label: 'Global chrome capture',
+    limits,
+    now,
+    routeCount: routeInputs.length,
+    viewportCount: VIEWPORTS.length
+  });
   const base = new URL(baseUrl);
+  let routes = [];
+  try {
+    budget.assertRouteLimit();
+    budget.assertWithinDeadline();
+    routes = [...new Set(routeInputs.map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
+  } catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: '', product: '' },
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics(),
+      errors: [error.message]
+    };
+  }
+  const executable = findBrowserExecutable(environment);
   if (!executable) {
     return {
       schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
@@ -439,6 +584,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       browser: { executable: '', product: '' },
       primaryRoutes: routes,
       routes: [],
+      budget: budget.metrics(),
       errors: ['No Chrome/Chromium executable was found. Set CHROME_PATH or install Chrome/Chromium.']
     };
   }
@@ -454,7 +600,26 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
       browser: { executable: basename(executable), product: '' },
       primaryRoutes: routes,
       routes: [],
+      budget: budget.metrics(),
       errors: ['No primary routes were available for global chrome capture.']
+    };
+  }
+  try {
+    budget.assertWithinDeadline();
+  } catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: basename(executable), product: '' },
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics(),
+      errors: [error.message]
     };
   }
   const profile = join(tmpdir(), `agent-ready-chrome-${process.pid}-${Date.now()}`);
@@ -472,7 +637,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
   child.stderr.on('data', (chunk) => {
     if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
   });
-  const cdp = new CdpPipe(child);
+  const cdp = new CdpPipe(child, budget);
   const captured = [];
   const errors = [];
   let product = '';
@@ -485,18 +650,21 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Network.enable', {}, sessionId);
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+    captureLoop:
     for (const path of routes) {
       for (const viewport of VIEWPORTS) {
         try {
+          budget.assertWithinDeadline();
           const capture = await captureRoute(cdp, sessionId, base, path, viewport, normalizedContract);
           captured.push(capture);
           for (const violation of capture.signals.maskViolations ?? []) errors.push(`${path} ${viewport.name}: ${violation}`);
         } catch (error) {
           errors.push(`${path} ${viewport.name}: ${error.message}`);
+          if (budget.hasExceededDeadline()) break captureLoop;
         }
       }
     }
-    await cdp.send('Target.closeTarget', { targetId });
+    if (!budget.hasExceededDeadline()) await cdp.send('Target.closeTarget', { targetId });
   } catch (error) {
     errors.push(error.message);
   } finally {
@@ -530,6 +698,7 @@ export async function captureGlobalChrome({ baseUrl, primaryRoutes, contract = {
     browser: { executable: basename(executable), product },
     primaryRoutes: routes,
     routes: captured,
+    budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
     errors
   };
 }

@@ -10,7 +10,7 @@
   },
   "publicRouteChecks": [
     {
-      "routeRole": "homepage | primary | landing | listing | detail | taxonomy | search | form | legal | media | other",
+      "routeRole": "homepage | landing | listing | detail | taxonomy | search | form | legal | media | other",
       "sourceUrl": "",
       "sourceFinalUrl": "",
       "targetUrl": "",
@@ -23,7 +23,8 @@
       "sourceScreenshot": "",
       "targetScreenshot": "",
       "visualComparison": {
-        "method": "human_review | pixel_diff | structural_review | other",
+        "method": "human_review | agent_review | pixel_diff | structural_review | other",
+        "reviewer": "",
         "diffImage": "",
         "diffScore": null,
         "status": "pass | needs-review | fail | blocked",
@@ -65,6 +66,71 @@
         "accepted": false,
         "evidence": ""
       },
+      "accessibilityCheck": {
+        "standard": "WCAG 2.2 AA",
+        "engine": "axe-core",
+        "engineVersion": "",
+        "executedInBrowser": false,
+        "ruleScope": {
+          "mode": "full_default | wcag_tags",
+          "tags": [],
+          "accepted": false
+        },
+        "report": "",
+        "incompleteReviewed": false,
+        "incompleteDispositions": [
+          {
+            "ruleId": "",
+            "target": [],
+            "disposition": "manual_pass | false_positive | not_applicable",
+            "rationale": "",
+            "evidence": ""
+          }
+        ],
+        "manualChecks": {
+          "keyboardNavigation": "pass | not_applicable",
+          "keyboardNavigationNotApplicableRationale": "",
+          "visibleFocus": "pass | not_applicable",
+          "visibleFocusNotApplicableRationale": "",
+          "accessibleNamesAndLabels": "pass | not_applicable",
+          "accessibleNamesAndLabelsNotApplicableRationale": "",
+          "formLabelsErrorsAndFocus": "pass | not_applicable",
+          "formLabelsErrorsAndFocusNotApplicableRationale": ""
+        },
+        "status": "pass | fail | blocked",
+        "blockers": []
+      },
+      "detailContentSignals": {
+        "contentTypeOrBundle": "",
+        "drupalOwner": "",
+        "drupalOwnerConfigId": "",
+        "ownerDeviation": {
+          "applies": false,
+          "rationale": "",
+          "evidence": ""
+        },
+        "loadBearingFields": [
+          {
+            "field": "",
+            "sourceSignal": "",
+            "targetSignal": "",
+            "selector": "",
+            "computedVisibility": {
+              "matchedElementCount": 0,
+              "display": "",
+              "visibility": "",
+              "opacity": "",
+              "hiddenAttribute": false,
+              "ariaHidden": false,
+              "boundingWidth": 0,
+              "boundingHeight": 0,
+              "text": ""
+            },
+            "visible": false
+          }
+        ],
+        "accepted": false
+      },
       "renderedItemCounts": [
         {
           "sourceObject": "",
@@ -76,6 +142,39 @@
         }
       ],
       "notes": "",
+      "accepted": false,
+      "blockers": []
+    }
+  ],
+  "anonymousFormChecks": [
+    {
+      "formKey": "",
+      "sourceRoute": "",
+      "targetUrl": "",
+      "purpose": "",
+      "drupalOwner": "",
+      "anonymousSession": false,
+      "syntheticTestData": false,
+      "invalidSubmission": {
+        "performed": false,
+        "errorsVisible": false,
+        "focusOrSummaryVerified": false
+      },
+      "validSubmission": {
+        "performed": false,
+        "successStateVisible": false
+      },
+      "outcome": {
+        "mode": "local_mail_capture | provider_delivery | drupal_submission_storage | account_created | provider_handoff | other",
+        "evidence": ""
+      },
+      "abuseProtection": {
+        "mode": "rendered_honeypot | rendered_challenge | configured_rate_limiting | provider_managed | local_only_exception",
+        "dispositionVerified": false,
+        "rationale": "",
+        "evidence": ""
+      },
+      "status": "pass | fail | blocked",
       "accepted": false,
       "blockers": []
     }

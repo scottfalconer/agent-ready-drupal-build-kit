@@ -38,7 +38,7 @@ Before changing the site, read these installed references completely:
 1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
 2. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
 
-Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
+Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
 
 ## Build contract
 
@@ -59,6 +59,7 @@ Completion authority comes from the final verifier, not builder-authored `comple
 - Run independent verification against the actual Drupal target and try to falsify route, content-count, ownership, media, config, editor, accessibility, SEO, and packet-freshness claims.
 - Run a fresh blind product review against the original brief/source and target before showing the reviewer implementation notes or packet rationale. Cover every primary route at desktop and mobile widths. `accepted_out_of_scope` requires a named accepter, reason, and evidence. An external blocker leaves completion blocked and cannot substitute for route coverage.
 - Review rendered SEO on every primary route. `not_applicable` for meta description or `og:image` requires a reviewed rationale and evidence.
+- Require route-bound in-browser axe-core output, dispositions for WCAG-tagged incomplete nodes, and manual keyboard/focus/name checks for browser-reviewed routes. For anonymous source forms, preserve purpose/owner/outcome across audit, model, and browser evidence; exercise invalid and valid synthetic submissions; prove an outcome-appropriate handler; and record a vendor-neutral abuse-protection disposition. For collections with separate public details, verify a representative detail route renders its load-bearing fields and matches its declared owner or carries an evidenced deviation. Reject literal local-environment URLs in exported SEO defaults.
 - Store real packet-local evidence under `review-packet/evidence/`. A filename or authored boolean is not proof.
 - Fix agent-resolvable failures and repeat. Put only genuinely human-owned decisions in `open-decisions.md`.
 
@@ -68,7 +69,7 @@ Run the live-target verifier by default:
 node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
 ```
 
-This command detects the current DDEV target; binds the packet to the target origin, Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status read from that same runtime through Drush; independently requires real Git-tracked YAML in the current sync directory; fetches primary and target-required routes; rejects non-success responses even when packet data reports the same `5xx`; and compares fetched primary-route canonical, meta-description, and `og:image` output with browser evidence. It derives completion from the live runtime plus underlying review evidence. Packet-only data and injected test runtimes cannot authorize completion. Exit `0` authorizes complete local rebuild status, exit `2` means valid but incomplete, and exit `1` means packet or live-target validation failed.
+This command detects the current DDEV target; binds the packet to the target origin, Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status read from that same runtime through Drush; independently requires real Git-tracked YAML in the current sync directory; fetches every accepted route and target-required public route; checks links present in server-rendered response HTML; requires discovered same-origin targets to be declared or exactly dispositioned; validates expected external redirects without fetching the external origin; blocks direct source-origin links without exact accepted exceptions; rejects non-success responses even when packet data reports the same `5xx`; and compares fetched primary-route canonical, meta-description, and `og:image` output with browser evidence. This HTTP verifier does not execute JavaScript; browser-only links must be discovered by browser-first route expansion and represented in the route matrix. Every discovered route role must have a representative primary route. It derives completion from the live runtime plus underlying review evidence. Packet-only data and injected test runtimes cannot authorize completion. Exit `0` authorizes complete local rebuild status, exit `2` means valid but incomplete, and exit `1` means packet or live-target validation failed.
 
 For each passing independent claim, create packet-local JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. Bind each entry to its `claimId`, `gate`, inspected `targetBaseUrl`, and `checkedAt`; include concrete checks with `name`, `method`, `result: pass`, and `observation`. Do not reuse a generic status-only file as proof for every gate.
 
@@ -120,4 +121,4 @@ Everything required at runtime is inside this skill directory:
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
-- `references/` contains the complete build contract, output inventory, parity specification, playbook, and companion-skill guidance.
+- `references/` contains the complete build contract, output inventory, parity specification, playbook, command cookbook, and companion-skill guidance.

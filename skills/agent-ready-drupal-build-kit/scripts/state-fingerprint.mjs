@@ -682,6 +682,7 @@ export function buildSiteState({
   entityInventory,
   routeManifest,
   runtimeFacts = {},
+  runtimeEnvironmentBinding = null,
   packetFingerprint = '',
   packetEvidenceManifest = null,
   verifierFingerprint = ''
@@ -699,6 +700,11 @@ export function buildSiteState({
     codeManifest?.projectEvidenceBinding,
     'codeManifest.projectEvidenceBinding',
     'public-kit.project-evidence-binding.1'
+  );
+  const runtimeEnvironment = normalizedAggregateBinding(
+    runtimeEnvironmentBinding,
+    'runtimeEnvironmentBinding',
+    'public-kit.runtime-environment-binding.1'
   );
   const packetEvidence = packetEvidenceManifest
     ? normalizedManifest(packetEvidenceManifest, 'packetEvidenceManifest')
@@ -738,6 +744,7 @@ export function buildSiteState({
       packetEvidenceManifest: packetEvidence,
       verifierFingerprint: optionalFingerprint(verifierFingerprint, 'verifierFingerprint'),
       machineLocalEnvironment,
+      runtimeEnvironment,
       projectEvidence
     }
   };

@@ -2,9 +2,12 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -42,6 +45,10 @@ const ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const FRESH_INSPECTION_MS = 10 * 60 * 1000;
 const FUTURE_SKEW_MS = 2 * 60 * 1000;
+const BEGIN_CHANGE_LOCK_RETRY_MS = 10;
+const BEGIN_CHANGE_LOCK_RETRY_ATTEMPTS = 25;
+const BEGIN_CHANGE_LOCK_TIMEOUT_MS = BEGIN_CHANGE_LOCK_RETRY_MS * BEGIN_CHANGE_LOCK_RETRY_ATTEMPTS;
+const BEGIN_CHANGE_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const UNIVERSAL_MACHINE_CHECK_IDS = new Set(['state-bound', 'config-clean', 'baseline-route-smoke']);
 const MACHINE_CHECK_IDS = new Set([...UNIVERSAL_MACHINE_CHECK_IDS, 'global-chrome-regression']);
 
@@ -186,6 +193,91 @@ function ensureLifecycleDirectories(root) {
   for (const path of [root, join(root, 'changes'), join(root, 'checkpoints'), join(root, 'chrome'), join(root, 'chrome', 'anchors')]) {
     assertDirectoryNotSymlink(path, 'Lifecycle directory');
   }
+}
+
+function acquireBeginChangeLock(root) {
+  const path = join(root, '.begin-change.lock');
+  let retryCount = 0;
+  while (true) {
+    let descriptor;
+    try {
+      descriptor = openSync(path, 'wx', 0o600);
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        throw new Error(`Lifecycle begin lock could not be acquired: ${error.message}`);
+      }
+      let metadata;
+      try {
+        metadata = lstatSync(path);
+      } catch (inspectionError) {
+        if (inspectionError.code === 'ENOENT') continue;
+        throw new Error(`Lifecycle begin lock could not be inspected safely: ${inspectionError.message}`);
+      }
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error('Lifecycle begin lock must be a regular non-symlink file.');
+      }
+      if (retryCount >= BEGIN_CHANGE_LOCK_RETRY_ATTEMPTS) {
+        throw new Error(
+          `Lifecycle begin lock remained busy for ${BEGIN_CHANGE_LOCK_TIMEOUT_MS}ms; ` +
+          'no change was created. Retry after the other begin operation finishes.'
+        );
+      }
+      retryCount += 1;
+      Atomics.wait(BEGIN_CHANGE_LOCK_WAIT, 0, 0, BEGIN_CHANGE_LOCK_RETRY_MS);
+      continue;
+    }
+    try {
+      const metadata = fstatSync(descriptor);
+      return { descriptor, path, device: metadata.dev, inode: metadata.ino };
+    } catch (error) {
+      try {
+        closeSync(descriptor);
+      } finally {
+        unlinkSync(path);
+      }
+      throw new Error(`Lifecycle begin lock could not be initialized safely: ${error.message}`);
+    }
+  }
+}
+
+function releaseBeginChangeLock(lock) {
+  let releaseError = null;
+  try {
+    const metadata = lstatSync(lock.path);
+    if (metadata.isSymbolicLink() || !metadata.isFile() ||
+        metadata.dev !== lock.device || metadata.ino !== lock.inode) {
+      throw new Error('Lifecycle begin lock changed while held; refusing unsafe cleanup.');
+    }
+    unlinkSync(lock.path);
+  } catch (error) {
+    releaseError = error;
+  }
+  try {
+    closeSync(lock.descriptor);
+  } catch (error) {
+    if (!releaseError) releaseError = error;
+  }
+  if (releaseError) throw releaseError;
+}
+
+function withBeginChangeLock(root, operation) {
+  const lock = acquireBeginChangeLock(root);
+  let result;
+  try {
+    result = operation();
+  } catch (operationError) {
+    try {
+      releaseBeginChangeLock(lock);
+    } catch (releaseError) {
+      throw new AggregateError(
+        [operationError, releaseError],
+        'Lifecycle begin failed and its lock could not be released safely.'
+      );
+    }
+    throw operationError;
+  }
+  releaseBeginChangeLock(lock);
+  return result;
 }
 
 function safeId(value, label = 'ID') {
@@ -1827,8 +1919,14 @@ export function readLifecycleStatus(options = {}) {
 }
 
 /** Create the sole active repair or extension intent from the structural tail. */
-export function beginChange({
-  packetDir = 'review-packet',
+export function beginChange(options = {}) {
+  const packetDir = options.packetDir ?? 'review-packet';
+  const { root } = packetEvidence(packetDir);
+  ensureLifecycleDirectories(root);
+  return withBeginChangeLock(root, () => beginChangeLocked(root, options));
+}
+
+function beginChangeLocked(root, {
   id,
   kind,
   summary,
@@ -1836,15 +1934,20 @@ export function beginChange({
   routes = [],
   noPublicRoute = false,
   acceptance = [],
-  adoptCurrent = false
+  adoptCurrent = false,
+  testOnlyAfterActiveCheck
 } = {}) {
-  const { root } = packetEvidence(packetDir);
-  ensureLifecycleDirectories(root);
   const baseline = readInitialBaseline(root, { required: true });
   const graph = buildLifecycleGraph(root, baseline);
   const changeId = safeId(id, 'Change ID');
   if (!['repair', 'extension'].includes(kind)) throw new Error('Change kind must be repair or extension.');
   if (graph.active) throw new Error(`Change ${graph.active.id} is already in progress; complete or abandon it first.`);
+  if (testOnlyAfterActiveCheck !== undefined) {
+    if (typeof testOnlyAfterActiveCheck !== 'function') {
+      throw new Error('testOnlyAfterActiveCheck must be a function when provided.');
+    }
+    testOnlyAfterActiveCheck();
+  }
   const textSummary = String(summary ?? '').trim();
   if (!textSummary) throw new Error('Change summary is required.');
   const current = readCurrentState(root);

@@ -13,6 +13,14 @@ const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const BLIND_COMPLETE_VERDICTS = new Set(['good', 'good_enough']);
 const GATE_CHECKED_BY = new Set(['human', 'verify-script', 'verifier', 'blind-verifier']);
 const GATE_BLOCKING = new Set(['handoff', 'launch']);
+const VISUAL_COMPARISON_METHODS = new Set([
+  'agent_review',
+  'human_review',
+  'other',
+  'pixel_diff',
+  'structural_review'
+]);
+const COMPLETION_VISUAL_COMPARISON_METHODS = new Set(['agent_review', 'human_review', 'pixel_diff']);
 const BLIND_DEFECT_SEVERITIES = new Set(['blocker', 'critical', 'high', 'medium', 'low']);
 const BLIND_DEFECT_STATUSES = new Set(['open', 'fixed', 'accepted_out_of_scope', 'external_blocker']);
 const BLIND_ROUTE_CHECKS = [
@@ -41,7 +49,12 @@ const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 const MAX_SCREENSHOT_DIMENSION = 12_000;
 const MAX_SCREENSHOT_PIXELS = 50_000_000;
 const MAX_PNG_INFLATED_BYTES = 200 * 1024 * 1024;
-const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set(['launch-checklist.md', 'production-target.md']);
+const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set([
+  'launch-checklist.md',
+  'maintainer-review.md',
+  'operator-run.md',
+  'production-target.md'
+]);
 const COMPLETION_CLAIM_GATES = new Set([
   'content',
   'media',
@@ -57,6 +70,24 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+const ROUTE_ROLES = new Set([
+  'homepage',
+  'landing',
+  'listing',
+  'detail',
+  'taxonomy',
+  'search',
+  'form',
+  'legal',
+  'media',
+  'other'
+]);
+const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
+  'intentional_unlisted_route',
+  'dynamic_endpoint',
+  'other'
+]);
+const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -69,6 +100,9 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-ROUTE-06': 'homepageAndAlias',
   'G-BROWSER-01': 'publicBrowserEvidence',
   'G-BROWSER-02': 'firstFoldBrandParity',
+  'G-DETAIL-01': 'detailRouteContent',
+  'G-A11Y-01': 'realBrowserAccessibility',
+  'G-FORM-01': 'anonymousFormReadiness',
   'G-PARITY-01': 'addressableSurfaceParity',
   'G-CONTENT-01': 'structuredContentOwnership',
   'G-CONTENT-02': 'collectionOwnership',
@@ -80,6 +114,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
+  'G-HANDOFF-01': 'humanDecisionPresentation',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -213,12 +248,12 @@ function substantiveObjects(values) {
 
 function routeLikeValue(value) {
   if (typeof value === 'string') {
-    return normalizeRouteKey(value);
+    return normalizeRouteRequestKey(value);
   }
   if (!isJsonObject(value)) {
     return '';
   }
-  return normalizeRouteKey(value.sourcePath || value.path || value.route || value.url || value.href);
+  return normalizeRouteRequestKey(value.sourcePath || value.path || value.route || value.url || value.href);
 }
 
 function allPassingRecords(values, { allowNotApplicable = false } = {}) {
@@ -305,6 +340,20 @@ function normalizeRouteKey(value) {
   }
 }
 
+function normalizeRouteRequestKey(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  try {
+    const url = new URL(text, 'https://route-key.invalid/');
+    const pathname = url.pathname !== '/' ? url.pathname.replace(/\/+$/, '') : '/';
+    return `${pathname || '/'}${url.search}`;
+  } catch {
+    return '';
+  }
+}
+
 function httpUrl(value) {
   try {
     const url = new URL(String(value ?? '').trim());
@@ -361,6 +410,19 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
     return evidenceStat.isFile() && evidenceStat.size > 0;
   } catch {
     return false;
+  }
+}
+
+async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+  const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
+  if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
+    return null;
+  }
+  try {
+    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    return isJsonObject(evidence) ? evidence : null;
+  } catch {
+    return null;
   }
 }
 
@@ -601,6 +663,12 @@ function validateGateVocabulary(gates, errors) {
     errors.push('gates.json must use schemaVersion public-kit.gates.1.');
   }
 
+  for (const checker of new Set(arrayOrEmpty(gates?.gates).map((gate) => gate?.checkedBy).filter(Boolean))) {
+    if (GATE_CHECKED_BY.has(checker) && !String(gates?.checkedBySemantics?.[checker] ?? '').trim()) {
+      errors.push(`gates.json checkedBySemantics must define what checkedBy ${checker} means.`);
+    }
+  }
+
   const ids = new Set();
   const knownEvidenceFiles = new Set([
     ...arrayOrEmpty(gates?.reviewPacketFiles),
@@ -657,8 +725,8 @@ async function validateRequiredFiles(packetDir, gates, errors) {
 }
 
 function recordMatchesRoute(record, sourcePath, targetPath) {
-  const recordSource = normalizeRouteKey(record?.sourceRoute || record?.sourcePath);
-  const recordTarget = normalizeRouteKey(record?.targetRoute || record?.targetPath || record?.publicRoute);
+  const recordSource = normalizeRouteRequestKey(record?.sourceRoute || record?.sourcePath);
+  const recordTarget = normalizeRouteRequestKey(record?.targetRoute || record?.targetPath || record?.publicRoute);
   return (!sourcePath || recordSource === sourcePath) && (!targetPath || recordTarget === targetPath);
 }
 
@@ -732,8 +800,8 @@ async function independentStructuredGateReasons({
   const reasons = [];
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
     .map((route) => ({
-      source: normalizeRouteKey(route?.sourcePath),
-      target: normalizeRouteKey(route?.targetPath)
+      source: normalizeRouteRequestKey(route?.sourcePath),
+      target: normalizeRouteRequestKey(route?.targetPath)
     }))
     .filter((route) => route.source && route.target);
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
@@ -977,6 +1045,97 @@ async function independentStructuredGateReasons({
     reasons.push('independent-verification.json must contain passing rendered embed/media checks when the source audit identifies embeds or integrations.');
   }
 
+  const independentDetailChecks = substantiveObjects(independentVerification?.detailRouteChecks);
+  for (const ledger of collectionLedger.filter((record) =>
+    record?.accepted === true && record?.detailRouteMode === 'separate_public_route'
+  )) {
+    const expectedFields = detailExpectedFields(ledger, fieldOutputMatrix, recurringObjects);
+    const browserDetail = arrayOrEmpty(browserEvidence?.publicRouteChecks).find((candidate) =>
+      candidate?.routeRole === 'detail' &&
+      normalizeRouteKey(candidate?.sourceUrl) === normalizeRouteKey(ledger?.representativeDetailSourcePath) &&
+      routeRecordPath(candidate) === normalizeRouteKey(ledger?.representativeDetailTargetPath)
+    );
+    const browserSignals = browserDetail?.detailContentSignals ?? {};
+    const deviation = browserSignals?.ownerDeviation ?? {};
+    const check = independentDetailChecks.find((candidate) =>
+      normalizeRouteKey(candidate?.sourceRoute) === normalizeRouteKey(ledger?.representativeDetailSourcePath) &&
+      normalizeRouteKey(candidate?.targetRoute) === normalizeRouteKey(ledger?.representativeDetailTargetPath)
+    );
+    const evidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.evidence,
+      independentEvidenceDir
+    );
+    const deviationEvidencePresent = deviation?.applies === true && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.ownerDeviationEvidence
+    );
+    const verifiedFields = new Set(arrayOrEmpty(check?.loadBearingFieldsVerified).map((field) =>
+      identityKey(isJsonObject(field) ? field.field : field)
+    ));
+    if (
+      !check ||
+      check?.status !== 'pass' ||
+      !exactIdentityMatch(check?.contentTypeOrBundle, ledger?.contentTypeOrBundle) ||
+      !exactIdentityMatch(check?.declaredDetailOwner, ledger?.detailRouteOwner) ||
+      !exactIdentityMatch(check?.observedDetailOwner, browserSignals?.drupalOwner) ||
+      !exactIdentityMatch(check?.drupalOwnerConfigId, browserSignals?.drupalOwnerConfigId) ||
+      (deviation?.applies === true && (
+        check?.ownerDeviationEvidence !== deviation?.evidence || !deviationEvidencePresent
+      )) ||
+      (deviation?.applies !== true && (
+        !exactIdentityMatch(browserSignals?.drupalOwner, ledger?.detailRouteOwner) ||
+        !exactIdentityMatch(browserSignals?.drupalOwnerConfigId, ledger?.drupalOwnerConfigId)
+      )) ||
+      expectedFields.length === 0 ||
+      expectedFields.some((field) => !verifiedFields.has(identityKey(field))) ||
+      !evidencePresent
+    ) {
+      reasons.push(`independent-verification.json needs an owner/config-bound passing detailRouteChecks row covering every required public field for ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'}.`);
+    }
+  }
+
+  const modeledForms = substantiveObjects(patternMap?.forms);
+  const independentFormChecks = substantiveObjects(independentVerification?.anonymousFormChecks);
+  if (
+    (modeledForms.length > 0 || independentFormChecks.length > 0) &&
+    (!uniqueRecordKeys(modeledForms, 'formKey') || !uniqueRecordKeys(independentFormChecks, 'formKey'))
+  ) {
+    reasons.push('pattern-map.json forms and independent-verification.json anonymousFormChecks must use unique, non-empty formKey values.');
+  }
+  for (const form of modeledForms) {
+    const browserCheck = substantiveObjects(browserEvidence?.anonymousFormChecks).find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === String(form?.formKey ?? '').trim()
+    );
+    const check = independentFormChecks.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === String(form?.formKey ?? '').trim()
+    );
+    const evidencePresent = check && await nonEmptyPacketEvidence(
+      packetDir,
+      check?.evidence,
+      independentEvidenceDir
+    );
+    if (
+      !check ||
+      !browserCheck ||
+      check?.status !== 'pass' ||
+      normalizeRouteKey(check?.sourceRoute) !== normalizeRouteKey(form?.sourceRoute) ||
+      normalizeRouteKey(check?.targetRoute) !== normalizeRouteKey(form?.targetRoute) ||
+      !exactIdentityMatch(check?.purpose, form?.purpose) ||
+      !exactIdentityMatch(check?.modeledOwner, form?.drupalOwner) ||
+      !exactIdentityMatch(check?.browserOwner, browserCheck?.drupalOwner) ||
+      check?.expectedOutcome !== form?.expectedOutcome ||
+      check?.browserOutcome !== browserCheck?.outcome?.mode ||
+      check?.anonymousInvalidAndValidSubmissionVerified !== true ||
+      check?.outcomeEvidence !== browserCheck?.outcome?.evidence ||
+      check?.abuseProtectionDisposition !== browserCheck?.abuseProtection?.mode ||
+      check?.abuseProtectionEvidence !== browserCheck?.abuseProtection?.evidence ||
+      !evidencePresent
+    ) {
+      reasons.push(`independent-verification.json needs a passing formKey-bound anonymousFormChecks row matching model, browser outcome, and abuse evidence for ${form?.formKey || '(missing formKey)'}.`);
+    }
+  }
+
   const rawScan = independentVerification?.rawEmbedAndMarkupScan ?? {};
   if (
     rawScan.status !== 'pass' ||
@@ -1023,7 +1182,7 @@ async function independentStructuredGateReasons({
   if (
     driftRecords.length > 0 &&
     driftRecords.some((route) => !driftChecks.some((check) =>
-      normalizeRouteKey(check.sourcePath) === normalizeRouteKey(route.sourcePath) &&
+      normalizeRouteRequestKey(check.sourcePath) === normalizeRouteRequestKey(route.sourcePath) &&
       check.status === 'pass' &&
       String(check.dispositionEvidence ?? '').trim()
     ))
@@ -1032,7 +1191,7 @@ async function independentStructuredGateReasons({
   }
 
   const placeholderScan = independentVerification?.placeholderTextScan ?? {};
-  const scannedPlaceholderRoutes = new Set(arrayOrEmpty(placeholderScan.scannedRoutes).map(normalizeRouteKey));
+  const scannedPlaceholderRoutes = new Set(arrayOrEmpty(placeholderScan.scannedRoutes).map(normalizeRouteRequestKey));
   if (
     placeholderScan.status !== 'pass' ||
     arrayOrEmpty(placeholderScan.findings).length > 0 ||
@@ -1096,7 +1255,7 @@ async function independentStructuredGateReasons({
       check?.deviationRecordPresent === true &&
       independentTargetUrl &&
       deviationTargetUrl?.origin === independentTargetUrl.origin &&
-      normalizeRouteKey(deviationTargetUrl.pathname) === route.target &&
+      normalizeRouteRequestKey(deviationTargetUrl.href) === route.target &&
       String(check?.deviationRationale ?? '').trim() &&
       deviationEvidencePresent;
     if (
@@ -1784,8 +1943,8 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
 
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
     .map((route) => ({
-      source: normalizeRouteKey(route.sourcePath || route.route || route.path),
-      target: normalizeRouteKey(route.targetPath || route.sourcePath || route.route || route.path)
+      source: normalizeRouteRequestKey(route.sourcePath || route.route || route.path),
+      target: normalizeRouteRequestKey(route.targetPath || route.sourcePath || route.route || route.path)
     }))
     .filter((route) => route.target);
   const acceptedOmissions = new Map(
@@ -1796,14 +1955,14 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
         String(route.rationale ?? '').trim() &&
         arrayOrEmpty(route.evidence).length > 0
       )
-      .map((route) => [normalizeRouteKey(route.route || route.targetPath || route.sourcePath || route.path), route])
+      .map((route) => [normalizeRouteRequestKey(route.route || route.targetPath || route.sourcePath || route.path), route])
   );
 
   for (const primaryRoute of primaryRoutes) {
     const matchingReviews = routeReviews.filter((review) => {
-      const routeKey = normalizeRouteKey(review.route);
-      const targetKey = normalizeRouteKey(review.targetUrlOrArtifact);
-      const sourceKey = normalizeRouteKey(review.sourceTruthReference);
+      const routeKey = normalizeRouteRequestKey(review.route);
+      const targetKey = normalizeRouteRequestKey(review.targetUrlOrArtifact);
+      const sourceKey = normalizeRouteRequestKey(review.sourceTruthReference);
       return (
         routeKey === primaryRoute.target &&
         targetKey === primaryRoute.target &&
@@ -1958,11 +2117,395 @@ function routeRecordPath(record) {
   return normalizeRouteKey(record?.route || record?.targetPath || record?.targetUrl || record?.targetFinalUrl);
 }
 
+function routeRecordRequestKey(record) {
+  return normalizeRouteRequestKey(record?.route || record?.targetPath || record?.targetUrl || record?.targetFinalUrl);
+}
+
 function routeHasViewport(checks, route, viewport) {
   return checks.some((check) => {
     const viewportName = String(check?.viewport?.name ?? check?.viewport ?? '').trim();
-    return routeRecordPath(check) === route && viewportName === viewport;
+    return routeRecordRequestKey(check) === route && viewportName === viewport;
   });
+}
+
+const AXE_WCAG_TAG_RE = /^wcag(?:2|21|22)(?:a|aa)$/i;
+const REQUIRED_AXE_WCAG_TAGS = new Set([
+  'wcag2a',
+  'wcag2aa',
+  'wcag21a',
+  'wcag21aa',
+  'wcag22aa'
+]);
+
+function sameHttpRoute(left, right) {
+  const leftUrl = httpUrl(left);
+  const rightUrl = httpUrl(right);
+  return Boolean(
+    leftUrl &&
+    rightUrl &&
+    leftUrl.origin === rightUrl.origin &&
+    leftUrl.pathname === rightUrl.pathname &&
+    leftUrl.search === rightUrl.search
+  );
+}
+
+function axeRuleScopeReasons(accessibility, report, prefix) {
+  const reasons = [];
+  const declared = accessibility?.ruleScope ?? {};
+  const mode = String(declared?.mode ?? '');
+  const declaredTags = new Set(arrayOrEmpty(declared?.tags).map((tag) => String(tag).toLowerCase()));
+  const toolOptions = isJsonObject(report?.toolOptions) ? report.toolOptions : {};
+  const runOnly = toolOptions.runOnly;
+  const disabledRules = Object.entries(isJsonObject(toolOptions.rules) ? toolOptions.rules : {})
+    .filter(([, value]) => isJsonObject(value) && value.enabled === false)
+    .map(([rule]) => rule);
+  const resultCount = ['passes', 'incomplete', 'inapplicable', 'violations']
+    .reduce((count, key) => count + arrayOrEmpty(report?.[key]).length, 0);
+
+  if (declared?.accepted !== true || !['full_default', 'wcag_tags'].includes(mode)) {
+    reasons.push(`${prefix}.ruleScope must declare and accept full_default or wcag_tags coverage.`);
+    return reasons;
+  }
+  if (disabledRules.length > 0) {
+    reasons.push(`${prefix}.report disables axe rules (${disabledRules.join(', ')}), so it is not a complete declared WCAG run.`);
+  }
+  if (resultCount === 0) {
+    reasons.push(`${prefix}.report has no evaluated axe rules; empty result arrays cannot prove accessibility coverage.`);
+  }
+  if (mode === 'full_default') {
+    if (runOnly !== undefined && runOnly !== null && runOnly !== false) {
+      reasons.push(`${prefix}.report toolOptions.runOnly must be absent for declared full_default coverage.`);
+    }
+    if (declaredTags.size > 0) {
+      reasons.push(`${prefix}.ruleScope.tags must be empty for full_default coverage.`);
+    }
+    return reasons;
+  }
+
+  const normalizedRunOnly = Array.isArray(runOnly)
+    ? { type: 'tag', values: runOnly }
+    : runOnly;
+  const actualTags = new Set(arrayOrEmpty(normalizedRunOnly?.values).map((tag) => String(tag).toLowerCase()));
+  if (!isJsonObject(normalizedRunOnly) || normalizedRunOnly.type !== 'tag') {
+    reasons.push(`${prefix}.report toolOptions.runOnly must use tag mode for declared wcag_tags coverage.`);
+  }
+  for (const requiredTag of REQUIRED_AXE_WCAG_TAGS) {
+    if (!declaredTags.has(requiredTag) || !actualTags.has(requiredTag)) {
+      reasons.push(`${prefix}.ruleScope and report toolOptions.runOnly must include ${requiredTag}.`);
+    }
+  }
+  if (
+    declaredTags.size !== actualTags.size ||
+    [...declaredTags].some((tag) => !actualTags.has(tag))
+  ) {
+    reasons.push(`${prefix}.ruleScope.tags must exactly match report toolOptions.runOnly.values.`);
+  }
+  return reasons;
+}
+
+async function axeIncompleteEvidenceMatches({
+  browserEvidenceDir,
+  disposition,
+  incomplete,
+  nodeTarget,
+  packetDir,
+  report
+}) {
+  const evidence = await packetEvidenceJson(packetDir, disposition?.evidence, browserEvidenceDir);
+  const reportTimestamp = isoTimestamp(report?.timestamp);
+  const evidenceTimestamp = isoTimestamp(evidence?.checkedAt);
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.axe-incomplete-disposition.1' &&
+    sameHttpRoute(evidence?.targetUrl, report?.url) &&
+    String(evidence?.ruleId ?? '') === String(incomplete?.id ?? '') &&
+    JSON.stringify(arrayOrEmpty(evidence?.target)) === JSON.stringify(nodeTarget) &&
+    evidence?.disposition === disposition?.disposition &&
+    evidence?.result === 'pass' &&
+    String(evidence?.observation ?? '').trim() &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    reportTimestamp !== null &&
+    evidenceTimestamp !== null &&
+    evidenceTimestamp >= reportTimestamp &&
+    evidenceTimestamp - reportTimestamp <= MAX_COMPLETION_EVIDENCE_SPAN_MS
+  );
+}
+
+async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index) {
+  const reasons = [];
+  const accessibility = check?.accessibilityCheck ?? {};
+  const prefix = `browser-evidence.json publicRouteChecks[${index}].accessibilityCheck`;
+  if (
+    accessibility.standard !== 'WCAG 2.2 AA' ||
+    accessibility.engine !== 'axe-core' ||
+    !String(accessibility.engineVersion ?? '').trim() ||
+    accessibility.executedInBrowser !== true ||
+    accessibility.incompleteReviewed !== true ||
+    accessibility.status !== 'pass' ||
+    arrayOrEmpty(accessibility.blockers).length > 0
+  ) {
+    reasons.push(`${prefix} must record a passing in-browser axe-core WCAG 2.2 AA check with reviewed incomplete results and no blockers.`);
+  }
+
+  const reportPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, accessibility.report);
+  let report = null;
+  if (reportPath) {
+    try {
+      report = JSON.parse(await readFile(reportPath, 'utf8'));
+    } catch {
+      // The message below covers missing and malformed reports without leaking local paths.
+    }
+  }
+  if (!isJsonObject(report)) {
+    reasons.push(`${prefix}.report must reference packet-local raw axe-core JSON.`);
+  } else {
+    const environment = report.testEnvironment ?? {};
+    const engine = report.testEngine ?? {};
+    if (
+      String(engine.name ?? '').toLowerCase() !== 'axe-core' ||
+      String(engine.version ?? '').trim() !== String(accessibility.engineVersion ?? '').trim() ||
+      !String(environment.userAgent ?? '').trim() ||
+      !finiteNumberValue(environment.windowWidth) ||
+      !finiteNumberValue(environment.windowHeight) ||
+      Number(environment.windowWidth) !== Number(check?.viewport?.width) ||
+      Number(environment.windowHeight) !== Number(check?.viewport?.height) ||
+      !timestampIsFresh(report.timestamp) ||
+      !Array.isArray(report.passes) ||
+      !Array.isArray(report.incomplete) ||
+      !Array.isArray(report.inapplicable) ||
+      !Array.isArray(report.violations) ||
+      !sameHttpRoute(report.url, check?.targetFinalUrl || check?.targetUrl)
+    ) {
+      reasons.push(`${prefix}.report must bind the reviewed target route to a real browser environment and the declared axe-core version.`);
+    }
+    reasons.push(...axeRuleScopeReasons(accessibility, report, prefix));
+    const violations = arrayOrEmpty(report.violations);
+    const unresolvedWcag = violations.filter((violation) =>
+      arrayOrEmpty(violation?.tags).some((tag) => AXE_WCAG_TAG_RE.test(String(tag))) &&
+      arrayOrEmpty(violation?.nodes).length > 0
+    );
+    if (unresolvedWcag.length > 0) {
+      reasons.push(`${prefix}.report contains unresolved WCAG A/AA violations: ${unresolvedWcag.map((violation) => violation.id || 'unknown-rule').join(', ')}.`);
+    }
+    const incompleteDispositions = substantiveObjects(accessibility.incompleteDispositions);
+    const usedIncompleteDispositions = new Set();
+    for (const incomplete of arrayOrEmpty(report.incomplete).filter((record) =>
+      arrayOrEmpty(record?.tags).some((tag) => AXE_WCAG_TAG_RE.test(String(tag)))
+    )) {
+      for (const node of arrayOrEmpty(incomplete?.nodes)) {
+        const target = arrayOrEmpty(node?.target);
+        const dispositionIndex = incompleteDispositions.findIndex((record, index) =>
+          !usedIncompleteDispositions.has(index) &&
+          String(record?.ruleId ?? '') === String(incomplete?.id ?? '') &&
+          JSON.stringify(arrayOrEmpty(record?.target)) === JSON.stringify(target)
+        );
+        const disposition = dispositionIndex >= 0 ? incompleteDispositions[dispositionIndex] : null;
+        const evidenceMatches = disposition && await axeIncompleteEvidenceMatches({
+          browserEvidenceDir,
+          disposition,
+          incomplete,
+          nodeTarget: target,
+          packetDir,
+          report
+        });
+        if (
+          !disposition ||
+          !['manual_pass', 'false_positive', 'not_applicable'].includes(disposition.disposition) ||
+          !String(disposition.rationale ?? '').trim() ||
+          !evidenceMatches
+        ) {
+          reasons.push(`${prefix}.report incomplete WCAG result ${incomplete?.id || 'unknown-rule'} at ${JSON.stringify(target)} needs a matching rationale and packet-local disposition evidence.`);
+        } else {
+          usedIncompleteDispositions.add(dispositionIndex);
+        }
+      }
+    }
+  }
+
+  const manual = accessibility.manualChecks ?? {};
+  for (const name of ['keyboardNavigation', 'visibleFocus', 'accessibleNamesAndLabels', 'formLabelsErrorsAndFocus']) {
+    const result = String(manual[name] ?? '');
+    const rationale = String(manual[`${name}NotApplicableRationale`] ?? '').trim();
+    if (result !== 'pass' && !(result === 'not_applicable' && rationale)) {
+      reasons.push(`${prefix}.manualChecks.${name} must pass or include a not-applicable rationale.`);
+    }
+  }
+  return reasons;
+}
+
+function formOutcomeMatches(expected, actual) {
+  const allowed = {
+    message_delivery: new Set(['local_mail_capture', 'provider_delivery']),
+    submission_storage: new Set(['drupal_submission_storage']),
+    account_creation: new Set(['account_created']),
+    provider_handoff: new Set(['provider_handoff']),
+    other: new Set(['other'])
+  };
+  return allowed[expected]?.has(actual) === true;
+}
+
+function uniqueRecordKeys(records, keyName) {
+  const keys = records.map((record) => String(record?.[keyName] ?? '').trim()).filter(Boolean);
+  return keys.length === records.length && new Set(keys).size === keys.length;
+}
+
+async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) {
+  const evidence = await packetEvidenceJson(packetDir, check?.outcome?.evidence, browserEvidenceDir);
+  const mode = String(check?.outcome?.mode ?? '');
+  const providerRequired = ['provider_delivery', 'provider_handoff'].includes(mode);
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.form-outcome-evidence.1' &&
+    String(evidence?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
+    sameHttpRoute(evidence?.targetUrl, check?.targetUrl) &&
+    evidence?.mode === mode &&
+    evidence?.result === 'pass' &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    String(evidence?.handlerOwner ?? '').trim() &&
+    String(evidence?.resultReference ?? '').trim() &&
+    String(evidence?.observation ?? '').trim() &&
+    (!providerRequired || String(evidence?.provider ?? '').trim()) &&
+    (mode !== 'other' || String(evidence?.rationale ?? '').trim())
+  );
+}
+
+async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check) {
+  const evidence = await packetEvidenceJson(packetDir, check?.abuseProtection?.evidence, browserEvidenceDir);
+  const mode = String(check?.abuseProtection?.mode ?? '');
+  const localException = mode === 'local_only_exception';
+  const modeSpecific =
+    (['rendered_honeypot', 'rendered_challenge'].includes(mode) &&
+      String(evidence?.renderedSelector ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (mode === 'configured_rate_limiting' &&
+      String(evidence?.configurationOwner ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (mode === 'provider_managed' &&
+      String(evidence?.provider ?? '').trim() && evidence?.enforcementVerified === true) ||
+    (localException &&
+      evidence?.localTargetVerified === true &&
+      String(evidence?.rationale ?? '').trim());
+  return Boolean(
+    evidence?.schemaVersion === 'public-kit.form-abuse-evidence.1' &&
+    String(evidence?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
+    sameHttpRoute(evidence?.targetUrl, check?.targetUrl) &&
+    evidence?.mode === mode &&
+    evidence?.result === (localException ? 'accepted_gap' : 'pass') &&
+    timestampIsFresh(evidence?.checkedAt) &&
+    String(evidence?.observation ?? '').trim() &&
+    modeSpecific
+  );
+}
+
+function detailFieldVisible(record) {
+  const visibility = record?.computedVisibility ?? {};
+  const selector = String(record?.selector ?? '').trim();
+  const documentWideSelector = /^(?:\*|:root|html|body|main|#page|\[role=["']?main["']?\])$/i.test(selector);
+  const opacity = Number(visibility?.opacity);
+  const width = Number(visibility?.boundingWidth);
+  const height = Number(visibility?.boundingHeight);
+  const visibleText = String(visibility?.text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const expectedText = String(record?.targetSignal ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return Boolean(
+    selector &&
+    !documentWideSelector &&
+    Number(visibility?.matchedElementCount) === 1 &&
+    String(visibility?.display ?? '').toLowerCase() !== 'none' &&
+    !['hidden', 'collapse'].includes(String(visibility?.visibility ?? '').toLowerCase()) &&
+    Number.isFinite(opacity) && opacity > 0 &&
+    visibility?.hiddenAttribute === false &&
+    visibility?.ariaHidden === false &&
+    Number.isFinite(width) && width > 0 &&
+    Number.isFinite(height) && height > 0 &&
+    expectedText && visibleText.includes(expectedText)
+  );
+}
+
+function recordConfigIdentities(record, owner) {
+  if (typeof record === 'string') {
+    const value = record.trim();
+    if (!value) {
+      return [];
+    }
+    return owner === 'view_row' && !value.startsWith('views.view.')
+      ? [value, `views.view.${value}`]
+      : [value];
+  }
+  if (!isJsonObject(record)) {
+    return [];
+  }
+  const identities = new Set([
+    record?.configId,
+    record?.id,
+    record?.config,
+    record?.name,
+    record?.displayConfig
+  ].map((value) => String(value ?? '').trim()).filter(Boolean));
+  if (owner === 'entity_view_display' && record?.bundle && record?.mode) {
+    identities.add(`core.entity_view_display.${record.entityType || 'node'}.${record.bundle}.${record.mode}`);
+  }
+  if (owner === 'view_row' && record?.id) {
+    identities.add(`views.view.${record.id}`);
+    for (const display of arrayOrEmpty(record?.displays)) {
+      const displayId = String(isJsonObject(display) ? display.id || display.displayId : display).trim();
+      if (displayId) {
+        identities.add(`views.view.${record.id}:${displayId}`);
+      }
+    }
+  }
+  return [...identities];
+}
+
+function drupalOwnerConfigExists(drupalReadback, owner, configId) {
+  const recordsByOwner = {
+    entity_view_display: drupalReadback?.content?.viewDisplays,
+    canvas_composition: drupalReadback?.content?.canvasPages,
+    view_row: drupalReadback?.views
+  };
+  if (owner === 'documented_exception') {
+    return true;
+  }
+  return arrayOrEmpty(recordsByOwner[owner]).some((record) =>
+    recordConfigIdentities(record, owner).some((identity) => exactIdentityMatch(identity, configId))
+  );
+}
+
+function detailExpectedFields(ledger, fieldOutputMatrix, recurringSourceObjects = []) {
+  const expected = new Set(
+    arrayOrEmpty(ledger?.requiredFields).map((field) => String(field).trim()).filter(Boolean)
+  );
+  for (const field of arrayOrEmpty(ledger?.detailLoadBearingFields)) {
+    if (String(field).trim()) {
+      expected.add(String(field).trim());
+    }
+  }
+  for (const recurring of recurringSourceObjects) {
+    if (exactIdentityMatch(recurring?.bundleOrConfigName, ledger?.contentTypeOrBundle)) {
+      for (const field of arrayOrEmpty(recurring?.requiredFields)) {
+        if (String(field).trim()) {
+          expected.add(String(field).trim());
+        }
+      }
+    }
+  }
+  const matchingFieldBundles = arrayOrEmpty(fieldOutputMatrix?.bundles).filter((bundle) =>
+    exactIdentityMatch(bundle?.entityType, ledger?.drupalEntityType) &&
+    exactIdentityMatch(bundle?.bundle, ledger?.contentTypeOrBundle)
+  );
+  for (const field of matchingFieldBundles.flatMap((bundle) => arrayOrEmpty(bundle?.fields))) {
+    const locations = arrayOrEmpty(field?.publicRenderLocations).map((location) => String(location).trim()).filter(Boolean);
+    const appliesToDetail = locations.some((location) =>
+      normalizeRouteKey(location) === normalizeRouteKey(ledger?.representativeDetailTargetPath) ||
+      exactIdentityMatch(location, ledger?.drupalOwnerConfigId) ||
+      ['detail', 'full', 'canonicaldetail'].includes(identityKey(location))
+    ) || (locations.length === 0 && arrayOrEmpty(ledger?.detailLoadBearingFields).some((declared) =>
+      exactIdentityMatch(declared, field?.machineName)
+    ));
+    if (
+      (field?.required === true || field?.affectsAnonymousOutput === true) &&
+      appliesToDetail &&
+      String(field?.machineName ?? '').trim()
+    ) {
+      expected.add(String(field.machineName).trim());
+    }
+  }
+  return [...expected];
 }
 
 function escapedRegex(value) {
@@ -1970,19 +2513,20 @@ function escapedRegex(value) {
 }
 
 function markdownField(text, label) {
-  return text.match(new RegExp(`^\\s*-\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*-[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
 }
 
 function markdownPlainField(text, label) {
-  return text.match(new RegExp(`^\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
+}
+
+function resolvedMarkdownField(text, label) {
+  const value = markdownField(text, label);
+  return Boolean(value) && !/^`?UNKNOWN`?$/i.test(value);
 }
 
 function checkedStatement(text, statement) {
   return new RegExp(`^\\s*-\\s*\\[[xX]\\]\\s*${escapedRegex(statement)}\\s*$`, 'm').test(text);
-}
-
-function uncheckedStatement(text, statement) {
-  return new RegExp(`^\\s*-\\s*\\[ \\]\\s*${escapedRegex(statement)}\\s*$`, 'm').test(text);
 }
 
 function blockedTableRow(text) {
@@ -1993,29 +2537,282 @@ function unresolvedMarkdownUnknown(text) {
   return /:\s*`?UNKNOWN`?\s*$/im.test(text) || /\|\s*UNKNOWN\s*\|/i.test(text);
 }
 
-async function markdownCompletionReadiness(packetDir) {
-  const reasons = [];
-  const texts = Object.fromEntries(
-    await Promise.all(
-      [
-        'operator-run.md',
-        'maintainer-review.md',
-        'recipe-start-point.md',
-        'scoped-gap-list.md',
-        'open-decisions.md',
-        'off-road-inventory.md',
-        'durable-intent.yml'
-      ].map(async (file) => [file, existsSync(join(packetDir, file)) ? await readFile(join(packetDir, file), 'utf8') : ''])
+function markdownDecisionRows(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+        return null;
+      }
+      const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.trim());
+      if (!/^DEC-[A-Za-z0-9._-]+$/.test(cells[0] ?? '')) {
+        return null;
+      }
+      return { cells, currentEvidence: cells[3] ?? '', raw: trimmed };
+    })
+    .filter(Boolean);
+}
+
+function completeDecisionRow(row) {
+  return row?.cells?.length === 9 && row.cells.every((cell) => Boolean(cell));
+}
+
+function decisionRowStatus(row) {
+  return String(row?.cells?.[8] ?? '').replaceAll('`', '').trim().toLowerCase();
+}
+
+function currentEvidenceReferenceSet(rows) {
+  return new Set(
+    rows.flatMap((row) =>
+      String(row.currentEvidence)
+        .toLowerCase()
+        .replaceAll('`', '')
+        .split(/[\s,;()[\]{}]+/)
+        .map((token) => token.replace(/^["'<>]+|["'<>.!?]+$/g, ''))
+        .filter(Boolean)
     )
   );
+}
 
+function stableDeviationIdentity(value) {
+  const identity = typeof value === 'string'
+    ? value.trim()
+    : isJsonObject(value)
+      ? String(value.id || value.route || value.sourcePath || value.targetPath || value.path || '').trim()
+      : '';
+  return /^[A-Za-z0-9._~:/?&=%+-]+$/.test(identity) ? identity : '';
+}
+
+function referenceSlug(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function humanDecisionPresentationAssessment({ decisions, offRoad, records }) {
+  const structuralReasons = [];
+  const contradictionReasons = [];
+  const decisionRows = markdownDecisionRows(decisions);
+  const openDecisionSummary = markdownField(decisions, 'Decisions still open').replaceAll('`', '').trim();
+  const noOpenDecisions = /^None$/i.test(openDecisionSummary);
+  const summaryFields = [
+    'Decisions still open',
+    'Decisions accepted',
+    'Decisions blocked by missing external input',
+    'Agent-resolvable work deliberately excluded from this file'
+  ];
+  const allowedDecisionStatuses = new Set([
+    'accepted',
+    'blocked',
+    'deferred',
+    'not_applicable',
+    'open',
+    'pending',
+    'rejected',
+    'resolved'
+  ]);
+  const openDecisionStatuses = new Set(['blocked', 'deferred', 'open', 'pending']);
+  const identityComplete = ['Source URL', 'Target site name', 'Target workspace', 'Date'].every((field) =>
+    resolvedMarkdownField(decisions, field)
+  );
+  const summariesComplete = summaryFields.every((field) => resolvedMarkdownField(decisions, field));
+  const rowsComplete = decisionRows.every(completeDecisionRow);
+  const rowStatusesValid = decisionRows.every((row) => allowedDecisionStatuses.has(decisionRowStatus(row)));
+  if (
+    !identityComplete ||
+    !summariesComplete ||
+    unresolvedMarkdownUnknown(decisions) ||
+    (!noOpenDecisions && decisionRows.length === 0) ||
+    !rowsComplete ||
+    !rowStatusesValid
+  ) {
+    structuralReasons.push(
+      'open-decisions.md must contain run identity, exact handoff summaries, and substantive DEC rows with nine populated cells and a supported status, or an exact Decisions still open: None declaration.'
+    );
+  }
+  if (noOpenDecisions && decisionRows.some((row) => openDecisionStatuses.has(decisionRowStatus(row)))) {
+    contradictionReasons.push(
+      'open-decisions.md cannot declare "Decisions still open: None" while a DEC row remains open, pending, blocked, or deferred.'
+    );
+  }
+  const requiredReferences = [];
+  const sourceDescriptions = new Set();
+  const missingStableIdentities = [];
+
+  for (const match of offRoad.matchAll(/^\|\s*(OR-[A-Za-z0-9._-]+)\s*\|[^\n]*$/gim)) {
+    requiredReferences.push(match[1]);
+    sourceDescriptions.add('off-road-inventory.md OR- exception rows');
+  }
+  for (const [index, defect] of arrayOrEmpty(records.blindAdversarialReview?.productDefects).entries()) {
+    if (defect?.status !== 'accepted_out_of_scope') {
+      continue;
+    }
+    const identity = stableDeviationIdentity(String(defect.id ?? ''));
+    if (!identity) {
+      missingStableIdentities.push(`blind-adversarial-review.json productDefects[${index}]`);
+      continue;
+    }
+    requiredReferences.push(identity);
+    sourceDescriptions.add('blind-adversarial-review.json accepted_out_of_scope defects');
+  }
+  for (const [index, route] of arrayOrEmpty(
+    records.blindAdversarialReview?.routeCoverage?.omittedPrimaryRoutes
+  ).entries()) {
+    if (route?.disposition !== 'accepted_out_of_scope') {
+      continue;
+    }
+    const identity = normalizeRouteKey(route.route || route.targetPath || route.sourcePath || route.path);
+    if (!identity) {
+      missingStableIdentities.push(`blind-adversarial-review.json routeCoverage.omittedPrimaryRoutes[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`omitted-route:${identity}`);
+    sourceDescriptions.add('blind-adversarial-review.json accepted primary-route omissions');
+  }
+  for (const [index, exclusion] of arrayOrEmpty(records.parityReport?.addressableSurface?.exclusions).entries()) {
+    if (!hasMeaningfulEntry([exclusion])) {
+      continue;
+    }
+    const identity = stableDeviationIdentity(exclusion);
+    if (!identity) {
+      missingStableIdentities.push(`parity-report.json addressableSurface.exclusions[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`parity-exclusion:${identity}`);
+    sourceDescriptions.add('parity-report.json addressable-surface exclusions');
+  }
+  for (const [index, reconciliation] of arrayOrEmpty(records.routeMatrix?.perRouteItemReconciliation).entries()) {
+    if (reconciliation?.mismatchDisposition !== 'owner_approved_exclusion') {
+      continue;
+    }
+    const sourcePath = normalizeRouteKey(reconciliation.sourcePath);
+    const targetPath = normalizeRouteKey(reconciliation.targetPath);
+    const itemType = String(reconciliation.itemType ?? '').trim();
+    const itemTypeSlug = referenceSlug(itemType);
+    if (!sourcePath || !targetPath || !itemTypeSlug || /\s/.test(sourcePath) || /\s/.test(targetPath)) {
+      missingStableIdentities.push(`route-matrix.json perRouteItemReconciliation[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`count-exclusion:${sourcePath}->${targetPath}:${itemTypeSlug}`);
+    sourceDescriptions.add('route-matrix.json owner_approved_exclusion count dispositions');
+  }
+  for (const [index, check] of arrayOrEmpty(
+    records.independentVerification?.compositionModelFidelityChecks
+  ).entries()) {
+    if (
+      compositionOwnersMatch(check?.declaredCompositionOwner, check?.actualCompositionOwner) ||
+      check?.deviationRecordRequired !== true ||
+      check?.deviationRecordPresent !== true
+    ) {
+      continue;
+    }
+    const targetRoute = normalizeRouteKey(check.targetRoute || check.publicRoute || check.targetPath);
+    if (!targetRoute || /\s/.test(targetRoute)) {
+      missingStableIdentities.push(`independent-verification.json compositionModelFidelityChecks[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`composition-deviation:${targetRoute}`);
+    sourceDescriptions.add('independent-verification.json accepted composition-owner deviations');
+  }
+
+  if (missingStableIdentities.length > 0) {
+    contradictionReasons.push(
+      `Accepted deviations need stable IDs or route/item identities before handoff presentation can be checked: ${missingStableIdentities.join(', ')}.`
+    );
+  }
+  const presentedReferences = currentEvidenceReferenceSet(decisionRows);
+  const missingReferences = requiredReferences.filter((reference) =>
+    !presentedReferences.has(reference.toLowerCase())
+  );
+  if (noOpenDecisions && requiredReferences.length > 0) {
+    contradictionReasons.push(
+      `open-decisions.md cannot declare "Decisions still open: None" while ${[...sourceDescriptions].join(', ')} require presented ratification decisions; the local verifier does not authenticate their approvers.`
+    );
+  } else if (missingReferences.length > 0) {
+    contradictionReasons.push(
+      `open-decisions.md must reference every accepted deviation in a substantive DEC row Current evidence cell; missing ${missingReferences.join(', ')}.`
+    );
+  }
+
+  return {
+    decisionRows,
+    noOpenDecisions,
+    reasons: [...structuralReasons, ...contradictionReasons],
+    status:
+      contradictionReasons.length > 0
+        ? 'contradictory'
+        : structuralReasons.length > 0
+          ? 'incomplete'
+          : 'presented-consistently'
+  };
+}
+
+function recordedDecision(text, choices) {
+  const selected = choices.filter(({ statement }) => checkedStatement(text, statement));
+  if (selected.length === 0) {
+    return 'pending';
+  }
+  if (selected.length > 1) {
+    return 'conflicting-record';
+  }
+  return selected[0].status;
+}
+
+function recordedAttribution(text, recordedByLabel) {
+  const recordedBy = markdownField(text, recordedByLabel);
+  const builderIdentity = markdownField(text, 'Builder identity');
+  return {
+    recordedBy,
+    builderIdentity,
+    identityStringComparison:
+      !recordedBy || !builderIdentity
+        ? 'not-comparable'
+        : identitiesMatch(recordedBy, builderIdentity)
+          ? 'same-string'
+          : 'different-string'
+  };
+}
+
+function recordedHumanGateAssessment(texts) {
   const operator = texts['operator-run.md'];
-  const operatorFields = [
+  const maintainer = texts['maintainer-review.md'];
+  const productionTarget = texts['production-target.md'];
+  const launchChecklist = texts['launch-checklist.md'];
+
+  const operatorStatus = recordedDecision(operator, [
+    { statement: 'Repeatability not reviewed', status: 'pending' },
+    { statement: 'Repeatability blocked', status: 'recorded-not-accepted' },
+    { statement: 'Repeatability accepted', status: 'recorded-accepted' },
+    { statement: 'Repeatability accepted with restrictions', status: 'recorded-accepted-with-restrictions' }
+  ]);
+  const maintainerStatus = recordedDecision(maintainer, [
+    {
+      statement: 'I would stake my name on this as a complete local Drupal CMS rebuild.',
+      status: 'recorded-accepted'
+    },
+    {
+      statement: 'I would not stake my name on this as a complete local Drupal CMS rebuild.',
+      status: 'recorded-not-accepted'
+    }
+  ]);
+  const productionTargetStatus = recordedDecision(productionTarget, [
+    { statement: 'Production target accepted', status: 'recorded-accepted' },
+    { statement: 'Production target not accepted', status: 'recorded-not-accepted' }
+  ]);
+  const launchStatus = recordedDecision(launchChecklist, [
+    { statement: 'Launch approved', status: 'recorded-accepted' },
+    { statement: 'Launch not approved', status: 'recorded-not-accepted' }
+  ]);
+  const operatorRecordComplete = [
     'Name',
     'Role',
     'Environment',
     'Environment provisioning (manual, One Line Installer, other)',
     'Date',
+    'Builder identity',
     'DDEV project URL',
     '`ddev drush status`',
     'Config export location',
@@ -2023,21 +2820,7 @@ async function markdownCompletionReadiness(packetDir) {
     'Browser-rendered evidence',
     'Command transcript',
     'Reviewer'
-  ];
-  const acceptedOperatorDecisions = [
-    'Repeatability accepted',
-    'Repeatability accepted with restrictions'
-  ].filter((decision) => checkedStatement(operator, decision));
-  if (
-    operatorFields.some((field) => !markdownField(operator, field)) ||
-    acceptedOperatorDecisions.length !== 1 ||
-    !uncheckedStatement(operator, 'Repeatability not reviewed') ||
-    !uncheckedStatement(operator, 'Repeatability blocked')
-  ) {
-    reasons.push('operator-run.md must identify the operator/runtime, point to concrete run evidence, and record an accepted repeatability decision.');
-  }
-
-  const maintainer = texts['maintainer-review.md'];
+  ].every((field) => resolvedMarkdownField(operator, field)) && !unresolvedMarkdownUnknown(operator);
   const maintainerQuestions = [
     'Is the build on Drupal CMS best practices using Drupal-native primitives?',
     "Is the architecture sound for the source site's real shape?",
@@ -2048,15 +2831,78 @@ async function markdownCompletionReadiness(packetDir) {
     'Are the remaining business, legal, integration, production, and launch gaps named?',
     'Would a Drupal maintainer put their name on this as a complete local starting point?'
   ];
-  if (
-    ['Site', 'Target', 'Reviewer', 'Date'].some((field) => !markdownField(maintainer, field)) ||
-    maintainerQuestions.some((question) => !checkedStatement(maintainer, question)) ||
-    !checkedStatement(maintainer, 'I would stake my name on this as a complete local Drupal CMS rebuild.') ||
-    !uncheckedStatement(maintainer, 'I would not stake my name on this as a complete local Drupal CMS rebuild.') ||
-    !markdownField(maintainer, 'Reasons to accept')
-  ) {
-    reasons.push('maintainer-review.md must contain a named, dated positive stake-my-name review with all local-rebuild questions answered.');
-  }
+  const maintainerRecordComplete =
+    ['Site', 'Target', 'Reviewer', 'Date', 'Builder identity'].every((field) => resolvedMarkdownField(maintainer, field)) &&
+    maintainerQuestions.every((question) => checkedStatement(maintainer, question)) &&
+    resolvedMarkdownField(maintainer, 'Reasons to accept') &&
+    !unresolvedMarkdownUnknown(maintainer);
+  const productionTargetRecordComplete = ['Approver', 'Builder identity', 'Reviewed at'].every((field) =>
+    resolvedMarkdownField(productionTarget, field)
+  ) && !unresolvedMarkdownUnknown(productionTarget);
+  const launchRecordComplete = ['Approver', 'Builder identity', 'Reviewed at'].every((field) =>
+    resolvedMarkdownField(launchChecklist, field)
+  ) && !unresolvedMarkdownUnknown(launchChecklist);
+  const localRecords = [
+    { recordComplete: operatorRecordComplete, status: operatorStatus },
+    { recordComplete: maintainerRecordComplete, status: maintainerStatus }
+  ];
+  const localRebuildStatus = localRecords.some(({ status }) =>
+    ['recorded-not-accepted', 'conflicting-record'].includes(status)
+  )
+    ? 'recorded-not-accepted'
+    : localRecords.some(({ recordComplete, status }) => !recordComplete || status === 'pending')
+      ? 'pending'
+      : localRecords.some(({ status }) => status === 'recorded-accepted-with-restrictions')
+        ? 'recorded-accepted-with-restrictions'
+        : 'recorded-accepted';
+
+  return {
+    authentication: 'self-attested-record-only',
+    affectsMachineCompletion: false,
+    localRebuildStatus,
+    gates: {
+      'G-OPERATOR-01': {
+        status: operatorStatus,
+        recordComplete: operatorRecordComplete,
+        ...recordedAttribution(operator, 'Name')
+      },
+      'G-TARGET-01': {
+        status: productionTargetStatus,
+        recordComplete: productionTargetRecordComplete,
+        ...recordedAttribution(productionTarget, 'Approver')
+      },
+      'G-LAUNCH-01': {
+        status: launchStatus,
+        recordComplete: launchRecordComplete,
+        ...recordedAttribution(launchChecklist, 'Approver')
+      },
+      'G-MAINTAINER-01': {
+        status: maintainerStatus,
+        recordComplete: maintainerRecordComplete,
+        ...recordedAttribution(maintainer, 'Reviewer')
+      }
+    },
+    note: 'These packet fields are builder-writable. The verifier reports the recorded strings and choices but does not authenticate a person or infer human independence.'
+  };
+}
+
+async function markdownCompletionReadiness(packetDir, records = {}) {
+  const reasons = [];
+  const texts = Object.fromEntries(
+    await Promise.all(
+      [
+        'operator-run.md',
+        'maintainer-review.md',
+        'production-target.md',
+        'launch-checklist.md',
+        'recipe-start-point.md',
+        'scoped-gap-list.md',
+        'open-decisions.md',
+        'off-road-inventory.md',
+        'durable-intent.yml'
+      ].map(async (file) => [file, existsSync(join(packetDir, file)) ? await readFile(join(packetDir, file), 'utf8') : ''])
+    )
+  );
 
   const recipe = texts['recipe-start-point.md'];
   const selectedStartPoints = [
@@ -2089,18 +2935,10 @@ async function markdownCompletionReadiness(packetDir) {
   }
 
   const decisions = texts['open-decisions.md'];
-  const noOpenDecisions = /^\s*-\s*Decisions still open:\s*None\b/im.test(decisions);
-  if (
-    ['Source URL', 'Target site name', 'Target workspace', 'Date'].some((field) => !markdownField(decisions, field)) ||
-    unresolvedMarkdownUnknown(decisions) ||
-    (!noOpenDecisions && !/^\|\s*DEC-[^\n]+\|\s*$/im.test(decisions)) ||
-    ['Decisions still open', 'Decisions accepted', 'Decisions blocked by missing external input', 'Agent-resolvable work deliberately excluded from this file']
-      .some((field) => !markdownField(decisions, field))
-  ) {
-    reasons.push('open-decisions.md must contain run identity, only evidence-backed human decisions (or an explicit none declaration), and a complete handoff summary.');
-  }
-
   const offRoad = texts['off-road-inventory.md'];
+  const decisionPresentation = humanDecisionPresentationAssessment({ decisions, offRoad, records });
+  reasons.push(...decisionPresentation.reasons);
+
   if (
     ['Site', 'Checked at', 'Reviewer'].some((field) => !markdownField(offRoad, field)) ||
     !/^\s*-\s*Overall status:\s*`?accepted`?\s*$/mi.test(offRoad) ||
@@ -2108,7 +2946,7 @@ async function markdownCompletionReadiness(packetDir) {
     blockedTableRow(offRoad) ||
     !(/no off-road moves/i.test(offRoad) || /^\|\s*OR-[^\n]+\|\s*$/im.test(offRoad))
   ) {
-    reasons.push('off-road-inventory.md must contain a named accepted review and disposition every paved-path exception without UNKNOWN or blocked rows.');
+    reasons.push('off-road-inventory.md must contain a recorded review and disposition every paved-path exception without UNKNOWN or blocked rows; reviewer attribution is self-attested.');
   }
 
   const durableIntent = texts['durable-intent.yml'];
@@ -2137,13 +2975,23 @@ async function markdownCompletionReadiness(packetDir) {
     reasons.push('durable-intent.yml must name the site and contain current accepted/hash-valid intent or an explicit empty intent record list.');
   }
 
-  return reasons;
+  return {
+    reasons,
+    humanDecisionPresentationStatus: decisionPresentation.status,
+    recordedHumanGateStatus: recordedHumanGateAssessment(texts)
+  };
 }
 
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
+  const markdownAssessment = await markdownCompletionReadiness(packetDir, records);
   if (!gates) {
-    return { packetCompletionReady: false, reasons: ['Gate vocabulary could not be loaded.'] };
+    return {
+      packetCompletionReady: false,
+      reasons: ['Gate vocabulary could not be loaded.'],
+      humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+      recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+    };
   }
 
   for (const packetFile of arrayOrEmpty(gates.reviewPacketFiles)) {
@@ -2174,7 +3022,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
 
-  reasons.push(...await markdownCompletionReadiness(packetDir));
+  reasons.push(...markdownAssessment.reasons);
 
   const {
     blindAdversarialReview,
@@ -2198,8 +3046,11 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     sourceAudit
   }));
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
-  const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteKey(route?.targetPath)).filter(Boolean);
-  const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteKey(route?.sourcePath)).filter(Boolean);
+  const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
+  const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
+  const primaryRouteRoles = new Map(
+    primaryRoutes.map((route) => [normalizeRouteRequestKey(route?.targetPath), String(route?.routeRole ?? '').trim()])
+  );
   const routeRows = arrayOrEmpty(routeMatrix?.routes);
   if (!String(routeMatrix?.sourceBaseUrl ?? '').trim() || !String(routeMatrix?.targetBaseUrl ?? '').trim()) {
     reasons.push('route-matrix.json must declare both sourceBaseUrl and targetBaseUrl.');
@@ -2222,19 +3073,21 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   if (
     primaryRoutes.length === 0 ||
     primaryRoutes.some((route) =>
-      !normalizeRouteKey(route?.sourcePath) ||
-      !normalizeRouteKey(route?.targetPath) ||
+      !normalizeRouteRequestKey(route?.sourcePath) ||
+      !normalizeRouteRequestKey(route?.targetPath) ||
+      !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
       numericValue(route?.sourceStatus) >= 500 ||
       numericValue(route?.targetStatus) >= 500 ||
       route?.matchesBrowserRenderedSource !== true ||
       route?.accepted !== true ||
       !routeRows.some((row) =>
-        normalizeRouteKey(row?.sourcePath) === normalizeRouteKey(route?.sourcePath) &&
-        normalizeRouteKey(row?.targetPath) === normalizeRouteKey(route?.targetPath)
+        normalizeRouteRequestKey(row?.sourcePath) === normalizeRouteRequestKey(route?.sourcePath) &&
+        normalizeRouteRequestKey(row?.targetPath) === normalizeRouteRequestKey(route?.targetPath) &&
+        String(row?.routeRole ?? '').trim() === String(route?.routeRole ?? '').trim()
       )
     )
   ) {
-    reasons.push('Every primary route must have source/target paths, a matching route row, browser-rendered source binding, and acceptance.');
+    reasons.push('Every primary route must have source/target paths, a valid routeRole matching its route row, browser-rendered source binding, and acceptance.');
   }
   if (
     routeMatrix?.homepageParity?.accepted === true &&
@@ -2245,8 +3098,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   if (
     routeRows.length === 0 ||
     routeRows.some((route) => {
-      const targetPath = normalizeRouteKey(route?.targetPath);
-      const targetFinalPath = normalizeRouteKey(route?.targetFinalPath);
+      const targetPath = normalizeRouteRequestKey(route?.targetPath);
+      const targetFinalPath = normalizeRouteRequestKey(route?.targetFinalPath);
       const declaredServerError = numericValue(route?.sourceStatus) >= 500 || numericValue(route?.targetStatus) >= 500;
       const redirectContractValid = route?.expectedRedirect === true &&
         redirectStatus(route?.targetStatus) &&
@@ -2255,10 +3108,274 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       const directContractValid = route?.expectedRedirect === false &&
         successfulStatus(route?.targetStatus) &&
         targetFinalPath === targetPath;
-      return route?.accepted !== true || declaredServerError || (!redirectContractValid && !directContractValid);
+      return route?.accepted !== true ||
+        !normalizeRouteRequestKey(route?.sourcePath) ||
+        !targetPath ||
+        !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
+        declaredServerError ||
+        (!redirectContractValid && !directContractValid);
     })
   ) {
-    reasons.push('route-matrix.json route rows must be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+    reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+  }
+  const mappingContracts = [];
+  for (const [index, route] of routeRows.entries()) {
+    const sourceRequest = normalizeRouteRequestKey(route?.sourcePath);
+    const targetRequest = normalizeRouteRequestKey(route?.targetPath);
+    const expectedFinalRequest = normalizeRouteRequestKey(route?.targetFinalPath || route?.targetPath);
+    if (sourceRequest && targetRequest && expectedFinalRequest && sourceRequest !== targetRequest) {
+      mappingContracts.push({
+        declaredIn: `routes[${index}]`,
+        expectedFinalRequest,
+        noRedirectDisposition: route?.noRedirectDisposition,
+        sourceRequest
+      });
+    }
+  }
+  for (const [index, record] of substantiveObjects(routeMatrix?.sourceRouteDriftClassification).entries()) {
+    const sourceRequest = normalizeRouteRequestKey(record?.sourcePath);
+    const targetRequest = normalizeRouteRequestKey(record?.targetPath);
+    if (record?.targetDisposition === 'redirect' && sourceRequest && targetRequest && sourceRequest !== targetRequest) {
+      mappingContracts.push({
+        declaredIn: `sourceRouteDriftClassification[${index}]`,
+        expectedFinalRequest: targetRequest,
+        noRedirectDisposition: record?.noRedirectDisposition,
+        sourceRequest
+      });
+    }
+  }
+  let invalidNoRedirectDisposition = false;
+  let conflictingMappingContract = false;
+  const mappingContractsBySource = new Map();
+  for (const contract of mappingContracts) {
+    const rawDisposition = contract.noRedirectDisposition;
+    const disposition = rawDisposition && typeof rawDisposition === 'object' && !Array.isArray(rawDisposition)
+      ? {
+          accepted: rawDisposition.accepted === true,
+          acceptedBy: String(rawDisposition.acceptedBy ?? '').trim(),
+          evidence: String(rawDisposition.evidence ?? '').trim(),
+          rationale: String(rawDisposition.rationale ?? '').trim()
+        }
+      : null;
+    if (rawDisposition !== undefined && rawDisposition !== null) {
+      const evidencePresent = disposition
+        ? await nonEmptyPacketEvidence(packetDir, disposition.evidence)
+        : false;
+      if (
+        !disposition ||
+        disposition.accepted !== true ||
+        !disposition.acceptedBy ||
+        !disposition.rationale ||
+        !evidencePresent
+      ) {
+        invalidNoRedirectDisposition = true;
+      }
+    }
+    const signature = JSON.stringify({
+      expectedFinalRequest: contract.expectedFinalRequest,
+      noRedirectDisposition: disposition
+    });
+    const existing = mappingContractsBySource.get(contract.sourceRequest);
+    if (existing && existing.signature !== signature) {
+      conflictingMappingContract = true;
+    } else if (!existing) {
+      mappingContractsBySource.set(contract.sourceRequest, {
+        declaredIn: contract.declaredIn,
+        signature
+      });
+    }
+  }
+  if (invalidNoRedirectDisposition) {
+    reasons.push('route-matrix.json noRedirectDisposition exceptions must set accepted true, name acceptedBy, explain the rationale, and reference non-empty packet-local evidence.');
+  }
+  if (conflictingMappingContract) {
+    reasons.push('route-matrix.json duplicate source path+query redirect mappings must fully agree on target path+query and noRedirectDisposition.');
+  }
+  const representedRouteRoles = new Set(primaryRouteRoles.values());
+  const uncoveredRouteRoles = [...new Set(routeRows.map((route) => String(route?.routeRole ?? '').trim()))]
+    .filter((role) => ROUTE_ROLES.has(role) && !representedRouteRoles.has(role));
+  if (uncoveredRouteRoles.length > 0) {
+    reasons.push(`route-matrix.json primaryRoutes must include a representative of every discovered routeRole; missing ${uncoveredRouteRoles.join(', ')}.`);
+  }
+  const frontPageRoute = routeRows.find((route) => normalizeRouteRequestKey(route?.targetPath) === '/');
+  if (frontPageRoute && String(frontPageRoute.routeRole ?? '').trim() !== 'homepage') {
+    reasons.push('route-matrix.json must classify the target front page with routeRole homepage.');
+  }
+  const rawSourceOriginLinkExceptions = arrayOrEmpty(routeMatrix?.sourceOriginLinkExceptions);
+  const sourceOriginLinkExceptions = substantiveObjects(rawSourceOriginLinkExceptions);
+  const declaredSourceUrl = httpUrl(routeMatrix?.sourceBaseUrl);
+  const declaredTargetUrl = httpUrl(routeMatrix?.targetBaseUrl);
+  const acceptedLinkReferrerRequests = new Set([
+    ...routeRows.filter((route) => route?.accepted === true),
+    ...substantiveObjects(routeMatrix?.targetRequiredRoutes).filter((route) => route?.accepted === true)
+  ].flatMap((route) => [route?.targetPath, route?.targetFinalPath])
+    .map(normalizeRouteRequestKey)
+    .filter(Boolean));
+  const exceptionPairs = new Set();
+  let sourceOriginExceptionInvalid = rawSourceOriginLinkExceptions.some((exception) => !isJsonObject(exception));
+  for (const exception of sourceOriginLinkExceptions) {
+    let referrerUrl = null;
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(exception?.referrer ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed exception URLs.
+    }
+    const exceptionTargetUrl = httpUrl(exception?.target);
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (exceptionTargetUrl) {
+      exceptionTargetUrl.hash = '';
+    }
+    const pairKey = referrerUrl && exceptionTargetUrl
+      ? `${referrerUrl.href}\n${exceptionTargetUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerRequests.has(normalizeRouteRequestKey(referrerUrl?.href));
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.evidence);
+    if (
+      exception?.accepted !== true ||
+      !declaredSourceUrl ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !exceptionTargetUrl ||
+      exceptionTargetUrl.origin !== declaredSourceUrl.origin ||
+      !String(exception?.rationale ?? '').trim() ||
+      !String(exception?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !pairKey ||
+      exceptionPairs.has(pairKey)
+    ) {
+      sourceOriginExceptionInvalid = true;
+    }
+    if (pairKey) {
+      exceptionPairs.add(pairKey);
+    }
+  }
+  if (sourceOriginExceptionInvalid) {
+    reasons.push('route-matrix.json sourceOriginLinkExceptions must uniquely bind an accepted target-route referrer to an absolute source-origin target with rationale, named accepter, non-empty packet-local evidence, and accepted true.');
+  }
+  const rawSameOriginLinkExceptions = arrayOrEmpty(routeMatrix?.sameOriginLinkExceptions);
+  const sameOriginLinkExceptions = substantiveObjects(rawSameOriginLinkExceptions);
+  const sameOriginExceptionPairs = new Set();
+  let sameOriginExceptionInvalid = rawSameOriginLinkExceptions.some((exception) => !isJsonObject(exception));
+  for (const exception of sameOriginLinkExceptions) {
+    let referrerUrl = null;
+    let exceptionTargetUrl = null;
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(exception?.referrer ?? ''), declaredTargetUrl)
+        : null;
+      exceptionTargetUrl = declaredTargetUrl
+        ? new URL(String(exception?.target ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed exception URLs.
+    }
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (exceptionTargetUrl) {
+      exceptionTargetUrl.hash = '';
+    }
+    const pairKey = referrerUrl && exceptionTargetUrl
+      ? `${referrerUrl.href}\n${exceptionTargetUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerRequests.has(normalizeRouteRequestKey(referrerUrl?.href));
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.evidence);
+    if (
+      exception?.accepted !== true ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !exceptionTargetUrl ||
+      exceptionTargetUrl.origin !== declaredTargetUrl.origin ||
+      !SAME_ORIGIN_LINK_DISPOSITIONS.has(String(exception?.disposition ?? '').trim()) ||
+      !String(exception?.rationale ?? '').trim() ||
+      !String(exception?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !pairKey ||
+      sameOriginExceptionPairs.has(pairKey)
+    ) {
+      sameOriginExceptionInvalid = true;
+    }
+    if (pairKey) {
+      sameOriginExceptionPairs.add(pairKey);
+    }
+  }
+  if (sameOriginExceptionInvalid) {
+    reasons.push('route-matrix.json sameOriginLinkExceptions must uniquely bind an accepted target-route referrer to an exact same-origin target with an allowed disposition, rationale, named accepter, non-empty packet-local evidence, and accepted true.');
+  }
+
+  const rawExpectedExternalRedirects = arrayOrEmpty(routeMatrix?.expectedExternalLinkRedirects);
+  const expectedExternalRedirects = substantiveObjects(rawExpectedExternalRedirects);
+  const expectedExternalRedirectKeys = new Set();
+  let expectedExternalRedirectInvalid = rawExpectedExternalRedirects.some((record) => !isJsonObject(record));
+  for (const record of expectedExternalRedirects) {
+    let referrerUrl = null;
+    let startUrl = null;
+    const finalUrl = httpUrl(record?.final);
+    try {
+      referrerUrl = declaredTargetUrl
+        ? new URL(String(record?.referrer ?? ''), declaredTargetUrl)
+        : null;
+      startUrl = declaredTargetUrl
+        ? new URL(String(record?.start ?? ''), declaredTargetUrl)
+        : null;
+    } catch {
+      // The aggregate completion reason below reports malformed expectation URLs.
+    }
+    if (referrerUrl) {
+      referrerUrl.hash = '';
+    }
+    if (startUrl) {
+      startUrl.hash = '';
+    }
+    if (finalUrl) {
+      finalUrl.hash = '';
+    }
+    const finalMatch = String(record?.finalMatch ?? '').trim();
+    const expectationKey = referrerUrl && startUrl && finalUrl
+      ? `${referrerUrl.href}\n${startUrl.href}\n${finalMatch}\n${finalUrl.href}`
+      : '';
+    const referrerMatchesAcceptedRoute = Boolean(referrerUrl) &&
+      acceptedLinkReferrerRequests.has(normalizeRouteRequestKey(referrerUrl?.href));
+    const originMatchUsesOriginOnly = finalMatch !== 'origin' || (
+      finalUrl?.pathname === '/' && !finalUrl.search && !finalUrl.hash
+    );
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, record?.evidence);
+    if (
+      record?.accepted !== true ||
+      !declaredTargetUrl ||
+      !referrerUrl ||
+      referrerUrl.origin !== declaredTargetUrl.origin ||
+      !referrerMatchesAcceptedRoute ||
+      !startUrl ||
+      startUrl.origin !== declaredTargetUrl.origin ||
+      !finalUrl ||
+      finalUrl.origin === declaredTargetUrl.origin ||
+      !EXTERNAL_REDIRECT_FINAL_MATCHES.has(finalMatch) ||
+      !originMatchUsesOriginOnly ||
+      !String(record?.rationale ?? '').trim() ||
+      !String(record?.accepter ?? '').trim() ||
+      !evidencePresent ||
+      !expectationKey ||
+      expectedExternalRedirectKeys.has(expectationKey)
+    ) {
+      expectedExternalRedirectInvalid = true;
+    }
+    if (expectationKey) {
+      expectedExternalRedirectKeys.add(expectationKey);
+    }
+  }
+  if (expectedExternalRedirectInvalid) {
+    reasons.push('route-matrix.json expectedExternalLinkRedirects must uniquely bind an accepted target-route referrer and exact same-origin start URL to an external final origin or exact URL with rationale, named accepter, non-empty packet-local evidence, and accepted true.');
   }
   if (
     arrayOrEmpty(routeMatrix?.blockedRoutes).length > 0 ||
@@ -2269,25 +3386,44 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const expansion = routeMatrix?.browserFirstRouteExpansion ?? {};
+  const legacyRenderedLinkRoutes = [...new Set(arrayOrEmpty(expansion.candidateRoutesFromRenderedLinks)
+    .map(routeLikeValue)
+    .filter(Boolean))];
+  const browserRenderedLinkRoutes = [...new Set(arrayOrEmpty(expansion.candidateRoutesFromBrowserRenderedLinks)
+    .map(routeLikeValue)
+    .filter(Boolean))];
+  if (
+    Object.hasOwn(expansion, 'candidateRoutesFromRenderedLinks') &&
+    Object.hasOwn(expansion, 'candidateRoutesFromBrowserRenderedLinks') &&
+    (
+      legacyRenderedLinkRoutes.length !== browserRenderedLinkRoutes.length ||
+      [...legacyRenderedLinkRoutes].sort().join('\n') !==
+        [...browserRenderedLinkRoutes].sort().join('\n')
+    )
+  ) {
+    reasons.push('route-matrix.json legacy candidateRoutesFromRenderedLinks and candidateRoutesFromBrowserRenderedLinks declarations must describe the same discovered routes when both are present.');
+  }
   const discoveredSourceRoutes = new Set([
     ...arrayOrEmpty(expansion.browserRenderedSeedRoutes),
-    ...arrayOrEmpty(expansion.candidateRoutesFromRenderedLinks),
+    ...legacyRenderedLinkRoutes,
+    ...browserRenderedLinkRoutes,
     ...arrayOrEmpty(expansion.candidateRoutesFromBundles),
     ...arrayOrEmpty(expansion.candidateRoutesFromMetadata),
     ...arrayOrEmpty(expansion.candidateRoutesFromAssets),
     ...arrayOrEmpty(expansion.candidateRoutesFromSitemapsOrRobots),
+    ...arrayOrEmpty(expansion.candidateRoutesFromImportedContentBodies),
     ...arrayOrEmpty(expansion.candidateRoutesFromNamingPatterns)
   ].map(routeLikeValue).filter(Boolean));
   const driftRecords = substantiveObjects(routeMatrix?.sourceRouteDriftClassification);
   const acceptedDriftRoutes = new Set(driftRecords.filter((record) =>
     record?.accepted === true &&
-    normalizeRouteKey(record.sourcePath) &&
+    normalizeRouteRequestKey(record.sourcePath) &&
     !['unknown'].includes(record.classification) &&
     !['blocked', 'owner_decision_required'].includes(record.targetDisposition) &&
     String(record.notes ?? '').trim()
-  ).map((record) => normalizeRouteKey(record.sourcePath)));
+  ).map((record) => normalizeRouteRequestKey(record.sourcePath)));
   if (
-    driftRecords.some((record) => !acceptedDriftRoutes.has(normalizeRouteKey(record.sourcePath))) ||
+    driftRecords.some((record) => !acceptedDriftRoutes.has(normalizeRouteRequestKey(record.sourcePath))) ||
     [...discoveredSourceRoutes].some((route) =>
       !primarySourceRoutePaths.includes(route) && !acceptedDriftRoutes.has(route)
     )
@@ -2363,7 +3499,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   for (const route of primaryRoutes) {
     for (const viewport of ['desktop', 'mobile']) {
       if (!firstFoldRecords.some((record) =>
-        recordMatchesRoute(record, normalizeRouteKey(route.sourcePath), normalizeRouteKey(route.targetPath)) &&
+        recordMatchesRoute(record, normalizeRouteRequestKey(route.sourcePath), normalizeRouteRequestKey(route.targetPath)) &&
         record.viewport === viewport &&
         record.heroArtworkMatchesOrDispositioned === true &&
         record.logoOrLockupMatchesOrDispositioned === true &&
@@ -2372,7 +3508,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
         record.accepted === true &&
         String(record.notes ?? '').trim()
       )) {
-        reasons.push(`route-matrix.json needs accepted first-fold brand parity for ${normalizeRouteKey(route.targetPath)} at ${viewport}.`);
+        reasons.push(`route-matrix.json needs accepted first-fold brand parity for ${normalizeRouteRequestKey(route.targetPath)} at ${viewport}.`);
       }
     }
   }
@@ -2396,7 +3532,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const acceptedPageOwners = arrayOrEmpty(patternMap?.pageCompositionOwnership).filter(
     (owner) =>
       owner?.accepted === true &&
-      normalizeRouteKey(owner?.sourceRoute) &&
+      normalizeRouteRequestKey(owner?.sourceRoute) &&
       String(owner?.selectedOwner ?? '').trim() &&
       String(owner?.ownerRationale ?? '').trim() &&
       String(owner?.editorVerificationEvidence ?? '').trim()
@@ -2459,7 +3595,9 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       )
     )) ||
     primaryRoutes.some(
-      (route) => !acceptedPageOwners.some((owner) => normalizeRouteKey(owner.sourceRoute) === normalizeRouteKey(route.sourcePath))
+      (route) => !acceptedPageOwners.some((owner) =>
+        normalizeRouteRequestKey(owner.sourceRoute) === normalizeRouteRequestKey(route.sourcePath)
+      )
     ) ||
     !arrayOrEmpty(patternMap?.sectionOwnershipMatrix).some(
       (section) =>
@@ -2521,7 +3659,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     parityRouteChecks.length === 0 ||
     primaryRoutePaths.some(
       (route) => !parityRouteChecks.some((check) =>
-        routeRecordPath(check) === route && check?.status === 'pass' && String(check?.evidence ?? '').trim()
+        routeRecordRequestKey(check) === route && check?.status === 'pass' && String(check?.evidence ?? '').trim()
       )
     ) ||
     parityContentChecks.length === 0 ||
@@ -2548,12 +3686,36 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const publicRouteChecks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
+  if (publicRouteChecks.some((check) => !VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method))) {
+    reasons.push('browser-evidence.json visualComparison.method must be agent_review, human_review, pixel_diff, structural_review, or other for every public route check.');
+  }
+  if (publicRouteChecks.some((check) =>
+    VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method) &&
+    !COMPLETION_VISUAL_COMPARISON_METHODS.has(check.visualComparison.method)
+  )) {
+    reasons.push('browser-evidence.json completion-bearing visualComparison.method must be agent_review, human_review, or pixel_diff; structural_review and other are diagnostic-only classifications.');
+  }
+  if (publicRouteChecks.some((check) =>
+    check?.visualComparison?.method === 'human_review' &&
+    !String(check?.visualComparison?.reviewer ?? '').trim()
+  )) {
+    reasons.push('browser-evidence.json visualComparison method human_review requires a recorded reviewer label; the local verifier reports that label as self-attested and does not authenticate it. Record agent_review for agent-performed structural comparison.');
+  }
+  if (publicRouteChecks.some((check) =>
+    check?.visualComparison?.method === 'pixel_diff' &&
+    (!String(check?.visualComparison?.diffImage ?? '').trim() || !finiteNumberValue(check?.visualComparison?.diffScore))
+  )) {
+    reasons.push('browser-evidence.json visualComparison method pixel_diff requires a diffImage and numeric diffScore.');
+  }
   let browserScreenshotsCredible = true;
+  let visualMethodEvidenceCredible = true;
   const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
-  for (const check of publicRouteChecks) {
+  for (const [index, check] of publicRouteChecks.entries()) {
+    const screenshotMetadata = {};
     for (const field of ['sourceScreenshot', 'targetScreenshot']) {
       const screenshotPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, check?.[field]);
       const metadata = screenshotPath ? await evidenceImageMetadata(screenshotPath) : null;
+      screenshotMetadata[field] = metadata;
       if (
         !metadata ||
         metadata.size < MIN_SCREENSHOT_BYTES ||
@@ -2563,6 +3725,32 @@ async function packetCompletionReadiness(packetDir, gates, records) {
         browserScreenshotsCredible = false;
       }
     }
+    reasons.push(...await accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index));
+    if (check?.visualComparison?.method === 'pixel_diff') {
+      const diffPath = resolveReviewEvidencePath(
+        packetDir,
+        browserEvidenceDir,
+        check.visualComparison.diffImage
+      );
+      const diffMetadata = diffPath ? await evidenceImageMetadata(diffPath) : null;
+      if (
+        !diffMetadata ||
+        diffMetadata.size < MIN_SCREENSHOT_BYTES ||
+        diffMetadata.width < MIN_SCREENSHOT_DIMENSION ||
+        diffMetadata.height < MIN_SCREENSHOT_DIMENSION ||
+        diffMetadata.contentSha256 === screenshotMetadata.sourceScreenshot?.contentSha256 ||
+        diffMetadata.contentSha256 === screenshotMetadata.targetScreenshot?.contentSha256 ||
+        diffMetadata.width !== screenshotMetadata.sourceScreenshot?.width ||
+        diffMetadata.height !== screenshotMetadata.sourceScreenshot?.height ||
+        diffMetadata.width !== screenshotMetadata.targetScreenshot?.width ||
+        diffMetadata.height !== screenshotMetadata.targetScreenshot?.height
+      ) {
+        visualMethodEvidenceCredible = false;
+      }
+    }
+  }
+  if (!visualMethodEvidenceCredible) {
+    reasons.push('browser-evidence.json pixel_diff visual comparisons require a distinct real bounded packet-local diff image with source/target dimensions.');
   }
   if (
     isoTimestamp(browserEvidence?.checkedAt) === null ||
@@ -2570,8 +3758,13 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     arrayOrEmpty(browserEvidence?.missingBrowserEvidence).length > 0 ||
     publicRouteChecks.length === 0 ||
     !browserScreenshotsCredible ||
+    !visualMethodEvidenceCredible ||
     publicRouteChecks.some((check) =>
       check?.accepted !== true ||
+      !ROUTE_ROLES.has(String(check?.routeRole ?? '').trim()) ||
+      (primaryRouteRoles.has(routeRecordRequestKey(check)) &&
+        primaryRouteRoles.get(routeRecordRequestKey(check)) !== String(check?.routeRole ?? '').trim()) ||
+      !COMPLETION_VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method) ||
       check?.visualComparison?.status !== 'pass' ||
       !httpUrl(check?.sourceUrl) ||
       !httpUrl(check?.sourceFinalUrl) ||
@@ -2601,6 +3794,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('browser-evidence.json must cover every primary route at desktop and mobile with accepted source/target visual and rendered-signal evidence.');
   }
   const renderedSeoRoutes = new Set();
+  const renderedSeoRoutePaths = new Set();
   for (const check of publicRouteChecks) {
     const seo = check?.renderedSeoSignals ?? {};
     if (
@@ -2620,11 +3814,204 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       )) &&
       String(seo.evidence ?? '').trim()
     ) {
-      renderedSeoRoutes.add(routeRecordPath(check));
+      renderedSeoRoutes.add(routeRecordRequestKey(check));
+      renderedSeoRoutePaths.add(routeRecordPath(check));
     }
   }
   if (primaryRoutePaths.some((route) => !renderedSeoRoutes.has(route))) {
     reasons.push('browser-evidence.json must contain accepted rendered canonical, description, and social-image dispositions for every primary route.');
+  }
+
+  const acceptedCollections = collectionLedger.filter((record) => record?.accepted === true);
+  for (const ledger of acceptedCollections) {
+    const mode = String(ledger?.detailRouteMode ?? '');
+    if (!['separate_public_route', 'inline_in_collection', 'external_provider', 'no_detail'].includes(mode)) {
+      reasons.push(`pattern-map.json collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} must declare detailRouteMode.`);
+      continue;
+    }
+    if (mode !== 'separate_public_route') {
+      if (!String(ledger?.detailRouteRationale ?? '').trim()) {
+        reasons.push(`pattern-map.json collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} needs a rationale for detailRouteMode ${mode}.`);
+      }
+      continue;
+    }
+    const sourceDetail = normalizeRouteKey(ledger?.representativeDetailSourcePath);
+    const targetDetail = normalizeRouteKey(ledger?.representativeDetailTargetPath);
+    const expectedFields = detailExpectedFields(ledger, fieldOutputMatrix, recurringSourceObjects);
+    const declaredDetailFields = new Set(
+      arrayOrEmpty(ledger?.detailLoadBearingFields).map((field) => identityKey(field)).filter(Boolean)
+    );
+    const matchingRoute = routeRows.find((route) =>
+      normalizeRouteKey(route?.sourcePath) === sourceDetail &&
+      normalizeRouteKey(route?.targetPath) === targetDetail &&
+      route?.accepted === true
+    );
+    const detailCheck = publicRouteChecks.find((check) =>
+      check?.routeRole === 'detail' &&
+      normalizeRouteKey(httpUrl(check?.sourceUrl)?.pathname) === sourceDetail &&
+      routeRecordPath(check) === targetDetail &&
+      check?.accepted === true
+    );
+    const detailSignals = detailCheck?.detailContentSignals ?? {};
+    const actualFields = arrayOrEmpty(detailSignals?.loadBearingFields);
+    const fieldsDeclared = expectedFields.length > 0 && expectedFields.every((field) =>
+      declaredDetailFields.has(identityKey(field))
+    );
+    const verifiedFieldRecords = expectedFields.map((field) =>
+      actualFields.find((record) =>
+        exactIdentityMatch(record?.field, field) &&
+        record?.visible === true &&
+        String(record?.sourceSignal ?? '').trim() &&
+        String(record?.targetSignal ?? '').trim() &&
+        detailFieldVisible(record)
+      )
+    );
+    const verifiedSelectors = verifiedFieldRecords
+      .map((record) => String(record?.selector ?? '').trim())
+      .filter(Boolean);
+    const fieldsVerified = fieldsDeclared &&
+      verifiedFieldRecords.every(Boolean) &&
+      new Set(verifiedSelectors).size === expectedFields.length;
+    const ownerDeviation = detailSignals?.ownerDeviation ?? {};
+    const ownerDeviationEvidencePresent = ownerDeviation?.applies === true && await nonEmptyPacketEvidence(
+      packetDir,
+      ownerDeviation?.evidence,
+      browserEvidenceDir
+    );
+    const detailOwnerMatches = exactIdentityMatch(detailSignals?.drupalOwner, ledger?.detailRouteOwner);
+    const detailOwnerConfigMatches = exactIdentityMatch(
+      detailSignals?.drupalOwnerConfigId,
+      ledger?.drupalOwnerConfigId
+    ) && drupalOwnerConfigExists(
+      drupalReadback,
+      ledger?.detailRouteOwner,
+      ledger?.drupalOwnerConfigId
+    );
+    const detailOwnerDeviationAccepted = Boolean(
+      String(detailSignals?.drupalOwner ?? '').trim() &&
+      ownerDeviation?.applies === true &&
+      String(ownerDeviation?.rationale ?? '').trim() &&
+      ownerDeviationEvidencePresent
+    );
+    if (detailCheck && (!detailOwnerMatches || !detailOwnerConfigMatches) && !detailOwnerDeviationAccepted) {
+      reasons.push(`browser-evidence.json detail owner/config must match Drupal readback and collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} owner ${ledger.detailRouteOwner || '(missing)'}, or record an evidenced owner deviation.`);
+    }
+    if (
+      !sourceDetail ||
+      !targetDetail ||
+      !matchingRoute ||
+      !detailCheck ||
+      detailSignals?.accepted !== true ||
+      !exactIdentityMatch(detailSignals?.contentTypeOrBundle, ledger?.contentTypeOrBundle) ||
+      (!detailOwnerMatches && !detailOwnerDeviationAccepted) ||
+      (!detailOwnerConfigMatches && !detailOwnerDeviationAccepted) ||
+      !fieldsVerified ||
+      !renderedSeoRoutePaths.has(targetDetail)
+    ) {
+      reasons.push(`browser-evidence.json must prove an accepted representative detail route with visible load-bearing fields and rendered SEO for collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'}.`);
+    }
+  }
+
+  const sourcePublicForms = substantiveObjects(sourceAudit?.formsAndIntegrations).filter((record) =>
+    record?.kind === 'public_submission_form' && record?.anonymousPublicUse === true
+  );
+  const modeledForms = substantiveObjects(patternMap?.forms);
+  const anonymousFormChecks = substantiveObjects(browserEvidence?.anonymousFormChecks);
+  if (
+    (sourcePublicForms.length > 0 || modeledForms.length > 0 || anonymousFormChecks.length > 0) &&
+    (!uniqueRecordKeys(sourcePublicForms, 'formKey') ||
+      !uniqueRecordKeys(modeledForms, 'formKey') ||
+      !uniqueRecordKeys(anonymousFormChecks, 'formKey'))
+  ) {
+    reasons.push('Anonymous public forms must use unique, non-empty formKey values in source-audit.json, pattern-map.json, and browser-evidence.json.');
+  }
+  if (sourcePublicForms.some((sourceForm) => {
+    const form = modeledForms.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === String(sourceForm?.formKey ?? '').trim()
+    );
+    return !form ||
+      form?.accepted !== true ||
+      normalizeRouteKey(form?.sourceRoute) !== normalizeRouteKey(sourceForm?.sourceRoute) ||
+      !exactIdentityMatch(form?.purpose, sourceForm?.purpose) ||
+      String(form?.expectedOutcome ?? '') !== String(sourceForm?.expectedOutcome ?? '') ||
+      !String(form?.drupalOwner ?? '').trim();
+  })) {
+    reasons.push('pattern-map.json must map every audited anonymous public submission form without changing its source purpose or expectedOutcome, and must name its accepted Drupal/provider owner.');
+  }
+  for (const form of modeledForms) {
+    const formKey = String(form?.formKey ?? '').trim();
+    const sourceRoute = normalizeRouteKey(form?.sourceRoute);
+    const targetRoute = normalizeRouteKey(form?.targetRoute);
+    const expectedOutcome = String(form?.expectedOutcome ?? '');
+    const sourceForm = sourcePublicForms.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === formKey
+    );
+    const check = anonymousFormChecks.find((candidate) =>
+      String(candidate?.formKey ?? '').trim() === formKey
+    );
+    const routeRecord = routeRows.find((candidate) =>
+      normalizeRouteKey(candidate?.targetPath) === targetRoute && candidate?.accepted === true
+    );
+    const browserFormCheck = publicRouteChecks.find((candidate) =>
+      candidate?.routeRole === 'form' && routeRecordPath(candidate) === targetRoute && candidate?.accepted === true
+    );
+    const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
+      packetDir,
+      browserEvidenceDir,
+      check
+    );
+    const abuseProtectionMode = String(check?.abuseProtection?.mode ?? '');
+    const abuseProtectionEvidenceMatches = check && await formAbuseEvidenceMatches(
+      packetDir,
+      browserEvidenceDir,
+      check
+    );
+    if (check && (
+      !exactIdentityMatch(check?.purpose, form?.purpose) ||
+      !exactIdentityMatch(check?.drupalOwner, form?.drupalOwner)
+    )) {
+      reasons.push(`browser-evidence.json anonymous form ${form.sourceRoute || form.targetRoute || '(unnamed)'} must preserve the modeled purpose and Drupal/provider owner.`);
+    }
+    if (
+      form?.accepted !== true ||
+      !formKey ||
+      !sourceForm ||
+      !sourceRoute ||
+      !targetRoute ||
+      !String(form?.purpose ?? '').trim() ||
+      !String(form?.drupalOwner ?? '').trim() ||
+      !['message_delivery', 'submission_storage', 'account_creation', 'provider_handoff', 'other'].includes(expectedOutcome) ||
+      !routeRecord ||
+      !browserFormCheck ||
+      !check ||
+      normalizeRouteKey(check?.sourceRoute) !== sourceRoute ||
+      routeRecordPath(check) !== targetRoute ||
+      check?.accepted !== true ||
+      check?.status !== 'pass' ||
+      check?.anonymousSession !== true ||
+      check?.syntheticTestData !== true ||
+      check?.invalidSubmission?.performed !== true ||
+      check?.invalidSubmission?.errorsVisible !== true ||
+      check?.invalidSubmission?.focusOrSummaryVerified !== true ||
+      check?.validSubmission?.performed !== true ||
+      check?.validSubmission?.successStateVisible !== true ||
+      !formOutcomeMatches(expectedOutcome, check?.outcome?.mode) ||
+      !outcomeEvidenceMatches ||
+      !['rendered_honeypot', 'rendered_challenge', 'configured_rate_limiting', 'provider_managed', 'local_only_exception'].includes(abuseProtectionMode) ||
+      check?.abuseProtection?.dispositionVerified !== true ||
+      !abuseProtectionEvidenceMatches ||
+      (abuseProtectionMode === 'local_only_exception' && !String(check?.abuseProtection?.rationale ?? '').trim()) ||
+      arrayOrEmpty(check?.blockers).length > 0
+    ) {
+      reasons.push(`browser-evidence.json must prove anonymous invalid and valid submissions plus an outcome-appropriate handler for form ${form.sourceRoute || form.targetRoute || '(unnamed)'}; it must also record a vendor-neutral abuse-protection disposition with evidence.`);
+    }
+  }
+  if (anonymousFormChecks.some((check) => !modeledForms.some((form) =>
+    String(form?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
+    normalizeRouteKey(form?.sourceRoute) === normalizeRouteKey(check?.sourceRoute) &&
+    normalizeRouteKey(form?.targetRoute) === routeRecordPath(check)
+  ))) {
+    reasons.push('browser-evidence.json anonymousFormChecks must map to pattern-map.json forms.');
   }
   const editorWorkflowChecks = arrayOrEmpty(browserEvidence?.editorWorkflowChecks);
   let editorScreenshotsCredible = true;
@@ -2736,7 +4123,29 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('The newest completion evidence is older than seven days and must be refreshed against the current target.');
   }
 
-  return { packetCompletionReady: reasons.length === 0, reasons };
+  return {
+    packetCompletionReady: reasons.length === 0,
+    reasons,
+    humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+    recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+  };
+}
+
+// Independence declarations live in builder-writable packet JSON, so the strongest
+// honest machine label is self-attested; subagent independence is allowed, not proven.
+function independenceAttestation(actor) {
+  if (!isJsonObject(actor) || !String(actor.nameOrRole ?? '').trim()) {
+    return 'not-declared';
+  }
+  if (
+    String(actor.independenceDegradedReason ?? '').trim() ||
+    actor.freshContextUsed !== true ||
+    actor.sameContextAsBuilder !== false ||
+    actor.builderSummaryExcluded !== true
+  ) {
+    return 'degraded';
+  }
+  return 'self-attested';
 }
 
 function sharedPacketDir(packetDir) {
@@ -2811,9 +4220,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    recordedHumanGateStatus: completionReadiness.recordedHumanGateStatus,
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
+      scopeDispositionAttribution: 'builder-writable-self-attested',
+      humanDecisionPresentationStatus: completionReadiness.humanDecisionPresentationStatus,
+      independence: {
+        independentVerification: independenceAttestation(independentVerification?.verifier),
+        blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
+      },
       packetCompletionReady: completionReadiness.packetCompletionReady,
       packetCompletionBlockedReasons: completionReadiness.reasons,
       packetSupportsCompletion:

@@ -98,6 +98,51 @@
       "evidence": ""
     }
   ],
+  "detailRouteChecks": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "contentTypeOrBundle": "",
+      "declaredDetailOwner": "",
+      "observedDetailOwner": "",
+      "drupalOwnerConfigId": "",
+      "ownerDeviationEvidence": "",
+      "loadBearingFieldsVerified": [],
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "accessibilityChecks": [
+    {
+      "targetRoute": "",
+      "viewport": "desktop | mobile | tablet | custom",
+      "browserEngine": "",
+      "axeReport": "",
+      "wcagIncompleteDispositionEvidence": [],
+      "manualKeyboardAndFocusEvidence": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
+  "anonymousFormChecks": [
+    {
+      "formKey": "",
+      "sourceRoute": "",
+      "targetRoute": "",
+      "purpose": "contact_message | application | registration | newsletter | survey | other",
+      "modeledOwner": "",
+      "browserOwner": "",
+      "expectedOutcome": "message_delivery | submission_storage | account_creation | provider_handoff | other",
+      "browserOutcome": "local_mail_capture | provider_delivery | drupal_submission_storage | account_created | provider_handoff | other",
+      "anonymousInvalidAndValidSubmissionVerified": false,
+      "outcomeEvidence": "",
+      "abuseProtectionDisposition": "rendered_honeypot | rendered_challenge | configured_rate_limiting | provider_managed | local_only_exception",
+      "abuseProtectionRationale": "",
+      "abuseProtectionEvidence": "",
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "rawEmbedAndMarkupScan": {
     "fieldsScanned": [],
     "patternsChecked": [

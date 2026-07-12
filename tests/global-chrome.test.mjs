@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  BROWSER_CAPTURE_LIMITS,
   captureGlobalChrome,
   compareGlobalChromeCaptures,
+  createBrowserCaptureBudget,
   finalizeGlobalChromeCapture,
   findBrowserExecutable,
   globalChromeImpact,
@@ -17,6 +19,60 @@ import {
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
 const state = (seed) => `sha256:${seed.repeat(64)}`;
+
+test('browser capture budget enforces an absolute route ceiling and aggregate deadline', () => {
+  let clock = 1_000;
+  const routeBudget = createBrowserCaptureBudget({
+    label: 'Fixture capture',
+    limits: { maxRoutes: BROWSER_CAPTURE_LIMITS.maxRoutes + 10 },
+    now: () => clock,
+    routeCount: BROWSER_CAPTURE_LIMITS.maxRoutes + 1,
+    viewportCount: 2
+  });
+  assert.throws(
+    () => routeBudget.assertRouteLimit(),
+    new RegExp(`exceeding the ${BROWSER_CAPTURE_LIMITS.maxRoutes} route limit`, 'i')
+  );
+  assert.equal(routeBudget.metrics().scheduledRouteViewportCount, (BROWSER_CAPTURE_LIMITS.maxRoutes + 1) * 2);
+
+  const deadlineBudget = createBrowserCaptureBudget({
+    label: 'Fixture capture',
+    limits: { deadlineMs: 50 },
+    now: () => clock,
+    routeCount: 1,
+    viewportCount: 2
+  });
+  clock += 40;
+  assert.deepEqual(deadlineBudget.operationTiming(), { deadlineLimited: true, timeoutMs: 10 });
+  clock += 10;
+  assert.throws(() => deadlineBudget.assertWithinDeadline(), /50 ms total wall-clock deadline/i);
+  assert.equal(deadlineBudget.metrics().deadlineExceeded, true);
+});
+
+test('global chrome capture fails closed before browser launch when route or wall-clock bounds are exceeded', async () => {
+  const tooManyRoutes = await captureGlobalChrome({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: Array.from({ length: BROWSER_CAPTURE_LIMITS.maxRoutes + 1 }, (_, index) => `/route-${index}`)
+  });
+  assert.equal(tooManyRoutes.status, 'blocked');
+  assert.equal(tooManyRoutes.authoritative, false);
+  assert.equal(tooManyRoutes.budget.attempted, false);
+  assert.equal(tooManyRoutes.budget.routeCount, BROWSER_CAPTURE_LIMITS.maxRoutes + 1);
+  assert.match(tooManyRoutes.errors.join('\n'), /route limit; no browser checks were run/i);
+
+  const clockValues = [0, 11, 11];
+  const expired = await captureGlobalChrome({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: ['/'],
+    limits: { deadlineMs: 10 },
+    now: () => clockValues.shift() ?? 11
+  });
+  assert.equal(expired.status, 'blocked');
+  assert.equal(expired.authoritative, false);
+  assert.equal(expired.budget.deadlineExceeded, true);
+  assert.equal(expired.budget.deadlineMs, 10);
+  assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
 
 function captureFixture(stateFingerprint, mutate = () => {}) {
   const contract = normalizeGlobalChromeContract({ dynamicRegionSelectors: ['[data-dynamic]'] });
