@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { Worker } from 'node:worker_threads';
 
 import {
   buildSiteState,
@@ -109,6 +110,72 @@ function lifecycleFixture() {
   writeFileSync(join(projectRoot, 'composer.json'), '{"name":"fixture/site"}\n');
   writeFileSync(join(packetDir, 'evidence', 'change-check.json'), '{"status":"pass"}\n');
   return { packetDir, projectRoot };
+}
+
+function beginChangeWorker(options, { gate, holdAfterActiveCheck = false } = {}) {
+  const source = `
+    import { parentPort, workerData } from 'node:worker_threads';
+    const { beginChange } = await import(workerData.lifecycleModuleUrl);
+    const gate = new Int32Array(workerData.gate);
+    try {
+      const change = beginChange({
+        ...workerData.options,
+        ...(workerData.holdAfterActiveCheck
+          ? {
+              testOnlyAfterActiveCheck() {
+                Atomics.store(gate, 0, 1);
+                Atomics.notify(gate, 0);
+                parentPort.postMessage({ type: 'holding' });
+                if (Atomics.wait(gate, 1, 0, 10000) === 'timed-out') {
+                  throw new Error('Timed out while holding the lifecycle begin lock for the concurrency test.');
+                }
+              }
+            }
+          : {})
+      });
+      parentPort.postMessage({ type: 'result', ok: true, id: change.id });
+    } catch (error) {
+      parentPort.postMessage({ type: 'result', ok: false, error: error.message });
+    }
+  `;
+  const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(source)}`), {
+    workerData: {
+      lifecycleModuleUrl: new URL('../bin/lifecycle.mjs', import.meta.url).href,
+      options,
+      gate,
+      holdAfterActiveCheck
+    }
+  });
+  let holdingResolve;
+  let holdingReject;
+  const holding = holdAfterActiveCheck
+    ? new Promise((resolve, reject) => {
+        holdingResolve = resolve;
+        holdingReject = reject;
+      })
+    : null;
+  let settled = false;
+  const result = new Promise((resolve, reject) => {
+    worker.on('message', (message) => {
+      if (message.type === 'holding') holdingResolve?.();
+      if (message.type === 'result') {
+        settled = true;
+        resolve(message);
+      }
+    });
+    worker.once('error', (error) => {
+      holdingReject?.(error);
+      reject(error);
+    });
+    worker.once('exit', (code) => {
+      if (!settled) {
+        const error = new Error(`Lifecycle begin worker exited with code ${code} before returning a result.`);
+        holdingReject?.(error);
+        reject(error);
+      }
+    });
+  });
+  return { holding, result };
 }
 
 function verificationFor(change, resultFingerprint, overrides = {}) {
@@ -626,6 +693,74 @@ test('repair and extension records require classified impact and allow only one 
       acceptance: ['It works']
     }),
     /repair or extension/i
+  );
+});
+
+test('concurrent distinct begins serialize before checking the sole-active invariant', async () => {
+  const { packetDir } = lifecycleFixture();
+  applyVerificationLifecycle({ packetDir, report: passingReport() });
+  const gate = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const first = beginChangeWorker({
+    packetDir,
+    id: 'concurrent-first',
+    kind: 'extension',
+    summary: 'Open the first concurrent change',
+    surfaces: ['editor'],
+    noPublicRoute: true,
+    acceptance: ['Only this change becomes active']
+  }, { gate, holdAfterActiveCheck: true });
+  await first.holding;
+
+  const second = beginChangeWorker({
+    packetDir,
+    id: 'concurrent-second',
+    kind: 'extension',
+    summary: 'Attempt a second concurrent change',
+    surfaces: ['editor'],
+    noPublicRoute: true,
+    acceptance: ['The sole-active invariant is preserved']
+  }, { gate });
+  let secondResult;
+  try {
+    secondResult = await second.result;
+  } finally {
+    const view = new Int32Array(gate);
+    Atomics.store(view, 1, 1);
+    Atomics.notify(view, 1);
+  }
+  const firstResult = await first.result;
+
+  assert.deepEqual(firstResult, { type: 'result', ok: true, id: 'concurrent-first' });
+  assert.equal(secondResult.ok, false);
+  assert.match(secondResult.error, /begin lock remained busy.*retry/i);
+  const status = readLifecycleStatus(packetDir);
+  assert.deepEqual(status.changes.map((change) => [change.id, change.status]), [
+    ['concurrent-first', 'in_progress']
+  ]);
+  assert.equal(existsSync(join(packetDir, 'evidence', 'lifecycle', '.begin-change.lock')), false);
+});
+
+test('begin lock refuses a symlink without touching its target', () => {
+  const { packetDir } = lifecycleFixture();
+  applyVerificationLifecycle({ packetDir, report: passingReport() });
+  const outside = mkdtempSync(join(tmpdir(), 'site-lifecycle-lock-target-'));
+  const target = join(outside, 'sentinel.txt');
+  writeFileSync(target, 'untouched\n');
+  symlinkSync(target, join(packetDir, 'evidence', 'lifecycle', '.begin-change.lock'));
+
+  assert.throws(() => beginChange({
+    packetDir,
+    id: 'unsafe-lock',
+    kind: 'extension',
+    summary: 'Do not follow a lock symlink',
+    surfaces: ['editor'],
+    noPublicRoute: true,
+    acceptance: ['The external target remains untouched']
+  }), /begin lock.*regular non-symlink/i);
+  assert.equal(readFileSync(target, 'utf8'), 'untouched\n');
+  assert.equal(
+    existsSync(join(packetDir, 'evidence', 'lifecycle', 'changes', 'unsafe-lock')),
+    false
   );
 });
 
