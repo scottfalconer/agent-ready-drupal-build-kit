@@ -5,7 +5,10 @@
 - Site:
 - Target:
 - Reviewer:
+- Builder identity:
 - Date:
+
+`Builder identity` names the agent/runtime that produced the build. `Reviewer` is a recorded label, not an authenticated identity. The local verifier reports whether the strings match but does not infer that a different string proves an independent human.
 
 ## Architecture Review
 
@@ -80,6 +83,8 @@ Answer these questions exactly. `gates.json` is the machine-readable gate vocabu
 - [ ] Would a Drupal maintainer put their name on this as a complete local starting point?
 
 ## Binary Verdict
+
+This is the human-facing `G-MAINTAINER-01` record. An authorized maintainer should check one verdict. Because this file is builder-writable, the local verifier reports the choice as self-attested status only; pending or recorded acceptance does not change the machine completion verdict or exit code.
 
 Choose exactly one:
 
@@ -194,6 +199,8 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Unexpected public 200 routes from duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts are removed or explicitly accepted.
 - [ ] Legal, privacy, footer, and menu links resolve anonymously or are explicitly blocked with next actions.
 - [ ] Target-required routes introduced by the Drupal build, including privacy/legal/footer links, sitemap/robots behavior when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links, resolve as intended or are blocked.
+- [ ] Every same-origin link found in server-rendered response HTML resolves and is represented by accepted `routes`/`targetRequiredRoutes`, or has an exact evidence-backed disposition; direct source-origin links and expected external redirects use their exact exception records.
+- [ ] JavaScript-only links were discovered through browser-executed route expansion and represented in the route matrix; the HTTP response-link check is not described as browser-DOM coverage.
 - [ ] Product, article, and legal detail routes render the expected H1/title and load-bearing fields, not only HTTP 200.
 - [ ] Important source-intent routes are preserved, redirected, or explicitly retired.
 - [ ] Drupal readback is unfiltered and includes front-page setting, all nodes including unpublished/default content, aliases including duplicates, menus and menu links, Canvas pages when available, media counts, themes, config sync directory, config status, and unexpected public routes.
@@ -215,4 +222,4 @@ Use this checklist to support the verdict. It is not a second rubric.
 
 ## Boundary
 
-Maintainer review is required before launch review. A positive stake-my-name verdict accepts the local Drupal CMS rebuild as reviewable.
+Maintainer review is required before launch review. A positive stake-my-name record communicates the maintainer view, but the local verifier cannot authenticate it and does not use it to authorize the complete-local-rebuild machine claim.
