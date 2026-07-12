@@ -78,6 +78,14 @@ drupal-project/
       field-output-matrix.json
       launch-checklist.md
       evidence/
+        lifecycle/
+          initial-baseline.json
+          current-state.json
+          changes/
+            change-id/
+              change.json
+              verification.json
+          checkpoints/
         independent-verification/
         blind-adversarial-review/
         next-cycle/
@@ -99,7 +107,7 @@ Before calling the local build successful, the agent must record:
 - the installed Drupal CMS substrate, the post-audit Recipe fit decision, and any applied Recipes;
 - optional Agent Skills used, including repo, selected skill, version or commit SHA, and any conflict with `AGENTS.md`;
 - content inventory and import evidence;
-- a collection ledger row for every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, with source and target counts, Drupal ownership, and non-admin editor add-a-row evidence; counts must match unless a named owner accepts an evidence-backed exclusion, and a private or unreachable item needs evidence of that boundary;
+- a collection ledger row for every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, with source and target counts, Drupal ownership, and non-admin editor add-a-row evidence; counts must match unless a recorded owner label, reason, and evidence disposition an exclusion (local attribution is self-attested), and a private or unreachable item needs evidence of that boundary;
 - design-system capture and target theme evidence;
 - content types, fields, form displays, view displays, Views, menus, aliases, media, taxonomy, workflow, and permissions evidence;
 - route matrix evidence for source-rendered routes, target statuses/H1s, homepage/front-page behavior, redirects, legal/footer links, and unexpected public 200 routes;
@@ -114,14 +122,36 @@ Before calling the local build successful, the agent must record:
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
 - composition evidence showing the target's actual route owner matches the declared owner, or a target-bound accepted deviation names the fallback, rationale, accepter, and evidence;
 - rendered SEO evidence for every primary route, including one usable canonical, a non-empty meta description, and `og:image` where applicable; each `not_applicable` disposition needs reviewed rationale and evidence;
+- environment-portable exported SEO defaults with request/entity/media tokens instead of literal DDEV, localhost, loopback, or any current authoritative DDEV web-origin URL, including a custom FQDN;
 - anonymous public route checks;
+- raw in-browser axe-core evidence with accepted full-default or WCAG-tagged rule scope; every incomplete disposition must use structured evidence bound to the exact URL, rule, target, result, and timestamp, plus keyboard, focus, accessible-name, and applicable form-error checks;
+- anonymous public-form source/model/browser/independent alignment by stable `formKey`; invalid and valid synthetic submissions; and structured, mode-specific outcome and vendor-neutral abuse-protection evidence bound to the same target (the live verifier accepts a local-only exception only for authoritative project web origins, including custom FQDNs but excluding service URLs; local proof does not establish production delivery or privacy compliance);
+- one browser-verified representative detail route whose fields cover required and anonymous-output fields, match a concrete Drupal owner config ID, and have selector-bound computed visibility plus an independent matching check, for every collection with separate public item details;
 - functional checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
 - authenticated non-admin editor add/edit form checks with clean labels, visible load-bearing fields, and create/edit permission proof;
 - a scoped gap list for operator, maintainer, content/business review, legal/privacy, integration, accessibility, performance, security, SEO, and launch evidence;
 - an open decisions handoff that lists only human-owned decisions with current evidence, options, owner role, impact, and affected gate.
 
-The default verifier exits zero only when the detected live DDEV target, packet readiness, Drupal site identity, independent verification, and blind review all authorize completion. It fetches primary and target-required routes, rejects self-consistent `5xx` failures, inspects actual rendered canonical/meta-description/`og:image` output on primary routes, runs a metadata-only Drush census before accepting next-cycle N/A, re-fetches an applicable cleaned next-cycle probe URL and requires its recorded `404` or `410`, and independently requires real Git-tracked YAML in the current config-sync directory. An explicit target must match the detected DDEV origin. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means structurally valid but incomplete; exit `1` means invalid packet or live-target checks. This local verdict is not production or launch approval.
+The default verifier exits zero only when the detected live DDEV target, machine-checkable packet readiness, Drupal site identity, independent verification, and blind review all authorize the complete-local-rebuild machine claim. It runs primary, target-required, browser-representative, accepted full-surface, server-rendered link, source-origin, and redirect-materialization checks through one shared concurrency/request/task/deadline budget; every redirect hop consumes that budget, and exhaustion blocks completion. It preserves query-distinct states while redacting query values in reports, requires discovered same-origin targets to be declared or exactly dispositioned, validates expected external redirects without fetching the external origin, blocks direct source-origin links without exact evidenced acceptance, materializes source path+query mappings through a first-hop `301` or `308` to the exact same-origin target path+query unless a named, evidenced exception is accepted, rejects self-consistent `5xx` failures, checks required rendered canonical/meta-description/`og:image` output, and independently requires real Git-tracked YAML in the current config-sync directory. It runs a metadata-only Drush census before accepting next-cycle N/A; for an applicable recurring editorial model, it also re-fetches the cleaned next-cycle probe URL and requires the recorded `404` or `410` without a redirect. It does not execute JavaScript; browser-only and imported-body routes must be recorded during route expansion. Every discovered route role needs a representative primary route. An explicit target must match one of the current project's authoritative DDEV web origins; configured custom FQDNs qualify, service URLs such as Mailpit do not. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means the packet and live checks are valid but required machine evidence is incomplete; exit `1` means invalid packet or live-target checks. `recordedHumanGateStatus` separately reports builder-writable names and choices as self-attested record status; it does not affect machine completion, verdict, or exit code. Authenticated human approval and production or launch approval remain separate.
+
+## Continue After The Initial Pass
+
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling for that exact initial rebuild state. The initial rebuild remains done when development continues; this is an integrity-checked record, not a claim of cryptographic immutability or tamper-proof storage.
+
+Before later work, inspect the lifecycle:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
+```
+
+`status` reports the last inspected cached state; it does not inspect DDEV. Commands in this section use host `node`; replace the leading `node` with `ddev exec node` when Node is available only inside DDEV. If `currentStateFresh` is false, run the default verifier before `begin`; use `--adopt-current` when that inspection exposes existing drift. The first executable-global-chrome run also needs one refresh while the site still matches its latest verified anchor. Classify the request as a `repair` when it corrects something the initial rebuild should have delivered, or an `extension` when it adds new scope. Run `lifecycle.mjs begin` before editing so the record captures `baseAnchorId` from the latest verified or evidence-recorded anchor. Repeat `--route /path` for every anonymous route expected to change, or explicitly use `--no-public-route` when the change has no anonymous route effect; an omitted route classification is rejected. Implement the change, then run the default full verifier to refresh the exact live-state fingerprint. Exit `2` can be expected while that changed state still lacks lifecycle evidence.
+
+Write a `public-kit.change-verification.1` JSON containing one `acceptanceEvidence` claim for every stable criterion ID returned by `begin`, every generated non-machine semantic check, and project-relative evidence. Copy `baseFingerprint` from the `begin` output and `resultFingerprint` from `.buildState.fingerprint` in the fresh `review-packet/evidence/live-verification.json`. Every concrete affected route must also appear in the packet's primary or target-required route matrix and pass the fresh anonymous fetch. Then run `lifecycle.mjs complete --verification <path>`. Completion performs its own fresh live inspection, derives state/config/route checks, and machine-evaluates applicable global chrome against the latest verified state-bound desktop/mobile anchor. Authored chrome pass booleans are ignored. It snapshots other referenced evidence bytes and records the result as `evidence_recorded`. The authored semantic evidence is integrity-bound to that inspected state, but the kit does not independently evaluate it and this is not a new completion certificate. Detected component or undeclared-route impact can widen the required checks; an agent must not remove or narrow them. If Chrome/Chromium is not found for an applicable check, set `CHROME_PATH` or install it; the check fails closed. The authored input may include `conservative-full-regression` proactively for widening. Use `lifecycle.mjs abandon --reason "..."` instead when the active record will not be completed. After abandonment, refresh with the default verifier and either revert leftover edits or classify them with `--adopt-current` before beginning again.
+
+Only after targeted evidence is recorded may `verify.mjs --change <change-id>` re-evaluate the current packet/live state against the full original verifier gates and bind its report. This path does not synthesize passing semantic checks from the targeted evidence, and it does not itself recreate source crawls, editor runs, or independent/blind reviews. Refresh affected evidence first. Add `--checkpoint <checkpoint-id>` when that passing full result should promote the exact current state to a new checkpoint. Neither operation overwrites the historical initial baseline.
+
+Unclassified changes are not evidence-recorded or fully verified, even though the initial baseline remains passed. The kit does not require a Git commit, Canvas, launch evidence, or a full source/blind-review rerun for every post-baseline change. See the canonical [site lifecycle reference](https://github.com/scottfalconer/agent-ready-drupal-build-kit/blob/main/docs/site-lifecycle.md).
 
 ## Fallback
 

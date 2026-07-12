@@ -74,7 +74,8 @@ Already fluent in Drupal? Use this as a repeatable agent workflow and review har
 - Pages editors can actually maintain: each flexible page declares which Drupal tool owns its composition (Canvas/Experience Builder, Layout Builder, Views, structured content, or a documented exception), proven with a non-admin editor account.
 - Version-controlled config as the source of truth, plus evidence another developer can inspect: route-by-route comparisons, rendered SEO output, browser evidence, and an inventory of any custom code or hardcoded behavior.
 - Independent verification and a blind adversarial review that try to break the build's completion claims before handoff. This catches "the checks pass, but this is not the requested site" failures.
-- A `review-packet/` explaining architecture decisions, remaining gaps, human-only open decisions, and verification evidence. It also proves whether recurring editorial models can advance beyond the current event/season/year without administrator or config work. The default verifier fetches the real DDEV site's primary and target-required routes, rejects non-success responses even when the packet reports the same failure, inspects rendered canonical, meta-description, and `og:image` output, runs a metadata-only Drush census of live temporal/cycle fields and relevant taxonomy/workflow configuration before accepting structured N/A, re-checks cleanup of an applicable future-cycle probe, and independently requires real Git-tracked YAML in the current config-sync directory. Packet-only data and injected test runtimes cannot authorize a completed rebuild.
+- A `review-packet/` explaining architecture decisions, remaining gaps, human-only open decisions, and verification evidence. The default verifier first derives and exactly reconciles the bounded live Drupal surface, then fetches the real DDEV site's primary, target-required, and browser-representative routes under one bounded budget, preserves representative query states, rejects non-success responses even when the packet reports the same failure, inspects required rendered canonical, meta-description, and `og:image` output, runs a metadata-only Drush census of live temporal/cycle fields and relevant taxonomy/workflow configuration before accepting structured N/A, proves whether recurring editorial models can advance beyond the current event/season/year without administrator or config work, re-checks cleanup of an applicable future-cycle probe, and independently requires real Git-tracked YAML in the current config-sync directory. Packet-only data and injected test runtimes cannot authorize a completed rebuild.
+- A create-once, integrity-checked historical baseline under kit tooling after the first successful full verification, including the exact tracked config, portable runtime code, effective Drupal runtime facts, live-derived public editorial entities/revisions (including drafts and unpublished rows in in-scope bundles), managed public-file bytes, stable route semantics, bounded critical same-origin rendered-asset bytes, and packet evidence manifest inspected in that run. Machine-local bindings stay outside intrinsic site identity. The initial rebuild remains done; later changes are reported separately as unclassified, evidence-recorded, or fully verified.
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
@@ -98,7 +99,19 @@ Every run asks:
 
 The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
-This is a complete-local-rebuild bar, not production approval. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+This is a complete-local-rebuild machine bar, not production or human approval. The default verifier can authorize that local machine claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+
+## After The First Verification
+
+Keep the installed kit in the Drupal project. Future agents can use it as a stewardship layer instead of starting the source rebuild again.
+
+- A **repair** corrects something the initial rebuild should already have delivered.
+- An **extension** adds genuinely new scope and is judged against the new request, with regression checks for affected existing surfaces.
+- Change evidence is impact-targeted. A localized content edit should not automatically trigger a full source crawl and blind review; a global theme or page-region change should trigger broader route and site-chrome checks. Detected component impact can widen the required checks, and an agent must not narrow that detected impact.
+- Targeted completion records authored semantic evidence against an exact inspected state. It does not independently evaluate that evidence and is not a new completion certificate.
+- A coherent set of evidence-recorded changes can optionally receive a fresh full checkpoint by re-evaluating the current packet/live state against the original full verifier gates. The verifier validates existing evidence rather than recreating reviews; affected evidence must be refreshed first. Checkpoints never rewrite the historical initial baseline.
+
+If the current Drupal state differs without a classified change whose evidence is bound to that state, the kit reports it as unclassified. It does not retroactively revoke the initial rebuild pass. Lifecycle `status` reports the last inspected cached state; the live verifier and `complete` command perform fresh inspections. See [docs/site-lifecycle.md](docs/site-lifecycle.md) for the lifecycle and commands.
 
 For the full case, see [docs/positioning.md](docs/positioning.md): who this is for, why Drupal CMS, why the kit, and when not to use it.
 
@@ -109,12 +122,15 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `skills/agent-ready-drupal-build-kit/`: the canonical installable Agent Skill, including its in-place initializer, references, templates, gate vocabulary, and verifier.
 - `AGENTS.md.template`: the canonical detailed build contract, packaged in the installed skill as `references/build-contract.md`. The initializer adds only a concise marker-managed project block to `AGENTS.md` that points agents to the detailed contract, preserving sections managed by Drupal CMS, AI Best Practices, and the One Line Installer.
 - `gates.json`: the stable machine-readable gate vocabulary.
-- `bin/verify.mjs`: the default target-local verifier; it checks the detected DDEV site, rendered primary and target-required routes, packet readiness, target origin, Drupal site UUID, front-page setting, config-sync directory, clean config status, and Git-tracked config YAML before authorizing local completion.
+- `bin/lifecycle.mjs`: the status, repair/extension, completed-change, and checkpoint lifecycle interface used after the initial rebuild passes.
+- `bin/global-chrome.mjs`: dependency-free CDP capture and state-bound desktop/mobile global-chrome regression evaluation for applicable later changes.
+- `bin/verify.mjs`: the default target-local verifier; it checks the detected DDEV site, rendered primary, target-required, and browser-representative routes under one bounded request budget, packet readiness, target origin, Drupal site UUID, front-page setting, config-sync directory, clean config status, and Git-tracked config YAML before authorizing local completion.
 - `bin/verify-packet.mjs`: the packet-lint layer used by the target-local verification flow. On its own it checks packet structure; it does not inspect or certify the live Drupal site.
 - `templates/`: packet templates for every required review artifact, from source audit to blind adversarial review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.
 - `docs/output-inventory.md`: the canonical packet and gate vocabulary.
+- `docs/site-lifecycle.md`: the post-baseline repair, extension, targeted-verification, and checkpoint workflow.
 - `docs/`: reference material and rationale.
 
 ## Rights

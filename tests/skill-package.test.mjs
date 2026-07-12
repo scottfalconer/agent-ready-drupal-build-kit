@@ -352,6 +352,16 @@ test('initializer runs from a copy containing only the installed skill directory
     assert.doesNotMatch(help.stdout, /node bin\/verify/);
   }
 
+  const lifecyclePath = join(installedSkill, 'scripts', 'lifecycle.mjs');
+  assert.equal(existsSync(lifecyclePath), true);
+  assert.notEqual(statSync(lifecyclePath).mode & 0o111, 0, 'lifecycle.mjs should be executable');
+  const lifecycleHelp = spawnSync(process.execPath, [lifecyclePath, '--help'], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.equal(lifecycleHelp.status, 0, lifecycleHelp.stderr);
+  assert.match(lifecycleHelp.stdout, /lifecycle\.mjs/);
+
   const packetOnly = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
     '--packet',
@@ -374,7 +384,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(28 files\)/);
+  assert.match(result.stdout, /is in sync \(33 files\)/);
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -411,7 +421,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(28 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(33 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

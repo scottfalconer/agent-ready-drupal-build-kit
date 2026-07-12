@@ -51,6 +51,35 @@ test('each required review packet file has a matching template', () => {
   assert.deepEqual(missing, []);
 });
 
+test('post-baseline impact profiles reference one canonical check catalog and known state components', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const knownComponents = new Set([
+    'targetIdentity',
+    'configTree',
+    'runtimeCodeTree',
+    'runtimeFacts',
+    'entityInventory',
+    'routeManifest'
+  ]);
+
+  assert.ok(gates.changeChecks && typeof gates.changeChecks === 'object');
+  assert.ok(gates.changeImpactProfiles && typeof gates.changeImpactProfiles === 'object');
+  for (const [profileId, profile] of Object.entries(gates.changeImpactProfiles)) {
+    assert.ok(Array.isArray(profile.checks), `${profileId} must declare checks`);
+    assert.ok(Array.isArray(profile.components), `${profileId} must declare state components`);
+    for (const checkId of profile.checks) {
+      assert.equal(typeof gates.changeChecks[checkId], 'string', `${profileId} references unknown check ${checkId}`);
+      assert.notEqual(gates.changeChecks[checkId].trim(), '', `${checkId} must have a description`);
+    }
+    for (const component of profile.components) {
+      assert.equal(knownComponents.has(component), true, `${profileId} references unknown component ${component}`);
+    }
+  }
+  for (const requiredProfile of ['universal', 'repair', 'extension', 'unknown']) {
+    assert.ok(gates.changeImpactProfiles[requiredProfile], `${requiredProfile} impact profile is required`);
+  }
+});
+
 test('template directory contains only packet templates named by gates.json', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
   const requiredFiles = new Set(gates.reviewPacketFiles);
@@ -129,10 +158,30 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.notEqual(path, 'skills-lock.json');
     assert.doesNotMatch(path, /\.tgz$/);
   }
-  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs']) {
+  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs', 'bin/lifecycle.mjs']) {
     assert.equal(files.has(path), true, `${path} missing from npm package`);
     assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
   }
+});
+
+test('PACKAGE-MANIFEST.json includedPaths matches the npm pack surface exactly', () => {
+  const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: repoRoot,
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const [pack] = JSON.parse(result.stdout);
+  const packedTopLevelPaths = [...new Set(
+    pack.files.map((file) => (file.path.includes('/') ? `${file.path.split('/')[0]}/` : file.path))
+  )].sort();
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'PACKAGE-MANIFEST.json'), 'utf8'));
+
+  assert.deepEqual(
+    [...manifest.includedPaths].sort(),
+    packedTopLevelPaths,
+    'PACKAGE-MANIFEST.json includedPaths drifted from npm pack --dry-run --json; update the manifest to match the shipped surface'
+  );
 });
 
 test('public repository surface includes conventional license, CI, and contribution metadata', () => {
@@ -172,6 +221,56 @@ test('README leads with the same concise bootstrap prompt as USAGE', () => {
   assert.ok(readme.indexOf('```text') < readme.indexOf('bash <('), 'copy-paste prompt should precede manual setup');
   assert.match(start, /on macOS, Docker Desktop or OrbStack installed and running/);
   assert.doesNotMatch(start, /supplies the rest: Docker/);
+});
+
+test('cookbook stays executable, Drush 13 compatible, and referenced from skill surfaces', () => {
+  const cookbook = readFileSync(join(repoRoot, 'docs', 'cookbook.md'), 'utf8');
+  const skill = readFileSync(join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'), 'utf8');
+  const playbook = readFileSync(join(repoRoot, 'docs', 'build-playbook.md'), 'utf8');
+  const gapList = readFileSync(join(templatesDir, 'scoped-gap-list.template.md'), 'utf8');
+
+  assert.match(skill, /references\/cookbook\.md/);
+  assert.match(playbook, /references\/cookbook\.md/);
+
+  for (const move of [
+    /role:create/,
+    /role:perm:add/,
+    /user:create/,
+    /uli --name=/,
+    /user:information/,
+    /'format' => 'basic_html'/,
+    /pathauto\.pattern\./,
+    /system_messages_block/,
+    /local_tasks_block/,
+    /title_prefix/,
+    /CacheableResponse/,
+    /\['#cache'\]\['contexts'\]\[\]\s*=\s*'route'/,
+    /results_lifespan/,
+    /node_preview/,
+    /metatag_views/,
+    /system\.menu\./
+  ]) {
+    assert.match(cookbook, move);
+  }
+
+  assert.doesNotMatch(cookbook, /drush (?:role-create|role-add-perm|user-create|user-add-role|pm-enable)\b/);
+  assert.doesNotMatch(cookbook, /role:perm:add[^\n]*full_html/);
+  assert.doesNotMatch(cookbook, /'format' => 'full_html'/);
+  assert.doesNotMatch(cookbook, /user_load_by_name\s*\(/);
+  assert.doesNotMatch(cookbook, /ddev composer require[^\n]*(?:\s-W\b|--with-all-dependencies)/);
+  assert.doesNotMatch(cookbook, /str_starts_with\(\\Drupal::service\('path\.current'\)/);
+  assert.match(cookbook, /get the human owner's approval before running `composer require`/);
+  assert.match(cookbook, /<TARGET_COMPATIBLE_CONSTRAINT>/);
+  assert.doesNotMatch(cookbook, /\/Users\/|\/home\/[a-z]/i);
+
+  for (const stance of [
+    'Multilingual stance',
+    'Caching and performance budget stance',
+    'Update strategy stance',
+    '404-page quality stance'
+  ]) {
+    assert.match(gapList, new RegExp(stance));
+  }
 });
 
 test('post-install assembly uses bounded Recipes and the available core runner', () => {

@@ -19,7 +19,7 @@ Human-only decisions belong in `open-decisions.md`. Do not use this gap list or 
 
 | ID | Gate | Owner role | Current evidence | Blocked reason | Next action | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| GAP-001 | Independent operator run | Operator | UNKNOWN | Non-builder operator evidence missing | Record independent operator run | blocked |
+| GAP-001 | Independent operator run | Operator | UNKNOWN | Human-facing operator status not recorded; this does not block the local machine claim | Record operator status in the separate human workflow | human-status-pending |
 | GAP-002 | Production-equivalent Drupal target | Operator | UNKNOWN | Local DDEV is not production target evidence | Submit production target record | blocked |
 | GAP-003 | Full route inventory or accepted route boundary | Builder/SEO | UNKNOWN | Source-intent aliases and redirects not reviewed | Complete route inventory and route boundary | blocked |
 | GAP-004 | Content parity | Builder/Editor | UNKNOWN | Public source content not fully imported or recreated as Drupal content | Complete content inventory and import/recreation evidence | blocked |
@@ -35,8 +35,12 @@ Human-only decisions belong in `open-decisions.md`. Do not use this gap list or 
 | GAP-014 | Security and privacy | Security/Legal | UNKNOWN | Security/privacy/legal review missing | Complete security/privacy/legal packet | blocked |
 | GAP-015 | Editorial handoff | Editor/Owner | UNKNOWN | Editor workflow and role acceptance missing | Review editor forms, roles, workflow, and acceptance | blocked |
 | GAP-016 | Durable intent validation | Maintainer | UNKNOWN | Intent hashes/status not validated against exported config | Validate durable intent or treat it as absent | blocked |
-| GAP-017 | Maintainer signoff | Drupal maintainer | UNKNOWN | Binary stake-my-name verdict missing | Review architecture and packet | blocked |
+| GAP-017 | Maintainer signoff | Drupal maintainer | UNKNOWN | Human-facing stake-my-name status not recorded; this does not block the local machine claim | Review architecture and record status separately | human-status-pending |
 | GAP-018 | Final QA | Owner/QA/Maintainer | UNKNOWN | Launch evidence and final QA missing | Complete final QA after hard gates clear | blocked |
+| GAP-019 | Multilingual stance | Builder/Owner | UNKNOWN | No recorded in-scope/out-of-scope multilingual disposition | Record multilingual stance with rationale | blocked |
+| GAP-020 | Caching and performance budget stance | Builder/Maintainer | UNKNOWN | No recorded page-cache/max-age budget disposition | Record caching budget stance with rationale | blocked |
+| GAP-021 | Update strategy stance | Operator/Maintainer | UNKNOWN | No recorded core/contrib update-path disposition | Record update strategy stance with rationale | blocked |
+| GAP-022 | 404-page quality stance | Builder/Editor | UNKNOWN | Default 404 not reviewed for search and top-task links | Record 404-page stance with rationale | blocked |
 
 ## Build-Architecture Gaps
 

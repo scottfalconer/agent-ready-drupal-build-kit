@@ -110,10 +110,12 @@ Run the build as a state machine. Do not skip phases.
 
 - Audit representative public source URLs and expand route coverage enough to understand the public site.
 - Build a content inventory for public pages, listings, details, media, taxonomies/categories, forms, embeds, and navigation.
-- Build a browser-rendered route manifest for the source. Include the homepage, rendered links, menu/footer/legal links, canonical aliases, redirects, status codes, titles/H1s, and key body evidence. JavaScript bundle data is useful evidence, but browser-rendered source truth wins when bundle data and rendered output disagree.
-- Browser-first route expansion is mandatory for JavaScript, static-bundle, smart-link, SPA, or app-like sources. Probe likely public slugs found in rendered links, source bundle route data, metadata, sitemap/robots hints, click targets, asset names, canonical tags, social metadata, and observed naming patterns. A curl response alone cannot close the route inventory when browser evidence, bundles, or assets imply more public routes.
+- Build a browser-rendered route manifest for the source. Include the homepage, links present in the browser-executed DOM, menu/footer/legal links, canonical aliases, redirects, status codes, titles/H1s, and key body evidence. JavaScript bundle data is useful evidence, but browser-rendered source truth wins when bundle data and browser output disagree.
+- Browser-first route expansion is mandatory for JavaScript, static-bundle, smart-link, SPA, or app-like sources. Probe likely public slugs found in the browser-executed DOM, source bundle route data, metadata, sitemap/robots hints, click targets, asset names, canonical tags, social metadata, imported content bodies, and observed naming patterns. Record imported-body candidates under `candidateRoutesFromImportedContentBodies`. A curl response alone cannot close the route inventory when browser evidence, bundles, assets, or imported content imply more public routes.
 - Classify every browser-rendered source 200 route before import as canonical, duplicate/alias, legacy, test/staging, private boundary, or unknown. Give each route a target disposition: keep, redirect, unpublished import, intentionally drop, owner decision required, or blocked. Test/staging routes must not silently ship as normal published content or silently disappear.
 - Mark primary routes separately from representative routes. The source homepage `/` is always a primary route unless the browser-rendered source immediately redirects elsewhere. Capture it after JavaScript/rendering, not only from a curl HTML shell or app bundle.
+- Classify every accepted route by its reusable role (`homepage`, `landing`, `listing`, `detail`, `taxonomy`, `search`, `form`, `legal`, `media`, or `other`). Put at least one route of every discovered role in `primaryRoutes`; a polished listing does not substitute for reviewing a representative detail page.
+- Treat links from the rebuild back to `sourceBaseUrl` as unresolved migration leaks by default. An intentional retained dependency needs an exact `sourceOriginLinkExceptions` referrer/target pair with rationale, named accepter, and packet-local evidence; a broad source-domain allowance is not acceptable.
 - Capture the source design system: palette, typography, spacing, layout, components, responsive behavior, and high-value interaction patterns.
 - Capture first-fold and brand-defining assets for primary routes: hero artwork, logo/lockup, campaign graphics, venue/map imagery, primary CTA treatment, sponsor/video imagery, and other signature graphics. Reachable brand-defining assets must be used, replaced with an explicit rationale, or item-blocked.
 - Capture source functionality: search, listings, filters, pagination, forms, video/media behavior, account/private boundaries, redirects, canonical URLs, and provider integrations.
@@ -130,7 +132,8 @@ Complete this gate before theme polish, Canvas composition, or bulk import. A Dr
 - Do not model repeatable source objects as generic Page or Utility Page nodes, body markup, JSON blobs, Canvas-only copies, Twig arrays, or import-script data. Generic pages are acceptable only for genuinely simple standalone informational pages, and the packet must name that exception.
 - A list, grid, schedule, directory, archive, catalog, feed, or search result implies a structured content type plus a View unless the packet records a stronger Drupal-native owner such as an existing entity display or Search API-backed view.
 - For every list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route, produce a collection ownership ledger entry: source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and non-admin editor add-a-row evidence. Every declared ledger row must contain all three kinds of proof: reconciled counts, real Drupal ownership, and a successful editor add-a-row task. Body markup, a one-off blob field, or static cards are failed collection owners unless the packet records a genuine one-off exception. Detail pages, individual node routes, or sample items do not satisfy the collection-route gate; a source listing/archive route needs its own View, redirect, intentional-drop disposition, or documented owner decision.
-- For every route with repeated load-bearing items, reconcile source versus target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar items. Counts must be equal unless a named owner accepts a specific evidence-backed exclusion. An item classified as private or unreachable needs evidence of that boundary; the label alone is not a disposition. A matching route status and H1 do not prove route completeness.
+- Declare whether each collection has a separate public detail route, renders items only inside the collection, hands details to an external provider, or has no detail. A separate public detail route needs one representative source/target pair. Its detail fields must cover the collection's `requiredFields` plus every field that `field-output-matrix.json` says affects anonymous output at that detail route. Bind the declared Drupal owner to a concrete config ID, reuse that ID in browser and independent verification, and prove each field with a route-local selector and computed visibility. HTTP 200, an H1, or body-wide text matching is not detail-route proof.
+- For every route with repeated load-bearing items, reconcile source versus target counts for videos, cards, events, gallery images, sponsors, posts/articles, downloads/documents, form fields, products, people, locations, and similar items. Counts must be equal unless a recorded owner label, reason, and evidence disposition a specific exclusion. Local packet attribution is self-attested; authenticated approval is separate. An item classified as private or unreachable needs evidence of that boundary; the label alone is not a disposition. A matching route status and H1 do not prove route completeness.
 - For each recurring object, define typed fields, taxonomy vocabularies, entity references, media references, dates, links, booleans, numeric values, text fields, view modes, form displays, and editor workflow before importing content.
 - Store facts as fields. Dates, venues, categories, speakers, prices, statuses, audiences, CTAs, provider URLs, external IDs, descriptions, images, alt text, legal labels, and relationship data do not belong only in the body field.
 - Canvas composes experiences; it does not replace the canonical data model for repeatable content. Use Canvas when composition itself is the editor-owned surface, and bind or place Drupal-owned structured content inside it where the page needs reusable data.
@@ -151,7 +154,7 @@ Complete this gate before creating Canvas pages, Layout Builder layouts, route-s
 - Use the hybrid rule: even on Canvas-owned pages, repeatable collections stay Drupal-owned. Sponsors, videos, cards, events, articles, people, products, locations, resources, galleries, and similar repeated items should come from entities, media references, entity references, Views, slots, or child components backed by Drupal data, not serialized text.
 - For each declared flexible route, write `compositionModel` evidence in `review-packet/pattern-map.json`: route, page type, selected owner, rationale, sections, editor-facing section name, section owner, singleton/repeatable classification, data source, expected editor action, and acceptance proof.
 - For Canvas-owned routes, declare the component model before building: component list, slots, props, prop types, which props are plain text, which props are media/entity/View references, how repeatable items are handled, and anti-patterns rejected.
-- If implementation cannot match the declared model, do not silently degrade to a fake pass. The actual target owner must match the declared owner unless a target-bound deviation record names the blocked owner/model, actual fallback owner, reason, reviewer-visible consequence, named accepter, and live evidence.
+- If implementation cannot match the declared model, do not silently degrade to a fake pass. The actual target owner must match the declared owner unless a target-bound deviation record names the blocked owner/model, actual fallback owner, reason, reviewer-visible consequence, recorded accepter label, and live evidence. The local packet does not authenticate that accepter.
 - A flexible page passes only when a non-admin editor can change a meaningful representative section through the declared owner and the anonymous public route changes without code.
 
 Record this gate in `review-packet/pattern-map.json`, `review-packet/browser-evidence.json`, `review-packet/independent-verification.json`, and maintainer review. If this gate fails, return to the review loop before declaring visual or editor parity.
@@ -213,9 +216,9 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 
 ### Phase 5: Stake-My-Name Self-Eval
 
-- Complete `review-packet/maintainer-review.md`.
-- Answer the canonical signoff verdict.
+- Fill the evidence, checklist, and rationale sections of `review-packet/maintainer-review.md`, including the builder identity, and answer the canonical signoff questions as self-eval.
 - If any answer is no, say the result is useful but not something to stand behind yet.
+- Leave the binary stake-my-name acceptance pending unless an authorized person records it. Gates marked `checkedBy: human` in `gates.json` (operator run, production target, launch checklist, maintainer review) are a separate human-facing status plane. Their Markdown fields are builder-writable, so the local verifier reports typed names, string comparisons, and choices as self-attested records only. It never treats a different name as proof of a person or uses these records to determine machine completion, verdict, or exit code. `G-HANDOFF-01` is instead a `verify-script` check that decisions declared human-only are presented consistently; it does not prove that classification or approve those decisions.
 
 ### Phase 6: Independent Verification
 
@@ -278,9 +281,9 @@ The reviewer's job is to falsify completion against the brief and source-of-trut
 - editor/admin maintainability when the brief requires a CMS/editor experience;
 - accessibility, SEO, console errors, and obvious usability defects.
 
-Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. The review must include desktop and mobile route notes. If a fresh blind reviewer/context is unavailable, record degraded independence honestly and leave the verdict and completion state blocked; the final verifier will not authorize completion. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. A defect may be `accepted_out_of_scope` only when it records a named accepter, specific reason, and evidence. An `external_blocker` always leaves completion blocked.
+Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. The review must include desktop and mobile route notes. If a fresh blind reviewer/context is unavailable, record degraded independence honestly and leave the verdict and completion state blocked; the final verifier will not authorize completion. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. A defect may be `accepted_out_of_scope` only when it records an accepter label, specific reason, and evidence. That label is self-attested packet attribution, not authenticated approval. An `external_blocker` always leaves completion blocked.
 
-The blind review claim set comes from the brief, source-truth materials, target, and restricted route list, not the builder's preferences. A complete claim must cover every primary route in that restricted route list at desktop and mobile widths. `routeCoverage.omittedPrimaryRoutes` records why coverage is missing; it does not count as coverage. A named, reasoned, evidence-backed `accepted_out_of_scope` entry may remove a route from the agreed scope, while an `external_blocker` leaves the verdict blocked. Each route review must use distinct, credible source and target captures for that viewport; every applicable route check must pass or be explicitly not applicable. Screenshot references must point at real files under `review-packet/evidence/blind-adversarial-review/` or another packet-local evidence path. Every product defect must have a valid severity and status; missing status is treated as open. A fixed defect must name the `reviewPasses` entry that confirmed the fix, so the artifact distinguishes rerun review from a builder-edited status.
+The blind review claim set comes from the brief, source-truth materials, target, and restricted route list, not the builder's preferences. A complete claim must cover every primary route in that restricted route list at desktop and mobile widths. `routeCoverage.omittedPrimaryRoutes` records why coverage is missing; it does not count as coverage. A recorded-attribution, reasoned, evidence-backed `accepted_out_of_scope` entry may remove a route from the machine-evaluated scope; authenticated human approval remains separate. An `external_blocker` leaves the verdict blocked. Each route review must use distinct, credible source and target captures for that viewport; every applicable route check must pass or be explicitly not applicable. Screenshot references must point at real files under `review-packet/evidence/blind-adversarial-review/` or another packet-local evidence path. Every product defect must have a valid severity and status; missing status is treated as open. A fixed defect must name the `reviewPasses` entry that confirmed the fix, so the artifact distinguishes rerun review from a builder-edited status.
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
@@ -290,17 +293,70 @@ After independent verification, run the installed skill's default target-local v
 node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
 ```
 
-This command binds the packet to the identified live target and the current DDEV runtime by target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status. It independently requires real Git-tracked YAML in that current sync directory; fetches all primary and target-required routes; rejects non-success responses even when the packet reports the same `5xx`; and inspects each fetched primary route's actual rendered canonical, meta description, and `og:image` against browser evidence. It then writes `review-packet/evidence/live-verification.json`. It exits zero only when all required Drupal readback, authenticated editor/browser, independent-verification, and blind-review evidence authorizes local completion. Packet-only values and injected test runtimes cannot grant that authority. Exit `2` means the packet/live checks are valid but completion is still blocked; exit `1` means packet or live-target validation failed.
+This command binds the packet to the identified live target and the current DDEV runtime by target origin, Drupal site UUID, front-page setting, config-sync directory, and clean config status. It independently requires real Git-tracked YAML in that current sync directory; derives a bounded metadata-only census of bundles/public roots, Views/displays, aliases, menus/links, redirects, Canvas pages/templates/components, sitemap surfaces, and custom extensions/routes; and requires `drupal-readback.json.liveSurfaceReconciliation` to disposition every live key exactly once as a specific packet declaration or named evidence-backed exclusion. Live-only and stale packet-only items fail. Non-public bundle/View/menu records require exclusions, while public-root bundles continue to fingerprint drafts and unpublished rows. One verifier-wide HTTP context bounds primary, target-required, browser-representative, accepted full-surface, server-rendered link, source-origin, and redirect-materialization work under shared concurrency, request, task, and deadline limits; every redirect hop consumes the same request budget, and exhaustion blocks completion. The verifier preserves query-distinct route states while redacting query values from its report; status-checks non-HTML files without buffering them as HTML evidence; requires same-origin rendered links to be declared or exactly dispositioned; validates expected external redirects without fetching the external origin; blocks direct source-origin links unless the exact pair has an accepted, evidenced exception; rejects non-success responses even when the packet reports the same `5xx`; materializes legacy source path+query mappings as a first-hop `301` or `308` to the exact same-origin target path+query unless a named, evidenced `noRedirectDisposition` is accepted; and checks required rendered canonical, meta-description, and `og:image` output against browser evidence. This HTTP verifier does not execute JavaScript. Links created only after JavaScript runs must be discovered through browser-first route expansion and represented in `route-matrix.json`. It then writes `review-packet/evidence/live-verification.json`. It exits zero only when all required Drupal readback, authenticated editor/browser, independent-verification, and blind-review evidence authorizes the complete-local-rebuild machine claim. Packet-only values and injected test runtimes cannot grant that authority. Exit `2` means the packet and live checks are valid but required machine evidence is incomplete; exit `1` means packet or live-target validation failed. Human-gate and independence declarations in the packet are builder-writable and reported as self-attested, not proven; recorded human status is separate and does not alter these exits.
 
 Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
-Completion packet readiness is semantic, not a file-presence check. Source audit, pattern map, field-output matrix, parity, browser/editor evidence, Drupal readback, operator run, recipe decision, scoped gaps, open decisions, off-road inventory, durable intent, and maintainer verdict must contain run-specific accepted evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Launch checklist and production-target records remain required handoff boundaries, but they do not by themselves authorize or block the narrower complete-local-rebuild claim.
+Completion packet readiness is semantic, not a file-presence check. Machine-authoritative source audit, pattern map, field-output matrix, parity, browser/editor evidence, Drupal readback, recipe decision, scoped gaps, open decisions, off-road inventory, and durable intent must contain run-specific evidence. Referenced browser and blind-review screenshots must be real packet-local images; blind source/target captures must be distinct and match desktop/mobile dimensions. Operator, maintainer, launch, and production-target records remain required human-facing boundaries, but their pending or recorded choices are self-attested status and do not authorize or block the narrower complete-local-rebuild machine claim.
 
 For explicit structural lint only, run `node [KIT_LOCAL_PATH]/scripts/verify-packet.mjs --packet review-packet` or add `--packet-only` to the default verifier. Packet-only success can never authorize a complete rebuild claim.
 
-The default verifier fetches only the detected DDEV target. An explicit `--target-url` must match the current DDEV origin. Redirects are never followed across origins.
+The default verifier fetches only the detected DDEV project. An explicit `--target-url` must match one of the current project's authoritative web origins reported by DDEV, including configured custom FQDNs but excluding service URLs such as Mailpit. Redirects are never followed across origins.
 
 This verdict covers the complete local rebuild only. Production deployment, hardening, credentials, legal/privacy acceptance, rollback, and launch approval remain separate gates.
+
+## Site Lifecycle After The Initial Pass
+
+The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling in `review-packet/evidence/lifecycle/`. It records the exact Drupal state inspected for the initial complete-local-rebuild claim. The initial rebuild remains done. Do not overwrite that record or reinterpret later changes as proof that the original milestone did not pass. The adjacent integrity certificate detects unsupported edits under kit tooling; it is not cryptographic immutability or tamper-proof storage.
+
+After a baseline exists, answer two questions separately:
+
+1. Did the initial rebuild pass? A strongly bound initial baseline remains `passed`.
+2. What is known about the latest inspected derived state? It may match the historical baseline, match a later fully verified checkpoint, match an evidence-recorded change, contain an active change, or contain unclassified changes.
+
+Before post-baseline work, inspect lifecycle state. `status` reports the last inspected cached state; it does not inspect the live Drupal runtime. Commands below use host `node`; use `ddev exec node` instead when Node is available only inside DDEV:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/lifecycle.mjs status --packet review-packet
+```
+
+If `currentStateFresh` is false, run the default verifier before `begin`. Exit `2` may identify already-existing drift; classify that state explicitly with `--adopt-current`.
+
+Classify one coherent active change before implementation:
+
+- `repair`: corrects an omission, defect, or regression against the original rebuild contract. Reference the applicable source, route, baseline claim, or gate in its acceptance criteria.
+- `extension`: adds scope that the original source rebuild did not require. Use the human's new acceptance criteria, then regression-test affected baseline surfaces.
+
+Create the record before editing with `lifecycle.mjs begin --id <change-id> --kind repair|extension --summary "..." --acceptance "..." --route </affected-path>`. It records `baseAnchorId` from the latest fully verified or evidence-recorded anchor. Do not use the change kind as a substitute for impact analysis. Record affected content, content model, composition, global presentation, routing/navigation, access/workflow, code/dependencies, integrations, every anonymous route expected to change, and editor workflows as applicable. Use explicit `--no-public-route` only when the change intentionally has no anonymous route effect; omission of both choices is rejected. If changes already exist, use `--adopt-current` explicitly; adopted work always adds conservative `unknown` impact. If the active change will not be completed, close it with `lifecycle.mjs abandon --id <change-id> --reason "..."` rather than deleting or rewriting its record.
+
+Canvas/PageRegion, global theme, block placement, shared entity display, menu, navigation, and detected custom-theme or public menu-link impact automatically require the machine-evaluated `global-chrome-regression` check. The live verifier uses Chrome/Chromium through CDP to capture every primary route at desktop and mobile widths within a fixed 64-route ceiling and one 120-second aggregate capture deadline, binds the capture and budget metrics to the exact Drupal state fingerprint, and compares brand, header, navigation, footer, meaningful hrefs, mobile-menu activation, and material layout/page-height signals to the latest verified anchor. Dynamic-region selectors come from that anchor and may not intersect global chrome. Authored screenshots or pass booleans cannot clear this check. If no Chrome/Chromium runtime is available or the bounded capture cannot complete, applicable work remains blocked; set `CHROME_PATH` or install Chrome/Chromium when the browser is missing.
+
+Verification after the baseline is impact-targeted:
+
+- always bind evidence to the current Drupal identity and exact resulting state;
+- prove the declared acceptance criteria and affected anonymous routes;
+- rerun editor, field-output, config, composition, accessibility, SEO, security, or code checks when the change can affect them;
+- check primary-route header, navigation, footer, branding, and responsive behavior after global theme, block, display, or page-region changes;
+- widen the required checks when detected component impact exceeds the declared surfaces; never remove or narrow checks selected by detected impact;
+- leave the current state unclassified when detected changes are not covered by the active record.
+
+After implementation, run the default full verifier once to refresh the exact current live-state fingerprint:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
+```
+
+Exit `2` can be expected while the changed state awaits lifecycle evidence. Every concrete affected route must be present in the packet's primary or target-required route matrix and pass the fresh anonymous fetch. Write a separate `public-kit.change-verification.1` JSON containing a passing evidence claim for every stable acceptance-criterion ID and every generated non-machine check. Copy `baseFingerprint` from `begin` and `resultFingerprint` from `.buildState.fingerprint` in the fresh live-verification report; the input may include `conservative-full-regression` proactively if derived impact widens. Then run `lifecycle.mjs complete --packet review-packet --id <change-id> --verification <path>`. `complete` performs its own fresh live inspection, derives the machine checks, snapshots referenced evidence bytes, and records the result as `evidence_recorded`. The authored semantic evidence is integrity-bound to the base and exact resulting fingerprints, but the kit does not independently evaluate it. It is not a new completion certificate. After abandonment, run the default verifier again and either revert leftover edits or classify them with `--adopt-current` before beginning another change.
+
+Only after targeted evidence is recorded may `verify.mjs --packet review-packet --change <change-id>` run the conservative path. It re-evaluates the current packet/live state against the full original verifier gates and binds that report without synthesizing passing semantic checks from targeted evidence. It validates existing source, editor, independent, and blind-review artifacts rather than recreating them, so refresh any artifact whose claim can be affected before running it.
+
+A full source crawl, full blind adversarial review, and every original editor task are not mandatory for every localized change. Rerun the evidence whose claims can be affected, or run a fresh full checkpoint when renewed whole-site confidence is warranted:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet --change <change-id> --checkpoint <checkpoint-id>
+```
+
+A checkpoint is optional and never replaces the historical initial baseline. Do not require a Git commit as the definition of state, Canvas when the site does not use it, or production/launch gates for ordinary local extension work. Read `[KIT_LOCAL_PATH]/references/site-lifecycle.md` for the detailed lifecycle model.
 
 ## Required Review Loop
 
@@ -314,7 +370,7 @@ Each loop must:
 2. Verify the slice with the strongest available evidence: command success, Drupal readback, anonymous public route checks, browser-rendered public checks, and authenticated editor form checks where relevant.
 3. Self-review against the review bar: Drupal CMS primitives, content/media completeness, visual design, public behavior, editor experience, durable intent, and scoped gaps.
 4. Fix the highest-impact gaps before moving to lower-value polish.
-5. Update `review-packet/` with new evidence, decisions, and blockers.
+5. Update `review-packet/` with new evidence, decisions, and blockers. Commit each coherent slice — code plus exported config — with a descriptive message; the verifier rejects an active sync directory whose YAML does not exactly match `HEAD`.
 6. Before final handoff, run the independent verification pass. Fix agent-resolvable failures; record genuine external blockers and leave completion blocked.
 7. Run the blind adversarial review pass. Fix agent-resolvable failures; an external blocker does not count as route coverage and leaves completion blocked.
 8. Run the installed skill's default live verifier. Fix failures or hand back a blocked result. Packet-only lint is diagnostic and cannot close the rebuild.
@@ -325,7 +381,7 @@ Stop only when the local Drupal CMS site has reviewable content, media, visual d
 
 Claims about what a visitor sees or what an editor can do require browser evidence. The tool is not prescribed. The evidence is prescribed.
 
-Use any available real browser method: an automated browser runner, browser DevTools protocol, Selenium-style driver, local browser with screenshots, or another tool that renders CSS, JavaScript, fonts, media, redirects, and authenticated Drupal pages as a user would see them. Do not prescribe one tool. Do record the tool or method used.
+Use any available real browser method: an automated browser runner, browser DevTools protocol, Selenium-style driver, local browser with screenshots, or another tool that renders CSS, JavaScript, fonts, media, redirects, and authenticated Drupal pages as a user would see them. Do not prescribe one tool. Do record the tool or method used, and label the visual comparison honestly: agent-performed structural comparison is `agent_review`; `human_review` requires a reviewer label in the record, which the local verifier reports as self-attested rather than authenticated.
 
 Do not claim visual parity, functional parity, homepage parity, source-like behavior, or editor experience from curl, HTTP status, Drush, config export, Drupal readback, DOM snapshots without rendered layout, target-only screenshots, or prose review alone.
 
@@ -351,7 +407,7 @@ If browser evidence is missing or failing, return to the review loop. A target t
 
 ## Completion Contract
 
-The final handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required.
+The initial-rebuild handoff must be binary: complete local rebuild or blocked. A partial local site is worse than no handoff because it hides the work still required. After that milestone passes, later lifecycle reporting must preserve the initial result and separately report whether the last inspected cached state is unchanged, under repair or extension, evidence-recorded, fully verified by a later original-gate run, or unclassified.
 
 The following are not acceptable final states:
 
@@ -377,7 +433,7 @@ Valid blockers are external or environmental: source routes are unreachable, con
 Before final handoff, answer this completion gate:
 
 - Public content inventory reconciled: every reachable source item is imported/recreated or item-blocked.
-- Per-route item reconciliation complete: repeated items on each load-bearing route match source counts, or a named owner has accepted a specific evidence-backed exclusion.
+- Per-route item reconciliation complete: repeated items on each load-bearing route match source counts, or a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested.
 - Collection ownership ledger complete: every declared row includes source/target count reconciliation, Drupal content/entity plus View/collection ownership, and non-admin editor add-a-row evidence.
 - Public media inventory reconciled: every reachable asset is managed in Drupal Media or item-blocked.
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
@@ -547,6 +603,7 @@ Inside a DDEV agent shell, run the equivalent from the Drupal webroot: `cd web &
 - Preserve or explicitly disposition important source-intent aliases and redirects.
 - Apply a maintained Drupal CMS SEO recipe for public rebuilds when available, or record why it is blocked/not applicable. Map its tokens to fields the model actually has; stock tokens pointing at missing fields silently emit empty metadata.
 - Verify rendered SEO output, not only module/config presence. For one published node per public content type, fetch the anonymous page and assert a non-empty `<meta name="description">`; assert a non-empty `og:image` when the source/content type has a meaningful image. An enabled module is not evidence.
+- Keep exported SEO configuration environment-portable. Metatag and schema defaults should use request-aware Drupal tokens, entity/media tokens, or intentionally external asset URLs. Do not export literal DDEV, localhost, loopback, or any current authoritative DDEV web-origin URL, including a custom FQDN, merely to make local rendered checks pass.
 - Include meta title, meta description, SEO image, Open Graph/social fields, logical heading structure, and schema-supporting fields where discovery matters.
 - Use taxonomy landing pages and internal related-content links when they match the source architecture.
 - Define public search behavior, search permissions, indexing assumptions, noindex cases, and blocked production-search gaps.
@@ -568,6 +625,16 @@ Before handoff:
 - dashboard or admin listing affordances exist for editors to find and maintain content.
 
 Public visual plausibility is not enough. A polished static-looking page with no credible Drupal editing path is a failed Drupal CMS rebuild. A tidy Drupal architecture that does not visually and functionally resemble the source is also incomplete.
+
+## Anonymous Public Forms
+
+For every anonymous submission form observed on the source, assign a stable `formKey` that identifies that form rather than only its route, then reuse it exactly in `source-audit.json`, `pattern-map.json`, `browser-evidence.json`, and `independent-verification.json`. Record purpose, Drupal/provider owner, and intended outcome. Preserve that purpose and outcome through the pattern map and browser check, and bind the browser result to the modeled owner; do not downgrade message delivery to submission storage. `other` is an explicit outcome that must match end to end, not a wildcard. Test the target in an anonymous browser session with synthetic data: exercise required-field errors, confirm error focus or summary behavior, submit valid data, verify the visible success state, and prove that the configured handler reached the intended outcome. A contact form that only stores a Webform submission but has no mail/provider delivery path is incomplete.
+
+Outcome and abuse evidence must be packet-local JSON, not a generic screenshot or status file. Outcome evidence uses `public-kit.form-outcome-evidence.1`; abuse evidence uses `public-kit.form-abuse-evidence.1`. Each binds `checkedAt`, `formKey`, exact `targetUrl`, `mode`, `result`, and `observation`, plus the handler/result reference/provider or rendered selector/config owner/enforcement/local-target fields applicable to that mode. Successful implemented controls use `result: pass`; a local-only exception uses `result: accepted_gap` plus `localTargetVerified` and rationale. Independent verification must match the same form, target, and modes. Packet lint can validate that claim's structure, but the default live verifier accepts the exception only when the exact form and selected target origins belong to the current project's authoritative DDEV web-origin set; custom FQDNs are eligible, service URLs are not. A local mail-capture sink and evidenced local-only abuse exception can satisfy local rebuild scope, but do not prove production delivery, provider credentials, retention/privacy compliance, or launch readiness. Do not require a particular CAPTCHA or security vendor.
+
+## Browser Accessibility
+
+Run axe-core in the rendered browser context for every route recorded in `browser-evidence.json`, bind the raw report to that exact target URL including its query string and viewport, and declare an accepted `ruleScope` covering either axe's full default ruleset or explicit WCAG tags. Empty results without accepted scope are not proof. Resolve WCAG A/AA violations before handoff. Every WCAG-tagged axe `incomplete` node must disappear in a fresh scan or reference `public-kit.axe-incomplete-disposition.1` evidence that binds timestamp, exact URL, rule ID, target, disposition, passing result, and observation. `incompleteReviewed: true` alone is not proof. Also manually verify keyboard navigation, visible focus, accessible names/labels, and form label/error/focus behavior where applicable. This handoff gate catches browser-detectable defects; it does not claim a formal accessibility certification or replace a launch audit.
 
 ## Regulated Or Claim-Sensitive Content
 
@@ -607,13 +674,18 @@ Before calling the local build successful, record:
 - independent verification evidence: a fresh verifier context attempted to falsify completion claims against the live site, including per-route item counts, collection ownership, rendered embed/media presence, raw embed/markup scans, footer/legal/target-required route resolution, route drift dispositions, placeholder/starter scans, Canvas placeholder leaks, first-fold brand assets, editor add-a-row tasks, cold-reader labels, field-output behavior, direct database cleanup/off-road records, and packet freshness.
 - blind adversarial review evidence: a reviewer that did not build the target compared the original brief and source-of-truth materials to the live target on desktop and mobile, excluded builder rationale before public review, produced `review-packet/blind-adversarial-review.json`, and stored raw evidence under `review-packet/evidence/blind-adversarial-review/`.
 - open decisions evidence: `review-packet/open-decisions.md` lists only decisions a human owner, operator, legal/privacy reviewer, maintainer, or launch authority must make, with options, current evidence, impact, and affected gate. It must not hide work the agent can still fix.
-- live verifier evidence: `review-packet/evidence/live-verification.json` from `node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet`, with a zero exit code, the correct live DDEV identity, fetched primary and target-required routes, actual rendered primary-route SEO, and independently confirmed Git-tracked config YAML before any complete local rebuild claim. Structural packet data and injected test runtimes are supporting diagnostics only and cannot certify the site.
+- live verifier evidence: `review-packet/evidence/live-verification.json` from `node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet`, with a zero exit code, the correct live DDEV identity, an exact live-first surface reconciliation, fetched primary and target-required routes, actual rendered primary-route SEO, and independently confirmed Git-tracked config YAML before any complete local rebuild claim. Structural packet data and injected test runtimes are supporting diagnostics only and cannot certify the site.
 - composition model evidence: every flexible landing-like route has a declared authoring owner, section ownership model, editor mental-model rationale, expected editor actions, acceptance proof, and deviation records when the implementation differs.
 - Canvas component fidelity evidence: every public or rebuild-owned Canvas page has a rational component model that rejects one giant components, JSON/newline URL/string blobs for repeatable content, hardcoded source-owned Twig literals, and repeatable sections not backed by Drupal-owned data.
 - primary-route evidence: browser-rendered source `/` compared with target `/` for final URL, status, title, H1, key body intent, canonical link, screenshot, and Drupal route ownership. A correct page at a different alias does not satisfy this gate unless the source also redirects there.
 - SEO/social metadata, moderation/workflow, accessibility-tooling, privacy/legal, backup/update, email, and site-settings evidence or explicit blocked notes;
 - rendered SEO evidence for every primary route, including exactly one usable canonical, non-empty meta description, and `og:image` where applicable. Every `not_applicable` disposition needs reviewed rationale and evidence;
+- exported SEO defaults contain no literal local-environment URLs;
+- raw in-browser axe-core results with accepted rule scope, structured exact-route incomplete dispositions, and manual keyboard/focus/name checks for every browser-evidence route;
+- anonymous public-form invalid/valid submission checks joined by stable `formKey`, with structured mode-specific outcome and vendor-neutral abuse-protection evidence independently matched to the same form and target;
+- representative detail-route evidence for each collection that declares a separate public detail route, including its required and anonymous-output fields, concrete Drupal owner config ID, selector-bound computed visibility, and an independent matching check;
 - anonymous public route checks;
+- bounded same-origin critical-asset checks for rendered stylesheets, scripts, images/srcset candidates, posters, and declared preloads. Hash served bytes, reject failed or content-type-incompatible responses, and keep third-party provider bytes outside the intrinsic state digest;
 - visual parity checks for homepage, listing, detail, navigation, footer, and major responsive states;
 - functional parity checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
@@ -648,7 +720,9 @@ Create `review-packet/open-decisions.md` at final handoff. This is the short lis
 
 This is not a permission slip to stop early. Before adding a decision here, ask whether the agent can resolve it with more build work, browser checks, Drupal readback, packet updates, route cleanup, imports, theme work, or editor-form fixes. If yes, fix it or record it as an implementation gap in `scoped-gap-list.md`, not as a human decision.
 
-Valid human-only decisions include production target selection, credentials and provider accounts, legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope items. Every `accepted_out_of_scope` item needs a named accepter, specific reason, and evidence. External blockers are not accepted completion; they keep the result blocked.
+Valid human-only decisions include production target selection, credentials and provider accounts, legal/privacy policy approval, content/business acceptance, accepted route/content dispositions, accessibility/performance/security exceptions, maintainer signoff, launch go/no-go, and owner acceptance of documented out-of-scope items. Every `accepted_out_of_scope` item needs recorded attribution, a specific reason, and evidence; the local verifier treats that attribution as self-attested, while authenticated approval belongs in the external human workflow. External blockers are not accepted completion; they keep the result blocked.
+
+Builder-accepted consequential calls are ratification decisions, not resolved history. When `off-road-inventory.md` contains `OR-` rows or the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, present them here as ratification decisions; the verifier rejects the packet contradiction created by a `Decisions still open: None` declaration while such records exist. It does not authenticate a recorded approver.
 
 Use the four-layer truth model:
 
@@ -681,7 +755,7 @@ Also check target-required routes introduced by the rebuild even when they were 
 
 Starter and route drift cleanup is part of route parity. Check `/home`, `/page/1`, `/privacy-policy`, raw `/node/*`, starter Canvas pages, stale menu/footer links, duplicate aliases, and unexpected public 200 routes before handoff.
 
-The route matrix must reconcile source-rendered routes against target routes. It must fail the review loop when a source route is missing, a target route renders the wrong H1/body pattern, homepage/front-page behavior is wrong, a legal/footer route is broken, or an unexpected public 200 exists because of duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts. Expected redirects are acceptable only when recorded with source evidence and rationale.
+The route matrix must reconcile source-rendered routes against target routes. It must fail the review loop when a source route is missing, a target route renders the wrong H1/body pattern, homepage/front-page behavior is wrong, a legal/footer route is broken, or an unexpected public 200 exists because of duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts. Expected redirects are acceptable only when recorded with source evidence and rationale. A legacy source path+query mapped to a different target must materialize on the target as a first-hop `301` or `308` ending at the exact same-origin target path+query. Otherwise record `noRedirectDisposition` with `accepted: true`, `acceptedBy`, rationale, and non-empty packet-local evidence. Duplicate mapping declarations must fully agree.
 
 Direct SQL cleanup, table purges, alias resets, and destructive import cleanup are off-road operations. They may be acceptable only in a clean local rebuild when recorded as local-only in `off-road-inventory.md` with what changed, why Drupal APIs/config were insufficient, why the operation is safe in this workspace, and what a production-safe alternative would be.
 
@@ -714,9 +788,9 @@ Core architecture packet:
 - durable intent sidecar;
 - scoped gap list;
 - off-road inventory;
-- maintainer review packet with a binary stake-my-name verdict.
+- maintainer review packet with a separate human-facing binary stake-my-name status.
 
-Gate records, either accepted evidence or blocked stubs:
+Gate records, with machine evidence, pending human status, or blocked stubs as applicable:
 
 - operator run record;
 - production target record or blocked production-target note;
@@ -726,6 +800,7 @@ Gate records, either accepted evidence or blocked stubs:
 - independent verification;
 - live verifier report under `evidence/live-verification.json`;
 - packet verifier report under `evidence/packet-verification.json`;
+- generated lifecycle evidence under `evidence/lifecycle/` after the first successful full verification;
 - Drupal readback;
 - field-output matrix;
 - launch checklist.

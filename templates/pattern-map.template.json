@@ -49,6 +49,12 @@
         "collectionOwner": "view | search_api_view | taxonomy_view | canvas_component_bound_to_view | block_view | documented_exception",
         "viewDisplayOrConfig": "",
         "detailRouteOwner": "entity_view_display | canvas_composition | view_row | documented_exception",
+        "drupalOwnerConfigId": "",
+        "detailRouteMode": "separate_public_route | inline_in_collection | external_provider | no_detail",
+        "representativeDetailSourcePath": "",
+        "representativeDetailTargetPath": "",
+        "detailLoadBearingFields": [],
+        "detailRouteRationale": "",
         "editorAddRowEvidence": "",
         "exceptionRationale": "",
         "accepted": false,
@@ -221,7 +227,18 @@
     "noEmptyMarkerModules": true,
     "noUnsafeRawSourceRendering": true
   },
-  "forms": [],
+  "forms": [
+    {
+      "formKey": "",
+      "sourceRoute": "",
+      "targetRoute": "",
+      "purpose": "contact_message | application | registration | newsletter | survey | other",
+      "drupalOwner": "webform | contact_form | entity_form | external_provider",
+      "expectedOutcome": "message_delivery | submission_storage | account_creation | provider_handoff | other",
+      "accepted": false,
+      "notes": ""
+    }
+  ],
   "integrations": [],
   "redirectsAndSeo": [],
   "editorialWorkflow": [],
