@@ -2639,6 +2639,42 @@ test('critical asset inspection shares global concurrency and wall-clock bounds'
   );
 });
 
+test('critical asset byte reservations stop queued fetches at the aggregate limit', async () => {
+  let requests = 0;
+  await withHttpServer(
+    (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { 'content-type': 'text/css' });
+      response.end('12345678');
+    },
+    async (baseUrl) => {
+      const html = `<!doctype html><html><head>${Array.from(
+        { length: 6 },
+        (_, index) => `<link rel="stylesheet" href="/asset-${index}.css">`
+      ).join('')}</head><body></body></html>`;
+      const liveHttpContext = createLiveHttpContext({
+        concurrency: 4,
+        deadlineMs: 1_000,
+        maxRequests: 10,
+        maxTasks: 10
+      });
+      const context = createCriticalAssetContext({
+        liveHttpContext,
+        maxAssetBytes: 10,
+        maxRequests: 10,
+        maxTotalBytes: 10
+      });
+      const result = await inspectCriticalAssets(html, `${baseUrl}/`, context);
+
+      assert.equal(context.totalBytes, 8);
+      assert.equal(result.manifest.length, 1);
+      assert.equal(requests, 2, 'assets queued beyond the remaining aggregate bytes must not be fetched');
+      assert.match(result.errors.join('\n'), /response body exceeds the 2 byte limit/i);
+      assert.match(result.errors.join('\n'), /bytes exceed the 10 byte total limit/i);
+    }
+  );
+});
+
 test('critical same-origin rendered assets fail closed on HTTP and content-type errors', async () => {
   await withHttpServer(
     (request, response) => {

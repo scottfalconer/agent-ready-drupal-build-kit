@@ -1045,6 +1045,9 @@ function assetContentTypeMatches(contentType, expectedTypes) {
 export function createCriticalAssetContext({
   concurrency = 8,
   liveHttpContext = null,
+  maxAssetBytes = MAX_CRITICAL_ASSET_BYTES,
+  maxRequests = MAX_CRITICAL_ASSET_REQUESTS,
+  maxTotalBytes = MAX_CRITICAL_ASSET_TOTAL_BYTES,
   wallClockMs = 60_000
 } = {}) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_LIVE_ROUTE_CONCURRENCY) {
@@ -1053,32 +1056,112 @@ export function createCriticalAssetContext({
   if (!Number.isSafeInteger(wallClockMs) || wallClockMs < 1 || wallClockMs > LIVE_ROUTE_DEADLINE_MS) {
     throw new Error(`Critical asset wall-clock budget must be between 1 and ${LIVE_ROUTE_DEADLINE_MS} ms.`);
   }
+  const byteLimits = {
+    maxAssetBytes: [maxAssetBytes, MAX_CRITICAL_ASSET_BYTES],
+    maxTotalBytes: [maxTotalBytes, MAX_CRITICAL_ASSET_TOTAL_BYTES]
+  };
+  for (const [name, [value, maximum]] of Object.entries(byteLimits)) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+      throw new Error(`Critical asset ${name} must be between 1 and ${maximum}.`);
+    }
+  }
+  if (!Number.isSafeInteger(maxRequests) || maxRequests < 1 || maxRequests > MAX_CRITICAL_ASSET_REQUESTS) {
+    throw new Error(`Critical asset maxRequests must be between 1 and ${MAX_CRITICAL_ASSET_REQUESTS}.`);
+  }
   const sharedContext = liveHttpContext ?? createLiveHttpContext({
     concurrency,
     deadlineMs: wallClockMs,
-    maxRequests: MAX_CRITICAL_ASSET_REQUESTS,
-    maxTasks: MAX_CRITICAL_ASSET_REQUESTS
+    maxRequests,
+    maxTasks: maxRequests
   });
   return {
+    byteBudgetExhausted: false,
+    byteWaiters: [],
     cache: new Map(),
-    counted: new Set(),
     liveHttpContext: sharedContext,
+    maxAssetBytes,
+    maxRequests,
+    maxTotalBytes,
+    reservedBytes: 0,
     totalBytes: 0
   };
 }
 
+function dispatchCriticalAssetByteWaiters(context) {
+  while (context.byteWaiters.length > 0) {
+    if (context.byteBudgetExhausted || context.totalBytes >= context.maxTotalBytes) {
+      context.byteBudgetExhausted = true;
+      const error = new Error(`bytes exceed the ${context.maxTotalBytes} byte total limit`);
+      for (const waiter of context.byteWaiters.splice(0)) {
+        waiter.reject(error);
+      }
+      return;
+    }
+    const available = context.maxTotalBytes - context.totalBytes - context.reservedBytes;
+    if (available <= 0) {
+      return;
+    }
+    const waiter = context.byteWaiters.shift();
+    const reservation = Math.min(context.maxAssetBytes, available);
+    context.reservedBytes += reservation;
+    waiter.resolve(reservation);
+  }
+}
+
+function reserveCriticalAssetBytes(context) {
+  if (context.byteBudgetExhausted || context.totalBytes >= context.maxTotalBytes) {
+    context.byteBudgetExhausted = true;
+    return Promise.reject(new Error(`bytes exceed the ${context.maxTotalBytes} byte total limit`));
+  }
+  const available = context.maxTotalBytes - context.totalBytes - context.reservedBytes;
+  if (available > 0) {
+    const reservation = Math.min(context.maxAssetBytes, available);
+    context.reservedBytes += reservation;
+    return Promise.resolve(reservation);
+  }
+  return new Promise((resolveReservation, rejectReservation) => {
+    context.byteWaiters.push({ reject: rejectReservation, resolve: resolveReservation });
+  });
+}
+
+function releaseCriticalAssetBytes(context, reservation) {
+  context.reservedBytes = Math.max(0, context.reservedBytes - reservation);
+  dispatchCriticalAssetByteWaiters(context);
+}
+
 function criticalAssetResponse(candidate, context) {
   if (!context.cache.has(candidate.url.href)) {
-    if (context.cache.size >= MAX_CRITICAL_ASSET_REQUESTS) {
-      throw new Error(`inventory exceeds the ${MAX_CRITICAL_ASSET_REQUESTS} request limit`);
+    if (context.cache.size >= context.maxRequests) {
+      throw new Error(`inventory exceeds the ${context.maxRequests} request limit`);
     }
-    context.cache.set(candidate.url.href, context.liveHttpContext.runTask(
-      'critical-asset',
-      () => requestFollowingRedirects(candidate.url, {
-        liveHttpContext: context.liveHttpContext,
-        maxBodyBytes: MAX_CRITICAL_ASSET_BYTES
-      })
-    ));
+    context.cache.set(candidate.url.href, (async () => {
+      const reservation = await reserveCriticalAssetBytes(context);
+      try {
+        const response = await context.liveHttpContext.runTask(
+          'critical-asset',
+          () => requestFollowingRedirects(candidate.url, {
+            liveHttpContext: context.liveHttpContext,
+            maxBodyBytes: reservation
+          })
+        );
+        const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
+        context.totalBytes += bytes.length;
+        if (context.totalBytes >= context.maxTotalBytes) {
+          context.byteBudgetExhausted = true;
+        }
+        return response;
+      } catch (error) {
+        if (
+          reservation < context.maxAssetBytes &&
+          /response body exceeds the \d+ byte limit/i.test(String(error?.message ?? error))
+        ) {
+          context.byteBudgetExhausted = true;
+        }
+        throw error;
+      } finally {
+        releaseCriticalAssetBytes(context, reservation);
+      }
+    })());
   }
   return context.cache.get(candidate.url.href);
 }
@@ -1092,13 +1175,6 @@ export async function inspectCriticalAssets(html, finalUrl, context) {
     try {
       const response = await criticalAssetResponse(candidate, context);
       const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
-      if (!context.counted.has(candidate.url.href)) {
-        context.counted.add(candidate.url.href);
-        context.totalBytes += bytes.length;
-      }
-      if (context.totalBytes > MAX_CRITICAL_ASSET_TOTAL_BYTES) {
-        throw new Error(`bytes exceed the ${MAX_CRITICAL_ASSET_TOTAL_BYTES} byte total limit`);
-      }
       const errors = [];
       if (response.status < 200 || response.status >= 300) {
         errors.push(`${candidate.url.pathname} critical asset returned HTTP ${response.status}.`);
@@ -5112,9 +5188,9 @@ export async function verifyLive({
       distinctRequestCount: criticalAssetContext.cache.size,
       totalBytes: criticalAssetContext.totalBytes,
       limits: {
-        requestCount: MAX_CRITICAL_ASSET_REQUESTS,
-        perAssetBytes: MAX_CRITICAL_ASSET_BYTES,
-        totalBytes: MAX_CRITICAL_ASSET_TOTAL_BYTES,
+        requestCount: criticalAssetContext.maxRequests,
+        perAssetBytes: criticalAssetContext.maxAssetBytes,
+        totalBytes: criticalAssetContext.maxTotalBytes,
         concurrency: liveHttpBudget.maxConcurrency,
         wallClockMs: liveHttpBudget.deadlineMs
       },
