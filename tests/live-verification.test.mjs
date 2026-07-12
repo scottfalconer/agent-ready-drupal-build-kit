@@ -12,10 +12,12 @@ import {
   createCriticalAssetContext,
   createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
+  DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
+  liveSurfaceReconciliationErrors,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
@@ -46,7 +48,7 @@ test('Drupal entity state inventory is a batched, revision-bounded public refere
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'contact_message'\s*=>/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'search_api_task'\s*=>/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'commerce_order'\s*=>/);
-  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /declared_editorial_roots/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /live_editorial_roots/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /declared_public_fields/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /public_route_paths/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /entity_reference_revisions/);
@@ -55,24 +57,43 @@ test('Drupal entity state inventory is a batched, revision-bounded public refere
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /referenced-file-presentation-state/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /condition\('entity_type', 'file'\)/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /latest-non-default/);
-  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'missingDeclaredRoots'\s*=>/);
+  assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'missingLiveRoots'\s*=>/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'closureCounts'\s*=>/);
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /'excludedEntityTypes'\s*=>/);
   assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /hash_file\('sha256'/);
   assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /allRevisions\(\)/);
   assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /'items'\s*=>/);
   assert.doesNotMatch(DRUPAL_ENTITY_INVENTORY_EVAL, /loadMultiple\(\s*\)/);
-  const declaredRootQuery = DRUPAL_ENTITY_INVENTORY_EVAL.slice(
-    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('foreach ($declared_editorial_roots as'),
-    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('sort($missing_declared_roots')
+  const liveRootQuery = DRUPAL_ENTITY_INVENTORY_EVAL.slice(
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('foreach ($live_editorial_roots as'),
+    DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('sort($missing_live_roots')
   );
-  assert.doesNotMatch(declaredRootQuery, /getKey\('status'\)|condition\(\$status_key/);
+  assert.doesNotMatch(liveRootQuery, /getKey\('status'\)|condition\(\$status_key/);
   const infrastructureQuery = DRUPAL_ENTITY_INVENTORY_EVAL.slice(
     DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('foreach ($infrastructure_type_policy as'),
     DRUPAL_ENTITY_INVENTORY_EVAL.indexOf('$privacy_safe_user_values')
   );
   assert.match(infrastructureQuery, /getKey\('status'\)/);
   assert.match(infrastructureQuery, /condition\(\$status_key, TRUE\)/);
+});
+
+test('Drupal live surface census is bounded, metadata-only, privacy-safe, and live-first', () => {
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /\$surface_limit = 5000/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /entity_type\.bundle\.info/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /views\.view\./);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /path_alias/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /menu_link_content/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /canvas_component/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /sitemap_route/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /custom_extension/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /custom_route/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'webform_submission'\s*=>/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'commerce_payment_method'\s*=>/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'rawContentRowsEmitted'\s*=>\s*FALSE/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'privateEntityRowsQueried'\s*=>\s*FALSE/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicSurface'\s*=>\s*\$public_surface/);
+  assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicEditorialRoot'\s*=>\s*\$is_public_root_type/);
+  assert.doesNotMatch(DRUPAL_LIVE_SURFACE_EVAL, /->label\(\)|->getTitle\(\)|->toArray\(\)/);
 });
 
 test('Drupal runtime identity emits digest-only active config, schema, settings, and database-update facts', () => {
@@ -120,6 +141,73 @@ test('machine-local runtime changes are evidence-only while Drupal-owned runtime
   assert.notEqual(moved.environmentBinding.fingerprint, baseline.environmentBinding.fingerprint);
   assert.equal(JSON.stringify(baseline.intrinsic).includes('phpVersion'), false);
   assert.equal(JSON.stringify(baseline.intrinsic).includes('effectiveSettings'), false);
+});
+
+test('live-derived surfaces reconcile bidirectionally and non-public items require owned exclusions', () => {
+  const packetDir = mkdtempSync(join(tmpdir(), 'surface-reconciliation-'));
+  mkdirSync(join(packetDir, 'evidence', 'live-surface'), { recursive: true });
+  writeJson(join(packetDir, 'pattern-map.json'), { contentTypes: [{ machineName: 'page' }] });
+  writeJson(join(packetDir, 'drupal-readback.json'), { liveSurfaceReconciliation: {} });
+  writeFileSync(join(packetDir, 'evidence', 'live-surface', 'admin-view.txt'), 'Reviewed as an administrative-only View.');
+  const inventory = {
+    schemaVersion: 'public-kit.drupal-live-surface.1',
+    confirmed: true,
+    fingerprint: `sha256:${'a'.repeat(64)}`,
+    countsByKind: { bundle: 1, view_display: 1 },
+    items: [
+      { key: 'bundle:node:page', kind: 'bundle', publicEditorialRoot: true, publicSurface: true },
+      { key: 'view_display:content:page_admin', kind: 'view_display', publicSurface: false }
+    ]
+  };
+  const reconciliation = {
+    schemaVersion: 'public-kit.live-surface-reconciliation.1',
+    inventoryFingerprint: inventory.fingerprint,
+    countsByKind: inventory.countsByKind,
+    declarations: [
+      {
+        key: 'bundle:node:page',
+        kind: 'bundle',
+        packetReferences: ['pattern-map.json#contentTypes']
+      }
+    ],
+    exclusions: [
+      {
+        key: 'view_display:content:page_admin',
+        kind: 'view_display',
+        owner: 'site maintainer',
+        rationale: 'Administrative-only report, not anonymous output.',
+        evidence: ['evidence/live-surface/admin-view.txt']
+      }
+    ],
+    reconciliationComplete: true,
+    blockers: []
+  };
+  assert.deepEqual(liveSurfaceReconciliationErrors(inventory, reconciliation, packetDir), []);
+
+  const omitted = structuredClone(reconciliation);
+  omitted.declarations = [];
+  assert.match(liveSurfaceReconciliationErrors(inventory, omitted, packetDir).join('\n'), /Live-only bundle/);
+
+  const stale = structuredClone(reconciliation);
+  stale.declarations.push({
+    key: 'menu:stale',
+    kind: 'menu',
+    packetReferences: ['pattern-map.json#contentTypes']
+  });
+  assert.match(liveSurfaceReconciliationErrors(inventory, stale, packetDir).join('\n'), /Packet-only live surface menu:stale/);
+
+  const nonPublicDeclared = structuredClone(reconciliation);
+  nonPublicDeclared.declarations.push({
+    key: 'view_display:content:page_admin',
+    kind: 'view_display',
+    packetReferences: ['pattern-map.json#contentTypes']
+  });
+  nonPublicDeclared.exclusions = [];
+  assert.match(liveSurfaceReconciliationErrors(inventory, nonPublicDeclared, packetDir).join('\n'), /classified non-public/);
+
+  const circular = structuredClone(reconciliation);
+  circular.declarations[0].packetReferences = ['drupal-readback.json#liveSurfaceReconciliation.declarations'];
+  assert.match(liveSurfaceReconciliationErrors(inventory, circular, packetDir).join('\n'), /specific section/);
 });
 
 function templateName(packetFile) {
@@ -1208,6 +1296,21 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   readback.content.viewDisplays = [{ bundle: 'page', mode: 'full' }];
   readback.routing.menus = [{ id: 'main', label: 'Main navigation' }];
   readback.routing.menuLinks = [{ menu: 'main', title: 'Home', url: '/' }];
+  readback.liveSurfaceReconciliation = {
+    schemaVersion: 'public-kit.live-surface-reconciliation.1',
+    inventoryFingerprint: `sha256:${'c'.repeat(64)}`,
+    countsByKind: { bundle: 1 },
+    declarations: [
+      {
+        key: 'bundle:node:page',
+        kind: 'bundle',
+        packetReferences: ['pattern-map.json#contentTypes']
+      }
+    ],
+    exclusions: [],
+    reconciliationComplete: true,
+    blockers: []
+  };
   readback.rolesAndPermissionsNotes = ['Content editor can create and edit Page content.'];
   readback.readbackComplete = true;
   readback.blockers = [];
@@ -3116,13 +3219,41 @@ if (args[1] === 'php:eval') {
     }) + '\\n');
     process.exit(0);
   }
+  if (args[2].includes('public-kit.drupal-live-surface.1')) {
+    process.stdout.write(JSON.stringify({
+      schemaVersion: 'public-kit.drupal-live-surface.1',
+      fingerprint: 'sha256:${'c'.repeat(64)}',
+      confirmed: true,
+      bounded: true,
+      limit: 5000,
+      truncated: false,
+      itemCount: 1,
+      countsByKind: { bundle: 1 },
+      items: [
+        {
+          key: 'bundle:node:page',
+          kind: 'bundle',
+          entityType: 'node',
+          bundle: 'page',
+          publicEditorialRoot: true,
+          publicSurface: true,
+          publishedCount: 1
+        }
+      ],
+      publicEditorialRoots: { node: ['page'] },
+      excludedEntityTypes: { user: 'broad user rows are never swept' },
+      errors: [],
+      policy: { metadataOnly: true, rawContentRowsEmitted: false, privateEntityRowsQueried: false }
+    }) + '\\n');
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
-    schemaVersion: 'public-kit.drupal-entity-inventory.4',
+    schemaVersion: 'public-kit.drupal-entity-inventory.5',
     fingerprint: 'sha256:${'a'.repeat(64)}',
     entityTypeCount: 1,
     closureCounts: { entityCount: 1, entityTypeCount: 1 },
     excludedEntityTypes: { user: 'private authentication and login state' },
-    missingDeclaredRoots: process.env.FAKE_DDEV_MISSING_ROOT === '1' ? ['node.page'] : [],
+    missingLiveRoots: process.env.FAKE_DDEV_MISSING_ROOT === '1' ? ['node.page'] : [],
     missingManagedFileCount: 0,
     policy: { rawPerItemRowsEmitted: false },
     publicAuthorUserDigest: {
@@ -3217,7 +3348,7 @@ process.stdout.write(outputs.get(command) + '\\n');
         readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
       );
       assert.equal(missingRootReport.drupalRuntime.entityInventory.confirmed, false);
-      assert.match(missingRootReport.completionBlockedReasons.join('\n'), /declared roots were missing.*node\.page/i);
+      assert.match(missingRootReport.completionBlockedReasons.join('\n'), /live-derived roots were missing.*node\.page/i);
 
       const stagedOnlyResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(stagedOnlyResult.status, 2, stagedOnlyResult.stderr);
