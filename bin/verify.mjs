@@ -4535,14 +4535,19 @@ function reconcileLiveNextCycleCensus(nextCycleVerification, census, { required 
   const unreviewedLiveCandidateKeys = liveCandidateKeys.filter((key) => !authoredSet.has(key));
   const errors = [];
 
-  if (!authoredApplies && required && !censusTrusted) {
+  if (required && !censusTrusted) {
     errors.push(
-      'G-EDITOR-02 structured N/A requires a successful read-only Drush live model census; authored packet evidence alone cannot establish N/A.'
+      'G-EDITOR-02 requires a successful read-only Drush live model census before authored next-cycle applicability can support completion.'
     );
   }
   if (!authoredApplies && censusTrusted && liveCandidateKeys.length > 0) {
     errors.push(
       `G-EDITOR-02 cannot use N/A because the live Drupal model has temporal/cycle candidates omitted from the packet: ${liveCandidateKeys.join(', ')}.`
+    );
+  }
+  if (authoredApplies && censusTrusted && unreviewedLiveCandidateKeys.length > 0) {
+    errors.push(
+      `G-EDITOR-02 authored applicability omits live Drupal temporal/cycle candidates: ${unreviewedLiveCandidateKeys.join(', ')}.`
     );
   }
 
@@ -4559,7 +4564,12 @@ function reconcileLiveNextCycleCensus(nextCycleVerification, census, { required 
   };
 }
 
-async function verifyNextCycleCleanup(baseUrl, nextCycleVerification, liveReconciliation = null) {
+async function verifyNextCycleCleanup(
+  baseUrl,
+  nextCycleVerification,
+  liveReconciliation = null,
+  liveHttpContext = null
+) {
   if (nextCycleVerification?.applicability?.applies !== true) {
     if (liveReconciliation?.liveApplies === true) {
       return {
@@ -4589,7 +4599,7 @@ async function verifyNextCycleCleanup(baseUrl, nextCycleVerification, liveReconc
     errors.push('Next-cycle cleanup must declare publicUrlStatusAfterCleanup as 404 or 410.');
   }
   try {
-    const response = await requestFollowingRedirects(requestedUrl);
+    const response = await requestFollowingRedirects(requestedUrl, { liveHttpContext });
     if (response.redirects.length > 0) {
       errors.push('Next-cycle cleanup URL still redirects; alias or redirect residue remains.');
     }
@@ -4888,22 +4898,48 @@ export async function verifyLive({
     }
   }
   liveErrors.push(...redirectMaterializationChecks.flatMap((check) => check.errors));
+  let nextCycleCleanupCheck;
+  if (target && explicitTargetFetchAllowed) {
+    try {
+      nextCycleCleanupCheck = nextCycleVerification?.applicability?.applies === true
+        ? await liveHttpContext.runTask(
+            'next-cycle-cleanup',
+            () => verifyNextCycleCleanup(
+              target.url,
+              nextCycleVerification,
+              liveNextCycleReconciliation,
+              liveHttpContext
+            )
+          )
+        : await verifyNextCycleCleanup(
+            target.url,
+            nextCycleVerification,
+            liveNextCycleReconciliation,
+            liveHttpContext
+          );
+    } catch (error) {
+      nextCycleCleanupCheck = {
+        applicable: true,
+        errors: [`Next-cycle cleanup verification could not be scheduled: ${error.message}`],
+        passed: false
+      };
+    }
+  } else {
+    nextCycleCleanupCheck = {
+      applicable:
+        nextCycleVerification?.applicability?.applies === true ||
+        liveNextCycleReconciliation.liveApplies === true,
+      errors: [],
+      passed: false
+    };
+  }
+  liveErrors.push(...nextCycleCleanupCheck.errors);
   for (const error of liveHttpContext.errors) {
     if (!liveErrors.includes(error)) {
       liveErrors.push(error);
     }
   }
   const liveHttpBudget = liveHttpContext.metrics();
-  const nextCycleCleanupCheck = target && explicitTargetFetchAllowed
-    ? await verifyNextCycleCleanup(target.url, nextCycleVerification, liveNextCycleReconciliation)
-    : {
-        applicable:
-          nextCycleVerification?.applicability?.applies === true ||
-          liveNextCycleReconciliation.liveApplies === true,
-        errors: [],
-        passed: false
-      };
-  liveErrors.push(...nextCycleCleanupCheck.errors);
 
   if (target && (packetSupportsCompletion || packetClaimsQualifyingReview) && declaredSource) {
     try {

@@ -4904,6 +4904,106 @@ test('live model census rejects authored N/A with omitted temporal fields and ac
   );
 });
 
+test('live model census fails closed for authored applicability when the census is untrusted or incomplete', async () => {
+  await withHttpServer(
+    (request, response) => {
+      const status = request.url === '/__next-cycle-probe-42' ? 410 : 200;
+      response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(status === 410 ? 'removed' : fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'next-cycle-live-census-fail-closed-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      addQualifyingNextCycleEvidence(packetDir, baseUrl);
+
+      const untrustedReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: false,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 0,
+            fields: [],
+            taxonomyDimensions: [],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(untrustedReport.liveNextCycleReconciliation.authoredApplies, true);
+      assert.equal(untrustedReport.liveNextCycleReconciliation.censusTrusted, false);
+      assert.equal(untrustedReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(untrustedReport.liveTargetValid, false);
+      assert.match(
+        untrustedReport.errors.join('\n'),
+        /requires a successful read-only Drush live model census/i
+      );
+
+      const incompleteReport = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          liveNextCycleCensus: {
+            schemaVersion: 'public-kit.live-next-cycle-census.1',
+            confirmed: true,
+            metadataOnly: true,
+            privateContentRead: false,
+            candidateCount: 2,
+            fields: [
+              {
+                key: 'node.event.field_year',
+                entityType: 'node',
+                bundle: 'event',
+                machineName: 'field_year',
+                fieldType: 'integer',
+                required: true,
+                cardinality: 1,
+                optionCount: 0,
+                signalKinds: ['year'],
+                targetVocabularies: []
+              },
+              {
+                key: 'node.event.field_season',
+                entityType: 'node',
+                bundle: 'event',
+                machineName: 'field_season',
+                fieldType: 'list_string',
+                required: false,
+                cardinality: 1,
+                optionCount: 4,
+                signalKinds: ['season'],
+                targetVocabularies: []
+              }
+            ],
+            taxonomyDimensions: [],
+            workflows: []
+          }
+        })
+      });
+      assert.equal(incompleteReport.liveNextCycleReconciliation.censusTrusted, true);
+      assert.deepEqual(
+        incompleteReport.liveNextCycleReconciliation.unreviewedLiveCandidateKeys,
+        ['node.event.field_season']
+      );
+      assert.equal(incompleteReport.liveNextCycleReconciliation.passed, false);
+      assert.equal(incompleteReport.liveTargetValid, false);
+      assert.match(
+        incompleteReport.errors.join('\n'),
+        /authored applicability omits live Drupal temporal\/cycle candidates.*field_season/i
+      );
+    }
+  );
+});
+
 test('blanket-filled packet templates remain valid lint but cannot support completion', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'blanket-filled-packet-'));
   const packetDir = join(temp, 'review-packet');
