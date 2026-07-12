@@ -683,6 +683,7 @@ Before calling the local build successful, record:
 - anonymous public-form invalid/valid submission checks joined by stable `formKey`, with structured mode-specific outcome and vendor-neutral abuse-protection evidence independently matched to the same form and target;
 - representative detail-route evidence for each collection that declares a separate public detail route, including its required and anonymous-output fields, concrete Drupal owner config ID, selector-bound computed visibility, and an independent matching check;
 - anonymous public route checks;
+- bounded same-origin critical-asset checks for rendered stylesheets, scripts, images/srcset candidates, posters, and declared preloads. Hash served bytes, reject failed or content-type-incompatible responses, and keep third-party provider bytes outside the intrinsic state digest;
 - visual parity checks for homepage, listing, detail, navigation, footer, and major responsive states;
 - functional parity checks for source-like behaviors;
 - browser-rendered homepage, listing, detail, search, contact, legal, and other representative route evidence;
