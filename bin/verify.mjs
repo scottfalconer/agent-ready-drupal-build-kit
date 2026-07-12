@@ -50,6 +50,16 @@ const MAX_LIVE_ROUTE_CONCURRENCY = 12;
 const MAX_LIVE_HTTP_REQUESTS = 2_000;
 const MAX_LIVE_HTTP_TASKS = 20_000;
 const LIVE_ROUTE_DEADLINE_MS = 90_000;
+export const SOURCE_SURFACE_LIMITS = Object.freeze({
+  concurrency: 8,
+  deadlineMs: 90_000,
+  maxBodyBytes: 2 * 1024 * 1024,
+  maxRequests: 768,
+  maxRoutes: 512,
+  maxSitemapLocs: 5_000,
+  maxSitemaps: 24,
+  maxTasks: 1_024
+});
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -1016,6 +1026,527 @@ async function requestFollowingRedirects(
     };
   }
   throw new Error('Redirect resolution failed.');
+}
+
+const SOURCE_NON_DOCUMENT_EXTENSION_RE = /\.(?:avif|bmp|css|csv|docx?|eot|gif|gz|ico|jpe?g|js|json|m4a|m4v|mov|mp3|mp4|ogg|ogv|otf|pdf|png|pptx?|rar|rss|svg|tar|tiff?|ttf|txt|wav|webm|webp|woff2?|xlsx?|xml|zip)$/i;
+
+function sourceDocumentPath(value, sourceBaseUrl) {
+  try {
+    const url = new URL(String(value ?? ''), sourceBaseUrl);
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.origin !== sourceBaseUrl.origin ||
+      url.username ||
+      url.password
+    ) {
+      return '';
+    }
+    const path = normalizePath(url.pathname);
+    return SOURCE_NON_DOCUMENT_EXTENSION_RE.test(path) ? '' : path;
+  } catch {
+    return '';
+  }
+}
+
+function sourceRenderedRouteLinks(html, finalUrl, sourceOrigin) {
+  const extracted = serverResponseLinks(html, finalUrl, sourceOrigin, '');
+  return {
+    paths: [...new Set(extracted.internalLinks
+      .map((link) => sourceDocumentPath(link.url, new URL('/', sourceOrigin)))
+      .filter(Boolean))].sort(comparePortable),
+    warnings: extracted.errors
+  };
+}
+
+function sourceRobotsSitemapUrls(body, sourceBaseUrl) {
+  const urls = [];
+  for (const match of String(body).matchAll(/^\s*sitemap\s*:\s*(\S+)\s*$/gim)) {
+    try {
+      const url = new URL(decodeEntities(match[1]), sourceBaseUrl);
+      url.hash = '';
+      if (['http:', 'https:'].includes(url.protocol) && url.origin === sourceBaseUrl.origin && !url.username && !url.password) {
+        urls.push(url.href);
+      }
+    } catch {
+      // Malformed source directives are recorded as source warnings by omission.
+    }
+  }
+  return [...new Set(urls)].sort(comparePortable);
+}
+
+function sourceSitemapLocUrls(body, sourceBaseUrl) {
+  const urls = [];
+  for (const match of String(body).matchAll(/<loc\b[^>]*>([\s\S]*?)<\/loc>/gi)) {
+    const text = normalizeText(decodeEntities(match[1].replace(/<[^>]+>/g, ' ')));
+    try {
+      const url = new URL(text, sourceBaseUrl);
+      url.hash = '';
+      if (['http:', 'https:'].includes(url.protocol) && url.origin === sourceBaseUrl.origin && !url.username && !url.password) {
+        urls.push(url.href);
+      }
+    } catch {
+      // The bounded census ignores malformed or cross-origin sitemap entries.
+    }
+  }
+  return [...new Set(urls)].sort(comparePortable);
+}
+
+function sourceBoundaryKind(status) {
+  if ([401, 403].includes(status)) return 'private';
+  if ([404, 410].includes(status)) return 'unreachable';
+  return '';
+}
+
+function sourceBoundaryDisposition(routeMatrix, independentVerification, path, status) {
+  const boundaryKind = sourceBoundaryKind(status);
+  if (!boundaryKind) return null;
+  const record = (Array.isArray(routeMatrix?.sourceRouteDriftClassification)
+    ? routeMatrix.sourceRouteDriftClassification
+    : []).find((candidate) => normalizePath(candidate?.sourcePath) === path);
+  const check = (Array.isArray(independentVerification?.routeDriftDispositionChecks)
+    ? independentVerification.routeDriftDispositionChecks
+    : []).find((candidate) => normalizePath(candidate?.sourcePath) === path);
+  const allowedClassifications = boundaryKind === 'private'
+    ? new Set(['private_boundary'])
+    : new Set(['legacy', 'private_boundary', 'test_staging']);
+  const allowedDispositions = new Set(['intentionally_drop', 'unpublished_import']);
+  const recordEvidence = String(
+    record?.ownerDecisionEvidence || record?.noRedirectDisposition?.evidence || ''
+  ).trim();
+  const checkMatches = Boolean(
+    check &&
+    check.status === 'pass' &&
+    String(check.dispositionEvidence ?? '').trim() &&
+    (!String(check.classification ?? '').trim() || check.classification === record?.classification) &&
+    (!String(check.targetDisposition ?? '').trim() || check.targetDisposition === record?.targetDisposition)
+  );
+  const valid = Boolean(
+    record?.accepted === true &&
+    allowedClassifications.has(record.classification) &&
+    allowedDispositions.has(record.targetDisposition) &&
+    String(record.notes ?? '').trim() &&
+    recordEvidence &&
+    checkMatches &&
+    (!Number.isFinite(Number(record.sourceStatus)) || Number(record.sourceStatus) === status)
+  );
+  return valid
+    ? {
+        classification: record.classification,
+        evidenceSha256: `sha256:${sha256(`${recordEvidence}\n${check.dispositionEvidence}`)}`,
+        targetDisposition: record.targetDisposition
+      }
+    : null;
+}
+
+function sourceSurfaceNotRun(reason) {
+  return {
+    schemaVersion: 'public-kit.source-surface-census.1',
+    checkedAt: new Date().toISOString(),
+    status: 'not_run',
+    authoritative: false,
+    sourceOrigin: '',
+    routes: [],
+    sitemaps: [],
+    robots: null,
+    discoveredPublicPaths: [],
+    errors: [],
+    warnings: [reason],
+    budget: {
+      attempted: false,
+      maxRoutes: SOURCE_SURFACE_LIMITS.maxRoutes,
+      maxSitemapLocs: SOURCE_SURFACE_LIMITS.maxSitemapLocs,
+      maxSitemaps: SOURCE_SURFACE_LIMITS.maxSitemaps
+    },
+    fingerprint: ''
+  };
+}
+
+export async function inspectSourceSurface({
+  independentVerification = {},
+  limits = {},
+  liveHttpContext = null,
+  routeMatrix = {}
+} = {}) {
+  const checkedAt = new Date().toISOString();
+  const effectiveLimits = { ...SOURCE_SURFACE_LIMITS, ...limits };
+  const positiveLimitNames = [
+    'concurrency', 'deadlineMs', 'maxBodyBytes', 'maxRequests', 'maxRoutes',
+    'maxSitemapLocs', 'maxSitemaps', 'maxTasks'
+  ];
+  const invalidLimit = positiveLimitNames.find((name) =>
+    !Number.isSafeInteger(effectiveLimits[name]) || effectiveLimits[name] <= 0
+  );
+  if (invalidLimit) {
+    return {
+      ...sourceSurfaceNotRun(`Source surface ${invalidLimit} must be a positive safe integer.`),
+      checkedAt,
+      status: 'blocked',
+      errors: [`Source surface ${invalidLimit} must be a positive safe integer.`],
+      warnings: []
+    };
+  }
+
+  let sourceBaseUrl;
+  try {
+    sourceBaseUrl = parseHttpUrl(routeMatrix?.sourceBaseUrl, 'route-matrix.json sourceBaseUrl');
+    sourceBaseUrl.pathname = '/';
+    sourceBaseUrl.search = '';
+  } catch (error) {
+    return {
+      ...sourceSurfaceNotRun(error.message),
+      checkedAt,
+      status: 'blocked',
+      errors: [error.message],
+      warnings: []
+    };
+  }
+
+  const context = liveHttpContext ?? createLiveHttpContext({
+    attempted: true,
+    concurrency: effectiveLimits.concurrency,
+    deadlineMs: effectiveLimits.deadlineMs,
+    maxRequests: effectiveLimits.maxRequests,
+    maxTasks: effectiveLimits.maxTasks
+  });
+  const errors = [];
+  const warnings = [];
+  const routeQueue = [];
+  const queuedRoutes = new Set();
+  const routeProvenance = new Map();
+  const sitemapQueue = [];
+  const queuedSitemaps = new Set();
+  const sitemapProvenance = new Map();
+  const routes = new Map();
+  const sitemaps = [];
+  let droppedRouteCount = 0;
+  let droppedSitemapCount = 0;
+  let sitemapLocCount = 0;
+
+  const addProvenance = (map, key, provenance) => {
+    const records = map.get(key) ?? new Map();
+    const normalized = {
+      kind: String(provenance?.kind ?? 'unknown'),
+      referrer: String(provenance?.referrer ?? '')
+    };
+    records.set(`${normalized.kind}\0${normalized.referrer}`, normalized);
+    map.set(key, records);
+  };
+  const enqueueRoute = (value, provenance) => {
+    const path = sourceDocumentPath(value, sourceBaseUrl);
+    if (!path) return;
+    addProvenance(routeProvenance, path, provenance);
+    if (queuedRoutes.has(path)) return;
+    if (queuedRoutes.size >= effectiveLimits.maxRoutes) {
+      droppedRouteCount += 1;
+      return;
+    }
+    queuedRoutes.add(path);
+    routeQueue.push(path);
+  };
+  const enqueueSitemap = (value, provenance) => {
+    let url;
+    try {
+      url = new URL(String(value ?? ''), sourceBaseUrl);
+      url.hash = '';
+    } catch {
+      return;
+    }
+    if (url.origin !== sourceBaseUrl.origin || url.username || url.password || queuedSitemaps.has(url.href)) return;
+    addProvenance(sitemapProvenance, url.href, provenance);
+    if (queuedSitemaps.size >= effectiveLimits.maxSitemaps) {
+      droppedSitemapCount += 1;
+      return;
+    }
+    queuedSitemaps.add(url.href);
+    sitemapQueue.push(url.href);
+  };
+
+  enqueueRoute('/', { kind: 'homepage', referrer: routeMatrix.sourceBaseUrl });
+  for (const route of Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []) {
+    enqueueRoute(route?.sourcePath, { kind: 'declared-primary', referrer: 'route-matrix.json#primaryRoutes' });
+  }
+
+  let robots = null;
+  try {
+    robots = await context.runTask('source-robots', async () => {
+      const url = new URL('/robots.txt', sourceBaseUrl);
+      const response = await requestFollowingRedirects(url, {
+        liveHttpContext: context,
+        maxBodyBytes: effectiveLimits.maxBodyBytes
+      });
+      const directives = response.status >= 200 && response.status < 300
+        ? sourceRobotsSitemapUrls(response.body, sourceBaseUrl)
+        : [];
+      for (const sitemapUrl of directives) {
+        enqueueSitemap(sitemapUrl, { kind: 'robots-directive', referrer: url.href });
+      }
+      if (response.status >= 500 || response.status === 429) {
+        errors.push(`Source robots.txt returned HTTP ${response.status}; source discovery is not complete.`);
+      }
+      return {
+        bodySha256: `sha256:${sha256(response.body)}`,
+        finalUrl: response.finalUrl,
+        sitemapDirectives: directives,
+        status: response.status
+      };
+    });
+  } catch (error) {
+    warnings.push(`Source robots.txt could not be inspected: ${error.message}`);
+  }
+  enqueueSitemap(new URL('/sitemap.xml', sourceBaseUrl).href, {
+    kind: 'default-sitemap-probe',
+    referrer: sourceBaseUrl.href
+  });
+
+  let sitemapCursor = 0;
+  while (sitemapCursor < sitemapQueue.length) {
+    const sitemapUrl = sitemapQueue[sitemapCursor];
+    sitemapCursor += 1;
+    try {
+      const record = await context.runTask('source-sitemap', async () => {
+        const response = await requestFollowingRedirects(new URL(sitemapUrl), {
+          liveHttpContext: context,
+          maxBodyBytes: effectiveLimits.maxBodyBytes
+        });
+        const locs = response.status >= 200 && response.status < 300
+          ? sourceSitemapLocUrls(response.body, sourceBaseUrl)
+          : [];
+        const isIndex = /<sitemapindex\b/i.test(response.body);
+        const isUrlset = /<urlset\b/i.test(response.body);
+        sitemapLocCount += locs.length;
+        if (sitemapLocCount > effectiveLimits.maxSitemapLocs) {
+          errors.push(`Verifier-owned source sitemap discovery exceeded its ${effectiveLimits.maxSitemapLocs} URL limit.`);
+        } else if (isIndex) {
+          for (const location of locs) {
+            enqueueSitemap(location, { kind: 'sitemap-index', referrer: sitemapUrl });
+          }
+        } else if (isUrlset) {
+          for (const location of locs) {
+            enqueueRoute(location, { kind: 'sitemap-url', referrer: sitemapUrl });
+          }
+        } else if (response.status >= 200 && response.status < 300 && sitemapProvenance.get(sitemapUrl)?.has(`robots-directive\0${new URL('/robots.txt', sourceBaseUrl).href}`)) {
+          errors.push(`Robots-declared source sitemap ${redactedUrl(sitemapUrl)} is not a sitemap index or URL set.`);
+        }
+        if (response.status >= 500 || response.status === 429) {
+          errors.push(`Source sitemap ${redactedUrl(sitemapUrl)} returned HTTP ${response.status}.`);
+        }
+        return {
+          bodySha256: `sha256:${sha256(response.body)}`,
+          finalUrl: response.finalUrl,
+          kind: isIndex ? 'index' : isUrlset ? 'urlset' : 'unknown',
+          locCount: locs.length,
+          requestedUrl: sitemapUrl,
+          status: response.status
+        };
+      });
+      sitemaps.push(record);
+    } catch (error) {
+      const onlyDefaultProbe = [...(sitemapProvenance.get(sitemapUrl)?.values() ?? [])]
+        .every((record) => record.kind === 'default-sitemap-probe');
+      if (!onlyDefaultProbe) {
+        errors.push(`Source sitemap ${redactedUrl(sitemapUrl)} could not be inspected: ${error.message}`);
+      }
+    }
+  }
+
+  let routeCursor = 0;
+  while (routeCursor < routeQueue.length) {
+    const batch = routeQueue.slice(routeCursor, routeCursor + effectiveLimits.concurrency);
+    routeCursor += batch.length;
+    let results;
+    try {
+      results = await context.runTasks('source-route', batch, async (path) => {
+      const url = new URL(path, sourceBaseUrl);
+      const routeErrors = [];
+      try {
+        const response = await requestFollowingRedirects(url, {
+          liveHttpContext: context,
+          maxBodyBytes: effectiveLimits.maxBodyBytes
+        });
+        const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
+        const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
+          (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
+        const metadata = isHtml ? renderedMetadata(response.body, response.finalUrl) : {};
+        const extracted = isHtml
+          ? sourceRenderedRouteLinks(response.body, response.finalUrl, sourceBaseUrl.origin)
+          : { paths: [], warnings: [] };
+        warnings.push(...extracted.warnings);
+        const boundary = sourceBoundaryKind(response.status);
+        let boundaryConfirmationStatus = 0;
+        let boundaryConfirmed = false;
+        if (boundary) {
+          try {
+            const confirmation = await requestFollowingRedirects(url, {
+              captureBody: 'never',
+              liveHttpContext: context,
+              maxBodyBytes: effectiveLimits.maxBodyBytes
+            });
+            boundaryConfirmationStatus = confirmation.status;
+            boundaryConfirmed = confirmation.status === response.status;
+            if (!boundaryConfirmed) {
+              routeErrors.push(`Source boundary ${path} changed from HTTP ${response.status} to ${confirmation.status} on immediate verifier recheck.`);
+            }
+          } catch (error) {
+            routeErrors.push(`Source boundary ${path} could not be confirmed by a second verifier request: ${error.message}`);
+          }
+        }
+        if (response.status >= 500 || response.status === 429) {
+          routeErrors.push(`Source route ${path} returned HTTP ${response.status}; public reachability cannot be established.`);
+        }
+        return {
+          bodySha256: `sha256:${sha256(response.body)}`,
+          boundaryConfirmationStatus,
+          boundaryConfirmed,
+          canonical: metadata.canonicalUrl ?? '',
+          discoveredLinks: extracted.paths,
+          errors: routeErrors,
+          finalUrl: response.finalUrl,
+          h1: isHtml ? elementText(response.body, 'h1') : '',
+          initialStatus: response.initialStatus,
+          isHtml,
+          path,
+          status: response.status,
+          title: isHtml ? elementText(response.body, 'title') : ''
+        };
+      } catch (error) {
+        return {
+          bodySha256: '', canonical: '', discoveredLinks: [],
+          boundaryConfirmationStatus: 0, boundaryConfirmed: false,
+          errors: [`Source route ${path} could not be inspected: ${error.message}`],
+          finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
+        };
+      }
+      });
+    } catch (error) {
+      errors.push(`Verifier-owned source route census could not complete within its HTTP budget: ${error.message}`);
+      break;
+    }
+    for (const record of results) {
+      routes.set(record.path, record);
+      errors.push(...record.errors);
+      for (const linkedPath of record.discoveredLinks) {
+        enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
+      }
+      if (record.finalUrl) {
+        const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
+        if (finalPath && finalPath !== record.path) {
+          enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
+        }
+      }
+    }
+  }
+
+  if (droppedRouteCount > 0) {
+    errors.push(`Verifier-owned source route discovery exceeded its ${effectiveLimits.maxRoutes} route limit; ${droppedRouteCount} additional discoveries were not inspected.`);
+  }
+  if (droppedSitemapCount > 0) {
+    errors.push(`Verifier-owned source sitemap discovery exceeded its ${effectiveLimits.maxSitemaps} sitemap limit; ${droppedSitemapCount} additional sitemaps were not inspected.`);
+  }
+
+  const declaredSourcePaths = new Set([
+    ...(Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : [])
+      .map((route) => normalizePath(route?.sourcePath)),
+    ...(Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+      .filter((route) => route?.accepted === true)
+      .map((route) => normalizePath(route?.sourcePath))
+  ].filter(Boolean));
+  const discoveredPublicPaths = new Set();
+  for (const record of routes.values()) {
+    const publicHtml = record.status >= 200 && record.status < 300 && record.isHtml;
+    const boundaryKind = sourceBoundaryKind(record.status);
+    const boundaryDisposition = record.boundaryConfirmed
+      ? sourceBoundaryDisposition(routeMatrix, independentVerification, record.path, record.status)
+      : null;
+    record.boundary = boundaryKind;
+    record.boundaryDisposition = boundaryDisposition;
+    if (publicHtml) {
+      discoveredPublicPaths.add(record.path);
+      if (!declaredSourcePaths.has(record.path)) {
+        const provenance = [...(routeProvenance.get(record.path)?.values() ?? [])]
+          .map((item) => item.kind)
+          .join(', ') || 'source discovery';
+        errors.push(`Verifier-owned source census discovered reachable public source route ${record.path} via ${provenance}, but route-matrix.json has no accepted source route. Reachable public routes cannot be excluded by builder-authored drift dispositions.`);
+      }
+    } else if (boundaryKind && !boundaryDisposition) {
+      errors.push(`Verifier-owned source census found ${boundaryKind} source boundary ${record.path} with HTTP ${record.status}, but it was not persistently machine-confirmed and matched to an evidenced sourceRouteDriftClassification boundary.`);
+    } else if (
+      [...(routeProvenance.get(record.path)?.values() ?? [])].some((item) => item.kind === 'declared-primary') &&
+      !publicHtml &&
+      !boundaryKind
+    ) {
+      errors.push(`Declared primary source route ${record.path} did not resolve to a public HTML response.`);
+    }
+  }
+
+  const declaredPrimaryByPath = new Map((Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : [])
+    .map((route) => [normalizePath(route?.sourcePath), route]));
+  const sourceRowsByPath = new Map((Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+    .map((route) => [normalizePath(route?.sourcePath), route]));
+  for (const [path] of declaredPrimaryByPath) {
+    const record = routes.get(path);
+    const declared = sourceRowsByPath.get(path);
+    if (!record || !declared) continue;
+    const sourceStatusDeclared = declared.sourceStatus !== null && declared.sourceStatus !== undefined && declared.sourceStatus !== '';
+    const expectedStatus = Number(declared.sourceStatus);
+    if (sourceStatusDeclared && Number.isFinite(expectedStatus) && expectedStatus !== record.initialStatus) {
+      errors.push(`Primary source route ${path} returned HTTP ${record.initialStatus}; route-matrix.json records ${expectedStatus}.`);
+    }
+    const expectedFinalPath = normalizePath(declared.sourceFinalPath);
+    if (expectedFinalPath && expectedFinalPath !== normalizePath(record.finalUrl)) {
+      errors.push(`Primary source route ${path} ended at ${normalizePath(record.finalUrl)}; route-matrix.json records ${expectedFinalPath}.`);
+    }
+    if (String(declared.sourceTitle ?? '').trim() && declared.sourceTitle !== record.title) {
+      errors.push(`Primary source route ${path} title does not match verifier-owned source readback.`);
+    }
+    if (String(declared.sourceH1 ?? '').trim() && declared.sourceH1 !== record.h1) {
+      errors.push(`Primary source route ${path} H1 does not match verifier-owned source readback.`);
+    }
+  }
+
+  const routeRecords = [...routes.values()].map(({ discoveredLinks: _discoveredLinks, ...record }) => ({
+    ...record,
+    provenance: [...(routeProvenance.get(record.path)?.values() ?? [])].sort((left, right) =>
+      comparePortable(`${left.kind}\0${left.referrer}`, `${right.kind}\0${right.referrer}`)
+    )
+  })).sort((left, right) => comparePortable(left.path, right.path));
+  const sitemapRecords = sitemaps.map((record) => ({
+    ...record,
+    provenance: [...(sitemapProvenance.get(record.requestedUrl)?.values() ?? [])].sort((left, right) =>
+      comparePortable(`${left.kind}\0${left.referrer}`, `${right.kind}\0${right.referrer}`)
+    )
+  })).sort((left, right) => comparePortable(left.requestedUrl, right.requestedUrl));
+  const fingerprintInput = {
+    sourceOrigin: sourceBaseUrl.origin,
+    routes: routeRecords.map(({ errors: _errors, ...record }) => record),
+    sitemaps: sitemapRecords,
+    robots
+  };
+  return {
+    schemaVersion: 'public-kit.source-surface-census.1',
+    checkedAt,
+    status: errors.length === 0 ? 'passed' : 'blocked',
+    authoritative: true,
+    sourceOrigin: sourceBaseUrl.origin,
+    routes: routeRecords,
+    sitemaps: sitemapRecords,
+    robots,
+    discoveredPublicPaths: [...discoveredPublicPaths].sort(comparePortable),
+    errors: [...new Set(errors)],
+    warnings: [...new Set(warnings)],
+    budget: {
+      ...context.metrics(),
+      droppedRouteCount,
+      droppedSitemapCount,
+      maxBodyBytes: effectiveLimits.maxBodyBytes,
+      maxRoutes: effectiveLimits.maxRoutes,
+      maxSitemapLocs: effectiveLimits.maxSitemapLocs,
+      maxSitemaps: effectiveLimits.maxSitemaps,
+      routeCount: routeRecords.length,
+      sitemapCount: sitemapRecords.length,
+      sitemapLocCount
+    },
+    fingerprint: stateSha256(fingerprintInput)
+  };
 }
 
 function criticalAssetCandidates(html, finalUrl) {
@@ -5533,6 +6064,13 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
+  const sourceSurfaceCensusPromise = runtimeAuthoritativeForCompletion && declaredSource
+    ? inspectSourceSurface({ independentVerification, routeMatrix })
+    : Promise.resolve(sourceSurfaceNotRun(
+        runtimeWasInjected
+          ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
+          : 'Verifier-owned source census could not start without sourceBaseUrl.'
+      ));
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
@@ -5589,6 +6127,8 @@ export async function verifyLive({
           routeCount: liveRouteTasks.length
         }
       };
+  const sourceSurfaceCensus = await sourceSurfaceCensusPromise;
+  liveErrors.push(...sourceSurfaceCensus.errors);
   liveErrors.push(...liveRouteSchedule.errors);
   const checksForBucket = (bucket) => liveRouteSchedule.checks
     .filter((entry) => entry.bucket === bucket)
@@ -6094,6 +6634,9 @@ export async function verifyLive({
   if (!liveTargetValid) {
     completionBlockedReasons.push('Live target identity or route verification failed.');
   }
+  if (runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
+    completionBlockedReasons.push('Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.');
+  }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
     completionBlockedReasons.push('Independent verification evidence does not support completion.');
   }
@@ -6150,6 +6693,7 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
+    sourceSurfaceFingerprint: sourceSurfaceCensus.fingerprint ?? '',
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
     beforeConsentNetworkCaptureFingerprint: beforeConsentNetworkCapture?.captureFingerprint ?? '',
     negativeRouteCheck: negativeRouteCheck
@@ -6227,9 +6771,10 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
+      sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 5
+      targetFingerprintInputVersion: 6
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
@@ -6244,6 +6789,7 @@ export async function verifyLive({
       sharesLiveHttpBudget: true
     },
     routeChecks: routeChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
+    sourceSurfaceCensus: sharedValue(sourceSurfaceCensus, absolutePacketDir),
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     globalChromeCapture,
     globalChromeCaptureSummary: captureSummary(globalChromeCapture),

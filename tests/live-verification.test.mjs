@@ -15,6 +15,7 @@ import {
   DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
+  inspectSourceSurface,
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
@@ -208,6 +209,181 @@ test('live-derived surfaces reconcile bidirectionally and non-public items requi
   const circular = structuredClone(reconciliation);
   circular.declarations[0].packetReferences = ['drupal-readback.json#liveSurfaceReconciliation.declarations'];
   assert.match(liveSurfaceReconciliationErrors(inventory, circular, packetDir).join('\n'), /specific section/);
+});
+
+test('verifier-owned source census rejects a target-derived one-route inventory and accepts complete source paths', async () => {
+  await withHttpServer(async (request, response) => {
+    const origin = `http://${request.headers.host}`;
+    if (request.url === '/robots.txt') {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end(`User-agent: *\nSitemap: ${origin}/sitemap.xml\n`);
+      return;
+    }
+    if (request.url === '/sitemap.xml') {
+      response.writeHead(200, { 'content-type': 'application/xml' });
+      response.end(`<?xml version="1.0"?><sitemapindex><sitemap><loc>${origin}/pages.xml</loc></sitemap></sitemapindex>`);
+      return;
+    }
+    if (request.url === '/pages.xml') {
+      response.writeHead(200, { 'content-type': 'application/xml' });
+      response.end(`<?xml version="1.0"?><urlset>
+        <url><loc>${origin}/</loc></url>
+        <url><loc>${origin}/projects</loc></url>
+        <url><loc>${origin}/developers</loc></url>
+        <url><loc>${origin}/podcasts</loc></url>
+      </urlset>`);
+      return;
+    }
+    const path = String(request.url ?? '').split('?')[0];
+    const pages = new Map([
+      ['/', ['Source home', 'Source home']],
+      ['/projects', ['Projects', 'Project Tracker']],
+      ['/developers', ['Developers', 'Developer Database']],
+      ['/podcasts', ['Podcasts', 'Podcasts']]
+    ]);
+    const page = pages.get(path);
+    if (!page) {
+      response.writeHead(404, { 'content-type': 'text/html' });
+      response.end('<title>Not found</title><h1>Not found</h1>');
+      return;
+    }
+    const links = path === '/'
+      ? '<nav><a href="/projects">Projects</a><a href="/developers">Developers</a><a href="/podcasts">Podcasts</a></nav>'
+      : '';
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end(`<!doctype html><html><head><title>${page[0]}</title><link rel="canonical" href="${origin}${path}"></head><body><h1>${page[1]}</h1>${links}</body></html>`);
+  }, async (sourceBaseUrl) => {
+    const matrix = {
+      sourceBaseUrl,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', accepted: true }],
+      routes: [{ sourcePath: '/', sourceStatus: 200, sourceFinalPath: '/', sourceTitle: 'Source home', sourceH1: 'Source home', accepted: true }],
+      sourceRouteDriftClassification: []
+    };
+    const incomplete = await inspectSourceSurface({ routeMatrix: matrix });
+    assert.equal(incomplete.status, 'blocked');
+    assert.equal(incomplete.authoritative, true);
+    assert.deepEqual(incomplete.discoveredPublicPaths, ['/', '/developers', '/podcasts', '/projects']);
+    assert.match(incomplete.errors.join('\n'), /source route \/projects.*no accepted source route/i);
+    assert.match(incomplete.errors.join('\n'), /source route \/developers.*no accepted source route/i);
+    assert.match(incomplete.errors.join('\n'), /source route \/podcasts.*no accepted source route/i);
+    const projects = incomplete.routes.find((route) => route.path === '/projects');
+    assert.deepEqual(
+      {
+        canonical: projects.canonical,
+        h1: projects.h1,
+        status: projects.status,
+        title: projects.title
+      },
+      {
+        canonical: `${sourceBaseUrl}/projects`,
+        h1: 'Project Tracker',
+        status: 200,
+        title: 'Projects'
+      }
+    );
+    assert.match(projects.bodySha256, /^sha256:[a-f0-9]{64}$/);
+    assert.ok(projects.provenance.some((record) => record.kind === 'rendered-link'));
+    assert.ok(projects.provenance.some((record) => record.kind === 'sitemap-url'));
+    assert.equal(incomplete.budget.maxRoutes, 512);
+    assert.equal(incomplete.budget.maxSitemaps, 24);
+
+    const locallyExcludedMatrix = structuredClone(matrix);
+    locallyExcludedMatrix.routes.push(
+      { sourcePath: '/developers', accepted: true },
+      { sourcePath: '/podcasts', accepted: true }
+    );
+    locallyExcludedMatrix.sourceRouteDriftClassification.push({
+      sourcePath: '/projects',
+      sourceStatus: 200,
+      classification: 'legacy',
+      targetDisposition: 'intentionally_drop',
+      ownerDecisionEvidence: 'Builder says this public route can be omitted.',
+      accepted: true,
+      notes: 'Locally accepted omission.'
+    });
+    const locallyExcluded = await inspectSourceSurface({
+      independentVerification: {
+        routeDriftDispositionChecks: [{
+          sourcePath: '/projects',
+          classification: 'legacy',
+          targetDisposition: 'intentionally_drop',
+          dispositionEvidence: 'Builder-authored review agrees.',
+          status: 'pass'
+        }]
+      },
+      routeMatrix: locallyExcludedMatrix
+    });
+    assert.equal(locallyExcluded.status, 'blocked');
+    assert.match(
+      locallyExcluded.errors.join('\n'),
+      /source route \/projects.*cannot be excluded by builder-authored drift dispositions/i
+    );
+
+    const completeMatrix = structuredClone(matrix);
+    for (const path of ['/projects', '/developers', '/podcasts']) {
+      completeMatrix.routes.push({ sourcePath: path, accepted: true });
+    }
+    const complete = await inspectSourceSurface({ routeMatrix: completeMatrix });
+    assert.equal(complete.status, 'passed', complete.errors.join('\n'));
+    assert.equal(complete.errors.length, 0);
+    assert.match(complete.fingerprint, /^sha256:[a-f0-9]{64}$/);
+
+    const bounded = await inspectSourceSurface({ routeMatrix: matrix, limits: { maxRoutes: 2 } });
+    assert.equal(bounded.status, 'blocked');
+    assert.equal(bounded.budget.maxRoutes, 2);
+    assert.ok(bounded.budget.droppedRouteCount > 0);
+    assert.match(bounded.errors.join('\n'), /exceeded its 2 route limit/i);
+  }, { defaultVerificationRoutes: false });
+});
+
+test('verifier-owned source census records an evidenced private source boundary without human review', async () => {
+  await withHttpServer((request, response) => {
+    if (request.url === '/robots.txt' || request.url === '/sitemap.xml') {
+      response.writeHead(404, { 'content-type': 'text/plain' });
+      response.end('Not found');
+      return;
+    }
+    if (request.url === '/private') {
+      response.writeHead(403, { 'content-type': 'text/html' });
+      response.end('<title>Private</title><h1>Private</h1>');
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html' });
+    response.end('<title>Source</title><link rel="canonical" href="/"><h1>Source</h1><a href="/private">Private area</a>');
+  }, async (sourceBaseUrl) => {
+    const routeMatrix = {
+      sourceBaseUrl,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', accepted: true }],
+      routes: [{ sourcePath: '/', accepted: true }],
+      sourceRouteDriftClassification: [{
+        sourcePath: '/private',
+        sourceStatus: 403,
+        classification: 'private_boundary',
+        targetDisposition: 'intentionally_drop',
+        targetPath: '',
+        ownerDecisionEvidence: 'Verifier-observed HTTP 403 boundary.',
+        accepted: true,
+        notes: 'The public source links to an authenticated private area.'
+      }]
+    };
+    const independentVerification = {
+      routeDriftDispositionChecks: [{
+        sourcePath: '/private',
+        classification: 'private_boundary',
+        targetDisposition: 'intentionally_drop',
+        dispositionEvidence: 'Fresh source request returned HTTP 403.',
+        status: 'pass'
+      }]
+    };
+    const census = await inspectSourceSurface({ independentVerification, routeMatrix });
+    assert.equal(census.status, 'passed', census.errors.join('\n'));
+    const boundary = census.routes.find((route) => route.path === '/private');
+    assert.equal(boundary.status, 403);
+    assert.equal(boundary.boundary, 'private');
+    assert.equal(boundary.boundaryConfirmed, true);
+    assert.equal(boundary.boundaryConfirmationStatus, 403);
+    assert.equal(boundary.boundaryDisposition.classification, 'private_boundary');
+  }, { defaultVerificationRoutes: false });
 });
 
 function templateName(packetFile) {
@@ -3477,6 +3653,17 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
 test('CLI discovers the DDEV Drupal runtime and requires clean status plus HEAD-matching tracked config YAML', async () => {
   let liveBaseUrl = '';
   await withHttpServer(
+    (request, response) => {
+      if (request.url === '/robots.txt' || request.url === '/sitemap.xml') {
+        response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        response.end('Not found');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Source site</title></head><body><h1>Source home</h1></body></html>');
+    },
+    async (sourceBaseUrl) => {
+  await withHttpServer(
     (_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html><head>
@@ -3636,7 +3823,9 @@ process.stdout.write(outputs.get(command) + '\\n');
 
       const packetDir = join(targetRoot, 'review-packet');
       copyTemplatePacket(packetDir);
-      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.sourceBaseUrl = sourceBaseUrl;
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
       addQualifyingReviewEvidence(packetDir, baseUrl);
       mutateText(join(packetDir, 'operator-run.md'), (text) =>
         text.replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted'));
@@ -3835,6 +4024,8 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(extraTrackedConfigReport.lifecycle.relation, 'changed-since-latest-anchor');
       assert.equal(extraTrackedConfigReport.lifecycle.currentStateVerified, false);
       assert.equal(readFileSync(baselinePath, 'utf8'), originalBaseline);
+    }
+  );
     }
   );
 });
