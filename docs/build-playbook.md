@@ -232,6 +232,14 @@ For public-facing rebuilds, SEO and social metadata are part of public behavior.
 
 Do not treat "Metatag is enabled" or "SEO recipe applied" as evidence. Fetch every primary route and verify the actual rendered output: exactly one usable canonical, a non-empty meta description, and `og:image` where applicable. Any `not_applicable` meta-description or `og:image` disposition needs reviewed rationale and evidence. Empty tags caused by tokens pointing at missing fields are failed evidence, not harmless defaults.
 
+## Negative Routes, Legal Links, And Consent
+
+Positive-route checks do not expose soft 404s, inherited canonicals on access walls, broken footer policies, or integrations that bypass consent. Complete `negative-route-consent.json`, then let the live verifier generate a high-entropy missing path and require an exact 404, a non-empty title and H1, the declared noindex policy, and either no canonical or a self canonical. Declare login and other access-wall routes explicitly; they must not borrow a canonical from unrelated public content.
+
+The verifier enumerates rendered same-origin links whose text or path indicates privacy, legal, terms, cookies, data protection, do-not-sell, or an accessibility statement. Every actively rendered link must resolve to a same-origin 2xx response. Production-only legal copy or approval may remain human-owned only through a named, reasoned, packet-local disposition; an already rendered broken link cannot use that disposition.
+
+When a consent module is installed, enumerate its managers, config objects, applications, enabled/required state, and controlled resource patterns. Packet-authored browser transcripts remain useful diagnostics but never become machine truth. For optional or disabled controlled resources, the live verifier launches a fresh isolated Chrome context for every primary route, disables cache, records actual `Network.requestWillBeSent` URLs and resource types before any consent interaction, observes for at least two seconds, then requires a bounded quiet network. It binds that complete capture to the exact DDEV target, primary-route set, verification time, and Drupal result-state fingerprint. A matching controlled request fails; absence passes only from this verifier-owned capture. Missing Chrome, incomplete routes, an origin escape, or an unsettled network fails closed. This is local behavior evidence, not legal approval of the policy text or production consent design.
+
 ## Non-Admin Editor Verification
 
 Drupal access and workflow are part of the build, not admin polish. Every custom public bundle and every bundle that owns repeating public content needs a non-admin editor role that can create and edit it.

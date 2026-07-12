@@ -25,6 +25,7 @@
     "blind-adversarial-review.json",
     "drupal-readback.json",
     "field-output-matrix.json",
+    "negative-route-consent.json",
     "launch-checklist.md"
   ],
   "generatedEvidenceFiles": [
@@ -385,6 +386,14 @@
       "phase": 6,
       "evidenceFile": "browser-evidence.json",
       "checkedBy": "verifier",
+      "blocking": "handoff"
+    },
+    {
+      "id": "G-PRIVACY-01",
+      "title": "Negative routes, legal links, and verifier-owned before-consent network behavior verified",
+      "phase": 6,
+      "evidenceFile": "negative-route-consent.json",
+      "checkedBy": "verify-script",
       "blocking": "handoff"
     },
     {

@@ -7,16 +7,20 @@ import test from 'node:test';
 
 import {
   BROWSER_CAPTURE_LIMITS,
+  captureBeforeConsentNetwork,
   captureGlobalChrome,
   cleanupBrowserProfile,
   compareGlobalChromeCaptures,
   createBrowserCaptureBudget,
+  finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
   findBrowserExecutable,
   globalChromeImpact,
   normalizeGlobalChromeContract,
+  validateBeforeConsentNetworkCapture,
   validateScreenshotArtifacts
 } from '../bin/global-chrome.mjs';
+import { consentNetworkCaptureRequired, verifyConsentReconciliation } from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
 const state = (seed) => `sha256:${seed.repeat(64)}`;
@@ -73,6 +77,77 @@ test('global chrome capture fails closed before browser launch when route or wal
   assert.equal(expired.budget.deadlineExceeded, true);
   assert.equal(expired.budget.deadlineMs, 10);
   assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
+
+test('before-consent capture reuses the browser route ceiling and aggregate deadline', async () => {
+  const tooManyRoutes = await captureBeforeConsentNetwork({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: Array.from({ length: BROWSER_CAPTURE_LIMITS.maxRoutes + 1 }, (_, index) => `/route-${index}`),
+    browserExecutable: '/definitely/not/a/browser'
+  });
+  assert.equal(tooManyRoutes.status, 'blocked');
+  assert.equal(tooManyRoutes.authoritative, false);
+  assert.equal(tooManyRoutes.budget.attempted, false);
+  assert.equal(tooManyRoutes.budget.routeCount, BROWSER_CAPTURE_LIMITS.maxRoutes + 1);
+  assert.equal(tooManyRoutes.budget.viewportCount, 1);
+  assert.match(tooManyRoutes.errors.join('\n'), /route limit; no browser checks were run/i);
+
+  const clockValues = [0, 11, 11];
+  const expired = await captureBeforeConsentNetwork({
+    baseUrl: 'http://127.0.0.1',
+    primaryRoutes: ['/'],
+    browserExecutable: '/definitely/not/a/browser',
+    limits: { deadlineMs: 10 },
+    now: () => clockValues.shift() ?? 11
+  });
+  assert.equal(expired.status, 'blocked');
+  assert.equal(expired.authoritative, false);
+  assert.equal(expired.budget.deadlineExceeded, true);
+  assert.equal(expired.budget.deadlineMs, 10);
+  assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
+});
+
+test('selector-only and attachment-only optional consent apps require verifier-owned capture', () => {
+  const declaration = (kind, { enabled = true, required = false } = {}) => ({
+    discoveryStatus: 'installed',
+    managers: [{ id: 'klaro', module: 'klaro', configNames: [`klaro.application.${kind}`] }],
+    applications: [{
+      id: kind,
+      managerId: 'klaro',
+      configName: `klaro.application.${kind}`,
+      enabled,
+      required,
+      controlledResources: [{ kind, pattern: kind === 'selector' ? '#external-media' : 'remote_video' }]
+    }]
+  });
+  assert.equal(consentNetworkCaptureRequired(declaration('selector')), true);
+  assert.equal(consentNetworkCaptureRequired(declaration('attachment', { enabled: false, required: false })), true);
+  assert.equal(consentNetworkCaptureRequired(declaration('selector', { enabled: true, required: true })), false);
+
+  for (const kind of ['selector', 'attachment']) {
+    const record = declaration(kind, { enabled: kind === 'selector', required: false });
+    const application = record.applications[0];
+    const reconciliation = verifyConsentReconciliation(record, {
+      confirmed: true,
+      detected: true,
+      managerModules: ['klaro'],
+      configNames: [application.configName],
+      applications: [{
+        id: application.id,
+        configName: application.configName,
+        enabled: application.enabled,
+        required: application.required,
+        resources: application.controlledResources
+      }]
+    }, [{ renderedResourceUrls: [] }], null, {
+      targetOrigin: 'https://fixture.ddev.site',
+      primaryRoutes: ['/'],
+      stateFingerprint: state('e')
+    });
+    assert.equal(reconciliation.passed, false, `${kind} capture unexpectedly passed`);
+    assert.match(reconciliation.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
+    assert.equal(reconciliation.authoritativeBeforeConsentCapture, false);
+  }
 });
 
 test('profile cleanup uses bounded retries and reports a deferred warning without leaking its path', () => {
@@ -308,4 +383,161 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
   } finally {
     await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
   }
+});
+
+test('verifier-owned consent capture catches delayed JS requests and proves no-load routes in fresh contexts', {
+  skip: findBrowserExecutable() ? false : 'Chrome/Chromium is not installed in this runtime.'
+}, async () => {
+  const server = createServer((request, response) => {
+    if (request.url === '/controlled-map.js') {
+      response.writeHead(200, { 'content-type': 'application/javascript' });
+      response.end('globalThis.controlledMapLoaded = true;');
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html><html><head><title>Consent fixture</title></head><body><h1>Fixture</h1>
+      ${request.url === '/' ? `<script>setTimeout(() => { const script = document.createElement('script'); script.src = '/controlled-map.js'; document.head.append(script); }, 1200);</script>` : ''}
+    </body></html>`);
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  try {
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const raw = await captureBeforeConsentNetwork({ baseUrl, primaryRoutes: ['/', '/clean'] });
+    assert.equal(raw.status, 'captured', raw.errors.join('\n'));
+    assert.deepEqual(
+      {
+        attempted: raw.budget.attempted,
+        captured: raw.budget.capturedRouteViewportCount,
+        deadlineExceeded: raw.budget.deadlineExceeded,
+        routeCount: raw.budget.routeCount,
+        scheduled: raw.budget.scheduledRouteViewportCount,
+        viewportCount: raw.budget.viewportCount
+      },
+      { attempted: true, captured: 2, deadlineExceeded: false, routeCount: 2, scheduled: 2, viewportCount: 1 }
+    );
+    assert.ok(raw.routes.every((route) => route.isolation.browserContextFresh));
+    assert.ok(raw.routes.every((route) => route.isolation.consentInteractionPerformed === false));
+    assert.ok(raw.routes.every((route) => route.observation.floorMs >= 2000 && route.observation.settled));
+    assert.ok(raw.routes.find((route) => route.path === '/').requests.some((request) =>
+      request.url === `${baseUrl}/controlled-map.js` && request.resourceType === 'Script'
+    ));
+    assert.equal(raw.routes.find((route) => route.path === '/clean').requests.some((request) =>
+      request.url.includes('controlled-map.js')
+    ), false);
+
+    const finalized = finalizeBeforeConsentNetworkCapture({
+      capture: raw,
+      stateFingerprint: state('c'),
+      targetOrigin: baseUrl
+    });
+    validateBeforeConsentNetworkCapture(finalized, {
+      stateFingerprint: state('c'),
+      targetOrigin: baseUrl,
+      primaryRoutes: ['/', '/clean']
+    });
+
+    const declaration = (pattern) => ({
+      discoveryStatus: 'installed',
+      managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
+      applications: [{
+        id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: false,
+        controlledResources: [{ kind: 'script', pattern }]
+      }],
+      beforeConsentChecks: [{
+        route: '/', observedResourceUrls: ['https://packet-authored.example/diagnostic.js'], blockedApplicationIds: ['maps']
+      }]
+    });
+    const runtime = (pattern) => ({
+      confirmed: true,
+      detected: true,
+      managerModules: ['klaro'],
+      configNames: ['klaro.application.maps'],
+      applications: [{
+        id: 'maps', configName: 'klaro.application.maps', enabled: true, required: false,
+        resources: [{ kind: 'script', pattern }]
+      }]
+    });
+    const context = {
+      targetOrigin: baseUrl,
+      primaryRoutes: ['/', '/clean'],
+      stateFingerprint: state('c')
+    };
+    const violation = verifyConsentReconciliation(
+      declaration('controlled-map.js'), runtime('controlled-map.js'),
+      [{ renderedResourceUrls: [] }], finalized, context
+    );
+    assert.equal(violation.passed, false);
+    assert.match(violation.errors.join('\n'), /loaded before consent.*controlled-map\.js/i);
+    assert.equal(violation.authoritativeBeforeConsentCapture, true);
+    assert.ok(violation.browserObservedRequests.some((request) => request.resourceType === 'Script'));
+    assert.deepEqual(violation.authoredBrowserObservedUrls, ['https://packet-authored.example/diagnostic.js']);
+    assert.equal(violation.browserObservedUrls.includes('https://packet-authored.example/diagnostic.js'), false);
+
+    const noLoad = verifyConsentReconciliation(
+      declaration('maps.example.invalid'), runtime('maps.example.invalid'),
+      [{ renderedResourceUrls: [] }], finalized, context
+    );
+    assert.equal(noLoad.passed, true, noLoad.errors.join('\n'));
+    assert.equal(noLoad.authoritativeBeforeConsentCapture, true);
+
+    const disabledDeclaration = declaration('maps.example.invalid');
+    const disabledRuntime = runtime('maps.example.invalid');
+    disabledDeclaration.applications[0].enabled = false;
+    disabledRuntime.applications[0].enabled = false;
+    const disabledNoLoad = verifyConsentReconciliation(
+      disabledDeclaration, disabledRuntime, [{ renderedResourceUrls: [] }], finalized, context
+    );
+    assert.equal(disabledNoLoad.passed, true, disabledNoLoad.errors.join('\n'));
+
+    assert.throws(() => validateBeforeConsentNetworkCapture(finalized, {
+      stateFingerprint: state('d'), targetOrigin: baseUrl, primaryRoutes: ['/', '/clean']
+    }), /exact live result-state fingerprint/i);
+    assert.throws(() => validateBeforeConsentNetworkCapture(finalized, {
+      stateFingerprint: state('c'), targetOrigin: baseUrl, primaryRoutes: ['/other']
+    }), /routes do not match/i);
+    assert.throws(() => validateBeforeConsentNetworkCapture(finalized, {
+      stateFingerprint: state('c'), targetOrigin: 'https://other.example', primaryRoutes: ['/', '/clean']
+    }), /target origin/i);
+  } finally {
+    await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+  }
+});
+
+test('applicable consent capture fails closed when Chrome is unavailable', async () => {
+  const unavailable = await captureBeforeConsentNetwork({
+    baseUrl: 'https://fixture.ddev.site',
+    primaryRoutes: ['/'],
+    browserExecutable: '/definitely/not/a/browser'
+  });
+  assert.equal(unavailable.status, 'unavailable');
+  assert.equal(unavailable.authoritative, false);
+  assert.throws(() => finalizeBeforeConsentNetworkCapture({
+    capture: unavailable,
+    stateFingerprint: state('e'),
+    targetOrigin: 'https://fixture.ddev.site'
+  }), /capture is unavailable/i);
+  const reconciliation = verifyConsentReconciliation({
+    discoveryStatus: 'installed',
+    managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
+    applications: [{
+      id: 'maps', configName: 'klaro.application.maps', enabled: false, required: false,
+      controlledResources: [{ kind: 'script', pattern: 'maps.example' }]
+    }]
+  }, {
+    confirmed: true,
+    detected: true,
+    managerModules: ['klaro'],
+    configNames: ['klaro.application.maps'],
+    applications: [{
+      id: 'maps', configName: 'klaro.application.maps', enabled: false, required: false,
+      resources: [{ kind: 'script', pattern: 'maps.example' }]
+    }]
+  }, [{ renderedResourceUrls: [] }], unavailable, {
+    targetOrigin: 'https://fixture.ddev.site', primaryRoutes: ['/'], stateFingerprint: state('e')
+  });
+  assert.equal(reconciliation.passed, false);
+  assert.match(reconciliation.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
 });

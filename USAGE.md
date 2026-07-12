@@ -76,6 +76,7 @@ drupal-project/
       blind-adversarial-review.json
       drupal-readback.json
       field-output-matrix.json
+      negative-route-consent.json
       launch-checklist.md
       evidence/
         lifecycle/
@@ -122,6 +123,7 @@ Before calling the local build successful, the agent must record:
 - off-road inventory for custom code, hardcoded public copy, raw rendering, Pathauto gaps, missing editor-role access, missing SEO token fields, and other places Drupal's normal guarantees were bypassed;
 - composition evidence showing the target's actual route owner matches the declared owner, or a target-bound accepted deviation names the fallback, rationale, accepter, and evidence;
 - rendered SEO evidence for every primary route, including one usable canonical, a non-empty meta description, and `og:image` where applicable; each `not_applicable` disposition needs reviewed rationale and evidence;
+- negative-route and consent evidence: a generated 404 with title/H1, noindex policy, and absent-or-self canonical; access-wall canonical checks; all rendered internal legal/privacy links; active consent managers/applications and controlled resources; and fresh before-consent browser evidence for every primary route with consent storage cleared;
 - environment-portable exported SEO defaults with request/entity/media tokens instead of literal DDEV, localhost, loopback, or any current authoritative DDEV web-origin URL, including a custom FQDN;
 - anonymous public route checks;
 - raw in-browser axe-core evidence with accepted full-default or WCAG-tagged rule scope; every incomplete disposition must use structured evidence bound to the exact URL, rule, target, result, and timestamp, plus keyboard, focus, accessible-name, and applicable form-error checks;
@@ -134,6 +136,8 @@ Before calling the local build successful, the agent must record:
 - an open decisions handoff that lists only human-owned decisions with current evidence, options, owner role, impact, and affected gate.
 
 The default verifier exits zero only when the detected live DDEV target, machine-checkable packet readiness, Drupal site identity, independent verification, and blind review all authorize the complete-local-rebuild machine claim. It runs primary, target-required, browser-representative, accepted full-surface, server-rendered link, source-origin, and redirect-materialization checks through one shared concurrency/request/task/deadline budget; every redirect hop consumes that budget, and exhaustion blocks completion. It preserves query-distinct states while redacting query values in reports, requires discovered same-origin targets to be declared or exactly dispositioned, validates expected external redirects without fetching the external origin, blocks direct source-origin links without exact evidenced acceptance, materializes source path+query mappings through a first-hop `301` or `308` to the exact same-origin target path+query unless a named, evidenced exception is accepted, rejects self-consistent `5xx` failures, checks required rendered canonical/meta-description/`og:image` output, and independently requires real Git-tracked YAML in the current config-sync directory. It runs a metadata-only Drush census before accepting next-cycle N/A; for an applicable recurring editorial model, it also re-fetches the cleaned next-cycle probe URL and requires the recorded `404` or `410` without a redirect. It does not execute JavaScript; browser-only and imported-body routes must be recorded during route expansion. Every discovered route role needs a representative primary route. An explicit target must match one of the current project's authoritative DDEV web origins; configured custom FQDNs qualify, service URLs such as Mailpit do not. Packet-only data and injected test runtimes may help diagnostics, but can never authorize completion. Exit `2` means the packet and live checks are valid but required machine evidence is incomplete; exit `1` means invalid packet or live-target checks. `recordedHumanGateStatus` separately reports builder-writable names and choices as self-attested record status; it does not affect machine completion, verdict, or exit code. Authenticated human approval and production or launch approval remain separate.
+
+That same shared HTTP budget covers the generated missing route, access-wall routes, and rendered legal/privacy links. When any optional or disabled controlled resource applies—including selector-only and attachment-only declarations—the verifier records CDP network requests from a fresh isolated context for every primary route before interaction. The capture is bound to the exact target, route set, time, and Drupal state and uses the browser route ceiling plus aggregate deadline. Matching requests, unavailable Chrome, incomplete coverage, unsettled network, or budget exhaustion fail closed.
 
 ## Continue After The Initial Pass
 
