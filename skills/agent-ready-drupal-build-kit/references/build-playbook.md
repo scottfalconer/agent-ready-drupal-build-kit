@@ -1,6 +1,6 @@
 # Drupal CMS Build Playbook
 
-This playbook records common build issues that can cause agents to misread evidence or produce brittle Drupal targets.
+This playbook records common build issues that can cause agents to misread evidence or produce brittle Drupal targets. The installed skill's `references/cookbook.md` carries the worked Drush sequences, config shapes, and code snippets these requirements assume; reach for it instead of inventing command syntax.
 
 ## Official Drupal CMS Baseline
 
@@ -77,7 +77,7 @@ Use the strongest separation the runtime supports: a subagent, a new agent conte
 
 The verifier must emit `review-packet/independent-verification.json`. At minimum it should check:
 
-- source and target item counts for every declared collection ledger row, with equality unless a named owner accepts a specific evidence-backed exclusion; private/unreachable items need boundary evidence;
+- source and target item counts for every declared collection ledger row, with equality unless a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested, and private/unreachable items need boundary evidence;
 - Drupal ownership and non-admin editor add-a-row evidence for every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route;
 - rendered embed and media presence: iframes, videos, posters, thumbnails, documents, alt text, fallback states, and provider links;
 - raw embed and source-markup scans for `<iframe>`, `<script>`, inline handlers, `javascript:` URLs, style attributes, and raw source HTML in editorial fields;
@@ -110,9 +110,9 @@ The reviewer must emit `review-packet/blind-adversarial-review.json` and store r
 - CMS/editor experience when the brief asks for it;
 - accessibility, SEO, console errors, and obvious usability defects.
 
-Use a verdict vocabulary that separates evidence layers: `mechanically_verified`, `parity_reviewed`, `human_accepted`, `complete`, and `blocked`. A packet with passing scripts is mechanically verified. It is not complete until the blind reviewer verdict is `good` or `good_enough`, raw evidence exists, desktop/mobile route notes exist, and every blocker/critical/high finding is fixed or has a named, reasoned, evidence-backed `accepted_out_of_scope` decision. An `external_blocker` leaves the verdict blocked.
+Use a verdict vocabulary that separates evidence layers: `mechanically_verified`, `parity_reviewed`, `human_accepted`, `complete`, and `blocked`. A packet with passing scripts is mechanically verified. It is not complete until the blind reviewer verdict is `good` or `good_enough`, raw evidence exists, desktop/mobile route notes exist, and every blocker/critical/high finding is fixed or has a recorded-attribution, reasoned, evidence-backed `accepted_out_of_scope` decision. The local verifier treats that attribution as self-attested; authenticated human approval is separate. An `external_blocker` leaves the verdict blocked.
 
-The route coverage floor is the route matrix, not a single homepage row. Classify each accepted route by role and include at least one route of every discovered role in `primaryRoutes`, including a representative detail route whenever detail pages exist. Complete claims cover every primary route from `route-matrix.json` at desktop and mobile widths. An omitted-route record explains missing coverage; it does not provide coverage. A named, reasoned, evidence-backed `accepted_out_of_scope` decision may remove a route from agreed scope, while an `external_blocker` keeps completion blocked. The screenshot paths named in each route review should resolve to real packet evidence files. If a defect is marked fixed, the blind review should name the later review pass that confirmed it; otherwise the artifact cannot distinguish rerun review from status laundering.
+The route coverage floor is the route matrix, not a single homepage row. Classify each accepted route by role and include at least one route of every discovered role in `primaryRoutes`, including a representative detail route whenever detail pages exist. Complete claims cover every primary route from `route-matrix.json` at desktop and mobile widths. An omitted-route record explains missing coverage; it does not provide coverage. A recorded-attribution, reasoned, evidence-backed `accepted_out_of_scope` decision may remove a route from the machine-evaluated scope; the local verifier treats that attribution as self-attested and authenticated approval remains separate, while an `external_blocker` keeps completion blocked. The screenshot paths named in each route review should resolve to real packet evidence files. If a defect is marked fixed, the blind review should name the later review pass that confirmed it; otherwise the artifact cannot distinguish rerun review from status laundering.
 
 A site cannot be called complete while the blind adversarial review says `acceptable_with_issues`, `not_good_enough`, or `blocked`.
 
@@ -170,7 +170,7 @@ The cleaner Drupal answer is usually one content owner plus a deliberate display
 
 Every run should emit comparable Drupal readback. At minimum include:
 
-- `ddev drush status`, `ddev drush config:get system.site --field=uuid`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
+- `ddev drush status`, `ddev drush config:get system.site uuid --format=string` (never `config:get --field`, which Drush 13 removed), enabled modules, default/admin themes, install profile, site name, front page, and config status;
 - Drupal CMS/core versions from `ddev composer show` and `ddev drush status`, plus the Recipe runner actually available in the target;
 - the active config sync directory and the real YAML paths Git tracks in that exact directory;
 - content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
@@ -201,7 +201,7 @@ Do not treat "Metatag is enabled" or "SEO recipe applied" as evidence. Fetch eve
 
 Drupal access and workflow are part of the build, not admin polish. Every custom public bundle and every bundle that owns repeating public content needs a non-admin editor role that can create and edit it.
 
-Seed at least one editor user for local verification. Run add/edit form checks as that user, not uid=1. Independently change every load-bearing field and every field claimed to affect anonymous output, then verify the expected public route changes. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
+Seed at least one editor user for local verification; the cookbook's editor-seeding section has the exact role, per-bundle permission, user, and login-link sequence. Run add/edit form checks as that user, not uid=1. Independently change every load-bearing field and every field claimed to affect anonymous output, then verify the expected public route changes. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
 
 ## Drupal Build Primitives
 
@@ -239,7 +239,7 @@ Canvas is a composition layer, not a loophole around content modeling. Use Canva
 
 Source audit and migration evidence are not normal editorial fields. `Source URL`, source route status, crawl notes, source HTML, source CSS, and route evidence belong in the review packet, import manifest, migration map, logs, or an admin-only audit surface when there is a real governance reason. They should not clutter the authoring form for ordinary editors.
 
-The collection ownership gate is concrete. Every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like ledger row needs the source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. Counts must be equal unless a named owner accepts a specific evidence-backed exclusion; private or unreachable items need evidence of that boundary. Detail pages, individual node routes, and sample items do not satisfy a collection route. A route-level 200/H1 check is not collection parity.
+The collection ownership gate is concrete. Every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like ledger row needs the source route, collection pattern, source and target item counts, Drupal entity/bundle owner, required fields, View or collection owner, detail route owner, and editor add-a-row evidence. Counts must be equal unless a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested, and private or unreachable items need evidence of that boundary. Detail pages, individual node routes, and sample items do not satisfy a collection route. A route-level 200/H1 check is not collection parity.
 
 The reverse is also true: a working collection does not prove its item details. Declare the detail mode for each collection. When items have separate public details, the checked fields must cover its `requiredFields` plus every field mapped to anonymous output at that detail route or view mode; listing-only render locations do not become detail requirements. Capture one representative source/target route, bind its Drupal owner to the same concrete config ID in the model, browser record, independent check, and Drupal readback, and record a distinct field-local selector with one computed-visible match, dimensions, hidden/ARIA state, and text. Readback may provide the exact config ID directly, derive an entity view display from entity type/bundle/mode, or identify a View plus display; Canvas and exceptional owners should provide an explicit config ID. Document-wide or reused selectors and body-wide string matching are not visibility proof. The live verifier fetches non-primary browser representatives as well as primary routes under the shared route/request/deadline budget so a large evidence set does not overload the target.
 
@@ -376,7 +376,7 @@ Use this decision procedure:
 
 The hybrid rule is strict: Canvas can arrange a page, but repeatable collections stay Drupal-owned. Sponsors, videos, cards, events, galleries, people, products, locations, articles, and resources should not be serialized into Canvas text props or Twig arrays. Use entities, media, entity references, Views, slots, or child components backed by Drupal data.
 
-For each flexible route, `pattern-map.json` should name the owner, rationale, sections, editor-facing section names, singleton/repeatable classification, data source, expected editor action, and acceptance proof. The actual target owner must match that declaration. If the build later changes owner or component model, add a target-bound deviation record with the actual owner, named accepter, reason, consequence, and live evidence instead of silently downgrading to theme-only composition or a blob component.
+For each flexible route, `pattern-map.json` should name the owner, rationale, sections, editor-facing section names, singleton/repeatable classification, data source, expected editor action, and acceptance proof. The actual target owner must match that declaration. If the build later changes owner or component model, add a target-bound deviation record with the actual owner, recorded accepter label, reason, consequence, and live evidence instead of silently downgrading to theme-only composition or a blob component. The local packet does not authenticate the accepter.
 
 ## Canvas Authoring Ownership
 
@@ -384,7 +384,7 @@ A Canvas-ready page is not proven by the existence of a Canvas page. It is prove
 
 The rebuilt public route must open in the Canvas editor when Canvas is the selected owner. The homepage, campaign landing pages, splash pages, presentation-heavy about pages, and other composed marketing experiences should not be route-specific Twig or preprocess arrays wrapped in a theme if Canvas/Experience Builder is available and fits the source pattern.
 
-Canvas usability is a component-model gate, not a page-existence gate. A flexible public Canvas page with one monolithic component is a failed Canvas model unless a target-bound accepted deviation records the actual fallback, named accepter, reason, consequence, and live evidence. A usable Canvas model has components, slots, and typed props aligned to editor mental models: hero, intro, CTA, sponsor strip, media band, gallery, related content, card grid, footer CTA, and similar sections.
+Canvas usability is a component-model gate, not a page-existence gate. A flexible public Canvas page with one monolithic component is a failed Canvas model unless a target-bound accepted deviation records the actual fallback, accepter label, reason, consequence, and live evidence. The local packet treats the attribution as self-attested. A usable Canvas model has components, slots, and typed props aligned to editor mental models: hero, intro, CTA, sponsor strip, media band, gallery, related content, card grid, footer CTA, and similar sections.
 
 Mechanical anti-patterns should fail independent verification:
 
@@ -499,7 +499,7 @@ URL/image fields can be useful evidence carriers, but they should not silently r
 
 ## Content Field Formats
 
-Text fields often need both value and format. Do not import formatted text without an explicit text format decision.
+Text fields often need both value and format. Do not import formatted text without an explicit text format decision. Imported source HTML goes into a filtered format, never `full_html`; the cookbook shows format discovery and the import snippet.
 
 Record:
 
@@ -527,7 +527,7 @@ For each important route, decide:
 
 Run a route/alias smoke check for every representative top-level source route and listing route. For condition/product/advice sites, this usually includes routes like `/`, condition hubs, product listings, advice listings, product details, article details, where-to-buy, search, contact, legal, privacy, and cookie pages when present. Record intended canonicalization, including trailing-slash behavior and Pathauto-generated alternates.
 
-Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
+Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed; the cookbook has a per-bundle pattern config example. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
 
 Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/seasonal-range`, either preserve, redirect, or explicitly retire the source-style route.
 

@@ -13,6 +13,14 @@ const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const BLIND_COMPLETE_VERDICTS = new Set(['good', 'good_enough']);
 const GATE_CHECKED_BY = new Set(['human', 'verify-script', 'verifier', 'blind-verifier']);
 const GATE_BLOCKING = new Set(['handoff', 'launch']);
+const VISUAL_COMPARISON_METHODS = new Set([
+  'agent_review',
+  'human_review',
+  'other',
+  'pixel_diff',
+  'structural_review'
+]);
+const COMPLETION_VISUAL_COMPARISON_METHODS = new Set(['agent_review', 'human_review', 'pixel_diff']);
 const BLIND_DEFECT_SEVERITIES = new Set(['blocker', 'critical', 'high', 'medium', 'low']);
 const BLIND_DEFECT_STATUSES = new Set(['open', 'fixed', 'accepted_out_of_scope', 'external_blocker']);
 const BLIND_ROUTE_CHECKS = [
@@ -41,7 +49,12 @@ const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 const MAX_SCREENSHOT_DIMENSION = 12_000;
 const MAX_SCREENSHOT_PIXELS = 50_000_000;
 const MAX_PNG_INFLATED_BYTES = 200 * 1024 * 1024;
-const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set(['launch-checklist.md', 'production-target.md']);
+const LOCAL_COMPLETION_NON_AUTHORITY_FILES = new Set([
+  'launch-checklist.md',
+  'maintainer-review.md',
+  'operator-run.md',
+  'production-target.md'
+]);
 const COMPLETION_CLAIM_GATES = new Set([
   'content',
   'media',
@@ -101,6 +114,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
+  'G-HANDOFF-01': 'humanDecisionPresentation',
   'G-VERIFY-01': 'independentVerification',
   'G-VERIFY-02': 'liveVerification',
   'G-BLIND-01': 'blindAdversarialReview',
@@ -647,6 +661,12 @@ async function evidenceImageMetadata(path) {
 function validateGateVocabulary(gates, errors) {
   if (gates?.schemaVersion !== 'public-kit.gates.1') {
     errors.push('gates.json must use schemaVersion public-kit.gates.1.');
+  }
+
+  for (const checker of new Set(arrayOrEmpty(gates?.gates).map((gate) => gate?.checkedBy).filter(Boolean))) {
+    if (GATE_CHECKED_BY.has(checker) && !String(gates?.checkedBySemantics?.[checker] ?? '').trim()) {
+      errors.push(`gates.json checkedBySemantics must define what checkedBy ${checker} means.`);
+    }
   }
 
   const ids = new Set();
@@ -2493,19 +2513,20 @@ function escapedRegex(value) {
 }
 
 function markdownField(text, label) {
-  return text.match(new RegExp(`^\\s*-\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*-[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
 }
 
 function markdownPlainField(text, label) {
-  return text.match(new RegExp(`^\\s*${escapedRegex(label)}:\\s*(.+?)\\s*$`, 'mi'))?.[1]?.trim() ?? '';
+  return text.match(new RegExp(`^[ \\t]*${escapedRegex(label)}:[ \\t]*([^\\r\\n]+?)[ \\t]*$`, 'mi'))?.[1]?.trim() ?? '';
+}
+
+function resolvedMarkdownField(text, label) {
+  const value = markdownField(text, label);
+  return Boolean(value) && !/^`?UNKNOWN`?$/i.test(value);
 }
 
 function checkedStatement(text, statement) {
   return new RegExp(`^\\s*-\\s*\\[[xX]\\]\\s*${escapedRegex(statement)}\\s*$`, 'm').test(text);
-}
-
-function uncheckedStatement(text, statement) {
-  return new RegExp(`^\\s*-\\s*\\[ \\]\\s*${escapedRegex(statement)}\\s*$`, 'm').test(text);
 }
 
 function blockedTableRow(text) {
@@ -2516,29 +2537,282 @@ function unresolvedMarkdownUnknown(text) {
   return /:\s*`?UNKNOWN`?\s*$/im.test(text) || /\|\s*UNKNOWN\s*\|/i.test(text);
 }
 
-async function markdownCompletionReadiness(packetDir) {
-  const reasons = [];
-  const texts = Object.fromEntries(
-    await Promise.all(
-      [
-        'operator-run.md',
-        'maintainer-review.md',
-        'recipe-start-point.md',
-        'scoped-gap-list.md',
-        'open-decisions.md',
-        'off-road-inventory.md',
-        'durable-intent.yml'
-      ].map(async (file) => [file, existsSync(join(packetDir, file)) ? await readFile(join(packetDir, file), 'utf8') : ''])
+function markdownDecisionRows(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+        return null;
+      }
+      const cells = trimmed.slice(1, -1).split('|').map((cell) => cell.trim());
+      if (!/^DEC-[A-Za-z0-9._-]+$/.test(cells[0] ?? '')) {
+        return null;
+      }
+      return { cells, currentEvidence: cells[3] ?? '', raw: trimmed };
+    })
+    .filter(Boolean);
+}
+
+function completeDecisionRow(row) {
+  return row?.cells?.length === 9 && row.cells.every((cell) => Boolean(cell));
+}
+
+function decisionRowStatus(row) {
+  return String(row?.cells?.[8] ?? '').replaceAll('`', '').trim().toLowerCase();
+}
+
+function currentEvidenceReferenceSet(rows) {
+  return new Set(
+    rows.flatMap((row) =>
+      String(row.currentEvidence)
+        .toLowerCase()
+        .replaceAll('`', '')
+        .split(/[\s,;()[\]{}]+/)
+        .map((token) => token.replace(/^["'<>]+|["'<>.!?]+$/g, ''))
+        .filter(Boolean)
     )
   );
+}
 
+function stableDeviationIdentity(value) {
+  const identity = typeof value === 'string'
+    ? value.trim()
+    : isJsonObject(value)
+      ? String(value.id || value.route || value.sourcePath || value.targetPath || value.path || '').trim()
+      : '';
+  return /^[A-Za-z0-9._~:/?&=%+-]+$/.test(identity) ? identity : '';
+}
+
+function referenceSlug(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function humanDecisionPresentationAssessment({ decisions, offRoad, records }) {
+  const structuralReasons = [];
+  const contradictionReasons = [];
+  const decisionRows = markdownDecisionRows(decisions);
+  const openDecisionSummary = markdownField(decisions, 'Decisions still open').replaceAll('`', '').trim();
+  const noOpenDecisions = /^None$/i.test(openDecisionSummary);
+  const summaryFields = [
+    'Decisions still open',
+    'Decisions accepted',
+    'Decisions blocked by missing external input',
+    'Agent-resolvable work deliberately excluded from this file'
+  ];
+  const allowedDecisionStatuses = new Set([
+    'accepted',
+    'blocked',
+    'deferred',
+    'not_applicable',
+    'open',
+    'pending',
+    'rejected',
+    'resolved'
+  ]);
+  const openDecisionStatuses = new Set(['blocked', 'deferred', 'open', 'pending']);
+  const identityComplete = ['Source URL', 'Target site name', 'Target workspace', 'Date'].every((field) =>
+    resolvedMarkdownField(decisions, field)
+  );
+  const summariesComplete = summaryFields.every((field) => resolvedMarkdownField(decisions, field));
+  const rowsComplete = decisionRows.every(completeDecisionRow);
+  const rowStatusesValid = decisionRows.every((row) => allowedDecisionStatuses.has(decisionRowStatus(row)));
+  if (
+    !identityComplete ||
+    !summariesComplete ||
+    unresolvedMarkdownUnknown(decisions) ||
+    (!noOpenDecisions && decisionRows.length === 0) ||
+    !rowsComplete ||
+    !rowStatusesValid
+  ) {
+    structuralReasons.push(
+      'open-decisions.md must contain run identity, exact handoff summaries, and substantive DEC rows with nine populated cells and a supported status, or an exact Decisions still open: None declaration.'
+    );
+  }
+  if (noOpenDecisions && decisionRows.some((row) => openDecisionStatuses.has(decisionRowStatus(row)))) {
+    contradictionReasons.push(
+      'open-decisions.md cannot declare "Decisions still open: None" while a DEC row remains open, pending, blocked, or deferred.'
+    );
+  }
+  const requiredReferences = [];
+  const sourceDescriptions = new Set();
+  const missingStableIdentities = [];
+
+  for (const match of offRoad.matchAll(/^\|\s*(OR-[A-Za-z0-9._-]+)\s*\|[^\n]*$/gim)) {
+    requiredReferences.push(match[1]);
+    sourceDescriptions.add('off-road-inventory.md OR- exception rows');
+  }
+  for (const [index, defect] of arrayOrEmpty(records.blindAdversarialReview?.productDefects).entries()) {
+    if (defect?.status !== 'accepted_out_of_scope') {
+      continue;
+    }
+    const identity = stableDeviationIdentity(String(defect.id ?? ''));
+    if (!identity) {
+      missingStableIdentities.push(`blind-adversarial-review.json productDefects[${index}]`);
+      continue;
+    }
+    requiredReferences.push(identity);
+    sourceDescriptions.add('blind-adversarial-review.json accepted_out_of_scope defects');
+  }
+  for (const [index, route] of arrayOrEmpty(
+    records.blindAdversarialReview?.routeCoverage?.omittedPrimaryRoutes
+  ).entries()) {
+    if (route?.disposition !== 'accepted_out_of_scope') {
+      continue;
+    }
+    const identity = normalizeRouteKey(route.route || route.targetPath || route.sourcePath || route.path);
+    if (!identity) {
+      missingStableIdentities.push(`blind-adversarial-review.json routeCoverage.omittedPrimaryRoutes[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`omitted-route:${identity}`);
+    sourceDescriptions.add('blind-adversarial-review.json accepted primary-route omissions');
+  }
+  for (const [index, exclusion] of arrayOrEmpty(records.parityReport?.addressableSurface?.exclusions).entries()) {
+    if (!hasMeaningfulEntry([exclusion])) {
+      continue;
+    }
+    const identity = stableDeviationIdentity(exclusion);
+    if (!identity) {
+      missingStableIdentities.push(`parity-report.json addressableSurface.exclusions[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`parity-exclusion:${identity}`);
+    sourceDescriptions.add('parity-report.json addressable-surface exclusions');
+  }
+  for (const [index, reconciliation] of arrayOrEmpty(records.routeMatrix?.perRouteItemReconciliation).entries()) {
+    if (reconciliation?.mismatchDisposition !== 'owner_approved_exclusion') {
+      continue;
+    }
+    const sourcePath = normalizeRouteKey(reconciliation.sourcePath);
+    const targetPath = normalizeRouteKey(reconciliation.targetPath);
+    const itemType = String(reconciliation.itemType ?? '').trim();
+    const itemTypeSlug = referenceSlug(itemType);
+    if (!sourcePath || !targetPath || !itemTypeSlug || /\s/.test(sourcePath) || /\s/.test(targetPath)) {
+      missingStableIdentities.push(`route-matrix.json perRouteItemReconciliation[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`count-exclusion:${sourcePath}->${targetPath}:${itemTypeSlug}`);
+    sourceDescriptions.add('route-matrix.json owner_approved_exclusion count dispositions');
+  }
+  for (const [index, check] of arrayOrEmpty(
+    records.independentVerification?.compositionModelFidelityChecks
+  ).entries()) {
+    if (
+      compositionOwnersMatch(check?.declaredCompositionOwner, check?.actualCompositionOwner) ||
+      check?.deviationRecordRequired !== true ||
+      check?.deviationRecordPresent !== true
+    ) {
+      continue;
+    }
+    const targetRoute = normalizeRouteKey(check.targetRoute || check.publicRoute || check.targetPath);
+    if (!targetRoute || /\s/.test(targetRoute)) {
+      missingStableIdentities.push(`independent-verification.json compositionModelFidelityChecks[${index}]`);
+      continue;
+    }
+    requiredReferences.push(`composition-deviation:${targetRoute}`);
+    sourceDescriptions.add('independent-verification.json accepted composition-owner deviations');
+  }
+
+  if (missingStableIdentities.length > 0) {
+    contradictionReasons.push(
+      `Accepted deviations need stable IDs or route/item identities before handoff presentation can be checked: ${missingStableIdentities.join(', ')}.`
+    );
+  }
+  const presentedReferences = currentEvidenceReferenceSet(decisionRows);
+  const missingReferences = requiredReferences.filter((reference) =>
+    !presentedReferences.has(reference.toLowerCase())
+  );
+  if (noOpenDecisions && requiredReferences.length > 0) {
+    contradictionReasons.push(
+      `open-decisions.md cannot declare "Decisions still open: None" while ${[...sourceDescriptions].join(', ')} require presented ratification decisions; the local verifier does not authenticate their approvers.`
+    );
+  } else if (missingReferences.length > 0) {
+    contradictionReasons.push(
+      `open-decisions.md must reference every accepted deviation in a substantive DEC row Current evidence cell; missing ${missingReferences.join(', ')}.`
+    );
+  }
+
+  return {
+    decisionRows,
+    noOpenDecisions,
+    reasons: [...structuralReasons, ...contradictionReasons],
+    status:
+      contradictionReasons.length > 0
+        ? 'contradictory'
+        : structuralReasons.length > 0
+          ? 'incomplete'
+          : 'presented-consistently'
+  };
+}
+
+function recordedDecision(text, choices) {
+  const selected = choices.filter(({ statement }) => checkedStatement(text, statement));
+  if (selected.length === 0) {
+    return 'pending';
+  }
+  if (selected.length > 1) {
+    return 'conflicting-record';
+  }
+  return selected[0].status;
+}
+
+function recordedAttribution(text, recordedByLabel) {
+  const recordedBy = markdownField(text, recordedByLabel);
+  const builderIdentity = markdownField(text, 'Builder identity');
+  return {
+    recordedBy,
+    builderIdentity,
+    identityStringComparison:
+      !recordedBy || !builderIdentity
+        ? 'not-comparable'
+        : identitiesMatch(recordedBy, builderIdentity)
+          ? 'same-string'
+          : 'different-string'
+  };
+}
+
+function recordedHumanGateAssessment(texts) {
   const operator = texts['operator-run.md'];
-  const operatorFields = [
+  const maintainer = texts['maintainer-review.md'];
+  const productionTarget = texts['production-target.md'];
+  const launchChecklist = texts['launch-checklist.md'];
+
+  const operatorStatus = recordedDecision(operator, [
+    { statement: 'Repeatability not reviewed', status: 'pending' },
+    { statement: 'Repeatability blocked', status: 'recorded-not-accepted' },
+    { statement: 'Repeatability accepted', status: 'recorded-accepted' },
+    { statement: 'Repeatability accepted with restrictions', status: 'recorded-accepted-with-restrictions' }
+  ]);
+  const maintainerStatus = recordedDecision(maintainer, [
+    {
+      statement: 'I would stake my name on this as a complete local Drupal CMS rebuild.',
+      status: 'recorded-accepted'
+    },
+    {
+      statement: 'I would not stake my name on this as a complete local Drupal CMS rebuild.',
+      status: 'recorded-not-accepted'
+    }
+  ]);
+  const productionTargetStatus = recordedDecision(productionTarget, [
+    { statement: 'Production target accepted', status: 'recorded-accepted' },
+    { statement: 'Production target not accepted', status: 'recorded-not-accepted' }
+  ]);
+  const launchStatus = recordedDecision(launchChecklist, [
+    { statement: 'Launch approved', status: 'recorded-accepted' },
+    { statement: 'Launch not approved', status: 'recorded-not-accepted' }
+  ]);
+  const operatorRecordComplete = [
     'Name',
     'Role',
     'Environment',
     'Environment provisioning (manual, One Line Installer, other)',
     'Date',
+    'Builder identity',
     'DDEV project URL',
     '`ddev drush status`',
     'Config export location',
@@ -2546,21 +2820,7 @@ async function markdownCompletionReadiness(packetDir) {
     'Browser-rendered evidence',
     'Command transcript',
     'Reviewer'
-  ];
-  const acceptedOperatorDecisions = [
-    'Repeatability accepted',
-    'Repeatability accepted with restrictions'
-  ].filter((decision) => checkedStatement(operator, decision));
-  if (
-    operatorFields.some((field) => !markdownField(operator, field)) ||
-    acceptedOperatorDecisions.length !== 1 ||
-    !uncheckedStatement(operator, 'Repeatability not reviewed') ||
-    !uncheckedStatement(operator, 'Repeatability blocked')
-  ) {
-    reasons.push('operator-run.md must identify the operator/runtime, point to concrete run evidence, and record an accepted repeatability decision.');
-  }
-
-  const maintainer = texts['maintainer-review.md'];
+  ].every((field) => resolvedMarkdownField(operator, field)) && !unresolvedMarkdownUnknown(operator);
   const maintainerQuestions = [
     'Is the build on Drupal CMS best practices using Drupal-native primitives?',
     "Is the architecture sound for the source site's real shape?",
@@ -2571,15 +2831,78 @@ async function markdownCompletionReadiness(packetDir) {
     'Are the remaining business, legal, integration, production, and launch gaps named?',
     'Would a Drupal maintainer put their name on this as a complete local starting point?'
   ];
-  if (
-    ['Site', 'Target', 'Reviewer', 'Date'].some((field) => !markdownField(maintainer, field)) ||
-    maintainerQuestions.some((question) => !checkedStatement(maintainer, question)) ||
-    !checkedStatement(maintainer, 'I would stake my name on this as a complete local Drupal CMS rebuild.') ||
-    !uncheckedStatement(maintainer, 'I would not stake my name on this as a complete local Drupal CMS rebuild.') ||
-    !markdownField(maintainer, 'Reasons to accept')
-  ) {
-    reasons.push('maintainer-review.md must contain a named, dated positive stake-my-name review with all local-rebuild questions answered.');
-  }
+  const maintainerRecordComplete =
+    ['Site', 'Target', 'Reviewer', 'Date', 'Builder identity'].every((field) => resolvedMarkdownField(maintainer, field)) &&
+    maintainerQuestions.every((question) => checkedStatement(maintainer, question)) &&
+    resolvedMarkdownField(maintainer, 'Reasons to accept') &&
+    !unresolvedMarkdownUnknown(maintainer);
+  const productionTargetRecordComplete = ['Approver', 'Builder identity', 'Reviewed at'].every((field) =>
+    resolvedMarkdownField(productionTarget, field)
+  ) && !unresolvedMarkdownUnknown(productionTarget);
+  const launchRecordComplete = ['Approver', 'Builder identity', 'Reviewed at'].every((field) =>
+    resolvedMarkdownField(launchChecklist, field)
+  ) && !unresolvedMarkdownUnknown(launchChecklist);
+  const localRecords = [
+    { recordComplete: operatorRecordComplete, status: operatorStatus },
+    { recordComplete: maintainerRecordComplete, status: maintainerStatus }
+  ];
+  const localRebuildStatus = localRecords.some(({ status }) =>
+    ['recorded-not-accepted', 'conflicting-record'].includes(status)
+  )
+    ? 'recorded-not-accepted'
+    : localRecords.some(({ recordComplete, status }) => !recordComplete || status === 'pending')
+      ? 'pending'
+      : localRecords.some(({ status }) => status === 'recorded-accepted-with-restrictions')
+        ? 'recorded-accepted-with-restrictions'
+        : 'recorded-accepted';
+
+  return {
+    authentication: 'self-attested-record-only',
+    affectsMachineCompletion: false,
+    localRebuildStatus,
+    gates: {
+      'G-OPERATOR-01': {
+        status: operatorStatus,
+        recordComplete: operatorRecordComplete,
+        ...recordedAttribution(operator, 'Name')
+      },
+      'G-TARGET-01': {
+        status: productionTargetStatus,
+        recordComplete: productionTargetRecordComplete,
+        ...recordedAttribution(productionTarget, 'Approver')
+      },
+      'G-LAUNCH-01': {
+        status: launchStatus,
+        recordComplete: launchRecordComplete,
+        ...recordedAttribution(launchChecklist, 'Approver')
+      },
+      'G-MAINTAINER-01': {
+        status: maintainerStatus,
+        recordComplete: maintainerRecordComplete,
+        ...recordedAttribution(maintainer, 'Reviewer')
+      }
+    },
+    note: 'These packet fields are builder-writable. The verifier reports the recorded strings and choices but does not authenticate a person or infer human independence.'
+  };
+}
+
+async function markdownCompletionReadiness(packetDir, records = {}) {
+  const reasons = [];
+  const texts = Object.fromEntries(
+    await Promise.all(
+      [
+        'operator-run.md',
+        'maintainer-review.md',
+        'production-target.md',
+        'launch-checklist.md',
+        'recipe-start-point.md',
+        'scoped-gap-list.md',
+        'open-decisions.md',
+        'off-road-inventory.md',
+        'durable-intent.yml'
+      ].map(async (file) => [file, existsSync(join(packetDir, file)) ? await readFile(join(packetDir, file), 'utf8') : ''])
+    )
+  );
 
   const recipe = texts['recipe-start-point.md'];
   const selectedStartPoints = [
@@ -2612,18 +2935,10 @@ async function markdownCompletionReadiness(packetDir) {
   }
 
   const decisions = texts['open-decisions.md'];
-  const noOpenDecisions = /^\s*-\s*Decisions still open:\s*None\b/im.test(decisions);
-  if (
-    ['Source URL', 'Target site name', 'Target workspace', 'Date'].some((field) => !markdownField(decisions, field)) ||
-    unresolvedMarkdownUnknown(decisions) ||
-    (!noOpenDecisions && !/^\|\s*DEC-[^\n]+\|\s*$/im.test(decisions)) ||
-    ['Decisions still open', 'Decisions accepted', 'Decisions blocked by missing external input', 'Agent-resolvable work deliberately excluded from this file']
-      .some((field) => !markdownField(decisions, field))
-  ) {
-    reasons.push('open-decisions.md must contain run identity, only evidence-backed human decisions (or an explicit none declaration), and a complete handoff summary.');
-  }
-
   const offRoad = texts['off-road-inventory.md'];
+  const decisionPresentation = humanDecisionPresentationAssessment({ decisions, offRoad, records });
+  reasons.push(...decisionPresentation.reasons);
+
   if (
     ['Site', 'Checked at', 'Reviewer'].some((field) => !markdownField(offRoad, field)) ||
     !/^\s*-\s*Overall status:\s*`?accepted`?\s*$/mi.test(offRoad) ||
@@ -2631,7 +2946,7 @@ async function markdownCompletionReadiness(packetDir) {
     blockedTableRow(offRoad) ||
     !(/no off-road moves/i.test(offRoad) || /^\|\s*OR-[^\n]+\|\s*$/im.test(offRoad))
   ) {
-    reasons.push('off-road-inventory.md must contain a named accepted review and disposition every paved-path exception without UNKNOWN or blocked rows.');
+    reasons.push('off-road-inventory.md must contain a recorded review and disposition every paved-path exception without UNKNOWN or blocked rows; reviewer attribution is self-attested.');
   }
 
   const durableIntent = texts['durable-intent.yml'];
@@ -2660,13 +2975,23 @@ async function markdownCompletionReadiness(packetDir) {
     reasons.push('durable-intent.yml must name the site and contain current accepted/hash-valid intent or an explicit empty intent record list.');
   }
 
-  return reasons;
+  return {
+    reasons,
+    humanDecisionPresentationStatus: decisionPresentation.status,
+    recordedHumanGateStatus: recordedHumanGateAssessment(texts)
+  };
 }
 
 async function packetCompletionReadiness(packetDir, gates, records) {
   const reasons = [];
+  const markdownAssessment = await markdownCompletionReadiness(packetDir, records);
   if (!gates) {
-    return { packetCompletionReady: false, reasons: ['Gate vocabulary could not be loaded.'] };
+    return {
+      packetCompletionReady: false,
+      reasons: ['Gate vocabulary could not be loaded.'],
+      humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+      recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+    };
   }
 
   for (const packetFile of arrayOrEmpty(gates.reviewPacketFiles)) {
@@ -2697,7 +3022,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     }
   }
 
-  reasons.push(...await markdownCompletionReadiness(packetDir));
+  reasons.push(...markdownAssessment.reasons);
 
   const {
     blindAdversarialReview,
@@ -3361,12 +3686,36 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   }
 
   const publicRouteChecks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
+  if (publicRouteChecks.some((check) => !VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method))) {
+    reasons.push('browser-evidence.json visualComparison.method must be agent_review, human_review, pixel_diff, structural_review, or other for every public route check.');
+  }
+  if (publicRouteChecks.some((check) =>
+    VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method) &&
+    !COMPLETION_VISUAL_COMPARISON_METHODS.has(check.visualComparison.method)
+  )) {
+    reasons.push('browser-evidence.json completion-bearing visualComparison.method must be agent_review, human_review, or pixel_diff; structural_review and other are diagnostic-only classifications.');
+  }
+  if (publicRouteChecks.some((check) =>
+    check?.visualComparison?.method === 'human_review' &&
+    !String(check?.visualComparison?.reviewer ?? '').trim()
+  )) {
+    reasons.push('browser-evidence.json visualComparison method human_review requires a recorded reviewer label; the local verifier reports that label as self-attested and does not authenticate it. Record agent_review for agent-performed structural comparison.');
+  }
+  if (publicRouteChecks.some((check) =>
+    check?.visualComparison?.method === 'pixel_diff' &&
+    (!String(check?.visualComparison?.diffImage ?? '').trim() || !finiteNumberValue(check?.visualComparison?.diffScore))
+  )) {
+    reasons.push('browser-evidence.json visualComparison method pixel_diff requires a diffImage and numeric diffScore.');
+  }
   let browserScreenshotsCredible = true;
+  let visualMethodEvidenceCredible = true;
   const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
   for (const [index, check] of publicRouteChecks.entries()) {
+    const screenshotMetadata = {};
     for (const field of ['sourceScreenshot', 'targetScreenshot']) {
       const screenshotPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, check?.[field]);
       const metadata = screenshotPath ? await evidenceImageMetadata(screenshotPath) : null;
+      screenshotMetadata[field] = metadata;
       if (
         !metadata ||
         metadata.size < MIN_SCREENSHOT_BYTES ||
@@ -3377,6 +3726,31 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       }
     }
     reasons.push(...await accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index));
+    if (check?.visualComparison?.method === 'pixel_diff') {
+      const diffPath = resolveReviewEvidencePath(
+        packetDir,
+        browserEvidenceDir,
+        check.visualComparison.diffImage
+      );
+      const diffMetadata = diffPath ? await evidenceImageMetadata(diffPath) : null;
+      if (
+        !diffMetadata ||
+        diffMetadata.size < MIN_SCREENSHOT_BYTES ||
+        diffMetadata.width < MIN_SCREENSHOT_DIMENSION ||
+        diffMetadata.height < MIN_SCREENSHOT_DIMENSION ||
+        diffMetadata.contentSha256 === screenshotMetadata.sourceScreenshot?.contentSha256 ||
+        diffMetadata.contentSha256 === screenshotMetadata.targetScreenshot?.contentSha256 ||
+        diffMetadata.width !== screenshotMetadata.sourceScreenshot?.width ||
+        diffMetadata.height !== screenshotMetadata.sourceScreenshot?.height ||
+        diffMetadata.width !== screenshotMetadata.targetScreenshot?.width ||
+        diffMetadata.height !== screenshotMetadata.targetScreenshot?.height
+      ) {
+        visualMethodEvidenceCredible = false;
+      }
+    }
+  }
+  if (!visualMethodEvidenceCredible) {
+    reasons.push('browser-evidence.json pixel_diff visual comparisons require a distinct real bounded packet-local diff image with source/target dimensions.');
   }
   if (
     isoTimestamp(browserEvidence?.checkedAt) === null ||
@@ -3384,11 +3758,13 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     arrayOrEmpty(browserEvidence?.missingBrowserEvidence).length > 0 ||
     publicRouteChecks.length === 0 ||
     !browserScreenshotsCredible ||
+    !visualMethodEvidenceCredible ||
     publicRouteChecks.some((check) =>
       check?.accepted !== true ||
       !ROUTE_ROLES.has(String(check?.routeRole ?? '').trim()) ||
       (primaryRouteRoles.has(routeRecordRequestKey(check)) &&
         primaryRouteRoles.get(routeRecordRequestKey(check)) !== String(check?.routeRole ?? '').trim()) ||
+      !COMPLETION_VISUAL_COMPARISON_METHODS.has(check?.visualComparison?.method) ||
       check?.visualComparison?.status !== 'pass' ||
       !httpUrl(check?.sourceUrl) ||
       !httpUrl(check?.sourceFinalUrl) ||
@@ -3747,7 +4123,29 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     reasons.push('The newest completion evidence is older than seven days and must be refreshed against the current target.');
   }
 
-  return { packetCompletionReady: reasons.length === 0, reasons };
+  return {
+    packetCompletionReady: reasons.length === 0,
+    reasons,
+    humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+    recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+  };
+}
+
+// Independence declarations live in builder-writable packet JSON, so the strongest
+// honest machine label is self-attested; subagent independence is allowed, not proven.
+function independenceAttestation(actor) {
+  if (!isJsonObject(actor) || !String(actor.nameOrRole ?? '').trim()) {
+    return 'not-declared';
+  }
+  if (
+    String(actor.independenceDegradedReason ?? '').trim() ||
+    actor.freshContextUsed !== true ||
+    actor.sameContextAsBuilder !== false ||
+    actor.builderSummaryExcluded !== true
+  ) {
+    return 'degraded';
+  }
+  return 'self-attested';
 }
 
 function sharedPacketDir(packetDir) {
@@ -3822,9 +4220,16 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    recordedHumanGateStatus: completionReadiness.recordedHumanGateStatus,
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
+      scopeDispositionAttribution: 'builder-writable-self-attested',
+      humanDecisionPresentationStatus: completionReadiness.humanDecisionPresentationStatus,
+      independence: {
+        independentVerification: independenceAttestation(independentVerification?.verifier),
+        blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
+      },
       packetCompletionReady: completionReadiness.packetCompletionReady,
       packetCompletionBlockedReasons: completionReadiness.reasons,
       packetSupportsCompletion:

@@ -38,7 +38,7 @@ Before changing the site, read these installed references completely:
 1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
 2. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
 
-Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
+Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
 
 ## Build contract
 
@@ -93,4 +93,4 @@ Everything required at runtime is inside this skill directory:
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
-- `references/` contains the complete build contract, output inventory, parity specification, playbook, and companion-skill guidance.
+- `references/` contains the complete build contract, output inventory, parity specification, playbook, command cookbook, and companion-skill guidance.

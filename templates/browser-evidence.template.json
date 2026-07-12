@@ -19,7 +19,8 @@
       "sourceScreenshot": "",
       "targetScreenshot": "",
       "visualComparison": {
-        "method": "human_review | pixel_diff | structural_review | other",
+        "method": "human_review | agent_review | pixel_diff | structural_review | other",
+        "reviewer": "",
         "diffImage": "",
         "diffScore": null,
         "status": "pass | needs-review | fail | blocked",
