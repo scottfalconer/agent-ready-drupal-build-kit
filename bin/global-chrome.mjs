@@ -143,6 +143,14 @@ function normalizeRoute(value) {
   return `${url.pathname || '/'}${url.search}`;
 }
 
+function privacyPreservingRoute(value) {
+  const route = normalizeRoute(value);
+  const url = new URL(route, 'https://before-consent.invalid');
+  return `${url.pathname || '/'}${url.search
+    ? `?query-sha256=${sha256(url.search).slice('sha256:'.length)}`
+    : ''}`;
+}
+
 function inside(parent, child) {
   const fromParent = relative(parent, child);
   return fromParent === '' || (
@@ -1142,7 +1150,13 @@ export function validateBeforeConsentNetworkCapture(capture, {
     throw new Error('Before-consent capture does not match the exact live result-state fingerprint.');
   }
   const expected = [...new Set(primaryRoutes.map((route) => normalizeRoute(route?.targetPath ?? route)))].sort();
-  if (expected.length && canonicalJson(expected) !== canonicalJson([...capture.primaryRoutes].sort())) {
+  const privacyPreservingExpected = [...new Set(expected.map(privacyPreservingRoute))].sort();
+  const capturedRoutes = [...capture.primaryRoutes].sort();
+  if (
+    expected.length &&
+    canonicalJson(expected) !== canonicalJson(capturedRoutes) &&
+    canonicalJson(privacyPreservingExpected) !== canonicalJson(capturedRoutes)
+  ) {
     throw new Error('Before-consent capture primary routes do not match the current route matrix.');
   }
   if (!HASH_RE.test(capture.captureFingerprint) || captureFingerprintValue(capture) !== capture.captureFingerprint) {

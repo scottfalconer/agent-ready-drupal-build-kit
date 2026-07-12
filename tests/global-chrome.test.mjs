@@ -20,7 +20,11 @@ import {
   validateBeforeConsentNetworkCapture,
   validateScreenshotArtifacts
 } from '../bin/global-chrome.mjs';
-import { consentNetworkCaptureRequired, verifyConsentReconciliation } from '../bin/verify.mjs';
+import {
+  consentNetworkCaptureRequired,
+  sharedBeforeConsentNetworkCapture,
+  verifyConsentReconciliation
+} from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
 const state = (seed) => `sha256:${seed.repeat(64)}`;
@@ -437,6 +441,26 @@ test('verifier-owned consent capture catches delayed JS requests and proves no-l
       stateFingerprint: state('c'),
       targetOrigin: baseUrl,
       primaryRoutes: ['/', '/clean']
+    });
+
+    const queryRoutes = ['/?state=keep', '/clean?state=drop'];
+    const queryBound = structuredClone(finalized);
+    queryBound.primaryRoutes = queryRoutes;
+    queryBound.routes = queryBound.routes.map((route) => {
+      const path = route.path === '/' ? queryRoutes[0] : queryRoutes[1];
+      const url = new URL(path, baseUrl).href;
+      return { ...route, path, requestedUrl: url, finalUrl: url };
+    });
+    delete queryBound.captureFingerprint;
+    queryBound.captureFingerprint = sha256(queryBound);
+    const reportCapture = sharedBeforeConsentNetworkCapture(queryBound, '/private/review-packet');
+    assert.doesNotMatch(JSON.stringify(reportCapture), /state=(?:drop|keep)/);
+    assert.ok(reportCapture.primaryRoutes.every((route) => /query-sha256=[a-f0-9]{64}/.test(route)));
+    assert.notEqual(reportCapture.captureFingerprint, queryBound.captureFingerprint);
+    validateBeforeConsentNetworkCapture(reportCapture, {
+      stateFingerprint: state('c'),
+      targetOrigin: baseUrl,
+      primaryRoutes: queryRoutes
     });
 
     const declaration = (pattern) => ({
