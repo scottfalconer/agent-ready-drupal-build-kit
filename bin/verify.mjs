@@ -6644,8 +6644,6 @@ export async function verifyLive({
           routeCount: liveRouteTasks.length
         }
       };
-  const sourceSurfaceCensus = await sourceSurfaceCensusPromise;
-  liveErrors.push(...sourceSurfaceCensus.errors);
   liveErrors.push(...liveRouteSchedule.errors);
   const checksForBucket = (bucket) => liveRouteSchedule.checks
     .filter((entry) => entry.bucket === bucket)
@@ -6814,6 +6812,19 @@ export async function verifyLive({
   for (const check of legalPrivacyLinkChecks) {
     liveErrors.push(...check.errors);
   }
+  // Await the verifier-owned source census only AFTER every target-side
+  // liveHttpContext check has completed. The census is started concurrently
+  // above (sourceSurfaceCensusPromise) but crawls a slow / large / CDN-gated
+  // SOURCE origin; awaiting it earlier let it consume the target context's
+  // fixed wall-clock deadline (deadlineAt = startedAt + deadlineMs), which then
+  // failed unrelated target-side checks (server-rendered surface, redirect
+  // materialization, next-cycle cleanup, generated missing-route, access-wall,
+  // legal/privacy) with false "exceeded its total wall-clock deadline" errors.
+  // The census result is only consumed by completion logic below, so deferring
+  // the await keeps the target-side verdict independent of source-census cost
+  // without changing any source-census behavior or enforcement.
+  const sourceSurfaceCensus = await sourceSurfaceCensusPromise;
+  liveErrors.push(...sourceSurfaceCensus.errors);
   for (const error of liveHttpContext.errors) {
     if (!liveErrors.includes(error)) {
       liveErrors.push(error);
