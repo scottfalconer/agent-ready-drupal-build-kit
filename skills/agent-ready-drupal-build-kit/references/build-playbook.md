@@ -69,6 +69,14 @@ Use browser evidence to compare source and target pages at the route and viewpor
 
 Use authenticated browser evidence for non-admin editor tasks. A form URL returning 200 or a Drush permission check is not enough. The packet should show that the editor can complete the task and that the expected public output changes without code changes.
 
+## Verify The Next Editorial Cycle
+
+A current-cycle CRUD task does not prove that editors can run the next event, season, year, or publishing period. For every recurring public model, inspect field definitions, taxonomy vocabularies, workflows, and role permissions for date, datetime, year, season, period, cycle, edition, and taxonomy dimensions. Record the commands and structured target-bound discovery evidence in `next-cycle-verification.json` and `evidence/next-cycle/`.
+
+When discovery finds a dimension, use the same least-privilege non-admin identity proven in browser evidence. Create or select a period/term whose comparable value is beyond the latest current value, create future-dated content, complete the real moderation or publication-status transition, and confirm a unique marker on anonymous public output. Verify the exact taxonomy/cycle and publish permissions used.
+
+Delete the content probe and any period/term created solely for it. Record zero remaining content records, revisions, aliases, and period/term records, plus a final `404` or `410` for the public probe URL. The live verifier re-fetches that URL and rejects redirects or a remaining public response. It also runs a metadata-only Drush census of active field, option-list, taxonomy, and workflow configuration; a packet that omits a live temporal/cycle candidate cannot declare this gate N/A. Use structured N/A only when evidence-backed discovery and that live census find no temporal/cycle dimension; a current predefined option list is not an N/A rationale.
+
 ## Independent Mechanical Verification Pass
 
 The builder's self-review is useful, but it is not enough to close the rebuild. A separate verifier that did not build the site should try to falsify every mechanical completion claim against the live Drupal site and the current packet.
