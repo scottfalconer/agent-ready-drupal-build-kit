@@ -974,6 +974,7 @@ export function captureSummary(capture) {
     stateFingerprint: capture?.resultStateFingerprint ?? '',
     captureFingerprint: capture?.captureFingerprint ?? '',
     routeViewportCount: Array.isArray(capture?.routes) ? capture.routes.length : 0,
+    budget: capture?.budget ?? null,
     errors: Array.isArray(capture?.errors) ? capture.errors : []
   };
 }

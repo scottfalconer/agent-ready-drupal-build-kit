@@ -4552,6 +4552,7 @@ export async function verifyLive({
         browser: { executable: '', product: '' },
         primaryRoutes: [],
         routes: [],
+        budget: null,
         errors: [chromeContext.lifecyclePresent
           ? 'Verifier-owned browser capture is disabled for an injected or unavailable runtime.'
           : 'No lifecycle baseline exists yet; the next live verifier run will establish the global chrome anchor.']
@@ -4784,7 +4785,9 @@ export async function verifyLive({
         resultStateFingerprint: buildState.fingerprint,
         contract: rawGlobalChromeCapture.contract,
         browser: rawGlobalChromeCapture.browser,
+        primaryRoutes: rawGlobalChromeCapture.primaryRoutes ?? [],
         routes: [],
+        budget: rawGlobalChromeCapture.budget ?? null,
         errors: [`Global chrome capture finalization failed: ${error.message}`]
       };
     }
