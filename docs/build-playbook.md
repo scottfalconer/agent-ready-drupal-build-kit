@@ -473,6 +473,10 @@ The target's structure must be reviewable from Drupal artifacts and internally c
 
 Config that imports but leaves editor forms unusable is not acceptable architecture.
 
+Before accepting the packet's scope, run the default live verifier and reconcile its live-first census in `drupal-readback.json.liveSurfaceReconciliation`. The verifier derives bundle definitions/public editorial roots, Views and displays, published aliases, enabled menu links, redirects, Canvas pages/templates/components, sitemap surfaces, and active custom extensions/routes from Drupal. Every key must appear exactly once as a packet declaration with a specific `file#section` reference or as an exclusion with a named owner, rationale, and non-empty packet-local evidence. A packet cannot make a surface disappear by omitting it, and stale packet-only records also fail.
+
+The census is metadata-only and bounded at 5,000 records. It must not read or emit private submissions, customer transactions, credentials, broad user rows, or content values. Non-public bundle/View/menu records remain visible and require explicit exclusions. Public-root classification does not narrow exact-state evidence: once a bundle is in scope, drafts and unpublished rows remain part of the entity fingerprint even though the census records `publishedCount` separately.
+
 ## Editor Experience Bar
 
 The build is not reviewable until an editor can use it. Before handoff:
