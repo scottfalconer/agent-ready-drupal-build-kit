@@ -8300,6 +8300,24 @@ test('negative-route and consent dispositions fail closed without named packet-l
           }]
         };
       }
+    },
+    {
+      name: 'required-without-essential-evidence',
+      expected: /required consent application maps needs an explicit essential-without-consent classification/i,
+      mutate(record) {
+        record.consent = {
+          discoveryStatus: 'installed',
+          notInstalledReason: '',
+          managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
+          applications: [{
+            id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: true,
+            essentialWithoutConsent: false, essentialServiceRationale: '', essentialServiceEvidence: [],
+            controlledResources: [{ kind: 'iframe', pattern: 'maps.example' }],
+            resourceDiscoveryDisposition: { acceptedBy: '', rationale: '', evidence: [] }
+          }],
+          beforeConsentChecks: []
+        };
+      }
     }
   ];
 
@@ -8315,6 +8333,7 @@ test('negative-route and consent dispositions fail closed without named packet-l
   const evidencedPacket = join(temp, 'evidenced-dispositions');
   cpSync(canonicalPacket, evidencedPacket, { recursive: true });
   writeFileSync(join(evidencedPacket, 'evidence', 'legal-disposition.txt'), 'Named owner accepted production-only legal copy.\n');
+  writeFileSync(join(evidencedPacket, 'evidence', 'essential-service.txt'), 'The fixture service is technically required before consent.\n');
   writeJson(join(evidencedPacket, 'evidence', 'before-consent.json'), {
     schemaVersion: 'public-kit.before-consent-evidence.1',
     targetBaseUrl: 'https://target.example',
@@ -8338,7 +8357,10 @@ test('negative-route and consent dispositions fail closed without named packet-l
       notInstalledReason: '',
       managers: [{ id: 'klaro', module: 'klaro', configNames: ['klaro.application.maps'] }],
       applications: [{
-        id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: false,
+        id: 'maps', managerId: 'klaro', configName: 'klaro.application.maps', enabled: true, required: true,
+        essentialWithoutConsent: true,
+        essentialServiceRationale: 'The fixture treats this service as technically essential.',
+        essentialServiceEvidence: ['essential-service.txt'],
         controlledResources: [{ kind: 'iframe', pattern: 'maps.example' }],
         resourceDiscoveryDisposition: { acceptedBy: '', rationale: '', evidence: [] }
       }],

@@ -6016,7 +6016,6 @@ function sameStringSet(left, right) {
 export function consentNetworkCaptureRequired(declaration) {
   if (declaration?.discoveryStatus !== 'installed') return false;
   return (Array.isArray(declaration?.applications) ? declaration.applications : []).some((application) =>
-    (application?.enabled !== true || application?.required !== true) &&
     (Array.isArray(application?.controlledResources) ? application.controlledResources : []).some((resource) =>
       String(resource?.pattern ?? '').trim()
     )
@@ -6104,7 +6103,7 @@ export function verifyConsentReconciliation(
         route.requests.map((request) => ({ ...request, route: route.path }))
       );
     } catch (error) {
-      errors.push(`G-PRIVACY-01 requires verifier-owned fresh browser/network capture for optional or disabled controlled resources: ${error.message}`);
+      errors.push(`G-PRIVACY-01 requires verifier-owned fresh browser/network capture for every declared application with controlled resources: ${error.message}`);
     }
   }
   const browserObservedUrls = [...new Set(browserObservedRequests.map((request) => request.url))];
@@ -6115,8 +6114,20 @@ export function verifyConsentReconciliation(
     const violating = observedUrls.filter((url) =>
       (application.controlledResources ?? []).some((resource) => controlledResourceMatches(resource, url))
     );
-    if (violating.length > 0 && (application.enabled !== true || application.required !== true)) {
-      const state = application.enabled === true ? 'before consent' : 'while its consent application is disabled';
+    const essentialWithoutConsent = application.required === true &&
+      application.essentialWithoutConsent === true &&
+      String(application.essentialServiceRationale ?? '').trim() &&
+      Array.isArray(application.essentialServiceEvidence) &&
+      application.essentialServiceEvidence.length > 0;
+    if (application.required === true && !essentialWithoutConsent) {
+      errors.push(`Required consent application ${application.id} lacks an explicit evidence-backed essential-without-consent classification; required=true cannot disable observation or authorize loading.`);
+    }
+    if (violating.length > 0 && !essentialWithoutConsent) {
+      const state = application.enabled !== true
+        ? 'while its consent application is disabled'
+        : application.required === true
+          ? 'before consent while its required application lacks an evidence-backed essential-service classification'
+          : 'before consent';
       errors.push(`Controlled resource for ${application.id} loaded ${state}: ${violating[0]}.`);
     }
   }

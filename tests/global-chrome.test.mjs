@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  BEFORE_CONSENT_NETWORK_SCHEMA,
   BROWSER_CAPTURE_LIMITS,
   VERIFIER_AXE_SCHEMA,
   VERIFIER_AXE_SOURCE_SHA256,
@@ -33,6 +34,52 @@ import {
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
 const state = (seed) => `sha256:${seed.repeat(64)}`;
+
+function beforeConsentCaptureFixture({
+  requests = [],
+  stateFingerprint = state('e'),
+  targetOrigin = 'https://fixture.ddev.site'
+} = {}) {
+  const primaryRoutes = ['/'];
+  const budget = createBrowserCaptureBudget({
+    label: 'Before-consent fixture',
+    routeCount: primaryRoutes.length,
+    viewportCount: 1
+  });
+  const capture = {
+    schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
+    checkedAt: '2026-07-12T00:00:00Z',
+    status: 'captured',
+    authoritative: true,
+    captureMode: 'verifier-owned-cdp-network',
+    targetOrigin,
+    browser: { executable: 'fixture-chromium', product: 'Fixture Chromium' },
+    primaryRoutes,
+    routes: [{
+      path: '/',
+      requestedUrl: `${targetOrigin}/`,
+      finalUrl: `${targetOrigin}/`,
+      isolation: {
+        browserContextFresh: true,
+        cacheDisabled: true,
+        consentInteractionPerformed: false,
+        method: 'new-incognito-browser-context',
+        storageCleared: true
+      },
+      observation: {
+        floorMs: 2000,
+        maximumMs: 8000,
+        networkQuietMs: 500,
+        settled: true
+      },
+      requests
+    }],
+    budget: budget.metrics({ attempted: true, capturedCount: primaryRoutes.length }),
+    warnings: [],
+    errors: []
+  };
+  return finalizeBeforeConsentNetworkCapture({ capture, stateFingerprint, targetOrigin });
+}
 
 test('browser capture budget enforces an absolute route ceiling and aggregate deadline', () => {
   let clock = 1_000;
@@ -116,7 +163,7 @@ test('before-consent capture reuses the browser route ceiling and aggregate dead
   assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
 });
 
-test('selector-only and attachment-only optional consent apps require verifier-owned capture', () => {
+test('every declared controlled consent app requires verifier-owned capture', () => {
   const declaration = (kind, { enabled = true, required = false } = {}) => ({
     discoveryStatus: 'installed',
     managers: [{ id: 'klaro', module: 'klaro', configNames: [`klaro.application.${kind}`] }],
@@ -131,7 +178,7 @@ test('selector-only and attachment-only optional consent apps require verifier-o
   });
   assert.equal(consentNetworkCaptureRequired(declaration('selector')), true);
   assert.equal(consentNetworkCaptureRequired(declaration('attachment', { enabled: false, required: false })), true);
-  assert.equal(consentNetworkCaptureRequired(declaration('selector', { enabled: true, required: true })), false);
+  assert.equal(consentNetworkCaptureRequired(declaration('selector', { enabled: true, required: true })), true);
 
   for (const kind of ['selector', 'attachment']) {
     const record = declaration(kind, { enabled: kind === 'selector', required: false });
@@ -157,6 +204,113 @@ test('selector-only and attachment-only optional consent apps require verifier-o
     assert.match(reconciliation.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
     assert.equal(reconciliation.authoritativeBeforeConsentCapture, false);
   }
+});
+
+test('all-enabled required analytics and marketing apps cannot bypass pre-consent capture', () => {
+  const applications = [
+    {
+      id: 'analytics',
+      managerId: 'klaro',
+      configName: 'klaro.application.analytics',
+      enabled: true,
+      required: true,
+      controlledResources: [{ kind: 'script', pattern: 'analytics.example/collect.js' }]
+    },
+    {
+      id: 'marketing',
+      managerId: 'klaro',
+      configName: 'klaro.application.marketing',
+      enabled: true,
+      required: true,
+      controlledResources: [{ kind: 'script', pattern: 'marketing.example/pixel.js' }]
+    }
+  ];
+  const declaration = {
+    discoveryStatus: 'installed',
+    managers: [{
+      id: 'klaro',
+      module: 'klaro',
+      configNames: applications.map((application) => application.configName)
+    }],
+    applications
+  };
+  const runtime = {
+    confirmed: true,
+    detected: true,
+    managerModules: ['klaro'],
+    configNames: applications.map((application) => application.configName),
+    applications: applications.map((application) => ({
+      id: application.id,
+      configName: application.configName,
+      enabled: application.enabled,
+      required: application.required,
+      resources: application.controlledResources
+    }))
+  };
+  const context = {
+    targetOrigin: 'https://fixture.ddev.site',
+    primaryRoutes: ['/'],
+    stateFingerprint: state('e')
+  };
+
+  assert.equal(consentNetworkCaptureRequired(declaration), true);
+  const missingCapture = verifyConsentReconciliation(
+    declaration,
+    runtime,
+    [{ renderedResourceUrls: [] }],
+    null,
+    context
+  );
+  assert.equal(missingCapture.passed, false);
+  assert.match(missingCapture.errors.join('\n'), /requires verifier-owned fresh browser\/network capture/i);
+
+  const noRequests = verifyConsentReconciliation(
+    declaration,
+    runtime,
+    [{ renderedResourceUrls: [] }],
+    beforeConsentCaptureFixture(),
+    context
+  );
+  assert.equal(noRequests.authoritativeBeforeConsentCapture, true);
+  assert.equal(noRequests.passed, false);
+  assert.match(noRequests.errors.join('\n'), /required consent application analytics lacks.*essential-without-consent/i);
+
+  const essentialDeclaration = structuredClone(declaration);
+  for (const application of essentialDeclaration.applications) {
+    application.essentialWithoutConsent = true;
+    application.essentialServiceRationale = 'Fixture-only essential service classification.';
+    application.essentialServiceEvidence = ['evidence/essential-service.json'];
+  }
+  const justifiedNoRequests = verifyConsentReconciliation(
+    essentialDeclaration,
+    runtime,
+    [{ renderedResourceUrls: [] }],
+    beforeConsentCaptureFixture(),
+    context
+  );
+  assert.equal(justifiedNoRequests.authoritativeBeforeConsentCapture, true);
+  assert.equal(justifiedNoRequests.passed, true, justifiedNoRequests.errors.join('\n'));
+
+  const capture = beforeConsentCaptureFixture({
+    requests: [{
+      method: 'GET',
+      resourceType: 'Script',
+      url: 'https://analytics.example/collect.js'
+    }]
+  });
+  const observedRequest = verifyConsentReconciliation(
+    declaration,
+    runtime,
+    [{ renderedResourceUrls: [] }],
+    capture,
+    context
+  );
+  assert.equal(observedRequest.authoritativeBeforeConsentCapture, true);
+  assert.equal(observedRequest.passed, false);
+  assert.match(
+    observedRequest.errors.join('\n'),
+    /analytics lacks.*essential-without-consent.*analytics loaded before consent.*lacks an evidence-backed essential-service classification.*analytics\.example\/collect\.js/is
+  );
 });
 
 test('profile cleanup uses bounded retries and reports a deferred warning without leaking its path', () => {

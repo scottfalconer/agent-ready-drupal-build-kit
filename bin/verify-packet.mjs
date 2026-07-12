@@ -3475,6 +3475,22 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
     ) {
       reasons.push('Every consent application needs an id, known manager, config name, and boolean enabled/required state.');
     }
+    const essentialEvidence = arrayOrEmpty(application?.essentialServiceEvidence);
+    if (application?.required === true) {
+      const essentialEvidenceReady = essentialEvidence.length > 0 &&
+        (await Promise.all(essentialEvidence.map((reference) =>
+          nonEmptyPacketEvidence(packetDir, reference)
+        ))).every(Boolean);
+      if (
+        application?.essentialWithoutConsent !== true ||
+        !String(application?.essentialServiceRationale ?? '').trim() ||
+        !essentialEvidenceReady
+      ) {
+        reasons.push(`Required consent application ${application?.id || '(missing id)'} needs an explicit essential-without-consent classification, rationale, and packet-local evidence; required=true alone cannot authorize pre-consent loading.`);
+      }
+    } else if (application?.essentialWithoutConsent === true) {
+      reasons.push(`Optional consent application ${application?.id || '(missing id)'} cannot declare essentialWithoutConsent.`);
+    }
     if (resources.some((resource) =>
       !['script', 'iframe', 'image', 'style', 'resource', 'selector', 'attachment'].includes(resource?.kind) ||
       !String(resource?.pattern ?? '').trim()
