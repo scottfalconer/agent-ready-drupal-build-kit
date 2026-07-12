@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -503,10 +503,35 @@ function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   return '';
 }
 
+function yamlFilesOnDisk(projectRoot, root) {
+  const pending = [root];
+  const files = [];
+  let entriesChecked = 0;
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      entriesChecked += 1;
+      if (entriesChecked > 20_000) {
+        throw new Error('Config sync exceeds the 20,000-entry verification limit.');
+      }
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Config sync contains a symbolic link: ${relative(projectRoot, path)}`);
+      }
+      if (entry.isDirectory()) {
+        pending.push(path);
+      } else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
+        files.push(relative(projectRoot, path).split(sep).join('/'));
+      }
+    }
+  }
+  return files.sort();
+}
+
 function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   if (!hostPath || !existsSync(hostPath) || !statSync(hostPath).isDirectory()) {
-    return { confirmed: false, directory: '', yamlFiles: [] };
+    return { confirmed: false, directory: '', matchesHead: false, yamlFiles: [] };
   }
   const directory = relative(projectRoot, hostPath).split(sep).join('/');
   try {
@@ -520,9 +545,43 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot) {
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter((path) => /\.ya?ml$/i.test(path) && existsSync(join(projectRoot, path)));
-    return { confirmed: yamlFiles.length > 0, directory, yamlFiles };
+    const confirmed = yamlFiles.length > 0;
+    const diskYamlFiles = yamlFilesOnDisk(projectRoot, hostPath);
+    let matchesHead = false;
+    if (confirmed) {
+      try {
+        const headOutput = execFileSync('git', ['ls-tree', '-r', '--name-only', 'HEAD', '--', directory], {
+          cwd: projectRoot,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 10_000
+        });
+        const headYamlFiles = headOutput
+          .split(/\r?\n/)
+          .map((path) => path.trim())
+          .filter((path) => /\.ya?ml$/i.test(path))
+          .sort();
+        const status = execFileSync(
+          'git',
+          ['status', '--porcelain=v1', '--untracked-files=all', '--', directory],
+          {
+            cwd: projectRoot,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            timeout: 10_000
+          }
+        );
+        matchesHead =
+          status.length === 0 &&
+          diskYamlFiles.length === headYamlFiles.length &&
+          diskYamlFiles.every((path, index) => path === headYamlFiles[index]);
+      } catch {
+        matchesHead = false;
+      }
+    }
+    return { confirmed, directory, matchesHead, yamlFiles };
   } catch {
-    return { confirmed: false, directory, yamlFiles: [] };
+    return { confirmed: false, directory, matchesHead: false, yamlFiles: [] };
   }
 }
 
@@ -550,6 +609,7 @@ function inspectDrupalRuntime(cwd, environment) {
       baseUrl: '',
       confirmed: false,
       configStatusClean: false,
+      configSyncMatchesHead: false,
       configSyncTracked: false,
       configSyncDirectory: '',
       drushCommandFailures: [],
@@ -589,6 +649,7 @@ function inspectDrupalRuntime(cwd, environment) {
     baseUrl,
     confirmed,
     configStatusClean: configStatusIsClean(configStatus),
+    configSyncMatchesHead: trackedConfig.matchesHead,
     configSyncTracked: trackedConfig.confirmed,
     configSyncDirectory,
     drupalRoot,
@@ -1193,6 +1254,7 @@ export async function verifyLive({
   const drupalRuntimeConfigSyncTracked =
     inspectedDrupalRuntime.configSyncTracked === true &&
     runtimeTrackedConfigYamlFiles.length > 0;
+  const drupalRuntimeConfigSyncMatchesHead = inspectedDrupalRuntime.configSyncMatchesHead === true;
   const drupalRuntimeTrackedConfigReadbackMatches =
     Boolean(packetTrackedConfigDirectory) &&
     packetTrackedConfigDirectory === runtimeTrackedConfigDirectory &&
@@ -1207,6 +1269,7 @@ export async function verifyLive({
     drupalRuntimeConfigSyncMatches &&
     drupalRuntimeConfigStatusClean &&
     drupalRuntimeConfigSyncTracked &&
+    drupalRuntimeConfigSyncMatchesHead &&
     drupalRuntimeTrackedConfigReadbackMatches;
   const completeLocalRebuildClaimAllowed =
     packetReport.valid &&
@@ -1255,6 +1318,11 @@ export async function verifyLive({
   }
   if (!drupalRuntimeConfigSyncTracked) {
     completionBlockedReasons.push('Current DDEV config-sync directory does not contain real Git-tracked YAML files.');
+  }
+  if (!drupalRuntimeConfigSyncMatchesHead) {
+    completionBlockedReasons.push(
+      'Current DDEV config-sync YAML does not match HEAD; commit or remove staged, modified, deleted, untracked, or ignored sync YAML before completion.'
+    );
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
     completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
@@ -1309,6 +1377,7 @@ export async function verifyLive({
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,
       configStatusClean: drupalRuntimeConfigStatusClean,
+      configSyncMatchesHead: drupalRuntimeConfigSyncMatchesHead,
       configSyncTracked: drupalRuntimeConfigSyncTracked,
       configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory),
       configSyncDirectoryMatchesPacket: drupalRuntimeConfigSyncMatches,
