@@ -40,6 +40,7 @@
     "START.md one-screen onboarding with prerequisites, workspace topology, one prompt, four moves, and stake-my-name review bar",
     "docs/parity-spec.md",
     "docs/build-playbook.md",
+    "docs/cookbook.md executable Drupal cookbook mirrored as references/cookbook.md: non-admin editor role/user seeding with Drush 13 sequences, filtered text formats for imported HTML, import hygiene (named authors, alt-derived media names, per-bundle Pathauto patterns), custom-theme block/template checklist, cache-correctness snippets, path/preview API warnings, Metatag-owned route SEO, and menu/block section branding",
     "docs/four-layer-truth.md",
     "docs/positioning.md",
     "docs/recommended-agent-skills.md",

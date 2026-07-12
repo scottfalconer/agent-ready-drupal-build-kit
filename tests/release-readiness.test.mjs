@@ -194,6 +194,56 @@ test('README leads with the same concise bootstrap prompt as USAGE', () => {
   assert.doesNotMatch(start, /supplies the rest: Docker/);
 });
 
+test('cookbook stays executable, Drush 13 compatible, and referenced from skill surfaces', () => {
+  const cookbook = readFileSync(join(repoRoot, 'docs', 'cookbook.md'), 'utf8');
+  const skill = readFileSync(join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'), 'utf8');
+  const playbook = readFileSync(join(repoRoot, 'docs', 'build-playbook.md'), 'utf8');
+  const gapList = readFileSync(join(templatesDir, 'scoped-gap-list.template.md'), 'utf8');
+
+  assert.match(skill, /references\/cookbook\.md/);
+  assert.match(playbook, /references\/cookbook\.md/);
+
+  for (const move of [
+    /role:create/,
+    /role:perm:add/,
+    /user:create/,
+    /uli --name=/,
+    /user:information/,
+    /'format' => 'basic_html'/,
+    /pathauto\.pattern\./,
+    /system_messages_block/,
+    /local_tasks_block/,
+    /title_prefix/,
+    /CacheableResponse/,
+    /\['#cache'\]\['contexts'\]\[\]\s*=\s*'route'/,
+    /results_lifespan/,
+    /node_preview/,
+    /metatag_views/,
+    /system\.menu\./
+  ]) {
+    assert.match(cookbook, move);
+  }
+
+  assert.doesNotMatch(cookbook, /drush (?:role-create|role-add-perm|user-create|user-add-role|pm-enable)\b/);
+  assert.doesNotMatch(cookbook, /role:perm:add[^\n]*full_html/);
+  assert.doesNotMatch(cookbook, /'format' => 'full_html'/);
+  assert.doesNotMatch(cookbook, /user_load_by_name\s*\(/);
+  assert.doesNotMatch(cookbook, /ddev composer require[^\n]*(?:\s-W\b|--with-all-dependencies)/);
+  assert.doesNotMatch(cookbook, /str_starts_with\(\\Drupal::service\('path\.current'\)/);
+  assert.match(cookbook, /get the human owner's approval before running `composer require`/);
+  assert.match(cookbook, /<TARGET_COMPATIBLE_CONSTRAINT>/);
+  assert.doesNotMatch(cookbook, /\/Users\/|\/home\/[a-z]/i);
+
+  for (const stance of [
+    'Multilingual stance',
+    'Caching and performance budget stance',
+    'Update strategy stance',
+    '404-page quality stance'
+  ]) {
+    assert.match(gapList, new RegExp(stance));
+  }
+});
+
 test('post-install assembly uses bounded Recipes and the available core runner', () => {
   const contract = readFileSync(join(repoRoot, 'AGENTS.md.template'), 'utf8');
   const decision = readFileSync(join(repoRoot, 'templates', 'recipe-start-point.template.md'), 'utf8');

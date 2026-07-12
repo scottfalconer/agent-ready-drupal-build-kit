@@ -37,6 +37,10 @@ Human-only decisions belong in `open-decisions.md`. Do not use this gap list or 
 | GAP-016 | Durable intent validation | Maintainer | UNKNOWN | Intent hashes/status not validated against exported config | Validate durable intent or treat it as absent | blocked |
 | GAP-017 | Maintainer signoff | Drupal maintainer | UNKNOWN | Human-facing stake-my-name status not recorded; this does not block the local machine claim | Review architecture and record status separately | human-status-pending |
 | GAP-018 | Final QA | Owner/QA/Maintainer | UNKNOWN | Launch evidence and final QA missing | Complete final QA after hard gates clear | blocked |
+| GAP-019 | Multilingual stance | Builder/Owner | UNKNOWN | No recorded in-scope/out-of-scope multilingual disposition | Record multilingual stance with rationale | blocked |
+| GAP-020 | Caching and performance budget stance | Builder/Maintainer | UNKNOWN | No recorded page-cache/max-age budget disposition | Record caching budget stance with rationale | blocked |
+| GAP-021 | Update strategy stance | Operator/Maintainer | UNKNOWN | No recorded core/contrib update-path disposition | Record update strategy stance with rationale | blocked |
+| GAP-022 | 404-page quality stance | Builder/Editor | UNKNOWN | Default 404 not reviewed for search and top-task links | Record 404-page stance with rationale | blocked |
 
 ## Build-Architecture Gaps
 

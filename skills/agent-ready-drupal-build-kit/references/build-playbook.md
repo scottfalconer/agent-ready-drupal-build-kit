@@ -1,6 +1,6 @@
 # Drupal CMS Build Playbook
 
-This playbook records common build issues that can cause agents to misread evidence or produce brittle Drupal targets.
+This playbook records common build issues that can cause agents to misread evidence or produce brittle Drupal targets. The installed skill's `references/cookbook.md` carries the worked Drush sequences, config shapes, and code snippets these requirements assume; reach for it instead of inventing command syntax.
 
 ## Official Drupal CMS Baseline
 
@@ -192,7 +192,7 @@ Do not treat "Metatag is enabled" or "SEO recipe applied" as evidence. Fetch eve
 
 Drupal access and workflow are part of the build, not admin polish. Every custom public bundle and every bundle that owns repeating public content needs a non-admin editor role that can create and edit it.
 
-Seed at least one editor user for local verification. Run add/edit form checks as that user, not uid=1. Independently change every load-bearing field and every field claimed to affect anonymous output, then verify the expected public route changes. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
+Seed at least one editor user for local verification; the cookbook's editor-seeding section has the exact role, per-bundle permission, user, and login-link sequence. Run add/edit form checks as that user, not uid=1. Independently change every load-bearing field and every field claimed to affect anonymous output, then verify the expected public route changes. Administrator success proves the site owner can bypass permissions; it does not prove the editorial experience works.
 
 ## Drupal Build Primitives
 
@@ -487,7 +487,7 @@ URL/image fields can be useful evidence carriers, but they should not silently r
 
 ## Content Field Formats
 
-Text fields often need both value and format. Do not import formatted text without an explicit text format decision.
+Text fields often need both value and format. Do not import formatted text without an explicit text format decision. Imported source HTML goes into a filtered format, never `full_html`; the cookbook shows format discovery and the import snippet.
 
 Record:
 
@@ -515,7 +515,7 @@ For each important route, decide:
 
 Run a route/alias smoke check for every representative top-level source route and listing route. For condition/product/advice sites, this usually includes routes like `/`, condition hubs, product listings, advice listings, product details, article details, where-to-buy, search, contact, legal, privacy, and cookie pages when present. Record intended canonicalization, including trailing-slash behavior and Pathauto-generated alternates.
 
-Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
+Custom content types should have Pathauto patterns or an explicit documented reason why aliases will be hand-managed; the cookbook has a per-bundle pattern config example. Editor-created content should not fall back to unpredictable `/node/{id}` URLs when the source pattern depends on readable routes.
 
 Preserve source-intent aliases when the source has recognizable routes that differ from the improved target IA. For example, if the target introduces `/products`, but the source used `/range`, `/shop`, or `/seasonal-range`, either preserve, redirect, or explicitly retire the source-style route.
 
