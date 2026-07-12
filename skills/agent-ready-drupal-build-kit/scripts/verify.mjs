@@ -3372,6 +3372,469 @@ function parseLiveNextCycleCensus(result) {
   }
 }
 
+const LIVE_EDITOR_SURFACE_SCHEMA = 'public-kit.live-editor-surface-census.1';
+const FORMATTED_TEXT_FIELD_TYPES = new Set(['text', 'text_long', 'text_with_summary']);
+
+function declaredLiveEditorSurface(fieldOutputMatrix, browserEvidence) {
+  const errors = [];
+  const roles = new Map();
+  const addRole = (check, source, global = false) => {
+    const declared = String(check?.editorRole ?? '').trim();
+    if (!declared) {
+      return;
+    }
+    const entityType = String(check?.entityType ?? '').trim();
+    const bundle = String(check?.bundle ?? '').trim();
+    if (!roles.has(declared)) {
+      roles.set(declared, { declared, bindings: [] });
+    }
+    roles.get(declared).bindings.push({
+      source,
+      entityType,
+      bundle,
+      global
+    });
+  };
+  for (const check of Array.isArray(browserEvidence?.editorWorkflowChecks)
+    ? browserEvidence.editorWorkflowChecks
+    : []) {
+    addRole(check, 'editorWorkflowChecks', false);
+  }
+  for (const check of Array.isArray(browserEvidence?.canvasAuthoringChecks)
+    ? browserEvidence.canvasAuthoringChecks
+    : []) {
+    addRole(check, 'canvasAuthoringChecks', true);
+  }
+
+  const fields = new Map();
+  for (const bundleRow of Array.isArray(fieldOutputMatrix?.bundles) ? fieldOutputMatrix.bundles : []) {
+    const entityType = String(bundleRow?.entityType ?? '').trim();
+    const bundle = String(bundleRow?.bundle ?? '').trim();
+    for (const field of Array.isArray(bundleRow?.fields) ? bundleRow.fields : []) {
+      const publicRenderLocations = (Array.isArray(field?.publicRenderLocations)
+        ? field.publicRenderLocations
+        : [])
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean);
+      if (field?.affectsAnonymousOutput !== true && publicRenderLocations.length === 0) {
+        continue;
+      }
+      const machineName = String(field?.machineName ?? '').trim();
+      const key = `${entityType}.${bundle}.${machineName}`;
+      if (
+        !/^[a-z][a-z0-9_]*$/.test(entityType) ||
+        !/^[a-z][a-z0-9_]*$/.test(bundle) ||
+        !/^[a-z][a-z0-9_]*$/.test(machineName)
+      ) {
+        errors.push(`field-output-matrix.json public field has an invalid live field identity: ${key}.`);
+        continue;
+      }
+      if (fields.has(key)) {
+        errors.push(`field-output-matrix.json repeats public field ${key}; live editor-surface metadata must be unique.`);
+        continue;
+      }
+      const editorRoles = [...roles.values()]
+        .filter((role) => role.bindings.some((binding) =>
+          binding.global || (binding.entityType === entityType && binding.bundle === bundle)
+        ))
+        .map((role) => role.declared)
+        .sort(comparePortable);
+      fields.set(key, {
+        key,
+        entityType,
+        bundle,
+        machineName,
+        packetRequired: field?.required,
+        packetWidget: String(field?.widget ?? '').trim(),
+        packetFieldType: String(field?.fieldType ?? '').trim(),
+        publicRenderLocations,
+        affectsAnonymousOutput: field?.affectsAnonymousOutput === true,
+        editorRoles
+      });
+    }
+  }
+
+  return {
+    errors,
+    fields: [...fields.values()].sort((left, right) => comparePortable(left.key, right.key)),
+    roles: [...roles.values()]
+      .map((role) => ({
+        ...role,
+        bindings: role.bindings.sort((left, right) => comparePortable(
+          `${left.source}\0${left.entityType}\0${left.bundle}`,
+          `${right.source}\0${right.entityType}\0${right.bundle}`
+        ))
+      }))
+      .sort((left, right) => comparePortable(left.declared, right.declared))
+  };
+}
+
+export const DRUPAL_LIVE_EDITOR_SURFACE_EVAL = String.raw`
+$entity_type_manager = \Drupal::entityTypeManager();
+$entity_field_manager = \Drupal::service('entity_field.manager');
+$field_config_storage = $entity_type_manager->getStorage('field_config');
+$form_display_storage = $entity_type_manager->getStorage('entity_form_display');
+$role_storage = $entity_type_manager->getStorage('user_role');
+$role_entities = $role_storage->loadMultiple();
+$declared_fields = is_array($declared_editor_surface['fields'] ?? NULL) ? $declared_editor_surface['fields'] : [];
+$declared_roles = is_array($declared_editor_surface['roles'] ?? NULL) ? $declared_editor_surface['roles'] : [];
+$errors = [];
+$entity_limit = 5000;
+
+$normalize_role = static function (string $value): string {
+  $normalized = strtolower(trim($value));
+  $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized) ?? '';
+  return trim($normalized, '_');
+};
+
+$resolved_roles = [];
+foreach ($declared_roles as $declared_role) {
+  $declared = trim((string) ($declared_role['declared'] ?? ''));
+  $matches = [];
+  if ($declared !== '' && isset($role_entities[$declared])) {
+    $matches[(string) $role_entities[$declared]->id()] = $role_entities[$declared];
+  }
+  if ($declared !== '') {
+    $normalized_declared = $normalize_role($declared);
+    foreach ($role_entities as $role) {
+      $role_id = (string) $role->id();
+      $role_label = (string) $role->label();
+      if (
+        strtolower($role_label) === strtolower($declared) ||
+        $normalize_role($role_id) === $normalized_declared ||
+        $normalize_role($role_label) === $normalized_declared
+      ) {
+        $matches[$role_id] = $role;
+      }
+    }
+  }
+  $resolved = count($matches) === 1;
+  $role = $resolved ? reset($matches) : NULL;
+  $resolved_roles[$declared] = [
+    'declared' => $declared,
+    'resolved' => $resolved,
+    'ambiguous' => count($matches) > 1,
+    'roleId' => $resolved ? (string) $role->id() : '',
+    'roleLabel' => $resolved ? (string) $role->label() : '',
+    'administrator' => $resolved && method_exists($role, 'isAdmin') && $role->isAdmin(),
+  ];
+}
+ksort($resolved_roles, SORT_STRING);
+
+$field_results = [];
+foreach ($declared_fields as $declared_field) {
+  $entity_type = trim((string) ($declared_field['entityType'] ?? ''));
+  $bundle = trim((string) ($declared_field['bundle'] ?? ''));
+  $field_name = trim((string) ($declared_field['machineName'] ?? ''));
+  $key = $entity_type . '.' . $bundle . '.' . $field_name;
+  $definitions = [];
+  try {
+    $definitions = $entity_field_manager->getFieldDefinitions($entity_type, $bundle);
+  }
+  catch (\Throwable $throwable) {
+    $errors[] = $key . ': field definitions could not be loaded: ' . $throwable->getMessage();
+  }
+  $definition = $definitions[$field_name] ?? NULL;
+  $definition_exists = $definition !== NULL;
+  $config_entity_exists = $field_config_storage->load($key) !== NULL;
+  $definition_source = $config_entity_exists ? 'configurable' : ($definition_exists ? 'base' : 'missing');
+  $field_type = $definition_exists ? (string) $definition->getType() : '';
+  $required = $definition_exists ? (bool) $definition->isRequired() : NULL;
+
+  $display_id = $entity_type . '.' . $bundle . '.default';
+  $display = $form_display_storage->load($display_id);
+  $component = $display ? $display->getComponent($field_name) : NULL;
+  $widget = is_array($component) ? trim((string) ($component['type'] ?? '')) : '';
+  $widget_visible = $widget !== '';
+
+  $formatted_text = in_array($field_type, ['text', 'text_long', 'text_with_summary'], TRUE);
+  $format_ids = [];
+  $format_inspection_error = '';
+  $format_inspection_truncated = FALSE;
+  if ($formatted_text && $definition_exists) {
+    try {
+      $entity_storage = $entity_type_manager->getStorage($entity_type);
+      $entity_definition = $entity_type_manager->getDefinition($entity_type);
+      $query = $entity_storage->getQuery()->accessCheck(FALSE)->exists($field_name);
+      $bundle_key = (string) $entity_definition->getKey('bundle');
+      if ($bundle_key !== '') {
+        $query->condition($bundle_key, $bundle);
+      }
+      $query->range(0, $entity_limit + 1);
+      $ids = array_values($query->execute());
+      if (count($ids) > $entity_limit) {
+        $format_inspection_truncated = TRUE;
+        $errors[] = $key . ': formatted-text inspection exceeded the ' . $entity_limit . '-entity bound.';
+        $ids = array_slice($ids, 0, $entity_limit);
+      }
+      foreach (array_chunk($ids, 100) as $id_batch) {
+        foreach ($entity_storage->loadMultiple($id_batch) as $entity) {
+          $translations = [$entity];
+          foreach (array_keys($entity->getTranslationLanguages()) as $langcode) {
+            if ($entity->hasTranslation($langcode)) {
+              $translations[] = $entity->getTranslation($langcode);
+            }
+          }
+          foreach ($translations as $translation) {
+            if (!$translation->hasField($field_name)) {
+              continue;
+            }
+            foreach ($translation->get($field_name) as $item) {
+              $format = trim((string) ($item->getValue()['format'] ?? ''));
+              if ($format !== '') {
+                $format_ids[$format] = TRUE;
+              }
+            }
+          }
+        }
+      }
+    }
+    catch (\Throwable $throwable) {
+      $format_inspection_error = $throwable->getMessage();
+      $errors[] = $key . ': formatted-text formats could not be inspected: ' . $format_inspection_error;
+    }
+  }
+  $format_ids = array_keys($format_ids);
+  sort($format_ids, SORT_STRING);
+
+  $permission_checks = [];
+  foreach ((array) ($declared_field['editorRoles'] ?? []) as $declared_role) {
+    $declared_role = trim((string) $declared_role);
+    $resolved_role = $resolved_roles[$declared_role] ?? [
+      'declared' => $declared_role,
+      'resolved' => FALSE,
+      'ambiguous' => FALSE,
+      'roleId' => '',
+      'roleLabel' => '',
+      'administrator' => FALSE,
+    ];
+    $missing_permissions = [];
+    foreach ($format_ids as $format_id) {
+      $permission = 'use text format ' . $format_id;
+      $role = $resolved_role['resolved'] ? ($role_entities[$resolved_role['roleId']] ?? NULL) : NULL;
+      $has_permission = $role && (
+        $resolved_role['administrator'] || $role->hasPermission($permission)
+      );
+      if (!$has_permission) {
+        $missing_permissions[] = $permission;
+      }
+    }
+    $permission_checks[] = $resolved_role + [
+      'requiredPermissions' => array_map(static fn(string $format_id): string => 'use text format ' . $format_id, $format_ids),
+      'missingPermissions' => $missing_permissions,
+    ];
+  }
+  usort($permission_checks, static fn(array $a, array $b): int => $a['declared'] <=> $b['declared']);
+
+  $field_results[] = [
+    'key' => $key,
+    'entityType' => $entity_type,
+    'bundle' => $bundle,
+    'machineName' => $field_name,
+    'fieldDefinitionExists' => $definition_exists,
+    'configEntityExists' => $config_entity_exists,
+    'definitionSource' => $definition_source,
+    'fieldType' => $field_type,
+    'required' => $required,
+    'defaultFormDisplayId' => $display_id,
+    'defaultFormDisplayExists' => $display !== NULL,
+    'widgetVisible' => $widget_visible,
+    'widget' => $widget,
+    'formattedText' => $formatted_text,
+    'existingFormatIds' => $format_ids,
+    'formatInspectionTruncated' => $format_inspection_truncated,
+    'formatInspectionError' => $format_inspection_error,
+    'editorRolePermissionChecks' => $permission_checks,
+  ];
+}
+usort($field_results, static fn(array $a, array $b): int => $a['key'] <=> $b['key']);
+$role_results = array_values($resolved_roles);
+usort($role_results, static fn(array $a, array $b): int => $a['declared'] <=> $b['declared']);
+
+$payload = [
+  'schemaVersion' => 'public-kit.live-editor-surface-census.1',
+  'readOnly' => TRUE,
+  'rawFieldValuesEmitted' => FALSE,
+  'entityInspectionLimitPerField' => $entity_limit,
+  'fieldCount' => count($field_results),
+  'roleCount' => count($role_results),
+  'fields' => $field_results,
+  'roles' => $role_results,
+  'errors' => $errors,
+];
+$encoded_payload = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);
+print json_encode($payload + [
+  'fingerprint' => 'sha256:' . hash('sha256', $encoded_payload),
+], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);
+`;
+
+function parseLiveEditorSurfaceCensus(result) {
+  const unavailable = (reason) => ({
+    schemaVersion: LIVE_EDITOR_SURFACE_SCHEMA,
+    confirmed: false,
+    readOnly: true,
+    rawFieldValuesEmitted: false,
+    entityInspectionLimitPerField: 5000,
+    fieldCount: 0,
+    roleCount: 0,
+    fields: [],
+    roles: [],
+    errors: [],
+    fingerprint: '',
+    reason
+  });
+  if (result?.ok !== true) {
+    return unavailable('The read-only Drush live editor-surface census did not run.');
+  }
+  try {
+    const parsed = JSON.parse(result.output);
+    const fields = Array.isArray(parsed?.fields) ? parsed.fields : [];
+    const roles = Array.isArray(parsed?.roles) ? parsed.roles : [];
+    const fieldKeys = fields.map((field) => String(field?.key ?? ''));
+    const roleKeys = roles.map((role) => String(role?.declared ?? ''));
+    const structurallyValid =
+      parsed?.schemaVersion === LIVE_EDITOR_SURFACE_SCHEMA &&
+      parsed?.readOnly === true &&
+      parsed?.rawFieldValuesEmitted === false &&
+      Number(parsed?.entityInspectionLimitPerField) === 5000 &&
+      Number(parsed?.fieldCount) === fields.length &&
+      Number(parsed?.roleCount) === roles.length &&
+      new Set(fieldKeys).size === fieldKeys.length &&
+      new Set(roleKeys).size === roleKeys.length &&
+      fieldKeys.every((key) => /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/.test(key)) &&
+      Array.isArray(parsed?.errors) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(parsed?.fingerprint ?? ''));
+    const complete = structurallyValid && parsed.errors.length === 0 && fields.every((field) =>
+      field?.formatInspectionTruncated !== true && !String(field?.formatInspectionError ?? '').trim()
+    );
+    return {
+      ...parsed,
+      confirmed: complete,
+      reason: complete
+        ? ''
+        : structurallyValid
+          ? `The live editor-surface census was incomplete${parsed.errors.length ? `: ${parsed.errors.join(' ')}` : '.'}`
+          : 'The live editor-surface census returned an invalid schema or count.'
+    };
+  } catch {
+    return unavailable('The read-only Drush live editor-surface census returned malformed JSON.');
+  }
+}
+
+function inspectLiveEditorSurface(
+  projectRoot,
+  environment,
+  fieldOutputMatrix,
+  browserEvidence,
+  readDrush = null
+) {
+  const declared = declaredLiveEditorSurface(fieldOutputMatrix, browserEvidence);
+  const encoded = Buffer.from(JSON.stringify({ fields: declared.fields, roles: declared.roles }), 'utf8').toString('base64');
+  const evaluation = [
+    `$declared_editor_surface = json_decode(base64_decode('${encoded}', TRUE), TRUE, 512, JSON_THROW_ON_ERROR);`,
+    DRUPAL_LIVE_EDITOR_SURFACE_EVAL
+  ].join('\n');
+  return parseLiveEditorSurfaceCensus(
+    readDrush
+      ? readDrush(['php:eval', evaluation], 120_000)
+      : runDrushResult(projectRoot, environment, ['php:eval', evaluation], 120_000)
+  );
+}
+
+export function reconcileLiveEditorSurface(fieldOutputMatrix, browserEvidence, census, { required = false } = {}) {
+  const declared = declaredLiveEditorSurface(fieldOutputMatrix, browserEvidence);
+  const expectedFields = declared.fields;
+  const expectedRoles = declared.roles;
+  const errors = [...declared.errors];
+  const censusTrusted =
+    census?.confirmed === true &&
+    census?.schemaVersion === LIVE_EDITOR_SURFACE_SCHEMA &&
+    census?.readOnly === true &&
+    census?.rawFieldValuesEmitted === false &&
+    Number(census?.fieldCount) === (Array.isArray(census?.fields) ? census.fields.length : -1) &&
+    Number(census?.roleCount) === (Array.isArray(census?.roles) ? census.roles.length : -1);
+  if (required && expectedFields.length > 0 && !censusTrusted) {
+    errors.push(
+      `G-EDITOR-01 requires a successful verifier-owned read-only Drush live editor-surface census: ${String(census?.reason ?? 'census unavailable')}`
+    );
+  }
+
+  const liveFields = new Map((Array.isArray(census?.fields) ? census.fields : []).map((field) => [field?.key, field]));
+  const liveRoles = new Map((Array.isArray(census?.roles) ? census.roles : []).map((role) => [role?.declared, role]));
+  if (censusTrusted) {
+    for (const field of expectedFields) {
+      const live = liveFields.get(field.key);
+      if (!live) {
+        errors.push(`Live editor-surface census omitted public field ${field.key}.`);
+        continue;
+      }
+      if (live.fieldDefinitionExists !== true) {
+        errors.push(`Public field ${field.key} has no live Drupal field config or base-field definition.`);
+      }
+      if (live.defaultFormDisplayExists !== true) {
+        errors.push(`Public field ${field.key} has no live default form display ${field.entityType}.${field.bundle}.default.`);
+      }
+      if (live.widgetVisible !== true || !String(live.widget ?? '').trim()) {
+        errors.push(`Public field ${field.key} is hidden or has no visible widget on the live default form display.`);
+      }
+      if (!field.packetWidget || field.packetWidget !== String(live.widget ?? '').trim()) {
+        errors.push(
+          `field-output-matrix.json widget for ${field.key} (${field.packetWidget || 'missing'}) does not match live default form widget ${String(live.widget ?? '').trim() || 'hidden'}.`
+        );
+      }
+      if (typeof field.packetRequired !== 'boolean' || field.packetRequired !== live.required) {
+        errors.push(
+          `field-output-matrix.json required metadata for ${field.key} (${String(field.packetRequired)}) does not match live field config (${String(live.required)}).`
+        );
+      }
+      const formats = Array.isArray(live.existingFormatIds) ? live.existingFormatIds.filter(Boolean) : [];
+      if (FORMATTED_TEXT_FIELD_TYPES.has(String(live.fieldType ?? '')) && formats.length > 0) {
+        if (field.editorRoles.length === 0) {
+          errors.push(
+            `Public formatted-text field ${field.key} has existing values using ${formats.join(', ')} but no matching editor role is declared in browser-evidence.json.`
+          );
+        }
+        const checks = new Map((Array.isArray(live.editorRolePermissionChecks)
+          ? live.editorRolePermissionChecks
+          : []).map((check) => [check?.declared, check]));
+        for (const declaredRole of field.editorRoles) {
+          const check = checks.get(declaredRole);
+          if (!check?.resolved) {
+            errors.push(`browser-evidence.json editor role ${declaredRole} could not be resolved in live Drupal for ${field.key}.`);
+            continue;
+          }
+          const missing = Array.isArray(check?.missingPermissions) ? check.missingPermissions.filter(Boolean) : [];
+          if (missing.length > 0) {
+            errors.push(
+              `Live Drupal editor role ${declaredRole} cannot edit existing ${field.key} values; missing ${missing.join(', ')}.`
+            );
+          }
+        }
+      }
+    }
+    for (const role of expectedRoles) {
+      const live = liveRoles.get(role.declared);
+      if (!live?.resolved) {
+        errors.push(`browser-evidence.json editor role ${role.declared} could not be resolved in live Drupal.`);
+      }
+    }
+  }
+
+  return {
+    schemaVersion: 'public-kit.live-editor-surface-reconciliation.1',
+    censusRequired: required && expectedFields.length > 0,
+    censusTrusted,
+    declaredFieldCount: expectedFields.length,
+    declaredRoleCount: expectedRoles.length,
+    inspectedFieldCount: Array.isArray(census?.fields) ? census.fields.length : 0,
+    inspectedRoleCount: Array.isArray(census?.roles) ? census.roles.length : 0,
+    fieldKeys: expectedFields.map((field) => field.key),
+    roleDeclarations: expectedRoles.map((role) => role.declared),
+    passed: errors.length === 0 && (!required || expectedFields.length === 0 || censusTrusted),
+    errors
+  };
+}
+
 function cleanScalar(value) {
   return String(value ?? '').trim().replace(/^(?:['"])(.*)(?:['"])$/s, '$1').trim();
 }
@@ -3983,7 +4446,7 @@ print json_encode(['schemaVersion' => 'public-kit.consent-runtime.1', 'confirmed
   }
 }
 
-function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, patternMap) {
+function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEvidence, routeMatrix, patternMap) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
@@ -4029,6 +4492,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
       },
       frontPage: '',
       identityReadbackFailed: false,
+      liveEditorSurfaceCensus: parseLiveEditorSurfaceCensus({ ok: false, output: '' }),
       liveNextCycleCensus: parseLiveNextCycleCensus({ ok: false, output: '' }),
       mode: 'unavailable',
       reason: 'Current working directory is not inside a DDEV Drupal project.',
@@ -4043,8 +4507,8 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
   }
   const inContainer = ddevContainerContext(projectRoot, environment);
   const drushCommandFailures = [];
-  const readDrush = (args) => {
-    const result = runDrushResult(projectRoot, environment, args);
+  const readDrush = (args, timeout = 15_000) => {
+    const result = runDrushResult(projectRoot, environment, args, timeout);
     if (!result.ok) {
       drushCommandFailures.push(describeDrushFailure(result.failure ?? { argv: ['drush', ...args] }));
     }
@@ -4101,6 +4565,13 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
   const liveNextCycleCensus = parseLiveNextCycleCensus(
     readDrush(['php:eval', LIVE_NEXT_CYCLE_CENSUS_PHP])
   );
+  const liveEditorSurfaceCensus = inspectLiveEditorSurface(
+    projectRoot,
+    environment,
+    fieldOutputMatrix,
+    browserEvidence,
+    readDrush
+  );
   return {
     baseUrl,
     confirmed,
@@ -4118,6 +4589,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     drushCommandFailures,
     frontPage,
     identityReadbackFailed,
+    liveEditorSurfaceCensus,
     liveNextCycleCensus,
     mode: inContainer ? 'ddev-container' : 'ddev-host',
     project: basename(projectRoot),
@@ -5476,6 +5948,7 @@ export async function verifyLive({
     cwd,
     environment,
     fieldOutputMatrix,
+    browserEvidence,
     routeMatrix,
     patternMap
   );
@@ -5493,6 +5966,16 @@ export async function verifyLive({
     { required: liveNextCycleCensusRequired }
   );
   liveErrors.push(...liveNextCycleReconciliation.errors);
+  const liveEditorSurfaceCensusRequired =
+    (runtimeAuthoritativeForCompletion && (packetSupportsCompletion || packetClaimsQualifyingReview)) ||
+    (runtimeWasInjected && Object.prototype.hasOwnProperty.call(inspectedDrupalRuntime, 'liveEditorSurfaceCensus'));
+  const liveEditorSurfaceReconciliation = reconcileLiveEditorSurface(
+    fieldOutputMatrix,
+    browserEvidence,
+    inspectedDrupalRuntime.liveEditorSurfaceCensus,
+    { required: liveEditorSurfaceCensusRequired }
+  );
+  liveErrors.push(...liveEditorSurfaceReconciliation.errors);
   const runtimeWebOrigins = new Set(Array.isArray(inspectedDrupalRuntime.webOrigins)
     ? inspectedDrupalRuntime.webOrigins
     : []);
@@ -6213,6 +6696,12 @@ export async function verifyLive({
     liveNextCycleCensus: {
       candidateKeys: liveNextCycleReconciliation.liveCandidateKeys,
       confirmed: liveNextCycleReconciliation.censusTrusted
+    },
+    liveEditorSurfaceCensus: {
+      fieldKeys: liveEditorSurfaceReconciliation.fieldKeys,
+      roleDeclarations: liveEditorSurfaceReconciliation.roleDeclarations,
+      confirmed: liveEditorSurfaceReconciliation.censusTrusted,
+      passed: liveEditorSurfaceReconciliation.passed
     }
   });
   const sharedPacketReport = {
@@ -6246,10 +6735,11 @@ export async function verifyLive({
         }
       : null,
     evidenceBinding: {
+      liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 5
+      targetFingerprintInputVersion: 6
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
@@ -6279,6 +6769,7 @@ export async function verifyLive({
     liveHttpBudget,
     liveRouteBudget: liveRouteSchedule.budget,
     nextCycleCleanupCheck,
+    liveEditorSurfaceReconciliation,
     liveNextCycleReconciliation,
     liveTargetValid,
     buildState,

@@ -12,6 +12,7 @@ import {
   createCriticalAssetContext,
   createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
+  DRUPAL_LIVE_EDITOR_SURFACE_EVAL,
   DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
@@ -94,6 +95,17 @@ test('Drupal live surface census is bounded, metadata-only, privacy-safe, and li
   assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicSurface'\s*=>\s*\$public_surface/);
   assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicEditorialRoot'\s*=>\s*\$is_public_root_type/);
   assert.doesNotMatch(DRUPAL_LIVE_SURFACE_EVAL, /->label\(\)|->getTitle\(\)|->toArray\(\)/);
+});
+
+test('Drupal live editor-surface census is read-only, bounded, and emits no field values', () => {
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /getFieldDefinitions/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /entity_form_display/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /getComponent\(\$field_name\)/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /->accessCheck\(FALSE\)/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /->range\(0, \$entity_limit \+ 1\)/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /use text format/);
+  assert.match(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /'rawFieldValuesEmitted' => FALSE/);
+  assert.doesNotMatch(DRUPAL_LIVE_EDITOR_SURFACE_EVAL, /'fieldValue'\s*=>|'rawValue'\s*=>/);
 });
 
 test('Drupal runtime identity emits digest-only active config, schema, settings, and database-update facts', () => {
@@ -504,6 +516,61 @@ function injectedDrupalRuntime(baseUrl, overrides = {}) {
       reason: ''
     },
     frontPage: '/',
+    liveEditorSurfaceCensus: {
+      schemaVersion: 'public-kit.live-editor-surface-census.1',
+      confirmed: true,
+      readOnly: true,
+      rawFieldValuesEmitted: false,
+      entityInspectionLimitPerField: 5000,
+      fieldCount: 1,
+      roleCount: 1,
+      fields: [
+        {
+          key: 'node.page.body',
+          entityType: 'node',
+          bundle: 'page',
+          machineName: 'body',
+          fieldDefinitionExists: true,
+          configEntityExists: true,
+          definitionSource: 'configurable',
+          fieldType: 'text_long',
+          required: true,
+          defaultFormDisplayId: 'node.page.default',
+          defaultFormDisplayExists: true,
+          widgetVisible: true,
+          widget: 'text_textarea',
+          formattedText: true,
+          existingFormatIds: [],
+          formatInspectionTruncated: false,
+          formatInspectionError: '',
+          editorRolePermissionChecks: [
+            {
+              declared: 'content editor',
+              resolved: true,
+              ambiguous: false,
+              roleId: 'content_editor',
+              roleLabel: 'Content editor',
+              administrator: false,
+              requiredPermissions: [],
+              missingPermissions: []
+            }
+          ]
+        }
+      ],
+      roles: [
+        {
+          declared: 'content editor',
+          resolved: true,
+          ambiguous: false,
+          roleId: 'content_editor',
+          roleLabel: 'Content editor',
+          administrator: false
+        }
+      ],
+      errors: [],
+      fingerprint: `sha256:${'7'.repeat(64)}`,
+      reason: ''
+    },
     liveNextCycleCensus: {
       schemaVersion: 'public-kit.live-next-cycle-census.1',
       confirmed: true,
@@ -3594,6 +3661,56 @@ if (args[1] === 'php:eval') {
     }) + '\\n');
     process.exit(0);
   }
+  if (args[2].includes('public-kit.live-editor-surface-census.1')) {
+    process.stdout.write(JSON.stringify({
+      schemaVersion: 'public-kit.live-editor-surface-census.1',
+      readOnly: true,
+      rawFieldValuesEmitted: false,
+      entityInspectionLimitPerField: 5000,
+      fieldCount: 1,
+      roleCount: 1,
+      fields: [{
+        key: 'node.page.body',
+        entityType: 'node',
+        bundle: 'page',
+        machineName: 'body',
+        fieldDefinitionExists: true,
+        configEntityExists: true,
+        definitionSource: 'configurable',
+        fieldType: 'text_long',
+        required: true,
+        defaultFormDisplayId: 'node.page.default',
+        defaultFormDisplayExists: true,
+        widgetVisible: true,
+        widget: 'text_textarea',
+        formattedText: true,
+        existingFormatIds: [],
+        formatInspectionTruncated: false,
+        formatInspectionError: '',
+        editorRolePermissionChecks: [{
+          declared: 'content editor',
+          resolved: true,
+          ambiguous: false,
+          roleId: 'content_editor',
+          roleLabel: 'Content editor',
+          administrator: false,
+          requiredPermissions: [],
+          missingPermissions: []
+        }]
+      }],
+      roles: [{
+        declared: 'content editor',
+        resolved: true,
+        ambiguous: false,
+        roleId: 'content_editor',
+        roleLabel: 'Content editor',
+        administrator: false
+      }],
+      errors: [],
+      fingerprint: 'sha256:${'7'.repeat(64)}'
+    }) + '\\n');
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     schemaVersion: 'public-kit.drupal-entity-inventory.5',
     fingerprint: 'sha256:${'a'.repeat(64)}',
@@ -5271,6 +5388,128 @@ test('live model census fails closed for authored applicability when the census 
       assert.match(
         incompleteReport.errors.join('\n'),
         /authored applicability omits live Drupal temporal\/cycle candidates.*field_season/i
+      );
+    }
+  );
+});
+
+test('live editor-surface census rejects a hidden widget for a load-bearing public field', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-editor-hidden-widget-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const runtime = injectedDrupalRuntime(baseUrl);
+      runtime.liveEditorSurfaceCensus.fields[0].widgetVisible = false;
+      runtime.liveEditorSurfaceCensus.fields[0].widget = '';
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: runtime
+      });
+
+      assert.equal(report.liveEditorSurfaceReconciliation.censusTrusted, true);
+      assert.equal(report.liveEditorSurfaceReconciliation.passed, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        report.errors.join('\n'),
+        /node\.page\.body is hidden or has no visible widget.*default form display/i
+      );
+    }
+  );
+});
+
+test('live editor-surface census requires the declared editor role to use existing text formats', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-editor-text-format-permission-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const runtime = injectedDrupalRuntime(baseUrl);
+      const field = runtime.liveEditorSurfaceCensus.fields[0];
+      field.existingFormatIds = ['content_format'];
+      field.editorRolePermissionChecks[0].requiredPermissions = ['use text format content_format'];
+      field.editorRolePermissionChecks[0].missingPermissions = ['use text format content_format'];
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: runtime
+      });
+
+      assert.equal(report.liveEditorSurfaceReconciliation.censusTrusted, true);
+      assert.equal(report.liveEditorSurfaceReconciliation.passed, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.match(
+        report.errors.join('\n'),
+        /content editor cannot edit existing node\.page\.body values; missing use text format content_format/i
+      );
+    }
+  );
+});
+
+test('live editor-surface census fails closed when its verifier-owned Drush readback is unavailable', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-editor-census-unavailable-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const runtime = injectedDrupalRuntime(baseUrl, {
+        liveEditorSurfaceCensus: {
+          schemaVersion: 'public-kit.live-editor-surface-census.1',
+          confirmed: false,
+          readOnly: true,
+          rawFieldValuesEmitted: false,
+          entityInspectionLimitPerField: 5000,
+          fieldCount: 0,
+          roleCount: 0,
+          fields: [],
+          roles: [],
+          errors: [],
+          fingerprint: '',
+          reason: 'The read-only Drush live editor-surface census did not run.'
+        }
+      });
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: runtime
+      });
+
+      assert.equal(report.liveEditorSurfaceReconciliation.censusTrusted, false);
+      assert.equal(report.liveEditorSurfaceReconciliation.passed, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.match(
+        report.errors.join('\n'),
+        /G-EDITOR-01 requires a successful verifier-owned read-only Drush live editor-surface census/i
       );
     }
   );
