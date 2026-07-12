@@ -32,6 +32,9 @@ Options:
   --packet-only        Run structural packet lint only; never authorizes completion
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_CRITICAL_ASSET_BYTES = 20 * 1024 * 1024;
+const MAX_CRITICAL_ASSET_REQUESTS = 160;
+const MAX_CRITICAL_ASSET_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_LIVE_ROUTE_CHECKS = 1_000;
@@ -566,7 +569,12 @@ export function isLocalEnvironmentHost(hostname) {
 
 function requestOnce(
   url,
-  { allowRuntimeBoundLocalCertificate = false, captureBody = 'always', deadlineAt = 0 } = {}
+  {
+    allowRuntimeBoundLocalCertificate = false,
+    captureBody = 'always',
+    deadlineAt = 0,
+    maxBodyBytes = MAX_BODY_BYTES
+  } = {}
 ) {
   return new Promise((resolveRequest, rejectRequest) => {
     const remainingDeadlineMs = deadlineAt > 0 ? deadlineAt - Date.now() : REQUEST_TIMEOUT_MS;
@@ -622,6 +630,7 @@ function requestOnce(
         if (!shouldCaptureBody) {
           finish(resolveRequest, {
             body: '',
+            bodyBytes: Buffer.alloc(0),
             headers: response.headers,
             localTlsVerificationBypassed: allowLocalCertificate,
             status: response.statusCode ?? 0
@@ -632,8 +641,8 @@ function requestOnce(
         const chunks = [];
         let size = 0;
         const declaredLength = Number(response.headers['content-length']);
-        if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
-          fail(new Error(`Response body exceeds the ${MAX_BODY_BYTES} byte limit.`));
+        if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
+          fail(new Error(`Response body exceeds the ${maxBodyBytes} byte limit.`));
           response.destroy();
           return;
         }
@@ -641,8 +650,8 @@ function requestOnce(
           if (settled) {
             return;
           }
-          if (size + chunk.length > MAX_BODY_BYTES) {
-            fail(new Error(`Response body exceeds the ${MAX_BODY_BYTES} byte limit.`));
+          if (size + chunk.length > maxBodyBytes) {
+            fail(new Error(`Response body exceeds the ${maxBodyBytes} byte limit.`));
             response.destroy();
             return;
           }
@@ -650,8 +659,10 @@ function requestOnce(
           size += chunk.length;
         });
         response.on('end', () => {
+          const bodyBytes = Buffer.concat(chunks);
           finish(resolveRequest, {
-            body: Buffer.concat(chunks).toString('utf8'),
+            body: bodyBytes.toString('utf8'),
+            bodyBytes,
             headers: response.headers,
             localTlsVerificationBypassed: allowLocalCertificate,
             status: response.statusCode ?? 0
@@ -774,7 +785,7 @@ export function createLiveHttpContext({
     allowRuntimeBoundLocalCertificate,
     deadlineAt,
     errors,
-    async request(url, { captureBody = 'always' } = {}) {
+    async request(url, { captureBody = 'always', maxBodyBytes = MAX_BODY_BYTES } = {}) {
       ensureUsable();
       if (requestCount >= maxRequests) {
         requestCapExhausted = true;
@@ -787,7 +798,8 @@ export function createLiveHttpContext({
         return await requestOnce(url, {
           allowRuntimeBoundLocalCertificate,
           captureBody,
-          deadlineAt
+          deadlineAt,
+          maxBodyBytes
         });
       } catch (error) {
         if (/total wall-clock deadline/i.test(String(error?.message ?? error))) {
@@ -859,7 +871,12 @@ export function createLiveHttpContext({
 
 async function requestFollowingRedirects(
   startUrl,
-  { captureBody = 'always', liveHttpContext, stopAtExternalRedirect = false } = {}
+  {
+    captureBody = 'always',
+    liveHttpContext,
+    maxBodyBytes = MAX_BODY_BYTES,
+    stopAtExternalRedirect = false
+  } = {}
 ) {
   if (!liveHttpContext) {
     throw new Error('A verifier-wide live HTTP context is required.');
@@ -874,7 +891,7 @@ async function requestFollowingRedirects(
   let localTlsVerificationBypassed = false;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-    const response = await liveHttpContext.request(current, { captureBody });
+    const response = await liveHttpContext.request(current, { captureBody, maxBodyBytes });
     localTlsVerificationBypassed ||= response.localTlsVerificationBypassed;
     const location = response.headers.location;
     if (REDIRECT_STATUSES.has(response.status) && location) {
@@ -914,6 +931,288 @@ async function requestFollowingRedirects(
     };
   }
   throw new Error('Redirect resolution failed.');
+}
+
+function criticalAssetCandidates(html, finalUrl) {
+  const base = new URL(finalUrl);
+  const candidates = [];
+  const add = (value, role, expectedType = '') => {
+    const text = String(value ?? '').trim();
+    if (!text) {
+      return;
+    }
+    try {
+      const url = new URL(text, base);
+      url.hash = '';
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin !== base.origin) {
+        return;
+      }
+      candidates.push({ expectedType, role, url });
+    } catch {
+      // Route semantics represent malformed URLs; only fetch valid same-origin assets.
+    }
+  };
+
+  for (const attributes of matchingTags(html, 'link', (item) => Boolean(item.href))) {
+    const relations = String(attributes.rel ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (relations.includes('stylesheet')) {
+      add(attributes.href, 'stylesheet', 'style');
+    }
+    if (relations.includes('preload')) {
+      add(
+        attributes.href,
+        `preload:${String(attributes.as ?? 'unknown').toLowerCase()}`,
+        String(attributes.as ?? '')
+      );
+    }
+  }
+  for (const attributes of matchingTags(html, 'script', (item) => Boolean(item.src))) {
+    add(attributes.src, 'script', 'script');
+  }
+  for (const tagName of ['img', 'source']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      if (tagName === 'img' || String(attributes.type ?? '').toLowerCase().startsWith('image/')) {
+        add(attributes.src, `${tagName}:src`, 'image');
+      }
+      if (attributes.srcset) {
+        for (const candidate of attributes.srcset.split(',')) {
+          const [url, descriptor = ''] = candidate.trim().split(/\s+/, 2);
+          add(url, `${tagName}:srcset:${descriptor}`, 'image');
+        }
+      }
+    }
+  }
+  for (const tagName of ['video', 'audio']) {
+    for (const attributes of matchingTags(html, tagName, () => true)) {
+      add(attributes.poster, `${tagName}:poster`, 'image');
+    }
+  }
+
+  const unique = new Map();
+  for (const candidate of candidates) {
+    const key = candidate.url.href;
+    const current = unique.get(key);
+    if (current) {
+      current.roles.add(candidate.role);
+      current.expectedTypes.add(candidate.expectedType);
+    } else {
+      unique.set(key, {
+        expectedTypes: new Set([candidate.expectedType]),
+        roles: new Set([candidate.role]),
+        url: candidate.url
+      });
+    }
+  }
+  return [...unique.values()].sort((left, right) => comparePortable(left.url.href, right.url.href));
+}
+
+function assetContentTypeMatches(contentType, expectedTypes) {
+  const normalized = String(contentType ?? '').split(';', 1)[0].trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const matches = (expected) => {
+    switch (String(expected).toLowerCase()) {
+      case 'style':
+        return normalized === 'text/css';
+      case 'script':
+      case 'worker':
+        return /^(?:application|text)\/(?:javascript|ecmascript|x-javascript)$/.test(normalized);
+      case 'image':
+        return normalized.startsWith('image/');
+      case 'font':
+        return normalized.startsWith('font/') ||
+          normalized === 'application/font-woff' ||
+          normalized === 'application/font-woff2';
+      case 'audio':
+      case 'video':
+        return normalized.startsWith(`${String(expected).toLowerCase()}/`);
+      case 'document':
+        return normalized === 'text/html' || normalized === 'application/xhtml+xml';
+      case 'track':
+        return normalized === 'text/vtt';
+      case 'fetch':
+      case '':
+      case 'unknown':
+        return normalized !== 'text/html';
+      default:
+        return normalized !== 'text/html';
+    }
+  };
+  return [...expectedTypes].every(matches);
+}
+
+export function createCriticalAssetContext({
+  concurrency = 8,
+  liveHttpContext = null,
+  maxAssetBytes = MAX_CRITICAL_ASSET_BYTES,
+  maxRequests = MAX_CRITICAL_ASSET_REQUESTS,
+  maxTotalBytes = MAX_CRITICAL_ASSET_TOTAL_BYTES,
+  wallClockMs = 60_000
+} = {}) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_LIVE_ROUTE_CONCURRENCY) {
+    throw new Error(`Critical asset concurrency must be between 1 and ${MAX_LIVE_ROUTE_CONCURRENCY}.`);
+  }
+  if (!Number.isSafeInteger(wallClockMs) || wallClockMs < 1 || wallClockMs > LIVE_ROUTE_DEADLINE_MS) {
+    throw new Error(`Critical asset wall-clock budget must be between 1 and ${LIVE_ROUTE_DEADLINE_MS} ms.`);
+  }
+  const byteLimits = {
+    maxAssetBytes: [maxAssetBytes, MAX_CRITICAL_ASSET_BYTES],
+    maxTotalBytes: [maxTotalBytes, MAX_CRITICAL_ASSET_TOTAL_BYTES]
+  };
+  for (const [name, [value, maximum]] of Object.entries(byteLimits)) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+      throw new Error(`Critical asset ${name} must be between 1 and ${maximum}.`);
+    }
+  }
+  if (!Number.isSafeInteger(maxRequests) || maxRequests < 1 || maxRequests > MAX_CRITICAL_ASSET_REQUESTS) {
+    throw new Error(`Critical asset maxRequests must be between 1 and ${MAX_CRITICAL_ASSET_REQUESTS}.`);
+  }
+  const sharedContext = liveHttpContext ?? createLiveHttpContext({
+    concurrency,
+    deadlineMs: wallClockMs,
+    maxRequests,
+    maxTasks: maxRequests
+  });
+  return {
+    byteBudgetExhausted: false,
+    byteWaiters: [],
+    cache: new Map(),
+    liveHttpContext: sharedContext,
+    maxAssetBytes,
+    maxRequests,
+    maxTotalBytes,
+    reservedBytes: 0,
+    totalBytes: 0
+  };
+}
+
+function dispatchCriticalAssetByteWaiters(context) {
+  while (context.byteWaiters.length > 0) {
+    if (context.byteBudgetExhausted || context.totalBytes >= context.maxTotalBytes) {
+      context.byteBudgetExhausted = true;
+      const error = new Error(`bytes exceed the ${context.maxTotalBytes} byte total limit`);
+      for (const waiter of context.byteWaiters.splice(0)) {
+        waiter.reject(error);
+      }
+      return;
+    }
+    const available = context.maxTotalBytes - context.totalBytes - context.reservedBytes;
+    if (available <= 0) {
+      return;
+    }
+    const waiter = context.byteWaiters.shift();
+    const reservation = Math.min(context.maxAssetBytes, available);
+    context.reservedBytes += reservation;
+    waiter.resolve(reservation);
+  }
+}
+
+function reserveCriticalAssetBytes(context) {
+  if (context.byteBudgetExhausted || context.totalBytes >= context.maxTotalBytes) {
+    context.byteBudgetExhausted = true;
+    return Promise.reject(new Error(`bytes exceed the ${context.maxTotalBytes} byte total limit`));
+  }
+  const available = context.maxTotalBytes - context.totalBytes - context.reservedBytes;
+  if (available > 0) {
+    const reservation = Math.min(context.maxAssetBytes, available);
+    context.reservedBytes += reservation;
+    return Promise.resolve(reservation);
+  }
+  return new Promise((resolveReservation, rejectReservation) => {
+    context.byteWaiters.push({ reject: rejectReservation, resolve: resolveReservation });
+  });
+}
+
+function releaseCriticalAssetBytes(context, reservation) {
+  context.reservedBytes = Math.max(0, context.reservedBytes - reservation);
+  dispatchCriticalAssetByteWaiters(context);
+}
+
+function criticalAssetResponse(candidate, context) {
+  if (!context.cache.has(candidate.url.href)) {
+    if (context.cache.size >= context.maxRequests) {
+      throw new Error(`inventory exceeds the ${context.maxRequests} request limit`);
+    }
+    context.cache.set(candidate.url.href, (async () => {
+      const reservation = await reserveCriticalAssetBytes(context);
+      try {
+        const response = await context.liveHttpContext.runTask(
+          'critical-asset',
+          () => requestFollowingRedirects(candidate.url, {
+            liveHttpContext: context.liveHttpContext,
+            maxBodyBytes: reservation
+          })
+        );
+        const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
+        context.totalBytes += bytes.length;
+        if (context.totalBytes >= context.maxTotalBytes) {
+          context.byteBudgetExhausted = true;
+        }
+        return response;
+      } catch (error) {
+        if (
+          reservation < context.maxAssetBytes &&
+          /response body exceeds the \d+ byte limit/i.test(String(error?.message ?? error))
+        ) {
+          context.byteBudgetExhausted = true;
+        }
+        throw error;
+      } finally {
+        releaseCriticalAssetBytes(context, reservation);
+      }
+    })());
+  }
+  return context.cache.get(candidate.url.href);
+}
+
+export async function inspectCriticalAssets(html, finalUrl, context) {
+  if (!context?.liveHttpContext) {
+    throw new Error('Critical asset inspection requires a bounded live HTTP context.');
+  }
+  const candidates = criticalAssetCandidates(html, finalUrl);
+  const results = await Promise.all(candidates.map(async (candidate) => {
+    try {
+      const response = await criticalAssetResponse(candidate, context);
+      const bytes = response.bodyBytes ?? Buffer.from(response.body ?? '', 'utf8');
+      const errors = [];
+      if (response.status < 200 || response.status >= 300) {
+        errors.push(`${candidate.url.pathname} critical asset returned HTTP ${response.status}.`);
+      }
+      const contentType = response.headers['content-type'] ?? '';
+      if (!assetContentTypeMatches(contentType, candidate.expectedTypes)) {
+        errors.push(
+          `${candidate.url.pathname} critical asset has content type ${JSON.stringify(String(contentType))}, incompatible with ${[...candidate.roles].join(', ')}.`
+        );
+      }
+      return {
+        errors,
+        manifest: {
+          contentType: String(contentType).split(';', 1)[0].trim().toLowerCase(),
+          path: intrinsicUrl(response.finalUrl, finalUrl, { asset: true }),
+          roles: [...candidate.roles].sort(comparePortable),
+          sha256: `sha256:${sha256(bytes)}`,
+          size: bytes.length
+        }
+      };
+    } catch (error) {
+      return {
+        errors: [`${candidate.url.pathname} critical asset could not be fetched: ${error.message}`],
+        manifest: null
+      };
+    }
+  }));
+  const manifest = results.map((result) => result.manifest).filter(Boolean);
+  const errors = results.flatMap((result) => result.errors);
+  manifest.sort((left, right) => comparePortable(
+    `${left.path}\0${left.roles.join(',')}`,
+    `${right.path}\0${right.roles.join(',')}`
+  ));
+  return {
+    errors,
+    fingerprint: stateSha256(manifest),
+    manifest
+  };
 }
 
 async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix, liveHttpContext) {
@@ -4194,7 +4493,7 @@ function completionEvidenceTargetErrors({
   return errors;
 }
 
-async function verifyRoute(baseUrl, expected, liveHttpContext) {
+async function verifyRoute(baseUrl, expected, liveHttpContext, criticalAssetContext) {
   const requestTarget = expected.requestTarget || expected.targetPath;
   const requestedUrl = new URL(requestTarget.replace(/^\//, ''), new URL('/', baseUrl));
   const errors = [];
@@ -4239,6 +4538,12 @@ async function verifyRoute(baseUrl, expected, liveHttpContext) {
     const actualTitle = elementText(response.body, 'title');
     const actualMetadata = renderedMetadata(response.body, response.finalUrl);
     const intrinsicSemantics = intrinsicRouteSemantics(response.body, response.finalUrl);
+    const criticalAssets = await inspectCriticalAssets(
+      response.body,
+      response.finalUrl,
+      criticalAssetContext
+    );
+    errors.push(...criticalAssets.errors.map((error) => `${expected.targetPath}: ${error}`));
     const actualStatus = expected.statusUsesInitialResponse ? response.initialStatus : response.status;
     if (actualStatus !== expected.expectedStatus) {
       errors.push(`${expected.targetPath} returned status ${actualStatus}; expected ${expected.expectedStatus}.`);
@@ -4324,6 +4629,7 @@ async function verifyRoute(baseUrl, expected, liveHttpContext) {
       },
       actualTitle,
       bodySha256: `sha256:${sha256(response.body)}`,
+      criticalAssets,
       intrinsicSemantics,
       errors,
       finalStatus: response.status,
@@ -4383,7 +4689,8 @@ export async function scheduleLiveRouteChecks({
   concurrency = MAX_LIVE_ROUTE_CONCURRENCY,
   deadlineMs = LIVE_ROUTE_DEADLINE_MS,
   maxRequests = MAX_LIVE_HTTP_REQUESTS,
-  liveHttpContext = null
+  liveHttpContext = null,
+  criticalAssetContext = null
 } = {}) {
   const routeTasks = Array.isArray(tasks) ? tasks : [];
   const errors = [];
@@ -4433,6 +4740,9 @@ export async function scheduleLiveRouteChecks({
     maxRequests,
     maxTasks: maxRoutes
   });
+  const assetContext = criticalAssetContext ?? createCriticalAssetContext({
+    liveHttpContext: context
+  });
   const checks = await Promise.all(routeTasks.map(async (task) => {
     const kind = task.bucket === 'primary'
       ? 'primary-route'
@@ -4442,7 +4752,10 @@ export async function scheduleLiveRouteChecks({
     try {
       return {
         bucket: task.bucket,
-        check: await context.runTask(kind, () => verifyRoute(baseUrl, task.expected, context))
+        check: await context.runTask(
+          kind,
+          () => verifyRoute(baseUrl, task.expected, context, assetContext)
+        )
       };
     } catch (error) {
       return {
@@ -4824,10 +5137,12 @@ export async function verifyLive({
     maxRequests: liveHttpLimits.maxRequests ?? MAX_LIVE_HTTP_REQUESTS,
     maxTasks: liveHttpLimits.maxTasks ?? MAX_LIVE_HTTP_TASKS
   });
+  const criticalAssetContext = createCriticalAssetContext({ liveHttpContext });
   const liveRouteSchedule = fetchChecksEnabled
     ? await scheduleLiveRouteChecks({
         allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
         baseUrl: target.url,
+        criticalAssetContext,
         liveHttpContext,
         tasks: liveRouteTasks
       })
@@ -5038,6 +5353,8 @@ export async function verifyLive({
   const routeStateManifest = [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]
     .map((route) => ({
       canonicalPath: normalizeRouteKey(route.actualMetadata?.canonicalUrl),
+      criticalAssetManifest: route.criticalAssets?.manifest ?? [],
+      criticalAssetManifestSha256: route.criticalAssets?.fingerprint ?? '',
       finalPath: normalizeRouteKey(route.finalUrl),
       h1: route.actualH1 ?? '',
       initialStatus: route.initialStatus ?? 0,
@@ -5291,6 +5608,18 @@ export async function verifyLive({
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
       targetFingerprintInputVersion: 5
+    },
+    criticalAssetInspection: {
+      distinctRequestCount: criticalAssetContext.cache.size,
+      totalBytes: criticalAssetContext.totalBytes,
+      limits: {
+        requestCount: criticalAssetContext.maxRequests,
+        perAssetBytes: criticalAssetContext.maxAssetBytes,
+        totalBytes: criticalAssetContext.maxTotalBytes,
+        concurrency: liveHttpBudget.maxConcurrency,
+        wallClockMs: liveHttpBudget.deadlineMs
+      },
+      sharesLiveHttpBudget: true
     },
     routeChecks,
     targetRequiredRouteChecks,
