@@ -2085,6 +2085,18 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.match(report.target.targetFingerprint, /^sha256:[a-f0-9]{64}$/);
       assert.equal(report.target.resolutionSource, 'explicit');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.deepEqual(report.agentContinuation, {
+        schemaVersion: 'public-kit.agent-continuation.1',
+        status: 'continue_required',
+        requiredAction: 'repair-and-reverify',
+        shouldContinue: true,
+        agentMayStop: false,
+        stopConditionMet: false,
+        humanReviewRequiredBeforeContinuing: false,
+        externalBlockerMayPauseOnlyWhenRecorded: true,
+        blockedReasons: report.completionBlockedReasons,
+        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+      });
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
         report.packetVerification.completionEvidence.packetCompletionBlockedReasons.join('\n'),
@@ -3725,6 +3737,13 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.drupalRuntime.trackedConfigYamlPresent, true);
       assert.equal(cleanReport.completeLocalRebuildClaimAllowed, true);
       assert.equal(cleanReport.verdict, 'complete-local-rebuild');
+      assert.equal(cleanReport.agentContinuation.requiredAction, 'handoff');
+      assert.equal(cleanReport.agentContinuation.status, 'complete');
+      assert.equal(cleanReport.agentContinuation.shouldContinue, false);
+      assert.equal(cleanReport.agentContinuation.agentMayStop, true);
+      assert.equal(cleanReport.agentContinuation.stopConditionMet, true);
+      assert.equal(cleanReport.agentContinuation.humanReviewRequiredBeforeContinuing, false);
+      assert.deepEqual(cleanReport.agentContinuation.blockedReasons, []);
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
       assert.equal(cleanReport.lifecycle.initialBaseline.status, 'passed');

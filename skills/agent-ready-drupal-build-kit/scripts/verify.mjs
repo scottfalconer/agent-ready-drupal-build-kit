@@ -3384,6 +3384,26 @@ function sharedConfigSyncDirectory(value) {
   return path.split(/[/\\]+/).filter(Boolean).slice(-2).join('/');
 }
 
+function agentContinuation({ complete = false, blockedReasons = [] } = {}) {
+  const reasons = [...new Set((Array.isArray(blockedReasons) ? blockedReasons : [])
+    .map((reason) => String(reason ?? '').trim())
+    .filter(Boolean))];
+  return {
+    schemaVersion: 'public-kit.agent-continuation.1',
+    status: complete ? 'complete' : 'continue_required',
+    requiredAction: complete ? 'handoff' : 'repair-and-reverify',
+    shouldContinue: !complete,
+    agentMayStop: complete,
+    stopConditionMet: complete,
+    humanReviewRequiredBeforeContinuing: false,
+    externalBlockerMayPauseOnlyWhenRecorded: true,
+    blockedReasons: complete ? [] : reasons,
+    instruction: complete
+      ? 'The lifecycle-verified complete-local-rebuild machine bar passed; handoff may proceed.'
+      : 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+  };
+}
+
 function pathIsInside(parent, child) {
   const pathFromParent = relative(parent, child);
   return pathFromParent === '' || (
@@ -6293,6 +6313,10 @@ export async function verifyLive({
       : packetReport.valid && liveTargetValid
         ? 'machine-incomplete'
         : 'blocked',
+    agentContinuation: agentContinuation({
+      complete: completeLocalRebuildClaimAllowed,
+      blockedReasons: completionBlockedReasons
+    }),
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
@@ -6345,6 +6369,13 @@ async function main() {
           report.lifecycle.currentStateClassification?.kind === 'unclassified'
         ? ['Current state differs from the latest lifecycle anchor and has no classified repair or extension; revert it or begin with explicit --adopt-current classification.']
         : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
+    report.agentContinuation = agentContinuation({
+      complete: report.currentSiteClaimAllowed === true,
+      blockedReasons: [
+        ...report.completionBlockedReasons,
+        ...report.currentStateBlockedReasons
+      ]
+    });
   }
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
@@ -6353,6 +6384,9 @@ async function main() {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
     for (const error of report.errors) {
       process.stderr.write(`- ${error}\n`);
+    }
+    if (!args.packetOnly) {
+      process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     }
     process.exitCode = 1;
     return;
@@ -6379,6 +6413,7 @@ async function main() {
       ? 'Full rebuild checks passed, but the changed current state is not classified and lifecycle-verified.'
       : 'Live target checks passed, but complete local rebuild machine authorization remains blocked by required machine evidence.';
     process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
+    process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     process.exitCode = 2;
   }
 }

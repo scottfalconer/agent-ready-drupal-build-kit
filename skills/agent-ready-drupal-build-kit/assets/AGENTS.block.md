@@ -17,6 +17,7 @@ Non-negotiable gates:
 - Complete negative-route and consent evidence: generated 404 quality, access-wall canonicals, rendered legal/privacy links, active consent configuration, and fresh before-consent resource behavior.
 - Preserve real packet-local evidence and separate builder work from independent and blind review.
 - Treat packet-only validation and injected test runtimes as diagnostic only. The default live-target verifier must independently inspect the current DDEV origin and Git-tracked config YAML before it may derive local completion authorization.
+- Treat `live-verification.json.agentContinuation.shouldContinue: true` as a required autonomous repair loop. Fix locally resolvable failures and rerun without waiting for human review; pause only for a recorded external blocker or genuinely owner-only decision. Handoff is allowed only when `requiredAction` is `handoff`.
 - After the first successful full verification, preserve its create-once, integrity-checked historical baseline under kit tooling. The initial rebuild remains done. For later work, begin a repair or extension before editing, allow detected impact to widen required checks, and report targeted authored evidence separately as `evidence_recorded` without calling it independent verification or a new completion certificate.
 
 Default verification:
