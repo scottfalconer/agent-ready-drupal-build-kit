@@ -199,6 +199,8 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Unexpected public 200 routes from duplicate aliases, duplicate content, stale menu links, default demo content, or route-normalization shortcuts are removed or explicitly accepted.
 - [ ] Legal, privacy, footer, and menu links resolve anonymously or are explicitly blocked with next actions.
 - [ ] Target-required routes introduced by the Drupal build, including privacy/legal/footer links, sitemap/robots behavior when enabled, login/admin expectations, canonical front page behavior, and locally introduced menu/footer links, resolve as intended or are blocked.
+- [ ] Every same-origin link found in server-rendered response HTML resolves and is represented by accepted `routes`/`targetRequiredRoutes`, or has an exact evidence-backed disposition; direct source-origin links and expected external redirects use their exact exception records.
+- [ ] JavaScript-only links were discovered through browser-executed route expansion and represented in the route matrix; the HTTP response-link check is not described as browser-DOM coverage.
 - [ ] Product, article, and legal detail routes render the expected H1/title and load-bearing fields, not only HTTP 200.
 - [ ] Important source-intent routes are preserved, redirected, or explicitly retired.
 - [ ] Drupal readback is unfiltered and includes front-page setting, all nodes including unpublished/default content, aliases including duplicates, menus and menu links, Canvas pages when available, media counts, themes, config sync directory, config status, and unexpected public routes.

@@ -46,7 +46,7 @@
     "docs/recommended-agent-skills.md",
     "docs/output-inventory.md",
     "gates.json stable machine-readable gate vocabulary",
-    "bin/verify.mjs default DDEV live-target verifier plus bin/verify-packet.mjs structural packet linter, with target-origin, Drupal site UUID, front-page, config-sync, clean-config, semantic packet, credible screenshot, recipe, and durable-intent checks",
+    "bin/verify.mjs default DDEV live-target verifier plus bin/verify-packet.mjs structural packet linter, with server-rendered response-link declaration integrity, exact external-redirect expectations, source-origin leak blocking with exact exceptions, representative route-role coverage, target-origin, Drupal site UUID, front-page, config-sync, clean-config, semantic packet, credible screenshot, recipe, and durable-intent checks",
     "templates/maintainer-review.template.md",
     "templates/operator-run.template.md",
     "templates/production-target.template.md",

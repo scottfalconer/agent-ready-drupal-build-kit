@@ -12,6 +12,8 @@ Define the addressable surface before scoring parity:
 - functional behaviors in scope for the target;
 - functional behaviors explicitly excluded by a recorded owner/maintainer disposition with reason and evidence; local packet attribution is self-attested and authenticated approval is separate.
 
+Route discovery includes route-like references found inside imported content bodies, not only browser navigation, sitemaps, or bundle metadata. Record those candidates explicitly and classify each one before calling the inventory complete.
+
 Score parity only over the accepted addressable surface. Do not hide excluded or blocked routes; list them separately. An external blocker leaves parity blocked and cannot stand in for route coverage.
 
 ## Route Parity
@@ -24,6 +26,8 @@ A route passes only when:
 - it is not an access wall, login page, draft-only page, or placeholder error;
 - canonical URL and title behavior are reviewed;
 - route-level redirect and SEO decisions are recorded.
+
+When a legacy source path+query maps to a different target, parity requires a first-hop `301` or `308` ending on the exact same-origin target path+query. The only exception is a named, reasoned, packet-evidenced `noRedirectDisposition` with `accepted: true`; duplicate mapping contracts must fully agree.
 
 Do not count 3xx, 401, 403, 404, 5xx, login pages, or unpublished draft 404s as passing route parity, even when the report expected the same response.
 
@@ -38,6 +42,8 @@ For each behavior, record:
 - browser-rendered target evidence;
 - reviewer decision;
 - unresolved differences.
+
+Anonymous submission forms pass only when source purpose/outcome, modeled purpose/outcome/owner, and browser purpose/owner/outcome agree, an anonymous browser exercised invalid and valid synthetic submissions, and the configured Drupal/provider handler reached the intended outcome. `other` is explicit rather than a wildcard, and storage alone does not satisfy a message-delivery form. The form also needs evidence of a rendered honeypot/challenge, configured rate limiting/provider protection, or a documented local-only exception; no particular vendor is required.
 
 Examples:
 
@@ -57,6 +63,10 @@ Visual and content parity are part of the default build goal.
 Content parity requires reachable public source material to exist as Drupal-owned content, fields, taxonomy, media, menus, Views, blocks, or config. Placeholder content is acceptable only for private, credentialed, unavailable, or intentionally excluded material, and each placeholder needs boundary evidence or a recorded-attribution, reasoned, evidence-backed exclusion. Every declared collection needs matching source/target counts, Drupal ownership, and non-admin editor add-a-row evidence unless a recorded owner label, reason, and evidence disposition a specific count exclusion. Local attribution is self-attested; authenticated approval is separate.
 
 Visual parity requires browser evidence for the source-like public experience: palette, typography, layout, navigation, card/detail patterns, media treatment, forms, responsive behavior, and major interaction states.
+
+Each collection with separate public item details also needs one representative detail-route comparison. Its checked fields must cover required fields and fields mapped to anonymous detail output, match a concrete Drupal owner config ID across the model/browser/independent records, and prove computed visibility at field-local selectors. Every recorded public browser route needs raw axe-core output bound to the exact URL and accepted full-default or WCAG-tagged rule scope, with no unresolved WCAG A/AA violations, no incomplete nodes lacking structured exact-rule/target evidence, and applicable keyboard, focus, accessible-name, and form-error checks.
+
+Each source form gets one stable `formKey` reused across source audit, pattern map, browser evidence, and independent verification so multiple forms on one route remain distinct. Outcome and abuse-protection evidence must be mode-specific packet-local JSON bound to that key and exact target; local mail capture or a local-only abuse exception does not establish production delivery, provider readiness, retention/privacy compliance, or launch approval.
 
 ## Minimum Parity Report Shape
 

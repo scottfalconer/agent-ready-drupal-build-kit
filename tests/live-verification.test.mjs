@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
-import { verifyLive } from '../bin/verify.mjs';
+import { exportedSeoUrlPortabilityFindings, verifyLive } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -167,7 +167,8 @@ function liveRouteMatrix(baseUrl) {
     targetBaseUrl: baseUrl,
     browserFirstRouteExpansion: {
       browserRenderedSeedRoutes: ['/'],
-      candidateRoutesFromRenderedLinks: [],
+      candidateRoutesFromBrowserRenderedLinks: [],
+      candidateRoutesFromImportedContentBodies: [],
       candidateRoutesFromBundles: [],
       candidateRoutesFromMetadata: [],
       candidateRoutesFromAssets: [],
@@ -227,6 +228,7 @@ function liveRouteMatrix(baseUrl) {
       {
         sourcePath: '/',
         targetPath: '/',
+        routeRole: 'homepage',
         sourceIntent: 'Source homepage',
         targetIntent: 'Target homepage',
         matchesBrowserRenderedSource: true,
@@ -238,6 +240,7 @@ function liveRouteMatrix(baseUrl) {
       {
         sourcePath: '/',
         targetPath: '/',
+        routeRole: 'homepage',
         targetStatus: 200,
         targetFinalPath: '/',
         targetTitle: 'Target site',
@@ -509,6 +512,9 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   independent.perRouteItemCounts = [];
   independent.collectionOwnershipChecks = [];
   independent.renderedEmbedChecks = [];
+  independent.detailRouteChecks = [];
+  independent.accessibilityChecks = [];
+  independent.anonymousFormChecks = [];
   independent.rawEmbedAndMarkupScan = {
     fieldsScanned: ['node fields', 'theme templates'],
     patternsChecked: ['<iframe', '<script', 'onload=', 'onclick=', 'javascript:', 'style=', 'raw source HTML'],
@@ -784,6 +790,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   sourceAudit.observedPatterns = [{ pattern: 'homepage', evidence: `${sourceBaseUrl}/` }];
   sourceAudit.contentInventory = [{ route: '/', type: 'homepage', title: 'Source home' }];
   sourceAudit.designSignals = [{ route: '/', signal: 'hero, navigation, and content hierarchy captured' }];
+  sourceAudit.formsAndIntegrations = [];
   sourceAudit.routeInventorySummary = {
     attemptedRoutes: 1,
     successfulRoutes: 1,
@@ -805,6 +812,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   };
   patternMap.structuredContentModel.recurringSourceObjects = [];
   patternMap.structuredContentModel.collectionOwnershipLedger = [];
+  patternMap.forms = [];
   patternMap.buildTypeDeclaration = {
     type: 'structured_drupal_native_canvas_unused',
     canvasAvailabilityEvidence: 'Canvas was inspected and is not needed for this one-route fixture.',
@@ -932,6 +940,25 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
 
   const browserPath = join(packetDir, 'browser-evidence.json');
   const browser = JSON.parse(readFileSync(browserPath, 'utf8'));
+  const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
+  mkdirSync(browserEvidenceDir, { recursive: true });
+  for (const [viewport, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
+    writeJson(join(browserEvidenceDir, `axe-home-${viewport}.json`), {
+      testEngine: { name: 'axe-core', version: '4.10.2' },
+      toolOptions: { runOnly: null, rules: {} },
+      testEnvironment: {
+        userAgent: 'Fixture Browser/1.0',
+        windowWidth: width,
+        windowHeight: height
+      },
+      timestamp: testCheckedAt,
+      url: `${targetBaseUrl}/`,
+      passes: [],
+      violations: [],
+      incomplete: [],
+      inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+    });
+  }
   browser.site = targetBaseUrl;
   browser.checkedAt = testCheckedAt;
   browser.toolOrMethod = 'browser';
@@ -983,12 +1010,42 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
         accepted: true,
         evidence: 'browser route capture'
       },
+      accessibilityCheck: {
+        standard: 'WCAG 2.2 AA',
+        engine: 'axe-core',
+        engineVersion: '4.10.2',
+        executedInBrowser: true,
+        ruleScope: { mode: 'full_default', tags: [], accepted: true },
+        report: `evidence/browser/axe-home-${viewport}.json`,
+        incompleteReviewed: true,
+        incompleteDispositions: [],
+        manualChecks: {
+          keyboardNavigation: 'pass',
+          keyboardNavigationNotApplicableRationale: '',
+          visibleFocus: 'pass',
+          visibleFocusNotApplicableRationale: '',
+          accessibleNamesAndLabels: 'pass',
+          accessibleNamesAndLabelsNotApplicableRationale: '',
+          formLabelsErrorsAndFocus: 'not_applicable',
+          formLabelsErrorsAndFocusNotApplicableRationale: 'The fixture homepage has no submission form.'
+        },
+        status: 'pass',
+        blockers: []
+      },
+      detailContentSignals: {
+        contentTypeOrBundle: '',
+        drupalOwner: '',
+        ownerDeviation: { applies: false, rationale: '', evidence: '' },
+        loadBearingFields: [],
+        accepted: false
+      },
       renderedItemCounts: [],
       notes: `Homepage checked at ${viewport}.`,
       accepted: true,
       blockers: []
     };
   });
+  browser.anonymousFormChecks = [];
   browser.editorWorkflowChecks = [
     {
       workflow: 'create',
@@ -1063,6 +1120,456 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   }
 }
 
+function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode = 'local_mail_capture') {
+  const sourceBaseUrl = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8')).sourceBaseUrl;
+  mutateJson(join(packetDir, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.formsAndIntegrations = [{
+      formKey: 'contact-main',
+      kind: 'public_submission_form',
+      sourceRoute: '/contact',
+      purpose: 'contact_message',
+      anonymousPublicUse: true,
+      expectedOutcome: 'message_delivery',
+      evidence: 'browser-evidence.json',
+      notes: ''
+    }];
+    sourceAudit.functionalSignals = [{ route: '/contact', behavior: 'Anonymous contact submission.' }];
+    sourceAudit.representativeUrls.push(`${sourceBaseUrl}/contact`);
+    sourceAudit.evidencePoints.push({
+      claim: 'The source contact form was captured.',
+      url: `${sourceBaseUrl}/contact`,
+      method: 'browser',
+      result: 'observed'
+    });
+    sourceAudit.contentInventory.push({ route: '/contact', type: 'form', title: 'Contact' });
+    sourceAudit.designSignals.push({ route: '/contact', signal: 'Public form hierarchy and labels captured' });
+    sourceAudit.routeInventorySummary.attemptedRoutes += 1;
+    sourceAudit.routeInventorySummary.successfulRoutes += 1;
+  });
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms = [{
+      formKey: 'contact-main',
+      sourceRoute: '/contact',
+      targetRoute: '/contact',
+      purpose: 'contact_message',
+      drupalOwner: 'webform',
+      expectedOutcome: 'message_delivery',
+      accepted: true,
+      notes: 'The contact form is Drupal-owned.'
+    }];
+    patternMap.pageCompositionOwnership.push({
+      ...structuredClone(patternMap.pageCompositionOwnership[0]),
+      sourceRoute: '/contact',
+      routeRole: 'form',
+      ownerRationale: 'A Drupal Webform owns the contact route.'
+    });
+    patternMap.sectionOwnershipMatrix.push({
+      ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
+      sourceRoute: '/contact',
+      section: 'contact form',
+      editorFacingName: 'Contact form',
+      dataSource: 'webform.contact',
+      expectedEditorAction: 'Edit the Contact Webform.',
+      drupalOwner: 'webform.contact',
+      publicOutputLocation: '/contact'
+    });
+  });
+  mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.primaryRoutes.push({
+      sourcePath: '/contact',
+      targetPath: '/contact',
+      routeRole: 'form',
+      sourceIntent: 'Anonymous visitors can contact the organization.',
+      targetIntent: 'A Drupal-owned public contact form.',
+      matchesBrowserRenderedSource: true,
+      accepted: true,
+      notes: 'Representative form route.'
+    });
+    routeMatrix.routes.push({
+      sourcePath: '/contact',
+      sourceStatus: 200,
+      sourceFinalPath: '/contact',
+      sourceTitle: 'Contact',
+      sourceH1: 'Contact',
+      targetPath: '/contact',
+      targetStatus: 200,
+      targetFinalPath: '/contact',
+      targetTitle: 'Contact',
+      targetH1: 'Contact',
+      expectedRedirect: false,
+      routeRole: 'form',
+      accepted: true,
+      notes: 'Anonymous contact form route.'
+    });
+    routeMatrix.firstFoldBrandAssetParity.push(...routeMatrix.firstFoldBrandAssetParity
+      .filter((record) => record.sourcePath === '/')
+      .map((record) => ({
+        ...structuredClone(record),
+        sourcePath: '/contact',
+        targetPath: '/contact',
+        notes: 'The public contact form uses the same accepted brand treatment.'
+      })));
+  });
+  mutateJson(join(packetDir, 'parity-report.json'), (parity) => {
+    parity.functionalScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The source has an anonymous contact form.'
+    };
+    parity.functionalChecks = [{
+      route: '/contact',
+      sourceExpectation: 'Anonymous visitors can send a contact message.',
+      targetObservation: 'Invalid and valid submissions were exercised.',
+      status: 'pass',
+      evidence: 'browser-evidence.json',
+      notes: ''
+    }];
+    parity.addressableSurface.routesInScope += 1;
+    parity.routeChecks.push({ route: '/contact', status: 'pass', evidence: 'browser-evidence.json' });
+    parity.contentChecks.push({
+      route: '/contact',
+      sourceExpectation: 'A public contact form is present.',
+      targetObservation: 'The Drupal-owned contact form preserves that intent.',
+      status: 'pass',
+      evidence: 'browser-evidence.json',
+      notes: ''
+    });
+    parity.visualChecks.push({
+      route: '/contact',
+      sourceExpectation: 'Form hierarchy and branding match.',
+      targetObservation: 'The form route was compared in browser evidence.',
+      status: 'pass',
+      evidence: 'browser-evidence.json',
+      notes: ''
+    });
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.renderedEmbedChecks = [{
+      route: '/contact',
+      embedType: 'form',
+      expectedSourceSignal: 'Anonymous contact form.',
+      targetRenderedSignal: 'Drupal Webform.',
+      providerLinkOrFallbackPresent: true,
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.anonymousFormChecks = [{
+      formKey: 'contact-main',
+      sourceRoute: '/contact',
+      targetRoute: '/contact',
+      purpose: 'contact_message',
+      modeledOwner: 'webform',
+      browserOwner: 'webform',
+      expectedOutcome: 'message_delivery',
+      browserOutcome: outcomeMode,
+      anonymousInvalidAndValidSubmissionVerified: true,
+      outcomeEvidence: 'evidence/browser/form-outcome.json',
+      abuseProtectionDisposition: 'rendered_honeypot',
+      abuseProtectionRationale: 'A credential-free honeypot is rendered and enforced locally.',
+      abuseProtectionEvidence: 'evidence/browser/form-abuse-protection.json',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.placeholderTextScan.scannedRoutes.push('/contact');
+    independent.firstFoldBrandAssetChecks.push(...independent.firstFoldBrandAssetChecks
+      .filter((record) => record.sourceRoute === '/')
+      .map((record) => ({
+        ...structuredClone(record),
+        sourceRoute: '/contact',
+        targetRoute: '/contact'
+      })));
+    independent.compositionModelFidelityChecks.push({
+      ...structuredClone(independent.compositionModelFidelityChecks[0]),
+      sourceRoute: '/contact',
+      targetRoute: '/contact',
+      sectionsChecked: ['Contact form']
+    });
+  });
+
+  const browserPath = join(packetDir, 'browser-evidence.json');
+  const browser = JSON.parse(readFileSync(browserPath, 'utf8'));
+  const contactChecks = browser.publicRouteChecks.map((homeCheck) => {
+    const contact = structuredClone(homeCheck);
+    contact.routeRole = 'form';
+    contact.sourceUrl = `${sourceBaseUrl}/contact`;
+    contact.sourceFinalUrl = `${sourceBaseUrl}/contact`;
+    contact.targetUrl = `${targetBaseUrl}/contact`;
+    contact.targetFinalUrl = `${targetBaseUrl}/contact`;
+    contact.renderedSignals.sourceTitle = 'Contact';
+    contact.renderedSignals.targetTitle = 'Contact';
+    contact.renderedSignals.sourceH1 = 'Contact';
+    contact.renderedSignals.targetH1 = 'Contact';
+    contact.renderedSeoSignals.targetCanonicalUrl = `${targetBaseUrl}/contact`;
+    contact.renderedSeoSignals.targetMetaDescription = 'Contact the fixture site.';
+    contact.accessibilityCheck.report = `evidence/browser/axe-contact-${homeCheck.viewport.name}.json`;
+    contact.accessibilityCheck.manualChecks.formLabelsErrorsAndFocus = 'pass';
+    contact.accessibilityCheck.manualChecks.formLabelsErrorsAndFocusNotApplicableRationale = '';
+    return contact;
+  });
+  browser.publicRouteChecks.push(...contactChecks);
+  browser.anonymousFormChecks = [{
+    formKey: 'contact-main',
+    sourceRoute: '/contact',
+    targetUrl: `${targetBaseUrl}/contact`,
+    purpose: 'contact_message',
+    drupalOwner: 'webform',
+    anonymousSession: true,
+    syntheticTestData: true,
+    invalidSubmission: { performed: true, errorsVisible: true, focusOrSummaryVerified: true },
+    validSubmission: { performed: true, successStateVisible: true },
+    outcome: { mode: outcomeMode, evidence: 'evidence/browser/form-outcome.json' },
+    abuseProtection: {
+      mode: 'rendered_honeypot',
+      dispositionVerified: true,
+      rationale: 'A credential-free honeypot is rendered and enforced locally.',
+      evidence: 'evidence/browser/form-abuse-protection.json'
+    },
+    status: 'pass',
+    accepted: true,
+    blockers: []
+  }];
+  writeJson(browserPath, browser);
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    const contactReviews = blind.routeViewportReviews.map((homeReview) => ({
+      ...structuredClone(homeReview),
+      route: '/contact',
+      sourceTruthReference: `${sourceBaseUrl}/contact`,
+      targetUrlOrArtifact: `${targetBaseUrl}/contact`,
+      sourceScreenshot: `source-contact-${homeReview.viewport}.png`,
+      targetScreenshot: `target-contact-${homeReview.viewport}.png`,
+      routeNotes: `${homeReview.viewport} contact form checked`
+    }));
+    blind.reviewInputs.targetUrlsOrArtifacts.push(`${targetBaseUrl}/contact`);
+    blind.routeViewportReviews.push(...contactReviews);
+    blind.routeCoverage.primaryRoutesReviewed.push('/contact');
+  });
+  const blindEvidenceDir = join(packetDir, 'evidence', 'blind-adversarial-review');
+  for (const [index, [viewport, width, height]] of [
+    ['desktop', 1280, 800],
+    ['mobile', 390, 844]
+  ].entries()) {
+    writeFileSync(join(blindEvidenceDir, `source-contact-${viewport}.png`), screenshotPng(20 + index, width, height));
+    writeFileSync(join(blindEvidenceDir, `target-contact-${viewport}.png`), screenshotPng(30 + index, width, height));
+  }
+
+  const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
+  for (const [viewport, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
+    writeJson(join(browserEvidenceDir, `axe-contact-${viewport}.json`), {
+      testEngine: { name: 'axe-core', version: '4.10.2' },
+      toolOptions: { runOnly: null, rules: {} },
+      testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: width, windowHeight: height },
+      timestamp: testCheckedAt,
+      url: `${targetBaseUrl}/contact`,
+      passes: [],
+      violations: [],
+      incomplete: [],
+      inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+    });
+  }
+  writeJson(join(browserEvidenceDir, 'form-outcome.json'), {
+    schemaVersion: 'public-kit.form-outcome-evidence.1',
+    checkedAt: testCheckedAt,
+    formKey: 'contact-main',
+    targetUrl: `${targetBaseUrl}/contact`,
+    mode: outcomeMode,
+    result: 'pass',
+    handlerOwner: 'fixture outcome handler',
+    resultReference: 'synthetic-result-1',
+    provider: ['provider_delivery', 'provider_handoff'].includes(outcomeMode) ? 'Fixture provider' : '',
+    rationale: outcomeMode === 'other' ? 'The explicit fixture outcome is intentionally custom.' : '',
+    observation: 'Synthetic submission reached the configured local outcome.'
+  });
+  writeJson(join(browserEvidenceDir, 'form-abuse-protection.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
+    checkedAt: testCheckedAt,
+    formKey: 'contact-main',
+    targetUrl: `${targetBaseUrl}/contact`,
+    mode: 'rendered_honeypot',
+    result: 'pass',
+    renderedSelector: 'input[name="fixture_honeypot"]',
+    enforcementVerified: true,
+    observation: 'The anonymous form rendered and enforced its honeypot field.'
+  });
+  writeJson(join(browserEvidenceDir, 'form-local-abuse-exception.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
+    checkedAt: testCheckedAt,
+    formKey: 'contact-main',
+    targetUrl: `${targetBaseUrl}/contact`,
+    mode: 'local_only_exception',
+    result: 'accepted_gap',
+    localTargetVerified: true,
+    rationale: 'The DDEV review target is local-only and requires a production control before launch.',
+    observation: 'The DDEV review target is local-only and the production abuse-control choice remains a launch gap.'
+  });
+  writeJson(join(browserEvidenceDir, 'form-rate-limiting.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1',
+    checkedAt: testCheckedAt,
+    formKey: 'contact-main',
+    targetUrl: `${targetBaseUrl}/contact`,
+    mode: 'configured_rate_limiting',
+    result: 'pass',
+    configurationOwner: 'fixture.rate_limit',
+    enforcementVerified: true,
+    observation: 'Anonymous submission throttling was read back from Drupal configuration and exercised.'
+  });
+}
+
+function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
+  const sourceBaseUrl = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8')).sourceBaseUrl;
+  const sourceRoute = '/search?state=featured';
+  const targetRoute = '/search?state=featured';
+  const sourceUrl = `${sourceBaseUrl}${sourceRoute}`;
+  const targetUrl = `${targetBaseUrl}${targetRoute}`;
+
+  mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.browserFirstRouteExpansion.browserRenderedSeedRoutes.push(sourceRoute);
+    routeMatrix.primaryRoutes.push({
+      sourcePath: sourceRoute,
+      targetPath: targetRoute,
+      routeRole: 'search',
+      sourceIntent: 'A specific source search result state.',
+      targetIntent: 'The equivalent target search result state.',
+      matchesBrowserRenderedSource: true,
+      accepted: true,
+      notes: 'The query is part of the primary route identity.'
+    });
+    routeMatrix.routes.push({
+      ...structuredClone(routeMatrix.routes[0]),
+      sourcePath: sourceRoute,
+      sourceStatus: 200,
+      sourceFinalPath: sourceRoute,
+      sourceTitle: 'Search',
+      sourceH1: 'Search',
+      targetPath: targetRoute,
+      targetStatus: 200,
+      targetFinalPath: targetRoute,
+      targetTitle: 'Search',
+      targetH1: 'Search',
+      routeRole: 'search',
+      notes: 'Exact query-bearing primary route.'
+    });
+    routeMatrix.firstFoldBrandAssetParity.push(...routeMatrix.firstFoldBrandAssetParity
+      .filter((record) => record.sourcePath === '/')
+      .map((record) => ({
+        ...structuredClone(record),
+        sourcePath: sourceRoute,
+        targetPath: targetRoute,
+        notes: 'The search state uses the accepted brand treatment.'
+      })));
+  });
+
+  mutateJson(join(packetDir, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.representativeUrls.push(sourceUrl);
+    sourceAudit.evidencePoints.push({
+      claim: 'The query-bearing source search state was captured.',
+      url: sourceUrl,
+      method: 'browser',
+      result: 'observed'
+    });
+    sourceAudit.contentInventory.push({ route: sourceRoute, type: 'search', title: 'Search' });
+    sourceAudit.designSignals.push({ route: sourceRoute, signal: 'Search hierarchy captured' });
+    sourceAudit.routeInventorySummary.attemptedRoutes += 1;
+    sourceAudit.routeInventorySummary.successfulRoutes += 1;
+  });
+
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.pageCompositionOwnership.push({
+      ...structuredClone(patternMap.pageCompositionOwnership[0]),
+      sourceRoute,
+      routeRole: 'search',
+      ownerRationale: 'A structured Drupal search route owns this query state.'
+    });
+  });
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.placeholderTextScan.scannedRoutes.push(targetRoute);
+    independent.firstFoldBrandAssetChecks.push(...independent.firstFoldBrandAssetChecks
+      .filter((record) => record.sourceRoute === '/')
+      .map((record) => ({
+        ...structuredClone(record),
+        sourceRoute,
+        targetRoute
+      })));
+    independent.compositionModelFidelityChecks.push({
+      ...structuredClone(independent.compositionModelFidelityChecks[0]),
+      sourceRoute,
+      targetRoute,
+      sectionsChecked: ['Search results']
+    });
+  });
+
+  mutateJson(join(packetDir, 'parity-report.json'), (parity) => {
+    parity.addressableSurface.routesInScope += 1;
+    parity.routeChecks.push({ route: targetRoute, status: 'pass', evidence: 'browser-evidence.json' });
+  });
+
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    const queryChecks = browser.publicRouteChecks.map((homeCheck) => {
+      const check = structuredClone(homeCheck);
+      const viewport = check.viewport.name;
+      check.routeRole = 'search';
+      check.sourceUrl = sourceUrl;
+      check.sourceFinalUrl = sourceUrl;
+      check.targetUrl = targetUrl;
+      check.targetFinalUrl = targetUrl;
+      check.sourceScreenshot = `evidence/blind-adversarial-review/source-search-${viewport}.png`;
+      check.targetScreenshot = `evidence/blind-adversarial-review/target-search-${viewport}.png`;
+      check.renderedSignals.sourceTitle = 'Search';
+      check.renderedSignals.targetTitle = 'Search';
+      check.renderedSignals.sourceH1 = 'Search';
+      check.renderedSignals.targetH1 = 'Search';
+      check.renderedSeoSignals.targetCanonicalUrl = targetUrl;
+      check.renderedSeoSignals.targetMetaDescription = 'Featured search results.';
+      check.accessibilityCheck.report = `evidence/browser/axe-search-primary-${viewport}.json`;
+      check.notes = `Exact query-bearing search state checked at ${viewport}.`;
+      return check;
+    });
+    browser.publicRouteChecks.push(...queryChecks);
+  });
+
+  const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
+  for (const [viewport, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
+    writeJson(join(browserEvidenceDir, `axe-search-primary-${viewport}.json`), {
+      testEngine: { name: 'axe-core', version: '4.10.2' },
+      toolOptions: { runOnly: null, rules: {} },
+      testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: width, windowHeight: height },
+      timestamp: testCheckedAt,
+      url: targetUrl,
+      passes: [],
+      violations: [],
+      incomplete: [],
+      inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+    });
+  }
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    const queryReviews = blind.routeViewportReviews
+      .filter((review) => review.route === '/')
+      .map((homeReview) => ({
+        ...structuredClone(homeReview),
+        route: targetRoute,
+        sourceTruthReference: sourceUrl,
+        targetUrlOrArtifact: targetUrl,
+        sourceScreenshot: `source-search-${homeReview.viewport}.png`,
+        targetScreenshot: `target-search-${homeReview.viewport}.png`,
+        routeNotes: `${homeReview.viewport} query-bearing search state checked`
+      }));
+    blind.reviewInputs.targetUrlsOrArtifacts.push(targetUrl);
+    blind.routeViewportReviews.push(...queryReviews);
+    blind.routeCoverage.primaryRoutesReviewed.push(targetRoute);
+  });
+
+  const blindEvidenceDir = join(packetDir, 'evidence', 'blind-adversarial-review');
+  for (const [index, [viewport, width, height]] of [
+    ['desktop', 1280, 800],
+    ['mobile', 390, 844]
+  ].entries()) {
+    writeFileSync(join(blindEvidenceDir, `source-search-${viewport}.png`), screenshotPng(40 + index, width, height));
+    writeFileSync(join(blindEvidenceDir, `target-search-${viewport}.png`), screenshotPng(50 + index, width, height));
+  }
+}
+
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
   let requestCount = 0;
   await withHttpServer(
@@ -1099,7 +1606,600 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.match(report.completionBlockedReasons.join(' '), /Independent verification/);
     }
   );
-  assert.equal(requestCount, 2, 'primary and target-required route checks should both fetch the declared target');
+  assert.equal(requestCount, 3, 'primary, target-required, and full rendered-surface checks should fetch the declared target');
+});
+
+test('live verifier blocks broken same-origin links present in accepted-route response HTML', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/missing') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><body><h1>Missing</h1></body></html>');
+        return;
+      }
+      if (request.url === '/large-manual.pdf') {
+        response.writeHead(200, {
+          'content-length': 6 * 1024 * 1024,
+          'content-type': 'application/pdf'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url?.startsWith('/working')) {
+        response.end('<!doctype html><html><body><h1>Working</h1></body></html>');
+        return;
+      }
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/working?mode=public#result">Working</a>
+        <a href="/working?mode=public#other">Working duplicate</a>
+        <a href="/missing">Missing</a>
+        <a href="/large-manual.pdf">Large manual</a>
+        <a href="mailto:help@example.com">Email</a>
+        <a href="https://external.example/path">External</a>
+        <template><a href="/template-only-missing">Template-only</a></template>
+        <script>const example = '<a href="/script-only-missing">Script-only</a>';</script>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-broken-response-link-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/working',
+          targetPath: '/working',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/working',
+          targetTitle: 'Working',
+          targetH1: 'Working',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Declared detail route used by the link-integrity fixture.'
+        },
+        {
+          sourcePath: '/large-manual.pdf',
+          targetPath: '/large-manual.pdf',
+          routeRole: 'media',
+          targetStatus: 200,
+          targetFinalPath: '/large-manual.pdf',
+          targetTitle: '',
+          targetH1: '',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Declared non-HTML media route used by the response-body fixture.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      assert.equal(report.liveTargetValid, false);
+      assert.equal(report.serverRenderedResponseSurface.uniqueInternalLinkCount, 3);
+      const missing = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/missing'
+      );
+      assert.equal(missing?.passed, false);
+      assert.equal(missing?.finalStatus, 404);
+      assert.ok(missing?.referrers.some((url) => new URL(url).pathname === '/'));
+      const largeManual = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/large-manual.pdf'
+      );
+      assert.equal(largeManual?.passed, true, 'status-only link checks must not download large linked files');
+      const largeManualRoute = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/large-manual.pdf'
+      );
+      assert.equal(largeManualRoute?.passed, true, 'accepted non-HTML routes must not buffer large response bodies');
+      assert.equal(largeManualRoute?.isHtml, false);
+      assert.match(report.errors.join('\n'), /Server-rendered same-origin link .*\/missing.*HTTP 404/);
+      assert.doesNotMatch(JSON.stringify(report), /mode=public/);
+    }
+  );
+});
+
+test('live verifier blocks source-origin link leaks unless the exact pair has an accepted exception', async () => {
+  await withHttpServer(
+    (_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="https://source.example/archive?page=1#top">Legacy source archive</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-source-origin-link-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.sourceOriginLinkExceptions = [];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const blocked = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(blocked.valid, false);
+      assert.equal(blocked.serverRenderedResponseSurface.sourceOriginLinkCount, 1);
+      assert.equal(blocked.serverRenderedResponseSurface.sourceOriginLinkChecks[0].passed, false);
+      assert.equal(blocked.liveHttpBudget.tasksByKind['source-origin-link'], 1);
+      assert.match(blocked.errors.join('\n'), /points back to source origin .* without an accepted per-link exception/);
+      assert.doesNotMatch(JSON.stringify(blocked), /page=1/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'source-link-exception.txt'), 'Approved retained source archive dependency.\n');
+      routeMatrix.sourceOriginLinkExceptions = [{
+        referrer: '/',
+        target: 'https://source.example/archive?page=1',
+        rationale: 'The source archive remains the named system of record for this public dependency.',
+        accepter: 'Content owner',
+        evidence: 'evidence/source-link-exception.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      assert.equal(accepted.serverRenderedResponseSurface.sourceOriginLinkCount, 1);
+      assert.equal(accepted.serverRenderedResponseSurface.sourceOriginLinkChecks[0].passed, true);
+      assert.equal(
+        accepted.serverRenderedResponseSurface.sourceOriginLinkChecks[0].acceptedException.accepter,
+        'Content owner'
+      );
+      assert.doesNotMatch(JSON.stringify(accepted), /page=1/);
+    }
+  );
+});
+
+test('live verifier blocks an undeclared same-origin detail link even when it returns 200', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      if (request.url?.startsWith('/article/undeclared')) {
+        response.end('<!doctype html><html><body><h1>Undeclared detail</h1></body></html>');
+        return;
+      }
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/article/undeclared?preview=private-value#content">Undeclared detail</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-undeclared-detail-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const detail = report.serverRenderedResponseSurface.linkChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/undeclared'
+      );
+      assert.equal(detail?.finalStatus, 200);
+      assert.equal(detail?.passed, false);
+      assert.match(
+        report.errors.join('\n'),
+        /not represented by an accepted routes or targetRequiredRoutes entry.*no exact accepted disposition/
+      );
+      assert.doesNotMatch(JSON.stringify(report), /private-value/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'unlisted-detail.txt'), 'Approved dynamic detail endpoint.\n');
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.sameOriginLinkExceptions = [{
+        referrer: '/',
+        target: '/article/undeclared?preview=private-value',
+        disposition: 'dynamic_endpoint',
+        rationale: 'This runtime-generated detail endpoint is intentionally outside the static route inventory.',
+        accepter: 'Application owner',
+        evidence: 'evidence/unlisted-detail.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      assert.equal(accepted.serverRenderedResponseSurface.linkChecks[0].passed, true);
+      assert.equal(
+        accepted.serverRenderedResponseSurface.linkChecks[0].acceptedDispositions[0].disposition,
+        'dynamic_endpoint'
+      );
+      assert.doesNotMatch(JSON.stringify(accepted), /private-value/);
+    }
+  );
+});
+
+test('live verifier accepts an exact evidenced external redirect without fetching the external origin', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url?.startsWith('/donate')) {
+        response.writeHead(302, {
+          location: 'https://payments.example/checkout?session=private-final'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/donate?token=private-start">Donate</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-external-redirect-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.expectedExternalLinkRedirects = [];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const blocked = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(blocked.valid, false);
+      assert.match(blocked.errors.join('\n'), /redirects externally.*without an exact accepted expectation/);
+      assert.doesNotMatch(JSON.stringify(blocked), /private-start|private-final/);
+
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'external-redirect.txt'), 'Approved external payment provider.\n');
+      routeMatrix.expectedExternalLinkRedirects = [{
+        referrer: '/',
+        start: '/donate?token=private-start',
+        finalMatch: 'exact_url',
+        final: 'https://payments.example/checkout?session=private-final',
+        rationale: 'Donation checkout is intentionally owned by the external payment provider.',
+        accepter: 'Commerce owner',
+        evidence: 'evidence/external-redirect.txt',
+        accepted: true
+      }];
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const accepted = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(accepted.valid, true, accepted.errors.join('\n'));
+      const redirect = accepted.serverRenderedResponseSurface.linkChecks[0];
+      assert.equal(redirect.passed, true);
+      assert.equal(redirect.externalRedirect, true);
+      assert.equal(redirect.finalStatus, 302);
+      assert.equal(redirect.acceptedDispositions[0].finalMatch, 'exact_url');
+      assert.doesNotMatch(JSON.stringify(accepted), /private-start|private-final/);
+    }
+  );
+});
+
+test('live verifier rejects credential-bearing same-origin and external redirects without leaking userinfo', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/same-origin-credential') {
+        response.writeHead(302, {
+          location: `http://private-user:same-origin-secret@${request.headers.host}/working`
+        });
+        response.end();
+        return;
+      }
+      if (request.url === '/external-credential') {
+        response.writeHead(302, {
+          location: 'https://external-user:external-secret@payments.example/checkout'
+        });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Target site</title></head><body>
+        <h1>Target home</h1>
+        <a href="/same-origin-credential">Same-origin credential redirect</a>
+        <a href="/external-credential">External credential redirect</a>
+      </body></html>`);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-credential-redirects-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      assert.equal(report.serverRenderedResponseSurface.linkChecks.length, 2);
+      assert.ok(report.serverRenderedResponseSurface.linkChecks.every((check) => check.passed === false));
+      assert.match(report.errors.join('\n'), /Refusing credential-bearing redirect/);
+      assert.doesNotMatch(
+        JSON.stringify(report),
+        /private-user|same-origin-secret|external-user|external-secret/
+      );
+    }
+  );
+});
+
+test('live report removes local packet paths before redacting query-like directory names', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'query-packet-path-'));
+      const packetDir = join(temp, 'review?token=private-value');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      writeFileSync(join(packetDir, 'source-audit.json'), '{');
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      const serialized = JSON.stringify(report);
+      const rawQueryIndex = serialized.indexOf('private-value');
+      assert.equal(
+        rawQueryIndex,
+        -1,
+        rawQueryIndex === -1 ? '' : serialized.slice(Math.max(0, rawQueryIndex - 120), rawQueryIndex + 160)
+      );
+      assert.equal(serialized.includes(temp), false);
+      assert.match(report.packetDir, /^review\?query-sha256=[a-f0-9]{64}$/);
+      assert.match(report.errors.join('\n'), /review\?query-sha256=[a-f0-9]{64}\/source-audit\.json/);
+    }
+  );
+});
+
+test('live verifier checks every accepted route row, not only primary routes', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/article/example') {
+        response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><body><h1>Missing article</h1></body></html>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-full-route-surface-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push({
+        sourcePath: '/article/example',
+        targetPath: '/article/example',
+        routeRole: 'detail',
+        targetStatus: 200,
+        targetFinalPath: '/article/example',
+        targetTitle: 'Example article',
+        targetH1: 'Example article',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'Representative detail route.'
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const detail = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/example'
+      );
+      assert.equal(detail?.passed, false);
+      assert.equal(detail?.finalStatus, 404);
+      assert.match(report.errors.join('\n'), /\/article\/example ended with HTTP 404/);
+      assert.match(detail?.errors.join('\n') ?? '', /returned status 404; expected 200/);
+      assert.equal(Object.hasOwn(report.liveRouteBudget, 'maxRoutes'), true);
+      assert.equal(Object.hasOwn(report.liveRouteBudget, 'routeCount'), true);
+      assert.equal(Object.hasOwn(report.liveHttpBudget, 'maxTasks'), true);
+      assert.equal(Object.hasOwn(report.liveHttpBudget, 'taskCount'), true);
+      assert.equal(Object.hasOwn(report.liveHttpBudget, 'maxRoutes'), false);
+    }
+  );
+});
+
+test('packet validator rejects accepted route rows with blank source or target paths', async () => {
+  for (const field of ['sourcePath', 'targetPath']) {
+    const temp = mkdtempSync(join(tmpdir(), `blank-${field}-`));
+    const packetDir = join(temp, 'review-packet');
+    copyTemplatePacket(packetDir);
+    const routeMatrix = liveRouteMatrix('https://target.example');
+    const blankRoute = {
+      ...structuredClone(routeMatrix.routes[0]),
+      sourcePath: '/blank-route',
+      targetPath: '/blank-route',
+      targetFinalPath: '/blank-route',
+      routeRole: 'other'
+    };
+    blankRoute[field] = '';
+    if (field === 'targetPath') {
+      blankRoute.targetFinalPath = '';
+    }
+    routeMatrix.routes.push(blankRoute);
+    writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, field);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /route rows must declare a valid routeRole.*direct final 2xx path/i,
+      field
+    );
+  }
+});
+
+test('packet completion accepts query-bearing primary routes only with exact evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'packet-primary-query-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  addQueryPrimaryEvidence(packetDir, 'https://target.example');
+
+  const exact = await validatePacket({ packetDir });
+  assert.equal(
+    exact.completionEvidence.packetSupportsCompletion,
+    true,
+    exact.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    const owner = patternMap.pageCompositionOwnership.find((record) => record.routeRole === 'search');
+    owner.sourceRoute = '/search?state=other';
+  });
+  const wrongOwnerState = await validatePacket({ packetDir });
+  assert.equal(wrongOwnerState.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    wrongOwnerState.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /pattern-map\.json must record reviewed Drupal structures plus accepted route composition/i
+  );
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    const owner = patternMap.pageCompositionOwnership.find((record) => record.routeRole === 'search');
+    owner.sourceRoute = '/search?state=featured';
+  });
+
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks.filter((record) => record.routeRole === 'search')) {
+      check.targetUrl = 'https://target.example/search';
+      check.targetFinalUrl = 'https://target.example/search';
+      check.renderedSeoSignals.targetCanonicalUrl = 'https://target.example/search';
+    }
+  });
+  for (const viewport of ['desktop', 'mobile']) {
+    mutateJson(join(packetDir, `evidence/browser/axe-search-primary-${viewport}.json`), (axe) => {
+      axe.url = 'https://target.example/search';
+    });
+  }
+
+  const pathOnly = await validatePacket({ packetDir });
+  assert.equal(pathOnly.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    pathOnly.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /browser-evidence\.json must cover every primary route at desktop and mobile/i
+  );
+});
+
+test('live verifier enforces redirect and final-path contracts for every accepted route row', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/article/example') {
+        response.writeHead(302, { location: '/' });
+        response.end();
+        return;
+      }
+      if (request.url === '/expected-alias') {
+        response.writeHead(302, { location: '/wrong-final' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1></body></html>');
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-route-contracts-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/article/example',
+          targetPath: '/article/example',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/article/example',
+          targetTitle: 'Example article',
+          targetH1: 'Example article',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'The detail route must remain a direct response.'
+        },
+        {
+          sourcePath: '/expected-alias',
+          targetPath: '/expected-alias',
+          routeRole: 'other',
+          targetStatus: 302,
+          targetFinalPath: '/expected-final',
+          targetTitle: 'Expected destination',
+          targetH1: 'Expected destination',
+          expectedRedirect: true,
+          accepted: true,
+          notes: 'The alias must retain its declared destination.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, false);
+      const direct = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/article/example'
+      );
+      const alias = report.serverRenderedResponseSurface.routeChecks.find((check) =>
+        new URL(check.requestedUrl).pathname === '/expected-alias'
+      );
+      assert.equal(direct?.passed, false);
+      assert.match(direct?.errors.join('\n') ?? '', /declares a direct response but the live response redirected/);
+      assert.match(direct?.errors.join('\n') ?? '', /resolved to \/; expected \/article\/example/);
+      assert.equal(alias?.passed, false);
+      assert.match(alias?.errors.join('\n') ?? '', /resolved to \/wrong-final; expected \/expected-final/);
+    }
+  );
 });
 
 test('live route verification rejects identity mismatches and accepts a declared same-origin redirect', async () => {
@@ -1636,6 +2736,48 @@ test('completion fails closed when structured gate evidence or applicability dis
   copyTemplatePacket(canonicalPacket);
   writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
   addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+  mkdirSync(join(canonicalPacket, 'evidence'), { recursive: true });
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'source-link-exception.txt'),
+    'Approved retained source archive dependency.\n'
+  );
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'same-origin-link-exception.txt'),
+    'Approved dynamic same-origin endpoint.\n'
+  );
+  writeFileSync(
+    join(canonicalPacket, 'evidence', 'external-redirect.txt'),
+    'Approved external provider redirect.\n'
+  );
+  mutateJson(join(canonicalPacket, 'route-matrix.json'), (value) => {
+    value.sourceOriginLinkExceptions = [{
+      referrer: '/',
+      target: 'https://source.example/archive',
+      rationale: 'The source archive remains the named public system of record.',
+      accepter: 'Content owner',
+      evidence: 'evidence/source-link-exception.txt',
+      accepted: true
+    }];
+    value.sameOriginLinkExceptions = [{
+      referrer: '/',
+      target: '/dynamic-endpoint?fixture=private',
+      disposition: 'dynamic_endpoint',
+      rationale: 'The endpoint is generated dynamically and intentionally outside the static route inventory.',
+      accepter: 'Application owner',
+      evidence: 'evidence/same-origin-link-exception.txt',
+      accepted: true
+    }];
+    value.expectedExternalLinkRedirects = [{
+      referrer: '/',
+      start: '/provider-start?fixture=private',
+      finalMatch: 'origin',
+      final: 'https://provider.example',
+      rationale: 'The provider owns the external workflow.',
+      accepter: 'Integration owner',
+      evidence: 'evidence/external-redirect.txt',
+      accepted: true
+    }];
+  });
 
   const cases = [
     {
@@ -1654,7 +2796,86 @@ test('completion fails closed when structured gate evidence or applicability dis
       name: 'route-drift',
       file: 'route-matrix.json',
       expected: /classify and accept every discovered source route/i,
-      mutate: (value) => { value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy']; }
+      mutate: (value) => { value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/legacy']; }
+    },
+    {
+      name: 'legacy-rendered-link-route-drift',
+      file: 'route-matrix.json',
+      expected: /classify and accept every discovered source route/i,
+      mutate: (value) => {
+        delete value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks;
+        value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+      }
+    },
+    {
+      name: 'conflicting-rendered-link-route-declarations',
+      file: 'route-matrix.json',
+      expected: /candidateRoutesFromRenderedLinks and candidateRoutesFromBrowserRenderedLinks declarations must describe the same discovered routes/i,
+      mutate: (value) => {
+        value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+        value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/current'];
+      }
+    },
+    {
+      name: 'route-role-coverage',
+      file: 'route-matrix.json',
+      expected: /representative of every discovered routeRole; missing detail/i,
+      mutate: (value) => {
+        value.routes.push({
+          sourcePath: '/article/example',
+          targetPath: '/article/example',
+          routeRole: 'detail',
+          targetStatus: 200,
+          targetFinalPath: '/article/example',
+          targetTitle: 'Example article',
+          targetH1: 'Example article',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Representative detail route is not included in primaryRoutes.'
+        });
+      }
+    },
+    {
+      name: 'source-origin-exception-accepter',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*named accepter/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].accepter = ''; }
+    },
+    {
+      name: 'source-origin-exception-target',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*source-origin target/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].target = 'https://unrelated.example/archive'; }
+    },
+    {
+      name: 'source-origin-exception-evidence',
+      file: 'route-matrix.json',
+      expected: /sourceOriginLinkExceptions.*packet-local evidence/i,
+      mutate: (value) => { value.sourceOriginLinkExceptions[0].evidence = 'evidence/missing.txt'; }
+    },
+    {
+      name: 'same-origin-exception-disposition',
+      file: 'route-matrix.json',
+      expected: /sameOriginLinkExceptions.*allowed disposition/i,
+      mutate: (value) => { value.sameOriginLinkExceptions[0].disposition = 'blanket_allow'; }
+    },
+    {
+      name: 'same-origin-exception-evidence',
+      file: 'route-matrix.json',
+      expected: /sameOriginLinkExceptions.*packet-local evidence/i,
+      mutate: (value) => { value.sameOriginLinkExceptions[0].evidence = 'evidence/missing.txt'; }
+    },
+    {
+      name: 'external-redirect-final-match',
+      file: 'route-matrix.json',
+      expected: /expectedExternalLinkRedirects.*external final origin or exact URL/i,
+      mutate: (value) => { value.expectedExternalLinkRedirects[0].finalMatch = 'anywhere'; }
+    },
+    {
+      name: 'external-redirect-evidence',
+      file: 'route-matrix.json',
+      expected: /expectedExternalLinkRedirects.*packet-local evidence/i,
+      mutate: (value) => { value.expectedExternalLinkRedirects[0].evidence = 'evidence/missing.txt'; }
     },
     {
       name: 'target-required-route',
@@ -1849,7 +3070,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       expected: [/pass every source-route drift disposition check with evidence/i],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
-          value.browserFirstRouteExpansion.candidateRoutesFromRenderedLinks = ['/legacy'];
+          value.browserFirstRouteExpansion.candidateRoutesFromBrowserRenderedLinks = ['/legacy'];
           value.sourceRouteDriftClassification = [{
             sourcePath: '/legacy',
             sourceStatus: 200,
@@ -2843,6 +4064,1488 @@ test('browser completion evidence requires real public and editor screenshots', 
   assert.equal(report.completionEvidence.packetCompletionReady, false);
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), /browser-evidence\.json/);
+});
+
+test('browser completion evidence requires route-bound in-browser axe results with no WCAG violations', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'browser-accessibility-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const cases = [
+    {
+      name: 'not-in-browser',
+      expected: /passing in-browser axe-core WCAG 2\.2 AA check/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        browser.publicRouteChecks[0].accessibilityCheck.executedInBrowser = false;
+      })
+    },
+    {
+      name: 'wrong-route',
+      expected: /bind the reviewed target route to a real browser environment/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+        axe.url = 'https://target.example/wrong';
+      })
+    },
+    {
+      name: 'wcag-violation',
+      expected: /unresolved WCAG A\/AA violations: color-contrast/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+        axe.violations = [{
+          id: 'color-contrast',
+          impact: 'serious',
+          tags: ['wcag2aa', 'wcag143'],
+          nodes: [{ target: ['.notice a'], html: '<a>Notice</a>', failureSummary: 'Insufficient contrast.' }]
+        }];
+      })
+    },
+    {
+      name: 'partial-rule-scope',
+      expected: /ruleScope and report toolOptions\.runOnly must include wcag2aa/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+          browser.publicRouteChecks[0].accessibilityCheck.ruleScope = {
+            mode: 'wcag_tags',
+            tags: ['wcag2a'],
+            accepted: true
+          };
+        });
+        mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+          axe.toolOptions.runOnly = { type: 'tag', values: ['wcag2a'] };
+        });
+      }
+    },
+    {
+      name: 'empty-rule-results',
+      expected: /has no evaluated axe rules/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+        axe.passes = [];
+        axe.violations = [];
+        axe.incomplete = [];
+        axe.inapplicable = [];
+      })
+    },
+    {
+      name: 'query-state-mismatch',
+      expected: /bind the reviewed target route to a real browser environment/i,
+      mutate: (packetDir) => {
+        mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+          browser.publicRouteChecks[0].targetUrl = 'https://target.example/?state=claimed';
+          browser.publicRouteChecks[0].targetFinalUrl = 'https://target.example/?state=claimed';
+        });
+        mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+          axe.url = 'https://target.example/?state=other';
+        });
+      }
+    },
+    {
+      name: 'undispositioned-wcag-incomplete',
+      expected: /incomplete WCAG result color-contrast.*needs a matching rationale and packet-local disposition evidence/i,
+      mutate: (packetDir) => mutateJson(join(packetDir, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+        axe.incomplete = [{
+          id: 'color-contrast',
+          impact: 'serious',
+          tags: ['wcag2aa', 'wcag143'],
+          nodes: [{ target: ['.gradient-link'], html: '<a class="gradient-link">Link</a>' }]
+        }];
+      })
+    }
+  ];
+
+  for (const { name, expected, mutate } of cases) {
+    const packetDir = join(temp, name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutate(packetDir);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+
+  const realWcagTagsPacket = join(temp, 'real-axe-wcag-tags');
+  cpSync(canonicalPacket, realWcagTagsPacket, { recursive: true });
+  const realWcagTags = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+  mutateJson(join(realWcagTagsPacket, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks) {
+      check.accessibilityCheck.ruleScope = { mode: 'wcag_tags', tags: realWcagTags, accepted: true };
+    }
+  });
+  for (const viewport of ['desktop', 'mobile']) {
+    mutateJson(join(realWcagTagsPacket, `evidence/browser/axe-home-${viewport}.json`), (axe) => {
+      axe.toolOptions.runOnly = viewport === 'mobile'
+        ? realWcagTags
+        : { type: 'tag', values: realWcagTags };
+    });
+  }
+  const realWcagTagsReport = await validatePacket({ packetDir: realWcagTagsPacket });
+  assert.equal(
+    realWcagTagsReport.completionEvidence.packetSupportsCompletion,
+    true,
+    realWcagTagsReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const dispositionedPacket = join(temp, 'dispositioned-wcag-incomplete');
+  cpSync(canonicalPacket, dispositionedPacket, { recursive: true });
+  mutateJson(join(dispositionedPacket, 'evidence/browser/axe-home-desktop.json'), (axe) => {
+    axe.incomplete = [{
+      id: 'color-contrast',
+      impact: 'serious',
+      tags: ['wcag2aa', 'wcag143'],
+      nodes: [{ target: ['.gradient-link'], html: '<a class="gradient-link">Link</a>' }]
+    }];
+  });
+  writeJson(join(dispositionedPacket, 'evidence/browser/axe-incomplete-review.json'), {
+    schemaVersion: 'public-kit.axe-incomplete-disposition.1',
+    checkedAt: testCheckedAt,
+    targetUrl: 'https://target.example/',
+    ruleId: 'color-contrast',
+    target: ['.gradient-link'],
+    disposition: 'manual_pass',
+    result: 'pass',
+    observation: 'Manual computed-style review confirmed a passing contrast ratio across the gradient.'
+  });
+  mutateJson(join(dispositionedPacket, 'browser-evidence.json'), (browser) => {
+    browser.publicRouteChecks[0].accessibilityCheck.incompleteDispositions = [{
+      ruleId: 'color-contrast',
+      target: ['.gradient-link'],
+      disposition: 'manual_pass',
+      rationale: 'The automated engine could not resolve the gradient; manual browser measurement passed.',
+      evidence: 'evidence/browser/axe-incomplete-review.json'
+    }];
+  });
+  const dispositioned = await validatePacket({ packetDir: dispositionedPacket });
+  assert.equal(
+    dispositioned.completionEvidence.packetSupportsCompletion,
+    true,
+    dispositioned.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const mismatchedDispositionPacket = join(temp, 'mismatched-incomplete-evidence');
+  cpSync(dispositionedPacket, mismatchedDispositionPacket, { recursive: true });
+  mutateJson(join(mismatchedDispositionPacket, 'evidence/browser/axe-incomplete-review.json'), (evidence) => {
+    evidence.target = ['.different-link'];
+  });
+  const mismatchedDisposition = await validatePacket({ packetDir: mismatchedDispositionPacket });
+  assert.equal(mismatchedDisposition.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    mismatchedDisposition.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /needs a matching rationale and packet-local disposition evidence/i
+  );
+});
+
+test('anonymous public forms require submissions, outcome handling, and a vendor-neutral abuse-protection disposition', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'anonymous-form-readiness-'));
+  const passingPacket = join(temp, 'passing');
+  copyTemplatePacket(passingPacket);
+  writeJson(join(passingPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(passingPacket, 'https://target.example');
+  addAnonymousContactFormEvidence(passingPacket, 'https://target.example');
+
+  const passing = await validatePacket({ packetDir: passingPacket });
+  assert.equal(
+    passing.completionEvidence.packetSupportsCompletion,
+    true,
+    passing.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const twoFormsPacket = join(temp, 'two-forms-one-route');
+  cpSync(passingPacket, twoFormsPacket, { recursive: true });
+  mutateJson(join(twoFormsPacket, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.formsAndIntegrations.push({
+      ...structuredClone(sourceAudit.formsAndIntegrations[0]),
+      formKey: 'newsletter-footer',
+      purpose: 'newsletter',
+      expectedOutcome: 'provider_handoff'
+    });
+  });
+  mutateJson(join(twoFormsPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms.push({
+      ...structuredClone(patternMap.forms[0]),
+      formKey: 'newsletter-footer',
+      purpose: 'newsletter',
+      drupalOwner: 'external_provider',
+      expectedOutcome: 'provider_handoff'
+    });
+  });
+  mutateJson(join(twoFormsPacket, 'browser-evidence.json'), (browser) => {
+    const second = structuredClone(browser.anonymousFormChecks[0]);
+    second.formKey = 'newsletter-footer';
+    second.purpose = 'newsletter';
+    second.drupalOwner = 'external_provider';
+    second.outcome = { mode: 'provider_handoff', evidence: 'evidence/browser/newsletter-outcome.json' };
+    second.abuseProtection = {
+      mode: 'provider_managed',
+      dispositionVerified: true,
+      rationale: 'The provider manages anonymous abuse controls.',
+      evidence: 'evidence/browser/newsletter-abuse.json'
+    };
+    browser.anonymousFormChecks.push(second);
+  });
+  mutateJson(join(twoFormsPacket, 'independent-verification.json'), (independent) => {
+    const second = structuredClone(independent.anonymousFormChecks[0]);
+    second.formKey = 'newsletter-footer';
+    second.purpose = 'newsletter';
+    second.modeledOwner = 'external_provider';
+    second.browserOwner = 'external_provider';
+    second.expectedOutcome = 'provider_handoff';
+    second.browserOutcome = 'provider_handoff';
+    second.outcomeEvidence = 'evidence/browser/newsletter-outcome.json';
+    second.abuseProtectionDisposition = 'provider_managed';
+    second.abuseProtectionEvidence = 'evidence/browser/newsletter-abuse.json';
+    independent.anonymousFormChecks.push(second);
+  });
+  writeJson(join(twoFormsPacket, 'evidence/browser/newsletter-outcome.json'), {
+    schemaVersion: 'public-kit.form-outcome-evidence.1', checkedAt: testCheckedAt,
+    formKey: 'newsletter-footer', targetUrl: 'https://target.example/contact',
+    mode: 'provider_handoff', result: 'pass', handlerOwner: 'Fixture provider adapter',
+    resultReference: 'synthetic-handoff-1', provider: 'Fixture provider', observation: 'Synthetic handoff completed.'
+  });
+  writeJson(join(twoFormsPacket, 'evidence/browser/newsletter-abuse.json'), {
+    schemaVersion: 'public-kit.form-abuse-evidence.1', checkedAt: testCheckedAt,
+    formKey: 'newsletter-footer', targetUrl: 'https://target.example/contact',
+    mode: 'provider_managed', result: 'pass', provider: 'Fixture provider',
+    enforcementVerified: true, observation: 'Provider-managed protection was verified.'
+  });
+  const twoForms = await validatePacket({ packetDir: twoFormsPacket });
+  assert.equal(
+    twoForms.completionEvidence.packetSupportsCompletion,
+    true,
+    twoForms.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const duplicateFormKeyPacket = join(temp, 'duplicate-form-key');
+  cpSync(twoFormsPacket, duplicateFormKeyPacket, { recursive: true });
+  mutateJson(join(duplicateFormKeyPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[1].formKey = 'contact-main';
+  });
+  const duplicateFormKey = await validatePacket({ packetDir: duplicateFormKeyPacket });
+  assert.equal(duplicateFormKey.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    duplicateFormKey.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /unique, non-empty formKey/i
+  );
+
+  const wrongOutcomeEvidencePacket = join(temp, 'wrong-outcome-evidence-binding');
+  cpSync(passingPacket, wrongOutcomeEvidencePacket, { recursive: true });
+  mutateJson(join(wrongOutcomeEvidencePacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.formKey = 'another-form';
+  });
+  const wrongOutcomeEvidence = await validatePacket({ packetDir: wrongOutcomeEvidencePacket });
+  assert.equal(wrongOutcomeEvidence.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    wrongOutcomeEvidence.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /outcome-appropriate handler/i
+  );
+
+  const storageOnlyPacket = join(temp, 'storage-only');
+  cpSync(passingPacket, storageOnlyPacket, { recursive: true });
+  mutateJson(join(storageOnlyPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].outcome.mode = 'drupal_submission_storage';
+  });
+  const storageOnly = await validatePacket({ packetDir: storageOnlyPacket });
+  assert.equal(storageOnly.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    storageOnly.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /outcome-appropriate handler for form \/contact/i
+  );
+
+  const downgradedModelPacket = join(temp, 'downgraded-model-outcome');
+  cpSync(passingPacket, downgradedModelPacket, { recursive: true });
+  mutateJson(join(downgradedModelPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms[0].expectedOutcome = 'submission_storage';
+  });
+  mutateJson(join(downgradedModelPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].outcome.mode = 'drupal_submission_storage';
+  });
+  const downgradedModel = await validatePacket({ packetDir: downgradedModelPacket });
+  assert.equal(downgradedModel.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    downgradedModel.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /without changing its source purpose or expectedOutcome/i
+  );
+
+  const browserOwnerMismatchPacket = join(temp, 'browser-owner-mismatch');
+  cpSync(passingPacket, browserOwnerMismatchPacket, { recursive: true });
+  mutateJson(join(browserOwnerMismatchPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].drupalOwner = 'contact_form';
+  });
+  const browserOwnerMismatch = await validatePacket({ packetDir: browserOwnerMismatchPacket });
+  assert.equal(browserOwnerMismatch.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    browserOwnerMismatch.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must preserve the modeled purpose and Drupal\/provider owner/i
+  );
+
+  const implicitOtherPacket = join(temp, 'other-is-not-a-wildcard');
+  cpSync(passingPacket, implicitOtherPacket, { recursive: true });
+  mutateJson(join(implicitOtherPacket, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.formsAndIntegrations[0].expectedOutcome = 'other';
+  });
+  mutateJson(join(implicitOtherPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms[0].expectedOutcome = 'other';
+  });
+  const implicitOther = await validatePacket({ packetDir: implicitOtherPacket });
+  assert.equal(implicitOther.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    implicitOther.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /outcome-appropriate handler for form \/contact/i
+  );
+
+  const explicitOtherPacket = join(temp, 'explicit-other-outcome');
+  cpSync(implicitOtherPacket, explicitOtherPacket, { recursive: true });
+  mutateJson(join(explicitOtherPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].outcome.mode = 'other';
+  });
+  mutateJson(join(explicitOtherPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].expectedOutcome = 'other';
+    independent.anonymousFormChecks[0].browserOutcome = 'other';
+  });
+  mutateJson(join(explicitOtherPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.mode = 'other';
+    evidence.rationale = 'The explicit fixture outcome is intentionally custom.';
+  });
+  const explicitOther = await validatePacket({ packetDir: explicitOtherPacket });
+  assert.equal(
+    explicitOther.completionEvidence.packetSupportsCompletion,
+    true,
+    explicitOther.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const missingModelPacket = join(temp, 'missing-model');
+  cpSync(passingPacket, missingModelPacket, { recursive: true });
+  mutateJson(join(missingModelPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms = [];
+  });
+  const missingModel = await validatePacket({ packetDir: missingModelPacket });
+  assert.equal(missingModel.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    missingModel.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /map every audited anonymous public submission form/i
+  );
+
+  const missingAbuseProtectionPacket = join(temp, 'missing-abuse-protection');
+  cpSync(passingPacket, missingAbuseProtectionPacket, { recursive: true });
+  mutateJson(join(missingAbuseProtectionPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].abuseProtection = {
+      mode: '',
+      dispositionVerified: false,
+      rationale: '',
+      evidence: ''
+    };
+  });
+  const missingAbuseProtection = await validatePacket({ packetDir: missingAbuseProtectionPacket });
+  assert.equal(missingAbuseProtection.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    missingAbuseProtection.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /vendor-neutral abuse-protection disposition with evidence/i
+  );
+
+  const localExceptionPacket = join(temp, 'local-only-exception');
+  cpSync(passingPacket, localExceptionPacket, { recursive: true });
+  mutateJson(join(localExceptionPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].abuseProtection = {
+      mode: 'local_only_exception',
+      dispositionVerified: true,
+      rationale: 'This DDEV-only review target is not publicly reachable; a launch target must select an abuse control.',
+      evidence: 'evidence/browser/form-local-abuse-exception.json'
+    };
+  });
+  mutateJson(join(localExceptionPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].abuseProtectionDisposition = 'local_only_exception';
+    independent.anonymousFormChecks[0].abuseProtectionRationale = 'This DDEV-only review target remains a launch gap.';
+    independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-local-abuse-exception.json';
+  });
+  const localException = await validatePacket({ packetDir: localExceptionPacket });
+  assert.equal(
+    localException.completionEvidence.packetSupportsCompletion,
+    true,
+    localException.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const localDdevExceptionPacket = join(temp, 'local-ddev-exception');
+  cpSync(localExceptionPacket, localDdevExceptionPacket, { recursive: true });
+  mutateJson(join(localDdevExceptionPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-local-abuse-exception.json'), (evidence) => {
+    evidence.targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
+    evidence.targetUrl = 'https://fixture.ddev.site/contact';
+  });
+  const localDdevException = await validatePacket({ packetDir: localDdevExceptionPacket });
+  assert.equal(
+    localDdevException.completionEvidence.packetSupportsCompletion,
+    true,
+    localDdevException.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const rateLimitedPacket = join(temp, 'configured-rate-limiting');
+  cpSync(passingPacket, rateLimitedPacket, { recursive: true });
+  mutateJson(join(rateLimitedPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].abuseProtection = {
+      mode: 'configured_rate_limiting',
+      dispositionVerified: true,
+      rationale: 'Drupal-owned anonymous submission throttling is configured.',
+      evidence: 'evidence/browser/form-rate-limiting.json'
+    };
+  });
+  mutateJson(join(rateLimitedPacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].abuseProtectionDisposition = 'configured_rate_limiting';
+    independent.anonymousFormChecks[0].abuseProtectionRationale = 'Drupal-owned anonymous submission throttling is configured.';
+    independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-rate-limiting.json';
+  });
+  const rateLimited = await validatePacket({ packetDir: rateLimitedPacket });
+  assert.equal(
+    rateLimited.completionEvidence.packetSupportsCompletion,
+    true,
+    rateLimited.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const undocumentedExceptionPacket = join(temp, 'undocumented-local-only-exception');
+  cpSync(localExceptionPacket, undocumentedExceptionPacket, { recursive: true });
+  mutateJson(join(undocumentedExceptionPacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].abuseProtection.rationale = '';
+  });
+  const undocumentedException = await validatePacket({ packetDir: undocumentedExceptionPacket });
+  assert.equal(undocumentedException.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    undocumentedException.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /vendor-neutral abuse-protection disposition with evidence/i
+  );
+});
+
+test('separate public collection details require browser proof of visible load-bearing fields', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'detail-route-proof-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.structuredContentModel.collectionScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The source has a public Event collection.'
+    };
+    patternMap.structuredContentModel.collectionOwnershipLedger = [{
+      sourceRoute: '/',
+      collectionPattern: 'schedule',
+      sourceObject: 'Event',
+      sourceItemCount: 1,
+      drupalEntityType: 'node',
+      contentTypeOrBundle: 'event',
+      requiredFields: ['title', 'field_start'],
+      collectionOwner: 'view',
+      viewDisplayOrConfig: 'views.view.events',
+      detailRouteOwner: 'entity_view_display',
+      drupalOwnerConfigId: 'core.entity_view_display.node.event.full',
+      detailRouteMode: 'separate_public_route',
+      representativeDetailSourcePath: '/events/source-event',
+      representativeDetailTargetPath: '/events/target-event',
+      detailLoadBearingFields: ['title', 'field_start'],
+      detailRouteRationale: '',
+      editorAddRowEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      exceptionRationale: '',
+      accepted: true,
+      notes: 'Events have public details.'
+    }];
+  });
+  mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.routes.push({
+      sourcePath: '/events/source-event',
+      sourceStatus: 200,
+      sourceFinalPath: '/events/source-event',
+      sourceTitle: 'Source event',
+      sourceH1: 'Source event',
+      targetPath: '/events/target-event',
+      targetStatus: 200,
+      targetFinalPath: '/events/target-event',
+      targetTitle: 'Target event',
+      targetH1: 'Target event',
+      expectedRedirect: false,
+      accepted: true,
+      notes: 'Representative Event detail.'
+    });
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields and rendered SEO for collection Event/i
+  );
+
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    const detail = structuredClone(browser.publicRouteChecks[0]);
+    detail.routeRole = 'detail';
+    detail.sourceUrl = 'https://source.example/events/source-event';
+    detail.sourceFinalUrl = 'https://source.example/events/source-event';
+    detail.targetUrl = 'https://target.example/events/target-event';
+    detail.targetFinalUrl = 'https://target.example/events/target-event';
+    detail.renderedSignals.sourceTitle = 'Source event';
+    detail.renderedSignals.targetTitle = 'Target event';
+    detail.renderedSignals.sourceH1 = 'Source event';
+    detail.renderedSignals.targetH1 = 'Target event';
+    detail.renderedSeoSignals.targetCanonicalUrl = 'https://target.example/events/target-event';
+    detail.renderedSeoSignals.targetMetaDescription = 'Target event detail.';
+    detail.accessibilityCheck.report = 'evidence/browser/axe-event-owner.json';
+    detail.detailContentSignals = {
+      contentTypeOrBundle: 'event',
+      drupalOwner: 'custom_controller',
+      drupalOwnerConfigId: 'mccall.event_controller',
+      ownerDeviation: { applies: false, rationale: '', evidence: '' },
+      loadBearingFields: [
+        {
+          field: 'title', sourceSignal: 'Source event', targetSignal: 'Target event', selector: 'h1',
+          computedVisibility: { matchedElementCount: 1, display: 'block', visibility: 'visible', opacity: '1', hiddenAttribute: false, ariaHidden: false, boundingWidth: 600, boundingHeight: 48, text: 'Target event' },
+          visible: true
+        },
+        {
+          field: 'field_start', sourceSignal: 'July 10, 2026', targetSignal: 'July 10, 2026', selector: '.event-date',
+          computedVisibility: { matchedElementCount: 1, display: 'block', visibility: 'visible', opacity: '1', hiddenAttribute: false, ariaHidden: false, boundingWidth: 220, boundingHeight: 24, text: 'July 10, 2026' },
+          visible: true
+        }
+      ],
+      accepted: true
+    };
+    browser.publicRouteChecks.push(detail);
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks = [{
+      sourceRoute: '/events/source-event',
+      targetRoute: '/events/target-event',
+      contentTypeOrBundle: 'event',
+      declaredDetailOwner: 'entity_view_display',
+      observedDetailOwner: 'custom_controller',
+      drupalOwnerConfigId: 'mccall.event_controller',
+      ownerDeviationEvidence: '',
+      loadBearingFieldsVerified: ['title', 'field_start'],
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+  });
+  writeJson(join(packetDir, 'evidence/browser/axe-event-owner.json'), {
+    testEngine: { name: 'axe-core', version: '4.10.2' },
+    toolOptions: { runOnly: null, rules: {} },
+    testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
+    timestamp: testCheckedAt,
+    url: 'https://target.example/events/target-event',
+    passes: [],
+    violations: [],
+    incomplete: [],
+    inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+  });
+  const ownerMismatch = await validatePacket({ packetDir });
+  assert.match(
+    ownerMismatch.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /detail owner\/config must match Drupal readback and collection Event owner entity_view_display/i
+  );
+
+  writeJson(join(packetDir, 'evidence/browser/detail-owner-deviation.json'), {
+    checkedAt: testCheckedAt,
+    route: '/events/target-event',
+    declaredOwner: 'entity_view_display',
+    actualOwner: 'custom_controller',
+    observation: 'The reviewed exception explains the alternate owner.'
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    const detail = browser.publicRouteChecks.find((check) => check.routeRole === 'detail');
+    detail.detailContentSignals.ownerDeviation = {
+      applies: true,
+      rationale: 'A maintained capability controller owns this provider-backed detail by reviewed exception.',
+      evidence: 'evidence/browser/detail-owner-deviation.json'
+    };
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].ownerDeviationEvidence = 'evidence/browser/detail-owner-deviation.json';
+  });
+  const ownerDeviation = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    ownerDeviation.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /detail owner\/config must match Drupal readback and collection Event owner entity_view_display/i
+  );
+
+  const exactOwnerPacket = join(temp, 'exact-detail-owner-readback');
+  cpSync(packetDir, exactOwnerPacket, { recursive: true });
+  mutateJson(join(exactOwnerPacket, 'browser-evidence.json'), (browser) => {
+    const signals = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals;
+    signals.drupalOwner = 'entity_view_display';
+    signals.drupalOwnerConfigId = 'core.entity_view_display.node.event.full';
+    signals.ownerDeviation = { applies: false, rationale: '', evidence: '' };
+  });
+  mutateJson(join(exactOwnerPacket, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].observedDetailOwner = 'entity_view_display';
+    independent.detailRouteChecks[0].drupalOwnerConfigId = 'core.entity_view_display.node.event.full';
+    independent.detailRouteChecks[0].ownerDeviationEvidence = '';
+  });
+  mutateJson(join(exactOwnerPacket, 'drupal-readback.json'), (readback) => {
+    readback.content.viewDisplays.push('core.entity_view_display.node.event.full');
+  });
+  const exactOwner = await validatePacket({ packetDir: exactOwnerPacket });
+  assert.doesNotMatch(
+    exactOwner.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /detail owner\/config|owner\/config-bound passing detailRouteChecks row/i
+  );
+
+  const listingOnlyFieldPacket = join(temp, 'listing-only-public-field');
+  cpSync(exactOwnerPacket, listingOnlyFieldPacket, { recursive: true });
+  mutateJson(join(listingOnlyFieldPacket, 'field-output-matrix.json'), (matrix) => {
+    matrix.bundles.push({
+      entityType: 'node',
+      bundle: 'event',
+      fields: [{
+        machineName: 'field_teaser', editorLabel: 'Teaser', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['/events'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'Listing-only teaser.'
+      }]
+    });
+  });
+  const listingOnlyField = await validatePacket({ packetDir: listingOnlyFieldPacket });
+  assert.doesNotMatch(
+    listingOnlyField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const declaredDetailLocationPacket = join(temp, 'declared-detail-public-field');
+  cpSync(exactOwnerPacket, declaredDetailLocationPacket, { recursive: true });
+  mutateJson(join(declaredDetailLocationPacket, 'field-output-matrix.json'), (matrix) => {
+    matrix.bundles.push({
+      entityType: 'node', bundle: 'event', fields: [{
+        machineName: 'field_listing_only', editorLabel: 'Listing only', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['/events'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'First split bundle row.'
+      }]
+    });
+    matrix.bundles.push({
+      entityType: 'node', bundle: 'event', fields: [{
+        machineName: 'field_public_detail', editorLabel: 'Public detail', required: false,
+        fieldType: 'string', widget: 'string_textfield', formatter: 'string',
+        publicRenderLocations: ['canonical_detail'], affectsAnonymousOutput: true,
+        containsRawPresentationImplementation: false, presentationBoundary: 'content_fact',
+        editorOnlyRationale: '', accepted: true, notes: 'Explicit detail output.'
+      }]
+    });
+  });
+  const declaredDetailLocation = await validatePacket({ packetDir: declaredDetailLocationPacket });
+  assert.match(
+    declaredDetailLocation.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const hiddenFieldPacket = join(temp, 'hidden-detail-field');
+  cpSync(packetDir, hiddenFieldPacket, { recursive: true });
+  mutateJson(join(hiddenFieldPacket, 'browser-evidence.json'), (browser) => {
+    const field = browser.publicRouteChecks.find((check) => check.routeRole === 'detail')
+      .detailContentSignals.loadBearingFields.find((record) => record.field === 'field_start');
+    field.computedVisibility.display = 'none';
+  });
+  const hiddenField = await validatePacket({ packetDir: hiddenFieldPacket });
+  assert.match(
+    hiddenField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const broadSelectorPacket = join(temp, 'broad-detail-selector');
+  cpSync(exactOwnerPacket, broadSelectorPacket, { recursive: true });
+  mutateJson(join(broadSelectorPacket, 'browser-evidence.json'), (browser) => {
+    const fields = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals.loadBearingFields;
+    fields[0].selector = 'body';
+    fields[0].computedVisibility.text = 'Target event July 10, 2026';
+  });
+  const broadSelector = await validatePacket({ packetDir: broadSelectorPacket });
+  assert.match(
+    broadSelector.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const reusedSelectorPacket = join(temp, 'reused-detail-selector');
+  cpSync(exactOwnerPacket, reusedSelectorPacket, { recursive: true });
+  mutateJson(join(reusedSelectorPacket, 'browser-evidence.json'), (browser) => {
+    const fields = browser.publicRouteChecks.find((check) => check.routeRole === 'detail').detailContentSignals.loadBearingFields;
+    fields[1].selector = fields[0].selector;
+  });
+  const reusedSelector = await validatePacket({ packetDir: reusedSelectorPacket });
+  assert.match(
+    reusedSelector.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const underdeclaredFieldPacket = join(temp, 'underdeclared-detail-field');
+  cpSync(packetDir, underdeclaredFieldPacket, { recursive: true });
+  mutateJson(join(underdeclaredFieldPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.structuredContentModel.collectionOwnershipLedger[0].detailLoadBearingFields = ['title'];
+  });
+  const underdeclaredField = await validatePacket({ packetDir: underdeclaredFieldPacket });
+  assert.match(
+    underdeclaredField.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /representative detail route with visible load-bearing fields/i
+  );
+
+  const independentOwnerPacket = join(temp, 'independent-detail-owner-mismatch');
+  cpSync(packetDir, independentOwnerPacket, { recursive: true });
+  mutateJson(join(independentOwnerPacket, 'independent-verification.json'), (independent) => {
+    independent.detailRouteChecks[0].drupalOwnerConfigId = 'different.owner.config';
+  });
+  const independentOwner = await validatePacket({ packetDir: independentOwnerPacket });
+  assert.match(
+    independentOwner.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /owner\/config-bound passing detailRouteChecks row/i
+  );
+});
+
+test('live verification fetches non-primary representatives without treating body substrings as visibility proof', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/events/target-event') {
+        const origin = `http://${request.headers.host}`;
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Target event</title><link rel="canonical" href="${origin}/events/target-event"><meta name="description" content="Target event detail."></head><body><h1>Target event</h1><p>The date was accidentally omitted.</p></body></html>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'representative-live-route-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      writeFileSync(
+        join(packetDir, 'evidence', 'event-route-remap.txt'),
+        'The fixture intentionally verifies the target detail without preserving the synthetic source URL.\n'
+      );
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.routes.push({
+          sourcePath: '/events/source-event',
+          sourceStatus: 200,
+          sourceFinalPath: '/events/source-event',
+          sourceTitle: 'Source event',
+          sourceH1: 'Source event',
+          targetPath: '/events/target-event',
+          targetStatus: 200,
+          targetFinalPath: '/events/target-event',
+          targetTitle: 'Target event',
+          targetH1: 'Target event',
+          expectedRedirect: false,
+          noRedirectDisposition: {
+            accepted: true,
+            acceptedBy: 'Fixture owner',
+            rationale: 'The synthetic source fixture URL is not part of the target route contract.',
+            evidence: 'evidence/event-route-remap.txt'
+          },
+          routeRole: 'detail',
+          accepted: true,
+          notes: 'Representative Event detail.'
+        });
+      });
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        const detail = structuredClone(browser.publicRouteChecks[0]);
+        detail.routeRole = 'detail';
+        detail.sourceUrl = 'https://source.example/events/source-event';
+        detail.sourceFinalUrl = 'https://source.example/events/source-event';
+        detail.targetUrl = `${baseUrl}/events/target-event`;
+        detail.targetFinalUrl = `${baseUrl}/events/target-event`;
+        detail.renderedSignals.sourceTitle = 'Source event';
+        detail.renderedSignals.targetTitle = 'Target event';
+        detail.renderedSignals.sourceH1 = 'Source event';
+        detail.renderedSignals.targetH1 = 'Target event';
+        detail.renderedSeoSignals.targetCanonicalUrl = `${baseUrl}/events/target-event`;
+        detail.renderedSeoSignals.targetMetaDescription = 'Target event detail.';
+        detail.accessibilityCheck.report = 'evidence/browser/axe-event-detail.json';
+        detail.detailContentSignals = {
+          contentTypeOrBundle: 'event',
+          drupalOwner: 'entity_view_display',
+          loadBearingFields: [{
+            field: 'field_start',
+            sourceSignal: 'July 10, 2026',
+            targetSignal: 'July 10, 2026',
+            visible: true
+          }],
+          accepted: true
+        };
+        browser.publicRouteChecks.push(detail);
+      });
+      writeJson(join(packetDir, 'evidence/browser/axe-event-detail.json'), {
+        testEngine: { name: 'axe-core', version: '4.10.2' },
+        toolOptions: { runOnly: null, rules: {} },
+        testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
+        timestamp: testCheckedAt,
+        url: `${baseUrl}/events/target-event`,
+        passes: [],
+        violations: [],
+        incomplete: [],
+        inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.browserRepresentativeRouteChecks.length, 1);
+      assert.equal(report.browserRepresentativeRouteChecks[0].passed, true);
+      assert.doesNotMatch(report.browserRepresentativeRouteChecks[0].errors.join('\n'), /visible detail signal/i);
+      assert.equal(report.liveTargetValid, true);
+    }
+  );
+});
+
+test('live verification preserves and independently checks representative query states', async () => {
+  const seen = new Set();
+  await withHttpServer(
+    (request, response) => {
+      if (request.url.startsWith('/search?')) {
+        seen.add(request.url);
+        const origin = `http://${request.headers.host}`;
+        if (new URL(`${origin}${request.url}`).searchParams.get('state') === 'drop') {
+          response.writeHead(302, { location: '/search' });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}${request.url}"><meta name="description" content="State ${new URL(`${origin}${request.url}`).searchParams.get('state')}"></head><body><h1>Search</h1></body></html>`);
+        return;
+      }
+      if (request.url === '/search') {
+        const origin = `http://${request.headers.host}`;
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}/search?state=drop"><meta name="description" content="State drop"></head><body><h1>Search</h1></body></html>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'representative-query-states-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        routeMatrix.routes.push({
+          sourcePath: '/search', sourceStatus: 200, sourceFinalPath: '/search', sourceTitle: 'Search', sourceH1: 'Search',
+          targetPath: '/search', targetStatus: 200, targetFinalPath: '/search', targetTitle: 'Search', targetH1: 'Search',
+          expectedRedirect: false, routeRole: 'search', accepted: true, notes: 'Query-state fixture.'
+        });
+      });
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        for (const state of ['a', 'b', 'drop']) {
+          const check = structuredClone(browser.publicRouteChecks[0]);
+          check.routeRole = 'other';
+          check.sourceUrl = `https://source.example/search?state=${state}`;
+          check.sourceFinalUrl = check.sourceUrl;
+          check.targetUrl = `${baseUrl}/search?state=${state}`;
+          check.targetFinalUrl = check.targetUrl;
+          check.renderedSignals.sourceTitle = 'Search';
+          check.renderedSignals.targetTitle = 'Search';
+          check.renderedSignals.sourceH1 = 'Search';
+          check.renderedSignals.targetH1 = 'Search';
+          check.renderedSeoSignals.targetCanonicalUrl = check.targetUrl;
+          check.renderedSeoSignals.targetMetaDescription = `State ${state}`;
+          check.accessibilityCheck.report = `evidence/browser/axe-search-${state}.json`;
+          browser.publicRouteChecks.push(check);
+        }
+      });
+      for (const state of ['a', 'b', 'drop']) {
+        writeJson(join(packetDir, `evidence/browser/axe-search-${state}.json`), {
+          testEngine: { name: 'axe-core', version: '4.10.2' }, toolOptions: { runOnly: null, rules: {} },
+          testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
+          timestamp: testCheckedAt, url: `${baseUrl}/search?state=${state}`,
+          passes: [], violations: [], incomplete: [], inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+        });
+      }
+
+      const report = await verifyLive({
+        packetDir, cwd: repoRoot, environment: {}, targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.browserRepresentativeRouteChecks.length, 3);
+      assert.equal(report.browserRepresentativeRouteChecks.filter((check) => check.passed).length, 2);
+      const droppedState = report.browserRepresentativeRouteChecks.find((check) => !check.passed);
+      assert.match(
+        droppedState.errors.join('\n'),
+        /expected exact representative state \/search\?query-sha256=/i
+      );
+      assert.doesNotMatch(JSON.stringify(report), /state=(?:a|b|drop)/);
+      assert.deepEqual([...seen].sort(), ['/search?state=a', '/search?state=b', '/search?state=drop']);
+    }
+  );
+});
+
+test('live verification fetches and reconciles primary query states exactly', async () => {
+  const seen = new Set();
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/search?state=drop') {
+        seen.add(request.url);
+        response.writeHead(302, { location: '/search' });
+        response.end();
+        return;
+      }
+      if (request.url?.startsWith('/search')) {
+        seen.add(request.url);
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><head><title>Search</title></head><body><h1>Search</h1></body></html>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'primary-query-states-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      for (const state of ['keep', 'drop']) {
+        routeMatrix.primaryRoutes.push({
+          sourcePath: `/search?state=${state}`,
+          targetPath: `/search?state=${state}`,
+          routeRole: 'search',
+          sourceIntent: `Source search state ${state}.`,
+          targetIntent: `Target search state ${state}.`,
+          matchesBrowserRenderedSource: true,
+          accepted: true,
+          notes: 'Exact query-state fixture.'
+        });
+        routeMatrix.routes.push({
+          sourcePath: `/search?state=${state}`,
+          targetPath: `/search?state=${state}`,
+          routeRole: 'search',
+          targetStatus: 200,
+          targetFinalPath: `/search?state=${state}`,
+          targetTitle: 'Search',
+          targetH1: 'Search',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Exact query-state fixture.'
+        });
+      }
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      const queryChecks = report.routeChecks.filter((check) => check.targetPath === '/search');
+      assert.equal(queryChecks.length, 2);
+      assert.equal(queryChecks.filter((check) => check.passed).length, 1);
+      assert.match(queryChecks.find((check) => !check.passed)?.errors.join('\n') ?? '', /expected exact primary state/i);
+      assert.deepEqual([...seen].filter((url) => url.includes('?')).sort(), ['/search?state=drop', '/search?state=keep']);
+      assert.doesNotMatch(JSON.stringify(report), /state=(?:drop|keep)/);
+    }
+  );
+});
+
+test('imported-body route candidates require exact path-plus-query drift classification', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'imported-body-route-classification-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.browserFirstRouteExpansion.candidateRoutesFromImportedContentBodies = [
+      '/legacy.aspx?item=one'
+    ];
+    routeMatrix.sourceRouteDriftClassification = [{
+      sourcePath: '/legacy.aspx?item=two',
+      sourceStatus: 200,
+      classification: 'legacy',
+      targetDisposition: 'intentionally_drop',
+      targetPath: '',
+      ownerDecisionEvidence: 'The other query variant was reviewed separately.',
+      accepted: true,
+      notes: 'Exact query variant disposition.'
+    }];
+  });
+
+  const mismatched = await validatePacket({ packetDir });
+  assert.equal(mismatched.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    mismatched.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /classify and accept every discovered source route/i
+  );
+
+  mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+    routeMatrix.sourceRouteDriftClassification[0].sourcePath = '/legacy.aspx?item=one';
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.routeDriftDispositionChecks = [{
+      sourcePath: '/legacy.aspx?item=one',
+      disposition: 'intentionally_drop',
+      status: 'pass',
+      dispositionEvidence: 'The imported-body legacy link was independently reviewed.'
+    }];
+  });
+  const classified = await validatePacket({ packetDir });
+  assert.equal(
+    classified.completionEvidence.packetSupportsCompletion,
+    true,
+    classified.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('noRedirectDisposition fails closed unless acceptance, owner, rationale, and packet evidence are all strong', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'no-redirect-disposition-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const routeMatrix = liveRouteMatrix('https://target.example');
+  routeMatrix.routes.push({
+    sourcePath: '/legacy?item=one',
+    targetPath: '/',
+    routeRole: 'homepage',
+    targetStatus: 200,
+    targetFinalPath: '/',
+    targetTitle: 'Target site',
+    targetH1: 'Target home',
+    expectedRedirect: false,
+    noRedirectDisposition: {
+      accepted: true,
+      acceptedBy: 'Fixture owner',
+      rationale: 'The legacy URL is intentionally retired.',
+      evidence: 'evidence/missing-approval.txt'
+    },
+    accepted: true,
+    notes: 'Legacy mapping fixture.'
+  });
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const missingEvidence = await validatePacket({ packetDir });
+  assert.match(
+    missingEvidence.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /noRedirectDisposition exceptions must set accepted true.*packet-local evidence/i
+  );
+
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeFileSync(join(packetDir, 'evidence', 'redirect-approval.txt'), 'Approved by the fixture owner.\n');
+  for (const weaken of [
+    (disposition) => { disposition.accepted = false; },
+    (disposition) => { disposition.acceptedBy = ''; },
+    (disposition) => { disposition.rationale = ''; }
+  ]) {
+    mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+      value.routes[1].noRedirectDisposition = {
+        accepted: true,
+        acceptedBy: 'Fixture owner',
+        rationale: 'The legacy URL is intentionally retired.',
+        evidence: 'evidence/redirect-approval.txt'
+      };
+      weaken(value.routes[1].noRedirectDisposition);
+    });
+    const weak = await validatePacket({ packetDir });
+    assert.match(
+      weak.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /noRedirectDisposition exceptions must set accepted true.*packet-local evidence/i
+    );
+  }
+
+  mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+    value.routes[1].noRedirectDisposition = {
+      accepted: true,
+      acceptedBy: 'Fixture owner',
+      rationale: 'The legacy URL is intentionally retired.',
+      evidence: 'evidence/redirect-approval.txt'
+    };
+  });
+  const strong = await validatePacket({ packetDir });
+  assert.equal(
+    strong.completionEvidence.packetSupportsCompletion,
+    true,
+    strong.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+});
+
+test('redirect materialization requires permanent first hop and exact same-origin final path-plus-query', async () => {
+  let behavior = 'missing';
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/legacy?token=private-source') {
+        const destinations = {
+          permanent: [301, '/news?view=full'],
+          permanent308: [308, '/news?view=full'],
+          temporary: [302, '/news?view=full'],
+          preserveMethodTemporary: [307, '/news?view=full'],
+          wrongQuery: [301, '/news?view=wrong']
+        };
+        if (destinations[behavior]) {
+          response.writeHead(destinations[behavior][0], { location: destinations[behavior][1] });
+        } else {
+          response.writeHead(404, { 'content-type': 'text/html; charset=utf-8' });
+        }
+        response.end();
+        return;
+      }
+      if (request.url?.startsWith('/news')) {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end('<!doctype html><html><head><title>News</title></head><body><h1>News</h1></body></html>');
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'redirect-materialization-contract-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push({
+        sourcePath: '/legacy?token=private-source',
+        targetPath: '/news?view=full',
+        routeRole: 'homepage',
+        targetStatus: 200,
+        targetFinalPath: '/news?view=full',
+        targetTitle: 'News',
+        targetH1: 'News',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'Legacy query mapping fixture.'
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      const run = () => verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      for (const [scenario, expected] of [
+        ['missing', /initial status 404/i],
+        ['temporary', /initial status 302/i],
+        ['preserveMethodTemporary', /initial status 307/i],
+        ['wrongQuery', /expects exact path\+query/i]
+      ]) {
+        behavior = scenario;
+        const blocked = await run();
+        assert.equal(blocked.liveTargetValid, false);
+        assert.match(blocked.redirectMaterializationChecks[0].errors.join('\n'), expected);
+        assert.doesNotMatch(JSON.stringify(blocked), /private-source|view=(?:full|wrong)/);
+      }
+
+      behavior = 'permanent';
+      const passing = await run();
+      assert.equal(passing.liveTargetValid, true, passing.errors.join('\n'));
+      assert.equal(passing.redirectMaterializationChecks[0].initialStatus, 301);
+      assert.equal(passing.redirectMaterializationChecks[0].passed, true);
+      assert.match(passing.redirectMaterializationChecks[0].sourcePath, /query-sha256=/);
+      assert.doesNotMatch(JSON.stringify(passing), /private-source|view=full/);
+
+      behavior = 'permanent308';
+      const passing308 = await run();
+      assert.equal(passing308.liveTargetValid, true, passing308.errors.join('\n'));
+      assert.equal(passing308.redirectMaterializationChecks[0].initialStatus, 308);
+    }
+  );
+});
+
+test('duplicate redirect mappings reconcile the complete destination and exception contract', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/legacy') {
+        response.writeHead(301, { location: '/news' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(request.url === '/news'
+        ? '<!doctype html><html><head><title>News</title></head><body><h1>News</h1></body></html>'
+        : fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'duplicate-redirect-contract-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+      writeFileSync(join(packetDir, 'evidence', 'retirement.txt'), 'Approved retirement.\n');
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      const mapping = {
+        sourcePath: '/legacy',
+        targetPath: '/news',
+        routeRole: 'homepage',
+        targetStatus: 200,
+        targetFinalPath: '/news',
+        targetTitle: 'News',
+        targetH1: 'News',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'Duplicate contract fixture.'
+      };
+      routeMatrix.routes.push(mapping, {
+        ...structuredClone(mapping),
+        noRedirectDisposition: {
+          accepted: true,
+          acceptedBy: 'Fixture owner',
+          rationale: 'This duplicate says the redirect may be absent.',
+          evidence: 'evidence/retirement.txt'
+        }
+      });
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const conflicted = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(conflicted.liveTargetValid, false);
+      assert.equal(conflicted.redirectMappingConflicts.length, 1);
+      assert.match(conflicted.errors.join('\n'), /duplicate redirect mapping contracts.*do not fully agree/i);
+
+      mutateJson(join(packetDir, 'route-matrix.json'), (value) => {
+        delete value.routes[2].noRedirectDisposition;
+      });
+      const reconciled = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(reconciled.redirectMappingConflicts.length, 0);
+      assert.equal(reconciled.redirectMaterializationChecks.length, 1);
+      assert.equal(reconciled.redirectMaterializationChecks[0].passed, true);
+    }
+  );
+});
+
+test('one live HTTP budget spans route classes, accepted seeds, rendered links, materialization, and redirect hops', async () => {
+  let active = 0;
+  let maximumActive = 0;
+  let requestCount = 0;
+  await withHttpServer(
+    (request, response) => {
+      requestCount += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      setTimeout(() => {
+        active -= 1;
+        if (request.url === '/legacy?private=one') {
+          response.writeHead(301, { location: '/linked' });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        if (request.url === '/') {
+          response.end('<!doctype html><html><head><title>Target site</title></head><body><h1>Target home</h1><a href="/linked">Linked</a></body></html>');
+        } else {
+          response.end('<!doctype html><html><head><title>Linked</title></head><body><h1>Linked</h1></body></html>');
+        }
+      }, 20);
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'shared-live-http-budget-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/linked', targetPath: '/linked', routeRole: 'homepage', targetStatus: 200,
+          targetFinalPath: '/linked', targetTitle: 'Linked', targetH1: 'Linked', expectedRedirect: false,
+          accepted: true, notes: 'Rendered-link fixture.'
+        },
+        {
+          sourcePath: '/legacy?private=one', targetPath: '/linked', routeRole: 'homepage', targetStatus: 200,
+          targetFinalPath: '/linked', targetTitle: 'Linked', targetH1: 'Linked', expectedRedirect: false,
+          accepted: true, notes: 'Redirect-materialization fixture.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+      const requestCapped = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        liveHttpLimits: { concurrency: 2, deadlineMs: 2_000, maxRequests: 6, maxTasks: 20 }
+      });
+      assert.equal(requestCapped.liveTargetValid, false);
+      assert.equal(requestCapped.liveHttpBudget.requestCapExhausted, true);
+      assert.equal(requestCapped.liveHttpBudget.requestCount, 6);
+      assert.equal(requestCount, 6);
+      assert.ok(maximumActive > 1 && maximumActive <= 2, `observed HTTP concurrency ${maximumActive}`);
+      assert.deepEqual(requestCapped.liveHttpBudget.tasksByKind, {
+        'accepted-route-seed': 2,
+        'primary-route': 1,
+        'redirect-materialization': 1,
+        'server-rendered-link': 1,
+        'target-required-route': 1
+      });
+      assert.match(requestCapped.errors.join('\n'), /exhausted its 6 HTTP request budget/i);
+      assert.doesNotMatch(JSON.stringify(requestCapped), /private=one/);
+
+      const taskCapped = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl),
+        liveHttpLimits: { concurrency: 2, deadlineMs: 2_000, maxRequests: 50, maxTasks: 3 }
+      });
+      assert.equal(taskCapped.liveTargetValid, false);
+      assert.equal(taskCapped.liveHttpBudget.taskCapExhausted, true);
+      assert.equal(taskCapped.liveHttpBudget.taskCount, 2);
+      assert.ok(taskCapped.liveHttpBudget.taskRejectedCount >= 2);
+      assert.match(taskCapped.errors.join('\n'), /exhausted its 3 task budget/i);
+    }
+  );
+});
+
+test('live verification caps non-primary representative route concurrency', async () => {
+  let activeRepresentativeRequests = 0;
+  let maxRepresentativeRequests = 0;
+  await withHttpServer(
+    (request, response) => {
+      if (request.url.startsWith('/representative-')) {
+        activeRepresentativeRequests += 1;
+        maxRepresentativeRequests = Math.max(maxRepresentativeRequests, activeRepresentativeRequests);
+        const path = request.url;
+        const index = path.split('-').at(-1);
+        const origin = `http://${request.headers.host}`;
+        setTimeout(() => {
+          response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          response.end(`<!doctype html><html><head><title>Representative ${index}</title><link rel="canonical" href="${origin}${path}"><meta name="description" content="Representative route ${index}."></head><body><h1>Representative ${index}</h1></body></html>`);
+          activeRepresentativeRequests -= 1;
+        }, 40);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'representative-concurrency-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      const representativeCount = 18;
+      mutateJson(join(packetDir, 'route-matrix.json'), (routeMatrix) => {
+        for (let index = 0; index < representativeCount; index += 1) {
+          routeMatrix.routes.push({
+            sourcePath: `/representative-${index}`,
+            sourceStatus: 200,
+            sourceFinalPath: `/representative-${index}`,
+            sourceTitle: `Representative ${index}`,
+            sourceH1: `Representative ${index}`,
+            targetPath: `/representative-${index}`,
+            targetStatus: 200,
+            targetFinalPath: `/representative-${index}`,
+            targetTitle: `Representative ${index}`,
+            targetH1: `Representative ${index}`,
+            expectedRedirect: false,
+            accepted: true,
+            notes: 'Concurrency fixture.'
+          });
+        }
+      });
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        for (let index = 0; index < representativeCount; index += 1) {
+          const check = structuredClone(browser.publicRouteChecks[0]);
+          check.routeRole = 'other';
+          check.sourceUrl = `https://source.example/representative-${index}`;
+          check.sourceFinalUrl = check.sourceUrl;
+          check.targetUrl = `${baseUrl}/representative-${index}`;
+          check.targetFinalUrl = check.targetUrl;
+          check.renderedSignals.sourceTitle = `Representative ${index}`;
+          check.renderedSignals.targetTitle = `Representative ${index}`;
+          check.renderedSignals.sourceH1 = `Representative ${index}`;
+          check.renderedSignals.targetH1 = `Representative ${index}`;
+          check.renderedSeoSignals.targetCanonicalUrl = check.targetUrl;
+          check.renderedSeoSignals.targetMetaDescription = `Representative route ${index}.`;
+          check.accessibilityCheck.report = `evidence/browser/axe-representative-${index}.json`;
+          browser.publicRouteChecks.push(check);
+        }
+      });
+      for (let index = 0; index < representativeCount; index += 1) {
+        writeJson(join(packetDir, `evidence/browser/axe-representative-${index}.json`), {
+          testEngine: { name: 'axe-core', version: '4.10.2' },
+          toolOptions: { runOnly: null, rules: {} },
+          testEnvironment: { userAgent: 'Fixture Browser/1.0', windowWidth: 1280, windowHeight: 800 },
+          timestamp: testCheckedAt,
+          url: `${baseUrl}/representative-${index}`,
+          passes: [],
+          violations: [],
+          incomplete: [],
+          inapplicable: [{ id: 'fixture-rule', tags: ['wcag2a'], nodes: [] }]
+        });
+      }
+
+      const report = await verifyLive({
+        packetDir,
+        cwd: repoRoot,
+        environment: {},
+        targetUrl: baseUrl,
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      assert.equal(report.browserRepresentativeRouteChecks.length, representativeCount);
+      assert.equal(report.browserRepresentativeRouteChecks.every((check) => check.passed), true);
+      assert.ok(maxRepresentativeRequests > 1, 'fixture should exercise concurrent requests');
+      assert.ok(maxRepresentativeRequests <= 12, `expected at most 12 concurrent representative requests, saw ${maxRepresentativeRequests}`);
+    }
+  );
+});
+
+test('exported SEO config rejects literal local origins while allowing tokens and external media URLs', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'seo-config-portability-'));
+  const configDir = join(temp, 'config', 'sync');
+  mkdirSync(configDir, { recursive: true });
+  const localFile = 'config/sync/metatag.metatag_defaults.front.yml';
+  const tokenFile = 'config/sync/metatag.metatag_defaults.node.yml';
+  writeFileSync(join(temp, localFile), `tags:\n  canonical_url: 'https://fixture.ddev.site/'\n  og_image: 'https://fixture.ddev.site/media/hero.jpg'\n`);
+  writeFileSync(join(temp, tokenFile), `tags:\n  canonical_url: '[current-page:url:absolute]'\n  og_image: 'https://cdn.example/media/hero.jpg'\n`);
+
+  const localFindings = exportedSeoUrlPortabilityFindings(temp, [localFile, tokenFile], 'https://fixture.ddev.site');
+  assert.equal(localFindings.length, 2);
+  assert.deepEqual(localFindings.map((finding) => finding.key), ['canonical_url', 'og_image']);
+
+  const portableFindings = exportedSeoUrlPortabilityFindings(temp, [tokenFile], 'https://fixture.ddev.site');
+  assert.deepEqual(portableFindings, []);
+});
+
+test('literal local URLs in exported SEO config block live completion', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'seo-portability-live-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl, {
+          exportedSeoUrlPortabilityFindings: [{
+            file: 'config/sync/metatag.metatag_defaults.front.yml',
+            line: 10,
+            key: 'canonical_url',
+            host: new URL(baseUrl).host
+          }]
+        })
+      });
+
+      assert.equal(report.drupalRuntime.seoUrlsPortable, false);
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.match(report.completionBlockedReasons.join('\n'), /exported SEO configuration contains literal local-environment URLs/i);
+    }
+  );
 });
 
 test('blind editor evidence requires captures or a target-bound action record', async () => {
