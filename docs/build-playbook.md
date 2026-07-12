@@ -161,7 +161,7 @@ The cleaner Drupal answer is usually one content owner plus a deliberate display
 
 Every run should emit comparable Drupal readback. At minimum include:
 
-- `ddev drush status`, `ddev drush config:get system.site --field=uuid`, enabled modules, default/admin themes, install profile, site name, front page, and config status;
+- `ddev drush status`, `ddev drush config:get system.site uuid --format=string` (never `config:get --field`, which Drush 13 removed), enabled modules, default/admin themes, install profile, site name, front page, and config status;
 - Drupal CMS/core versions from `ddev composer show` and `ddev drush status`, plus the Recipe runner actually available in the target;
 - the active config sync directory and the real YAML paths Git tracks in that exact directory;
 - content types, field storage, field instances, form displays, view displays, widgets, formatters, workflows, and roles/permissions notes;
