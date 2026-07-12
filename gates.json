@@ -298,6 +298,14 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-SURFACE-01",
+      "title": "Live-derived Drupal public surface exactly reconciled",
+      "phase": 6,
+      "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-INTENT-01",
       "title": "Durable intent is current or treated as advisory",
       "phase": 3,

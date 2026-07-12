@@ -1515,12 +1515,423 @@ function runDrush(projectRoot, environment, args) {
   return runDrushResult(projectRoot, environment, args).output;
 }
 
-const DRUPAL_ENTITY_INVENTORY_SCHEMA = 'public-kit.drupal-entity-inventory.4';
+const DRUPAL_LIVE_SURFACE_SCHEMA = 'public-kit.drupal-live-surface.1';
+const DRUPAL_LIVE_SURFACE_LIMIT = 5000;
+export const DRUPAL_LIVE_SURFACE_EVAL = String.raw`
+$manager = \Drupal::entityTypeManager();
+$definitions = $manager->getDefinitions();
+$bundle_info = \Drupal::service('entity_type.bundle.info');
+$config_factory = \Drupal::configFactory();
+$surface_limit = ${DRUPAL_LIVE_SURFACE_LIMIT};
+$items = [];
+$errors = [];
+$truncated = FALSE;
+$public_editorial_roots = [];
+$excluded_entity_types = [
+  'user' => 'broad user rows are never swept',
+  'webform_submission' => 'private form submissions',
+  'contact_message' => 'private contact submissions',
+  'easy_email' => 'private generated email messages',
+  'oauth2_token' => 'authentication credentials',
+  'oauth2_refresh_token' => 'authentication credentials',
+  'oauth2_auth_code' => 'authentication credentials',
+  'simple_oauth_token' => 'authentication credentials',
+  'simple_oauth_refresh_token' => 'authentication credentials',
+  'simple_oauth_auth_code' => 'authentication credentials',
+  'commerce_order' => 'private customer transactions',
+  'commerce_order_item' => 'private customer transactions',
+  'commerce_payment' => 'private payment data',
+  'commerce_payment_method' => 'private payment credentials',
+  'commerce_log' => 'private transaction audit data',
+  'consumer' => 'private API consumer credentials',
+  'search_api_task' => 'derived indexing tasks',
+  'content_moderation_state' => 'derived moderation state',
+  'workspace' => 'private derived workspace state',
+  'workspace_association' => 'derived workspace association',
+];
+$normalize_path = static function ($value): string {
+  $path = trim((string) $value);
+  if ($path === '') {
+    return '';
+  }
+  return '/' . ltrim($path, '/');
+};
+$safe_public_uri = static function ($value): string {
+  $uri = trim((string) $value);
+  if ($uri === '') {
+    return '';
+  }
+  $parts = parse_url($uri);
+  if (is_array($parts) && isset($parts['scheme'], $parts['host'])) {
+    $port = isset($parts['port']) ? ':' . (int) $parts['port'] : '';
+    return (string) $parts['scheme'] . '://' . (string) $parts['host'] . $port . (string) ($parts['path'] ?? '/');
+  }
+  return preg_split('/[?#]/', $uri, 2)[0] ?? '';
+};
+$add_surface = function (string $kind, string $identity, array $metadata = []) use (&$items, &$truncated, $surface_limit): void {
+  $identity = trim($identity);
+  if ($kind === '' || $identity === '') {
+    return;
+  }
+  $key = $kind . ':' . $identity;
+  if (isset($items[$key])) {
+    return;
+  }
+  if (count($items) >= $surface_limit) {
+    $truncated = TRUE;
+    return;
+  }
+  ksort($metadata, SORT_STRING);
+  $items[$key] = ['key' => $key, 'kind' => $kind] + $metadata;
+};
+$bounded_ids = function ($query, string $context) use (&$truncated, &$errors, $surface_limit): array {
+  try {
+    $ids = array_values($query->range(0, $surface_limit + 1)->execute());
+    if (count($ids) > $surface_limit) {
+      $truncated = TRUE;
+      $ids = array_slice($ids, 0, $surface_limit);
+    }
+    return $ids;
+  }
+  catch (\Throwable) {
+    $errors[] = $context . ' inventory query failed.';
+    return [];
+  }
+};
+
+// Bundle definitions come from Drupal before packet claims. Only aggregate
+// publication counts and stable machine identifiers are emitted.
+$public_root_allowlist = ['block_content', 'canvas_page', 'media', 'node', 'taxonomy_term'];
+ksort($definitions, SORT_STRING);
+foreach ($definitions as $entity_type_id => $definition) {
+  if (!($definition instanceof \Drupal\Core\Entity\ContentEntityTypeInterface) || isset($excluded_entity_types[$entity_type_id])) {
+    continue;
+  }
+  $bundle_key = (string) ($definition->getKey('bundle') ?? '');
+  if ($bundle_key === '') {
+    continue;
+  }
+  $bundles = $bundle_info->getBundleInfo($entity_type_id);
+  ksort($bundles, SORT_STRING);
+  $has_canonical_route = (string) ($definition->getLinkTemplate('canonical') ?? '') !== '';
+  $status_key = (string) ($definition->getKey('status') ?? '');
+  $is_public_root_type = in_array($entity_type_id, $public_root_allowlist, TRUE) || ($has_canonical_route && $status_key !== '');
+  foreach (array_keys($bundles) as $bundle) {
+    $published_count = 0;
+    if ($is_public_root_type) {
+      try {
+        $query = $manager->getStorage($entity_type_id)->getQuery()->accessCheck(FALSE)->condition($bundle_key, $bundle);
+        if ($status_key !== '') {
+          $query->condition($status_key, TRUE);
+        }
+        $published_count = (int) $query->count()->execute();
+      }
+      catch (\Throwable) {
+        $errors[] = 'Bundle publication count failed for ' . $entity_type_id . '.' . $bundle . '.';
+      }
+      $public_editorial_roots[$entity_type_id][] = (string) $bundle;
+    }
+    $add_surface('bundle', $entity_type_id . ':' . $bundle, [
+      'bundle' => (string) $bundle,
+      'entityType' => (string) $entity_type_id,
+      'publicEditorialRoot' => $is_public_root_type,
+      'publicSurface' => $is_public_root_type,
+      'publishedCount' => $published_count,
+    ]);
+  }
+}
+foreach ($public_editorial_roots as $entity_type_id => $bundles) {
+  $bundles = array_values(array_unique(array_map('strval', $bundles)));
+  sort($bundles, SORT_STRING);
+  $public_editorial_roots[$entity_type_id] = $bundles;
+}
+ksort($public_editorial_roots, SORT_STRING);
+
+// Active View definitions and every enabled non-default display are surface
+// metadata. Anonymous permissions plus active block/Canvas registration decide
+// whether a display is public; non-public records still require owned exclusion.
+$anonymous_permissions = $config_factory->get('user.role.anonymous')->get('permissions') ?? [];
+$anonymous_permissions = array_values(array_map('strval', is_array($anonymous_permissions) ? $anonymous_permissions : []));
+$public_view_blocks = [];
+$public_menus = ['footer' => TRUE, 'main' => TRUE];
+foreach ($config_factory->listAll('block.block.') as $block_config_name) {
+  $block = $config_factory->get($block_config_name)->getRawData();
+  if (($block['status'] ?? FALSE) !== TRUE) {
+    continue;
+  }
+  $plugin = (string) ($block['plugin'] ?? '');
+  if (str_starts_with($plugin, 'views_block:')) {
+    $public_view_blocks[substr($plugin, strlen('views_block:'))] = TRUE;
+  }
+  if (str_starts_with($plugin, 'system_menu_block:')) {
+    $public_menus[substr($plugin, strlen('system_menu_block:'))] = TRUE;
+  }
+}
+foreach ($config_factory->listAll('canvas.component.block.views_block.') as $component_config_name) {
+  $public_view_blocks[substr($component_config_name, strlen('canvas.component.block.views_block.'))] = TRUE;
+}
+foreach ($config_factory->listAll('views.view.') as $config_name) {
+  $view = $config_factory->get($config_name)->getRawData();
+  if (($view['status'] ?? TRUE) !== TRUE) {
+    continue;
+  }
+  $view_id = (string) ($view['id'] ?? substr($config_name, strlen('views.view.')));
+  $displays = is_array($view['display'] ?? NULL) ? $view['display'] : [];
+  ksort($displays, SORT_STRING);
+  $default_options = is_array($displays['default']['display_options'] ?? NULL) ? $displays['default']['display_options'] : [];
+  $view_is_public = FALSE;
+  foreach ($displays as $display_id => $display) {
+    if ($display_id === 'default' || !is_array($display) || ($display['enabled'] ?? TRUE) === FALSE) {
+      continue;
+    }
+    $options = is_array($display['display_options'] ?? NULL) ? $display['display_options'] : [];
+    $path = $normalize_path($options['path'] ?? '');
+    $access = is_array($options['access'] ?? NULL)
+      ? $options['access']
+      : (is_array($default_options['access'] ?? NULL) ? $default_options['access'] : []);
+    $access_type = (string) ($access['type'] ?? 'none');
+    $access_options = is_array($access['options'] ?? NULL) ? $access['options'] : [];
+    $access_roles = is_array($access_options['role'] ?? NULL) ? $access_options['role'] : [];
+    $anonymous_access = $access_type === 'none' ||
+      ($access_type === 'perm' && in_array((string) ($access_options['perm'] ?? ''), $anonymous_permissions, TRUE)) ||
+      ($access_type === 'role' && in_array('anonymous', array_map('strval', array_merge(array_keys($access_roles), array_values($access_roles))), TRUE));
+    $display_plugin = (string) ($display['display_plugin'] ?? '');
+    $registered_block = isset($public_view_blocks[$view_id . '-' . $display_id]);
+    $public_surface = $anonymous_access && ($path !== '' || ($display_plugin === 'block' && $registered_block));
+    $view_is_public = $view_is_public || $public_surface;
+    $add_surface('view_display', $view_id . ':' . $display_id, [
+      'anonymousAccessConfigured' => $anonymous_access,
+      'displayId' => (string) $display_id,
+      'displayPlugin' => $display_plugin,
+      'path' => $path,
+      'publicSurface' => $public_surface,
+      'routeName' => $path !== '' ? 'view.' . $view_id . '.' . $display_id : '',
+      'viewId' => $view_id,
+    ]);
+  }
+  $add_surface('view', $view_id, [
+    'configName' => (string) $config_name,
+    'publicSurface' => $view_is_public,
+  ]);
+}
+
+// Published routing/navigation infrastructure is public metadata. No labels,
+// titles, descriptions, or row payloads are returned.
+if (isset($definitions['path_alias'])) {
+  $definition = $definitions['path_alias'];
+  $query = $manager->getStorage('path_alias')->getQuery()->accessCheck(FALSE);
+  if ($status_key = $definition->getKey('status')) {
+    $query->condition($status_key, TRUE);
+  }
+  foreach ($manager->getStorage('path_alias')->loadMultiple($bounded_ids($query, 'Published alias')) as $alias) {
+    $internal = $normalize_path($alias->get('path')->value ?? '');
+    $public = $normalize_path($alias->get('alias')->value ?? '');
+    $langcode = (string) ($alias->language()->getId() ?? 'und');
+    $add_surface('alias', $langcode . ':' . $public . ':' . $internal, [
+      'alias' => $public,
+      'internalPath' => $internal,
+      'langcode' => $langcode,
+    ]);
+  }
+}
+if (isset($definitions['menu_link_content'])) {
+  $definition = $definitions['menu_link_content'];
+  $query = $manager->getStorage('menu_link_content')->getQuery()->accessCheck(FALSE);
+  if ($status_key = $definition->getKey('status')) {
+    $query->condition($status_key, TRUE);
+  }
+  $menu_links = $manager->getStorage('menu_link_content')->loadMultiple($bounded_ids($query, 'Enabled menu link'));
+  foreach ($menu_links as $link) {
+    $menu_name = (string) ($link->get('menu_name')->value ?? '');
+    if ($menu_name !== '') {
+      $public_menus[$menu_name] = TRUE;
+    }
+  }
+  foreach ($menu_links as $link) {
+    $uuid = method_exists($link, 'uuid') ? (string) $link->uuid() : (string) $link->id();
+    $uri = $safe_public_uri($link->get('link')->uri ?? '');
+    $menu_name = (string) ($link->get('menu_name')->value ?? '');
+    $add_surface('menu_link', $uuid, [
+      'menu' => $menu_name,
+      'publicSurface' => isset($public_menus[$menu_name]),
+      'uri' => $uri,
+    ]);
+  }
+}
+foreach ($config_factory->listAll('system.menu.') as $config_name) {
+  $menu_id = substr($config_name, strlen('system.menu.'));
+  $add_surface('menu', $menu_id, [
+    'configName' => (string) $config_name,
+    'publicSurface' => isset($public_menus[$menu_id]),
+  ]);
+}
+if (isset($definitions['redirect'])) {
+  $definition = $definitions['redirect'];
+  $query = $manager->getStorage('redirect')->getQuery()->accessCheck(FALSE);
+  if ($status_key = $definition->getKey('status')) {
+    $query->condition($status_key, TRUE);
+  }
+  foreach ($manager->getStorage('redirect')->loadMultiple($bounded_ids($query, 'Enabled redirect')) as $redirect) {
+    $uuid = method_exists($redirect, 'uuid') ? (string) $redirect->uuid() : (string) $redirect->id();
+    $source = method_exists($redirect, 'getSourceUrl') ? $safe_public_uri($redirect->getSourceUrl()) : $normalize_path($redirect->get('redirect_source')->path ?? '');
+    $target = method_exists($redirect, 'getRedirectUrl') ? $safe_public_uri($redirect->getRedirectUrl()->toString()) : $safe_public_uri($redirect->get('redirect_redirect')->uri ?? '');
+    $add_surface('redirect', $uuid, ['source' => $source, 'target' => $target]);
+  }
+}
+
+// Canvas config entities and published Canvas pages are enumerated by stable
+// config names/UUIDs. Component settings and page content are not emitted.
+foreach ($config_factory->listAll() as $config_name) {
+  if (preg_match('/^(?:canvas|experience_builder)\\.component\\./', $config_name)) {
+    $add_surface('canvas_component', $config_name, ['configName' => (string) $config_name]);
+  }
+  elseif (preg_match('/^(?:canvas|experience_builder)\\.(?:content_template|page_template|page_region)\\./', $config_name)) {
+    $config = $config_factory->get($config_name)->getRawData();
+    $add_surface('canvas_template', $config_name, [
+      'bundle' => (string) ($config['content_entity_type_bundle'] ?? ''),
+      'configName' => (string) $config_name,
+      'entityType' => (string) ($config['content_entity_type_id'] ?? ''),
+      'viewMode' => (string) ($config['content_entity_type_view_mode'] ?? ''),
+    ]);
+  }
+  elseif (preg_match('/^(?:simple_sitemap\\.(?:sitemap|type)\\.|xmlsitemap\\.)/', $config_name)) {
+    $add_surface('sitemap', $config_name, ['configName' => (string) $config_name]);
+  }
+}
+if (isset($definitions['canvas_page']) && $definitions['canvas_page'] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface) {
+  $definition = $definitions['canvas_page'];
+  $query = $manager->getStorage('canvas_page')->getQuery()->accessCheck(FALSE);
+  if ($status_key = $definition->getKey('status')) {
+    $query->condition($status_key, TRUE);
+  }
+  foreach ($manager->getStorage('canvas_page')->loadMultiple($bounded_ids($query, 'Published Canvas page')) as $page) {
+    $uuid = method_exists($page, 'uuid') ? (string) $page->uuid() : (string) $page->id();
+    $path = '';
+    try {
+      $path = $page->toUrl('canonical')->toString();
+    }
+    catch (\Throwable) {
+      // A missing canonical link remains visible as a page with an empty path.
+    }
+    $add_surface('canvas_page', $uuid, ['path' => $normalize_path($path)]);
+  }
+}
+
+// Active custom extensions come from Drupal's installed extension lists.
+$custom_extensions = [];
+foreach (\Drupal::moduleHandler()->getModuleList() as $machine_name => $extension) {
+  $path = str_replace('\\\\', '/', (string) $extension->getPath());
+  if (preg_match('#(?:^|/)modules/custom(?:/|$)#', $path)) {
+    $custom_extensions[(string) $machine_name] = 'module';
+    $add_surface('custom_extension', 'module:' . $machine_name, [
+      'machineName' => (string) $machine_name,
+      'path' => $path,
+      'type' => 'module',
+    ]);
+  }
+}
+$installed_themes = $config_factory->get('core.extension')->get('theme') ?? [];
+foreach (array_keys(is_array($installed_themes) ? $installed_themes : []) as $machine_name) {
+  try {
+    $path = str_replace('\\\\', '/', (string) \Drupal::service('extension.list.theme')->getPath($machine_name));
+    if (preg_match('#(?:^|/)themes/custom(?:/|$)#', $path)) {
+      $custom_extensions[(string) $machine_name] = 'theme';
+      $add_surface('custom_extension', 'theme:' . $machine_name, [
+        'machineName' => (string) $machine_name,
+        'path' => $path,
+        'type' => 'theme',
+      ]);
+    }
+  }
+  catch (\Throwable) {
+    $errors[] = 'Installed custom theme path lookup failed for ' . $machine_name . '.';
+  }
+}
+
+// The live router is authoritative for sitemap and custom routes. Route paths,
+// methods, and owner names are metadata; callbacks and request data are omitted.
+try {
+  foreach (\Drupal::service('router.route_provider')->getAllRoutes() as $route_name => $route) {
+    $route_path = (string) $route->getPath();
+    if (preg_match('/sitemap/i', (string) $route_name) || preg_match('#(?:^|/)sitemap(?:[^/]*)?(?:\\.xml)?(?:/|$)#i', $route_path)) {
+      $add_surface('sitemap_route', (string) $route_name, [
+        'methods' => array_values($route->getMethods()),
+        'path' => $route_path,
+        'routeName' => (string) $route_name,
+      ]);
+    }
+    $owner = '';
+    foreach (['_controller', '_form', '_title_callback'] as $default_key) {
+      $definition = (string) ($route->getDefault($default_key) ?? '');
+      if (preg_match('/^\\\\?Drupal\\\\([a-z0-9_]+)\\\\/i', $definition, $match) && isset($custom_extensions[$match[1]])) {
+        $owner = (string) $match[1];
+        break;
+      }
+    }
+    if ($owner === '') {
+      foreach ($custom_extensions as $machine_name => $type) {
+        if ($type === 'module' && ((string) $route_name === $machine_name || str_starts_with((string) $route_name, $machine_name . '.'))) {
+          $owner = (string) $machine_name;
+          break;
+        }
+      }
+    }
+    if ($owner !== '') {
+      $add_surface('custom_route', $owner . ':' . $route_name, [
+        'extension' => $owner,
+        'methods' => array_values($route->getMethods()),
+        'path' => $route_path,
+        'routeName' => (string) $route_name,
+      ]);
+    }
+  }
+}
+catch (\Throwable) {
+  $errors[] = 'Live router surface inventory failed.';
+}
+
+ksort($items, SORT_STRING);
+sort($errors, SORT_STRING);
+$counts_by_kind = [];
+foreach ($items as $item) {
+  $counts_by_kind[$item['kind']] = ($counts_by_kind[$item['kind']] ?? 0) + 1;
+}
+ksort($counts_by_kind, SORT_STRING);
+$fingerprint_input = [
+  'items' => array_values($items),
+  'publicEditorialRoots' => $public_editorial_roots,
+  'countsByKind' => $counts_by_kind,
+  'excludedEntityTypes' => $excluded_entity_types,
+];
+$encoded = json_encode($fingerprint_input, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+print json_encode([
+  'schemaVersion' => 'public-kit.drupal-live-surface.1',
+  'fingerprint' => 'sha256:' . hash('sha256', $encoded === FALSE ? serialize($fingerprint_input) : $encoded),
+  'confirmed' => !$truncated && count($errors) === 0,
+  'bounded' => TRUE,
+  'limit' => $surface_limit,
+  'truncated' => $truncated,
+  'itemCount' => count($items),
+  'countsByKind' => $counts_by_kind,
+  'items' => array_values($items),
+  'publicEditorialRoots' => $public_editorial_roots,
+  'excludedEntityTypes' => $excluded_entity_types,
+  'errors' => $errors,
+  'policy' => [
+    'metadataOnly' => TRUE,
+    'rawContentRowsEmitted' => FALSE,
+    'privateEntityRowsQueried' => FALSE,
+    'source' => 'active Drupal configuration, published public infrastructure, installed custom extensions, and the live router; clean tracked config is verified separately',
+  ],
+], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+`;
+
+const DRUPAL_ENTITY_INVENTORY_SCHEMA = 'public-kit.drupal-entity-inventory.5';
 export const DRUPAL_ENTITY_INVENTORY_EVAL = String.raw`
 $manager = \Drupal::entityTypeManager();
 $definitions = $manager->getDefinitions();
-$declared_editorial_roots = isset($declared_editorial_roots) && is_array($declared_editorial_roots)
-  ? $declared_editorial_roots
+$live_editorial_roots = isset($live_editorial_roots) && is_array($live_editorial_roots)
+  ? $live_editorial_roots
   : [];
 $declared_public_fields = isset($declared_public_fields) && is_array($declared_public_fields)
   ? $declared_public_fields
@@ -1544,12 +1955,12 @@ $encode = static function ($value): string {
   $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
   return $encoded === false ? serialize($value) : $encoded;
 };
-foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
+foreach ($live_editorial_roots as $entity_type_id => $bundles) {
   $bundles = array_values(array_unique(array_map('strval', is_array($bundles) ? $bundles : [])));
   sort($bundles, SORT_STRING);
-  $declared_editorial_roots[(string) $entity_type_id] = $bundles;
+  $live_editorial_roots[(string) $entity_type_id] = $bundles;
 }
-ksort($declared_editorial_roots, SORT_STRING);
+ksort($live_editorial_roots, SORT_STRING);
 foreach ($declared_public_fields as $entity_type_id => $by_bundle) {
   if (!is_array($by_bundle)) {
     unset($declared_public_fields[$entity_type_id]);
@@ -1598,7 +2009,7 @@ $excluded_type_policy = [
 $queue = [];
 $roles = [];
 $processed = [];
-$declared_root_keys = [];
+$live_root_keys = [];
 $enqueue = function (string $entity_type_id, $entity_id, string $role) use (&$enqueue, &$queue, &$roles, $definitions): void {
   $entity_id = (string) $entity_id;
   if ($entity_id === '' || !isset($definitions[$entity_type_id]) || !($definitions[$entity_type_id] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
@@ -1610,12 +2021,12 @@ $enqueue = function (string $entity_type_id, $entity_id, string $role) use (&$en
     $queue[$key] = ['entityType' => $entity_type_id, 'id' => $entity_id];
   }
 };
-$missing_declared_roots = [];
+$missing_live_roots = [];
 $bundle_info = \Drupal::service('entity_type.bundle.info');
-foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
+foreach ($live_editorial_roots as $entity_type_id => $bundles) {
   if (!isset($definitions[$entity_type_id]) || !($definitions[$entity_type_id] instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
     foreach ($bundles as $bundle) {
-      $missing_declared_roots[] = $entity_type_id . '.' . $bundle;
+      $missing_live_roots[] = $entity_type_id . '.' . $bundle;
     }
     continue;
   }
@@ -1624,7 +2035,7 @@ foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
   $bundle_key = $definition->getKey('bundle');
   foreach ($bundles as $bundle) {
     if (!isset($available_bundles[$bundle])) {
-      $missing_declared_roots[] = $entity_type_id . '.' . $bundle;
+      $missing_live_roots[] = $entity_type_id . '.' . $bundle;
       continue;
     }
     $query = $manager->getStorage($entity_type_id)->getQuery()->accessCheck(FALSE);
@@ -1635,12 +2046,12 @@ foreach ($declared_editorial_roots as $entity_type_id => $bundles) {
     sort($ids, SORT_STRING);
     foreach ($ids as $id) {
       $key = $entity_type_id . ':' . $id;
-      $declared_root_keys[$key] = TRUE;
-      $enqueue($entity_type_id, $id, 'declared-output-root');
+      $live_root_keys[$key] = TRUE;
+      $enqueue($entity_type_id, $id, 'live-output-root');
     }
   }
 }
-sort($missing_declared_roots, SORT_STRING);
+sort($missing_live_roots, SORT_STRING);
 $entity_backed_route_count = 0;
 $infrastructure_route_count = 0;
 foreach ($public_route_paths as $route_path) {
@@ -1869,10 +2280,10 @@ while (count($queue) > 0) {
           if (!in_array($field_type, ['entity_reference', 'entity_reference_revisions', 'file', 'image'], TRUE) || !$translation->hasField($field_name)) {
             continue;
           }
-          $is_declared_root = isset($declared_root_keys[$key]);
+          $is_live_root = isset($live_root_keys[$key]);
           $field_is_public = in_array($field_name, $declared_fields, TRUE);
           $transitive_field = str_starts_with($field_name, 'field_') || $field_name === 'user_picture';
-          if (($is_declared_root && !$field_is_public) || (!$is_declared_root && !$transitive_field)) {
+          if (($is_live_root && !$field_is_public) || (!$is_live_root && !$transitive_field)) {
             continue;
           }
           $target_type = in_array($field_type, ['file', 'image'], TRUE)
@@ -1934,7 +2345,7 @@ foreach ($variant_digests as $entity_type_id => $by_entity) {
 }
 ksort($types, SORT_STRING);
 $role_counts = [
-  'declaredOutputRootCount' => 0,
+  'liveOutputRootCount' => 0,
   'routeCompositionRootCount' => 0,
   'routeNavigationInfrastructureCount' => 0,
   'transitivePublicReferenceCount' => 0,
@@ -1943,7 +2354,7 @@ $role_counts = [
 foreach ($roles as $entity_roles) {
   foreach (array_keys($entity_roles) as $role) {
     $role_key = match ($role) {
-      'declared-output-root' => 'declaredOutputRootCount',
+      'live-output-root' => 'liveOutputRootCount',
       'route-composition-root' => 'routeCompositionRootCount',
       'route-navigation-infrastructure' => 'routeNavigationInfrastructureCount',
       'transitive-public-reference' => 'transitivePublicReferenceCount',
@@ -1964,8 +2375,8 @@ $public_author_user_digest = [
 ];
 $policy = [
   'batchSize' => 100,
-  'inclusion' => 'Public reference closure rooted in every entity from declared anonymous-output bundles (including unpublished/draft instances), entity-backed verified routes/compositions, and public route/navigation infrastructure.',
-  'declaredEditorialRoots' => $declared_editorial_roots,
+  'inclusion' => 'Public reference closure rooted in every entity, including drafts and unpublished revisions, from live-derived public editorial bundles, plus entity-backed verified routes/compositions and public route/navigation infrastructure.',
+  'liveEditorialRoots' => $live_editorial_roots,
   'declaredPublicReferenceFields' => $declared_public_fields,
   'routePathCount' => count($public_route_paths),
   'entityBackedRouteCount' => $entity_backed_route_count,
@@ -1982,18 +2393,18 @@ $closure_counts = ['entityCount' => count($processed), 'entityTypeCount' => coun
 $fingerprint_input = [
   'closureCounts' => $closure_counts,
   'excludedEntityTypes' => $excluded_type_policy,
-  'missingDeclaredRoots' => $missing_declared_roots,
+  'missingLiveRoots' => $missing_live_roots,
   'policy' => $policy,
   'publicAuthorUserDigest' => $public_author_user_digest,
   'types' => $types,
 ];
 print json_encode([
-  'schemaVersion' => 'public-kit.drupal-entity-inventory.4',
+  'schemaVersion' => 'public-kit.drupal-entity-inventory.5',
   'fingerprint' => 'sha256:' . hash('sha256', $encode($fingerprint_input)),
   'entityTypeCount' => count($types),
   'closureCounts' => $closure_counts,
   'excludedEntityTypes' => $excluded_type_policy,
-  'missingDeclaredRoots' => $missing_declared_roots,
+  'missingLiveRoots' => $missing_live_roots,
   'missingManagedFileCount' => $missing_managed_file_count,
   'policy' => $policy,
   'publicAuthorUserDigest' => $public_author_user_digest,
@@ -2174,24 +2585,76 @@ export function stateBoundRuntimeFacts(facts = {}) {
   };
 }
 
-function declaredEditorialRoots(fieldOutputMatrix) {
-  const roots = new Map();
-  for (const row of Array.isArray(fieldOutputMatrix?.bundles) ? fieldOutputMatrix.bundles : []) {
-    const entityType = String(row?.entityType ?? '').trim();
-    const bundle = String(row?.bundle ?? '').trim();
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType) || !/^[a-z][a-z0-9_]*$/.test(bundle)) {
-      continue;
-    }
-    if (!roots.has(entityType)) {
-      roots.set(entityType, new Set());
-    }
-    roots.get(entityType).add(bundle);
-  }
-  return Object.fromEntries(
-    [...roots.entries()]
-      .sort(([left], [right]) => comparePortable(left, right))
-      .map(([entityType, bundles]) => [entityType, [...bundles].sort(comparePortable)])
+function inspectDrupalLiveSurface(projectRoot, environment) {
+  const result = runDrushResult(
+    projectRoot,
+    environment,
+    ['php:eval', DRUPAL_LIVE_SURFACE_EVAL],
+    120_000
   );
+  if (!result.ok || !result.output) {
+    return {
+      bounded: true,
+      confirmed: false,
+      countsByKind: {},
+      errors: [],
+      fingerprint: '',
+      itemCount: 0,
+      items: [],
+      limit: DRUPAL_LIVE_SURFACE_LIMIT,
+      publicEditorialRoots: {},
+      reason: 'Drupal live public-surface inventory could not be read through Drush.',
+      schemaVersion: DRUPAL_LIVE_SURFACE_SCHEMA,
+      truncated: false
+    };
+  }
+  try {
+    const inventory = JSON.parse(result.output);
+    const items = Array.isArray(inventory?.items) ? inventory.items : [];
+    const keys = items.map((item) => String(item?.key ?? ''));
+    const structurallyValid =
+      inventory?.schemaVersion === DRUPAL_LIVE_SURFACE_SCHEMA &&
+      inventory?.bounded === true &&
+      inventory?.truncated === false &&
+      Number(inventory?.limit) === DRUPAL_LIVE_SURFACE_LIMIT &&
+      Number(inventory?.itemCount) === items.length &&
+      items.length <= DRUPAL_LIVE_SURFACE_LIMIT &&
+      new Set(keys).size === keys.length &&
+      items.every((item) =>
+        /^[a-z][a-z0-9_]*:.+/.test(String(item?.key ?? '')) &&
+        /^[a-z][a-z0-9_]*$/.test(String(item?.kind ?? '')) &&
+        String(item.key).startsWith(`${item.kind}:`)
+      ) &&
+      inventory?.publicEditorialRoots &&
+      typeof inventory.publicEditorialRoots === 'object' &&
+      !Array.isArray(inventory.publicEditorialRoots) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(inventory?.fingerprint ?? ''));
+    const confirmed = inventory?.confirmed === true && structurallyValid;
+    return {
+      ...inventory,
+      confirmed,
+      reason: confirmed
+        ? ''
+        : inventory?.truncated === true
+          ? `Drupal live public-surface inventory exceeded its ${DRUPAL_LIVE_SURFACE_LIMIT}-item bound.`
+          : `Drupal live public-surface inventory was incomplete${Array.isArray(inventory?.errors) && inventory.errors.length ? `: ${inventory.errors.join(' ')}` : '.'}`
+    };
+  } catch {
+    return {
+      bounded: true,
+      confirmed: false,
+      countsByKind: {},
+      errors: [],
+      fingerprint: '',
+      itemCount: 0,
+      items: [],
+      limit: DRUPAL_LIVE_SURFACE_LIMIT,
+      publicEditorialRoots: {},
+      reason: 'Drupal live public-surface inventory returned malformed JSON.',
+      schemaVersion: DRUPAL_LIVE_SURFACE_SCHEMA,
+      truncated: false
+    };
+  }
 }
 
 function declaredPublicReferenceFields(fieldOutputMatrix) {
@@ -2257,12 +2720,12 @@ function publicClosureRoutePaths(routeMatrix, patternMap) {
   return [...paths].sort(comparePortable);
 }
 
-function inspectDrupalEntityInventory(projectRoot, environment, fieldOutputMatrix, routeMatrix, patternMap) {
-  const roots = Buffer.from(JSON.stringify(declaredEditorialRoots(fieldOutputMatrix)), 'utf8').toString('base64');
+function inspectDrupalEntityInventory(projectRoot, environment, liveSurfaceInventory, fieldOutputMatrix, routeMatrix, patternMap) {
+  const roots = Buffer.from(JSON.stringify(liveSurfaceInventory?.publicEditorialRoots ?? {}), 'utf8').toString('base64');
   const fields = Buffer.from(JSON.stringify(declaredPublicReferenceFields(fieldOutputMatrix)), 'utf8').toString('base64');
   const routes = Buffer.from(JSON.stringify(publicClosureRoutePaths(routeMatrix, patternMap)), 'utf8').toString('base64');
   const evaluation = [
-    `$declared_editorial_roots = json_decode(base64_decode('${roots}', TRUE), TRUE);`,
+    `$live_editorial_roots = json_decode(base64_decode('${roots}', TRUE), TRUE);`,
     `$declared_public_fields = json_decode(base64_decode('${fields}', TRUE), TRUE);`,
     `$public_route_paths = json_decode(base64_decode('${routes}', TRUE), TRUE);`,
     DRUPAL_ENTITY_INVENTORY_EVAL
@@ -2292,8 +2755,8 @@ function inspectDrupalEntityInventory(projectRoot, environment, fieldOutputMatri
       inventory?.schemaVersion === DRUPAL_ENTITY_INVENTORY_SCHEMA &&
       /^sha256:[a-f0-9]{64}$/.test(String(inventory?.fingerprint ?? '')) &&
       /^sha256:[a-f0-9]{64}$/.test(String(inventory?.publicAuthorUserDigest?.fingerprint ?? '')) &&
-      Array.isArray(inventory?.missingDeclaredRoots) &&
-      inventory.missingDeclaredRoots.length === 0 &&
+      Array.isArray(inventory?.missingLiveRoots) &&
+      inventory.missingLiveRoots.length === 0 &&
       Number(inventory?.missingManagedFileCount ?? 0) === 0 &&
       !authorDigestError &&
       typeErrors.length === 0;
@@ -2302,7 +2765,7 @@ function inspectDrupalEntityInventory(projectRoot, environment, fieldOutputMatri
       confirmed,
       reason: confirmed
         ? ''
-        : `Drupal entity inventory was incomplete${typeErrors.length ? ` for: ${typeErrors.join(', ')}` : ''}${authorDigestError ? '; public author digest failed' : ''}${Array.isArray(inventory?.missingDeclaredRoots) && inventory.missingDeclaredRoots.length ? `; declared roots were missing: ${inventory.missingDeclaredRoots.join(', ')}` : ''}${Number(inventory?.missingManagedFileCount ?? 0) > 0 ? `; ${inventory.missingManagedFileCount} managed files were unreadable` : ''}.`
+        : `Drupal entity inventory was incomplete${typeErrors.length ? ` for: ${typeErrors.join(', ')}` : ''}${authorDigestError ? '; public author digest failed' : ''}${Array.isArray(inventory?.missingLiveRoots) && inventory.missingLiveRoots.length ? `; live-derived roots were missing: ${inventory.missingLiveRoots.join(', ')}` : ''}${Number(inventory?.missingManagedFileCount ?? 0) > 0 ? `; ${inventory.missingManagedFileCount} managed files were unreadable` : ''}.`
     };
   } catch {
     return {
@@ -2366,6 +2829,142 @@ function safeExistingProjectDirectory(projectRoot, candidate) {
   } catch {
     return '';
   }
+}
+
+function nonEmptyPacketFile(packetDir, reference, { requireFragment = false, evidenceOnly = false } = {}) {
+  const text = String(reference ?? '').trim();
+  const hashIndex = text.indexOf('#');
+  const relativePath = (hashIndex === -1 ? text : text.slice(0, hashIndex)).replaceAll('\\', '/');
+  const fragment = hashIndex === -1 ? '' : text.slice(hashIndex + 1).trim();
+  if (
+    !relativePath ||
+    isAbsolute(relativePath) ||
+    relativePath.split('/').includes('..') ||
+    (requireFragment && !fragment) ||
+    (requireFragment && relativePath === 'drupal-readback.json' && fragment.startsWith('liveSurfaceReconciliation')) ||
+    (evidenceOnly && !relativePath.startsWith('evidence/'))
+  ) {
+    return false;
+  }
+  const packetRoot = resolve(packetDir);
+  const candidate = resolve(packetRoot, relativePath);
+  if (!pathIsInside(packetRoot, candidate) || !existsSync(candidate)) {
+    return false;
+  }
+  try {
+    const realPacketRoot = realpathSync(packetRoot);
+    const realCandidate = realpathSync(candidate);
+    return pathIsInside(realPacketRoot, realCandidate) && statSync(realCandidate).isFile() && statSync(realCandidate).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, packetDir) {
+  const errors = [];
+  const push = (message) => {
+    if (errors.length < 200) {
+      errors.push(message);
+    } else if (errors.length === 200) {
+      errors.push('Live public-surface reconciliation produced more than 200 errors; remaining errors were bounded.');
+    }
+  };
+  if (liveInventory?.confirmed !== true) {
+    push(liveInventory?.reason || 'The live-derived Drupal public-surface inventory did not complete.');
+    return errors;
+  }
+  if (!reconciliation || typeof reconciliation !== 'object' || Array.isArray(reconciliation)) {
+    push('drupal-readback.json liveSurfaceReconciliation must be an object.');
+    return errors;
+  }
+  if (reconciliation.schemaVersion !== 'public-kit.live-surface-reconciliation.1') {
+    push('drupal-readback.json liveSurfaceReconciliation must use schemaVersion public-kit.live-surface-reconciliation.1.');
+  }
+  if (reconciliation.reconciliationComplete !== true || (Array.isArray(reconciliation.blockers) && reconciliation.blockers.length > 0)) {
+    push('drupal-readback.json liveSurfaceReconciliation must be complete with no blockers.');
+  }
+  if (String(reconciliation.inventoryFingerprint ?? '') !== String(liveInventory.fingerprint ?? '')) {
+    push('drupal-readback.json liveSurfaceReconciliation inventoryFingerprint does not match the current live-derived Drupal surface.');
+  }
+  const expectedCounts = liveInventory?.countsByKind && typeof liveInventory.countsByKind === 'object'
+    ? liveInventory.countsByKind
+    : {};
+  const recordedCounts = reconciliation?.countsByKind && typeof reconciliation.countsByKind === 'object'
+    ? reconciliation.countsByKind
+    : {};
+  const normalizedCounts = (counts) => Object.fromEntries(
+    Object.entries(counts)
+      .map(([kind, count]) => [String(kind), Number(count)])
+      .sort(([left], [right]) => comparePortable(left, right))
+  );
+  if (JSON.stringify(normalizedCounts(recordedCounts)) !== JSON.stringify(normalizedCounts(expectedCounts))) {
+    push('drupal-readback.json liveSurfaceReconciliation countsByKind does not exactly match the live-derived Drupal surface.');
+  }
+
+  const declarations = Array.isArray(reconciliation.declarations) ? reconciliation.declarations : [];
+  const exclusions = Array.isArray(reconciliation.exclusions) ? reconciliation.exclusions : [];
+  const liveItems = Array.isArray(liveInventory.items) ? liveInventory.items : [];
+  const liveByKey = new Map(liveItems.map((item) => [String(item?.key ?? ''), item]));
+  const declaredByKey = new Map();
+  const excludedByKey = new Map();
+  for (const [index, declaration] of declarations.entries()) {
+    const key = String(declaration?.key ?? '').trim();
+    if (!key || declaredByKey.has(key)) {
+      push(`drupal-readback.json liveSurfaceReconciliation declarations[${index}] has a missing or duplicate key.`);
+      continue;
+    }
+    declaredByKey.set(key, declaration);
+    const references = Array.isArray(declaration?.packetReferences) ? declaration.packetReferences : [];
+    if (
+      references.length === 0 ||
+      references.some((reference) => !nonEmptyPacketFile(packetDir, reference, { requireFragment: true }))
+    ) {
+      push(`Declared live surface ${key} must reference a non-empty packet artifact and a specific section using file#fragment.`);
+    }
+  }
+  for (const [index, exclusion] of exclusions.entries()) {
+    const key = String(exclusion?.key ?? '').trim();
+    if (!key || excludedByKey.has(key)) {
+      push(`drupal-readback.json liveSurfaceReconciliation exclusions[${index}] has a missing or duplicate key.`);
+      continue;
+    }
+    excludedByKey.set(key, exclusion);
+    const evidence = Array.isArray(exclusion?.evidence) ? exclusion.evidence : [];
+    if (
+      !String(exclusion?.owner ?? '').trim() ||
+      !String(exclusion?.rationale ?? '').trim() ||
+      evidence.length === 0 ||
+      evidence.some((reference) => !nonEmptyPacketFile(packetDir, reference, { evidenceOnly: true }))
+    ) {
+      push(`Excluded live surface ${key} requires a named owner, rationale, and non-empty packet-local evidence under evidence/.`);
+    }
+  }
+
+  for (const [key, item] of liveByKey) {
+    const declaration = declaredByKey.get(key);
+    const exclusion = excludedByKey.get(key);
+    if (!declaration && !exclusion) {
+      push(`Live-only ${item?.kind || 'surface'} ${key} is omitted from drupal-readback.json liveSurfaceReconciliation.`);
+      continue;
+    }
+    if (declaration && exclusion) {
+      push(`Live surface ${key} is both declared and excluded; it must have exactly one disposition.`);
+      continue;
+    }
+    if (declaration && (item?.publicSurface === false || item?.publicEditorialRoot === false)) {
+      push(`Live surface ${key} is classified non-public and therefore requires an owned evidence-backed exclusion, not a declaration.`);
+    }
+    const disposition = declaration ?? exclusion;
+    if (String(disposition?.kind ?? '') !== String(item?.kind ?? '')) {
+      push(`Live surface ${key} has kind ${item?.kind || '(missing)'} but the packet records ${disposition?.kind || '(missing)'}.`);
+    }
+  }
+  for (const [key] of [...declaredByKey, ...excludedByKey]) {
+    if (!liveByKey.has(key)) {
+      push(`Packet-only live surface ${key} is not present in the current Drupal census.`);
+    }
+  }
+  return errors;
 }
 
 function ddevDocroot(projectRoot) {
@@ -2725,6 +3324,20 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
       configSyncDirectory: '',
       configManifest: null,
       configSplitDirectories: [],
+      liveSurfaceInventory: {
+        bounded: true,
+        confirmed: false,
+        countsByKind: {},
+        errors: [],
+        fingerprint: '',
+        itemCount: 0,
+        items: [],
+        limit: DRUPAL_LIVE_SURFACE_LIMIT,
+        publicEditorialRoots: {},
+        reason: 'Drupal runtime is unavailable.',
+        schemaVersion: DRUPAL_LIVE_SURFACE_SCHEMA,
+        truncated: false
+      },
       drushCommandFailures: [],
       entityInventory: {
         confirmed: false,
@@ -2777,9 +3390,11 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     drupalRoot,
     runtimeFacts?.configSplitDirectories
   );
+  const liveSurfaceInventory = inspectDrupalLiveSurface(projectRoot, environment);
   const entityInventory = inspectDrupalEntityInventory(
     projectRoot,
     environment,
+    liveSurfaceInventory,
     fieldOutputMatrix,
     routeMatrix,
     patternMap
@@ -2817,6 +3432,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, routeMatrix, 
     configSplitDirectories: trackedConfig.configSplitDirectories,
     drupalRoot,
     entityInventory,
+    liveSurfaceInventory,
     runtimeFacts,
     drushCommandFailures,
     frontPage,
@@ -3933,6 +4549,15 @@ export async function verifyLive({
     }
   }
 
+  const surfaceReconciliationErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'liveSurfaceInventory')
+    ? liveSurfaceReconciliationErrors(
+      inspectedDrupalRuntime.liveSurfaceInventory,
+      drupalReadback?.liveSurfaceReconciliation,
+      absolutePacketDir
+    )
+    : [];
+  liveErrors.push(...surfaceReconciliationErrors);
+
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
@@ -4022,6 +4647,12 @@ export async function verifyLive({
   if (!inspectedDrupalRuntime.configManifest?.entryCount) {
     stateBlockers.push('Current tracked configuration tree is unavailable for state fingerprinting.');
   }
+  if (inspectedDrupalRuntime.liveSurfaceInventory?.confirmed !== true) {
+    stateBlockers.push(inspectedDrupalRuntime.liveSurfaceInventory?.reason || 'Drupal live public-surface inventory is unavailable.');
+  }
+  if (surfaceReconciliationErrors.length > 0) {
+    stateBlockers.push('The current live-derived Drupal public surface is not exactly reconciled to packet declarations or owned exclusions.');
+  }
   if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
     stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
   }
@@ -4044,7 +4675,9 @@ export async function verifyLive({
       entityTypeCount: inspectedDrupalRuntime.entityInventory?.entityTypeCount ?? 0,
       closureCounts: inspectedDrupalRuntime.entityInventory?.closureCounts ?? {},
       excludedEntityTypes: inspectedDrupalRuntime.entityInventory?.excludedEntityTypes ?? {},
-      missingDeclaredRoots: inspectedDrupalRuntime.entityInventory?.missingDeclaredRoots ?? [],
+      liveSurfaceCountsByKind: inspectedDrupalRuntime.liveSurfaceInventory?.countsByKind ?? {},
+      liveSurfaceFingerprint: inspectedDrupalRuntime.liveSurfaceInventory?.fingerprint ?? '',
+      missingLiveRoots: inspectedDrupalRuntime.entityInventory?.missingLiveRoots ?? [],
       missingManagedFileCount: inspectedDrupalRuntime.entityInventory?.missingManagedFileCount ?? 0,
       policy: inspectedDrupalRuntime.entityInventory?.policy ?? {},
       publicAuthorUserDigest: inspectedDrupalRuntime.entityInventory?.publicAuthorUserDigest ?? {},
