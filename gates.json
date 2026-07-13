@@ -7,6 +7,8 @@
     "blind-verifier": "A blind reviewer context that did not build the target records this gate's evidence from the brief, target, and source-of-truth materials only; its independence declarations are builder-writable and reported as self-attested."
   },
   "reviewPacketFiles": [
+    "build-input.json",
+    "brief-acceptance.json",
     "source-audit.json",
     "pattern-map.json",
     "recipe-start-point.md",

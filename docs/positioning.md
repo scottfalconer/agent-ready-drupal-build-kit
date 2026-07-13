@@ -4,7 +4,7 @@ This kit is for developers and teams who want to try Drupal CMS with an AI codin
 
 It is especially for Drupal-curious developers, designers, agencies, and site builders who know an existing site could use a stronger CMS but do not want a blank Drupal install, a pile of unfamiliar terms, or an AI-generated static mimic.
 
-The promise is simple: bring a source site and a local coding agent. The kit tells the agent how to build a real Drupal CMS site, show its work, and leave evidence a Drupal expert can inspect.
+The promise is simple: by default, bring a source site and a local coding agent. If there is no source site, bring a written brief instead. The kit tells the agent how to build a real Drupal CMS site, show its work, and leave evidence a Drupal expert can inspect.
 
 It is not trying to make every website a Drupal project. It is for sites that already need a serious CMS: structured content, editorial ownership, search and SEO, accessibility, privacy, integrations, governance, and a path a Drupal maintainer can stand behind.
 
@@ -65,7 +65,7 @@ Without the kit, an agent may:
 With the kit, the agent is instructed to:
 
 - build an actual Drupal CMS site with DDEV and `drupal/cms`;
-- start from source audit and pattern map before import;
+- start from a source audit and pattern map before import, or from preserved, testable brief requirements when no source exists;
 - use Drupal-native primitives first;
 - record the installed substrate and evaluate bounded Drupal CMS Recipes before custom overlays;
 - record durable intent for load-bearing decisions;
@@ -95,6 +95,7 @@ The most valuable output is often not the local site by itself. It is the combin
 Use this kit when:
 
 - an existing public site needs to be rebuilt or replatformed onto Drupal CMS;
+- a new Drupal CMS site needs to be built from a clear brief without pretending a source site exists;
 - the team wants an agent to create a strong first pass but still expects human review;
 - content structure, editorial workflow, SEO, accessibility, privacy, integrations, redirects, or governance matter;
 - you need to compare a potential rebuild approach before committing a full team;
@@ -107,7 +108,7 @@ Do not use this kit when:
 - you need a same-day production launch without maintainer review;
 - the target should not be Drupal CMS;
 - the site is intentionally static and has no meaningful editorial workflow;
-- you are not allowed to inspect or rebuild the source site;
+- you are not allowed to inspect or rebuild the selected source site and do not have an authorized brief-only path;
 - no one will review the Drupal architecture before using it.
 
 ## The Human Value

@@ -1,6 +1,6 @@
 # Agent-Ready Build Kit for Drupal CMS
 
-**Give your coding agent a source URL. Get back a real, editable Drupal CMS site.**
+**Give your coding agent a source URL—or, when you do not have one, a brief. Get back a real, editable Drupal CMS site.**
 
 ## Copy This Prompt
 
@@ -21,11 +21,28 @@ Prerequisite: macOS or Linux. On macOS, start Docker Desktop or OrbStack. After 
 
 Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. The agent should stop only for a genuinely human decision or something it cannot access, such as private source content or external credentials.
 
+### No source site? Use a brief
+
+The source-site prompt above is useful if you're coming from an existing site, but if the project starts from requirements instead, save the brief as a local file, change only the `Brief` line, and use this prompt:
+
+```text
+Build the site described in the brief below as a complete local Drupal CMS site.
+
+Brief: [BRIEF_FILE]
+Build kit: https://github.com/scottfalconer/agent-ready-drupal-build-kit
+
+Use the build kit as your instructions and handle all setup yourself. If needed, use its recommended One Line Installer path. Work in exactly one Drupal project, install and initialize the kit in brief mode, then continue until the real Drupal site passes the kit's verification.
+
+As soon as the first meaningful brief-defined route works, share its DDEV URL with me, then continue. Preserve the original brief, verify every accepted requirement, and do not claim source-site parity.
+```
+
+Brief mode does not ask the user to manufacture a source URL. The agent preserves the supplied file, translates it into stable acceptance requirements, records assumptions and out-of-scope items, and verifies the target against that contract. It authorizes a distinct `complete-local-build-from-brief` claim, never a source-parity claim.
+
 The result is not a screenshot, static export, or CMS-shaped demo. It is a real Drupal CMS project running locally, built to look, function, and edit like a site another developer could stand behind.
 
 ## What The Agent Does
 
-The kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS rebuild: real public content, source-shaped content structures, source-like visual design, public routes and functionality, editorial workflows, and a review packet that explains the work.
+The kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS site: real public content, appropriate content structures and visual design, public routes and functionality, editorial workflows, and a review packet that explains the work. With a source site, those decisions are checked for parity; with a brief, they are checked against explicit accepted requirements.
 
 For a new project, the agent uses the official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) to create the one Drupal project it will rebuild. The current installer supports macOS and Linux. It chooses **Drupal CMS** and the current coding agent, then treats the resulting DDEV project as the rebuild target rather than creating another site beside or inside it.
 
@@ -60,16 +77,16 @@ For optional companion Agent Skills, see [docs/recommended-agent-skills.md](docs
 
 This kit is for developers, designers, agencies, and site builders who want to try Drupal CMS without becoming Drupal-fluent first.
 
-You bring a site to study and the prerequisites above. The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
+You bring a site to study or a local brief and the prerequisites above. The kit gives your agent the Drupal operating model: how to choose Drupal-native structures, how to record important decisions, how to keep evidence attached, and how to leave behind a reviewable handoff packet.
 
 Already fluent in Drupal? Use this as a repeatable agent workflow and review harness.
 
 ## What The Agent Produces
 
 - A local Drupal CMS site you can open in your browser.
-- Real public content and media needed for the rebuild, modeled as Drupal content and Media entities.
-- Source-like visual design: palette, typography, spacing, layout, components, and responsive behavior.
-- Source-like public functionality: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where reachable.
+- Real public content and media required by the active source or brief, modeled as Drupal content and Media entities.
+- Source-like visual design in source-site mode, or brief-defined visual design in brief mode: palette, typography, spacing, layout, components, and responsive behavior.
+- Source-like public functionality in source-site mode, or brief-defined functionality in brief mode: routes, navigation, listings, detail pages, search, forms, embeds, and integrations where applicable.
 - Drupal-native content structure: content types, fields, media, menus, Views, taxonomy, aliases, and editor forms where appropriate.
 - Pages editors can actually maintain: each flexible page declares which Drupal tool owns its composition (Canvas/Experience Builder, Layout Builder, Views, structured content, or a documented exception), proven with a non-admin editor account.
 - Version-controlled config as the source of truth, plus evidence another developer can inspect: route-by-route comparisons, rendered SEO output, browser evidence, and an inventory of any custom code or hardcoded behavior.
@@ -102,7 +119,7 @@ Every run asks:
 
 The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
-This is a complete-local-rebuild machine bar, not production or human approval. The default verifier can authorize that local machine claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+This is a typed local-completion machine bar, not production or human approval: `complete-local-rebuild` for source-site mode and `complete-local-build-from-brief` for brief mode. The default verifier can authorize only the active mode's claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
 
 ## After The First Verification
 
@@ -138,7 +155,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 
 ## Rights
 
-Use this kit only with sites you are allowed to inspect and rebuild. The agent assumes the source URL you provide is authorized for a public-facing local rebuild; it does not adjudicate rights for you.
+Use this kit only with source sites and brief materials you are allowed to use. The agent assumes the source URL you provide is authorized for a public-facing local rebuild; it does not adjudicate rights for you.
 
 ## License
 

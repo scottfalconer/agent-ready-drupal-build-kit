@@ -60,6 +60,15 @@
       "nextFix": ""
     }
   ],
+  "briefRequirementChecks": [
+    {
+      "requirementId": "",
+      "targetRoutes": [],
+      "falsificationChecks": [],
+      "status": "pass | fail | blocked",
+      "evidence": []
+    }
+  ],
   "perRouteItemCounts": [
     {
       "sourceRoute": "",

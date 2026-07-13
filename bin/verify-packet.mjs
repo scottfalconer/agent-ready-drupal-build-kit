@@ -336,7 +336,10 @@ function compositionOwnersMatch(declared, actual) {
 }
 
 function authoredCompletionClaim(record) {
-  return isJsonObject(record?.summary) && record.summary.completeLocalRebuildClaimAllowed === true;
+  return isJsonObject(record?.summary) && (
+    record.summary.completeLocalRebuildClaimAllowed === true ||
+    record.summary.completeLocalBuildFromBriefClaimAllowed === true
+  );
 }
 
 function normalizeRouteKey(value) {
@@ -423,6 +426,71 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   } catch {
     return false;
   }
+}
+
+async function fileSha256(path) {
+  return `sha256:${createHash('sha256').update(await readFile(path)).digest('hex')}`;
+}
+
+async function validateBuildInput(packetDir, buildInput, routeMatrix, errors) {
+  const context = {
+    briefPath: '',
+    briefSha256: '',
+    mode: 'source_site'
+  };
+  if (!isJsonObject(buildInput)) {
+    errors.push('build-input.json must be a JSON object.');
+    return context;
+  }
+  if (buildInput.schemaVersion !== 'public-kit.build-input.1') {
+    errors.push('build-input.json must use schemaVersion public-kit.build-input.1.');
+  }
+  if (!['source_site', 'brief'].includes(buildInput.mode)) {
+    errors.push('build-input.json mode must be source_site or brief.');
+    return context;
+  }
+  context.mode = buildInput.mode;
+
+  if (buildInput.mode === 'source_site') {
+    const inputSource = String(buildInput.sourceUrl ?? '').trim();
+    if (inputSource && !httpUrl(inputSource)) {
+      errors.push('build-input.json sourceUrl must be a valid credential-free HTTP(S) URL when present.');
+    }
+    const routeSource = String(routeMatrix?.sourceBaseUrl ?? '').trim();
+    if (inputSource && routeSource && httpUrl(inputSource)?.origin !== httpUrl(routeSource)?.origin) {
+      errors.push('build-input.json sourceUrl must match route-matrix.json sourceBaseUrl.');
+    }
+    if (buildInput.brief !== null) {
+      errors.push('build-input.json source_site mode must set brief to null.');
+    }
+    return context;
+  }
+
+  if (String(buildInput.sourceUrl ?? '').trim()) {
+    errors.push('build-input.json brief mode must not declare sourceUrl.');
+  }
+  const brief = buildInput.brief;
+  if (!isJsonObject(brief) || !String(brief.path ?? '').trim() || !HASH_RE.test(String(brief.sha256 ?? ''))) {
+    errors.push('build-input.json brief mode requires brief.path and a sha256 brief.sha256 value.');
+    return context;
+  }
+  const briefPath = resolveReviewEvidencePath(packetDir, packetDir, brief.path);
+  if (!briefPath || basename(briefPath) !== 'original-brief.md') {
+    errors.push('build-input.json brief.path must reference packet-local original-brief.md.');
+    return context;
+  }
+  const briefStat = await stat(briefPath);
+  if (!briefStat.isFile() || briefStat.size === 0) {
+    errors.push('The preserved original brief must be a non-empty regular file.');
+    return context;
+  }
+  const actualSha256 = await fileSha256(briefPath);
+  if (actualSha256 !== brief.sha256) {
+    errors.push('build-input.json brief.sha256 does not match the preserved original brief bytes.');
+  }
+  context.briefPath = briefPath;
+  context.briefSha256 = actualSha256;
+  return context;
 }
 
 async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
@@ -1828,7 +1896,13 @@ async function independentStructuredGateReasons({
   return reasons;
 }
 
-async function validateIndependentVerification(packetDir, independentVerification, relatedRecords, errors) {
+async function validateIndependentVerification(
+  packetDir,
+  independentVerification,
+  relatedRecords,
+  errors,
+  { briefAcceptance = null, briefMode = false } = {}
+) {
   if (!isJsonObject(independentVerification)) {
     errors.push('independent-verification.json must be a JSON object (blocked stub at minimum).');
     return false;
@@ -1941,11 +2015,47 @@ async function validateIndependentVerification(packetDir, independentVerificatio
     errors.push('independent-verification.json pass verdict requires raw verifier evidence under review-packet/evidence/independent-verification/.');
   }
 
-  const structuredGateReasons = await independentStructuredGateReasons({
-    ...relatedRecords,
-    independentVerification,
-    packetDir
-  });
+  const structuredGateReasons = [];
+  if (briefMode) {
+    const requirementIds = new Set(
+      arrayOrEmpty(briefAcceptance?.requirements)
+        .map((requirement) => String(requirement?.id ?? '').trim())
+        .filter(Boolean)
+    );
+    const seenRequirementIds = new Set();
+    const checks = arrayOrEmpty(independentVerification.briefRequirementChecks)
+      .filter((check) => String(check?.requirementId ?? '').trim());
+    for (const [index, check] of checks.entries()) {
+      const requirementId = String(check.requirementId).trim();
+      if (!requirementIds.has(requirementId)) {
+        errors.push(`independent-verification.json briefRequirementChecks[${index}] references unknown requirement ${requirementId}.`);
+      }
+      if (seenRequirementIds.has(requirementId)) {
+        errors.push(`independent-verification.json repeats brief requirement ${requirementId}.`);
+      }
+      seenRequirementIds.add(requirementId);
+      if (check.status !== 'pass' || arrayOrEmpty(check.falsificationChecks).length === 0) {
+        errors.push(`independent-verification.json brief requirement ${requirementId} needs passing falsification checks.`);
+      }
+      const evidenceResults = await Promise.all(
+        arrayOrEmpty(check.evidence).map((reference) => nonEmptyPacketEvidence(packetDir, reference))
+      );
+      if (evidenceResults.length === 0 || !evidenceResults.every(Boolean)) {
+        errors.push(`independent-verification.json brief requirement ${requirementId} needs non-empty packet-local evidence.`);
+      }
+    }
+    for (const requirementId of requirementIds) {
+      if (!seenRequirementIds.has(requirementId)) {
+        errors.push(`independent-verification.json must independently check brief requirement ${requirementId}.`);
+      }
+    }
+  } else {
+    structuredGateReasons.push(...await independentStructuredGateReasons({
+      ...relatedRecords,
+      independentVerification,
+      packetDir
+    }));
+  }
 
   return errors.length === startingErrorCount && structuredGateReasons.length === 0;
 }
@@ -1957,13 +2067,19 @@ function rejectAuthoredCompletionClaims(independentVerification, blindReview, er
   ]) {
     if (authoredCompletionClaim(record)) {
       errors.push(
-        `${file} cannot set summary.completeLocalRebuildClaimAllowed=true; completion authority belongs only to the live verifier.`
+        `${file} cannot self-authorize a completion claim; completion authority belongs only to the live verifier.`
       );
     }
   }
 }
 
-async function validateBlindAdversarialReview(packetDir, blindReview, routeMatrix, errors) {
+async function validateBlindAdversarialReview(
+  packetDir,
+  blindReview,
+  routeMatrix,
+  errors,
+  { briefAcceptance = null, briefContext = null, briefMode = false } = {}
+) {
   if (!isJsonObject(blindReview)) {
     errors.push('blind-adversarial-review.json must be a JSON object (blocked stub at minimum).');
     return false;
@@ -1998,7 +2114,7 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
 
   const declaredSourceUrl = httpUrl(routeMatrix?.sourceBaseUrl);
   const declaredTargetUrl = httpUrl(routeMatrix?.targetBaseUrl);
-  if (!declaredSourceUrl || !declaredTargetUrl) {
+  if ((!briefMode && !declaredSourceUrl) || !declaredTargetUrl) {
     errors.push('blind-adversarial-review.json completion evidence requires valid route-matrix sourceBaseUrl and targetBaseUrl values.');
   }
 
@@ -2184,12 +2300,30 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
         `blind-adversarial-review.json routeViewportReviews[${index}] must have verdict good or good_enough for completion.`
       );
     }
-    const reviewSourceUrl = httpUrl(review.sourceTruthReference);
     const reviewTargetUrl = httpUrl(review.targetUrlOrArtifact);
-    if (!reviewSourceUrl || (declaredSourceUrl && reviewSourceUrl.origin !== declaredSourceUrl.origin)) {
-      errors.push(
-        `blind-adversarial-review.json routeViewportReviews[${index}].sourceTruthReference must use the declared source origin.`
+    if (briefMode) {
+      const briefReference = resolveReviewEvidencePath(packetDir, packetDir, review.sourceTruthReference);
+      if (!briefReference || briefReference !== briefContext?.briefPath) {
+        errors.push(
+          `blind-adversarial-review.json routeViewportReviews[${index}].sourceTruthReference must reference the preserved original brief.`
+        );
+      }
+      const requirementIds = new Set(
+        arrayOrEmpty(briefAcceptance?.requirements).map((requirement) => String(requirement?.id ?? '').trim()).filter(Boolean)
       );
+      const reviewedRequirementIds = arrayOrEmpty(review.briefRequirementIds).map((id) => String(id).trim()).filter(Boolean);
+      if (reviewedRequirementIds.length === 0 || reviewedRequirementIds.some((id) => !requirementIds.has(id))) {
+        errors.push(
+          `blind-adversarial-review.json routeViewportReviews[${index}] must name valid briefRequirementIds.`
+        );
+      }
+    } else {
+      const reviewSourceUrl = httpUrl(review.sourceTruthReference);
+      if (!reviewSourceUrl || (declaredSourceUrl && reviewSourceUrl.origin !== declaredSourceUrl.origin)) {
+        errors.push(
+          `blind-adversarial-review.json routeViewportReviews[${index}].sourceTruthReference must use the declared source origin.`
+        );
+      }
     }
     if (!reviewTargetUrl || (declaredTargetUrl && reviewTargetUrl.origin !== declaredTargetUrl.origin)) {
       errors.push(
@@ -2206,7 +2340,8 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
     }
 
     const reviewScreenshotPaths = {};
-    for (const screenshotField of ['sourceScreenshot', 'targetScreenshot']) {
+    const requiredScreenshotFields = briefMode ? ['targetScreenshot'] : ['sourceScreenshot', 'targetScreenshot'];
+    for (const screenshotField of requiredScreenshotFields) {
       const screenshotPath = resolveReviewEvidencePath(packetDir, evidenceDir, review[screenshotField]);
       if (!screenshotPath) {
         errors.push(`blind-adversarial-review.json routeViewportReviews[${index}].${screenshotField} must reference an existing evidence file.`);
@@ -2250,6 +2385,7 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
       }
     }
     if (
+      !briefMode &&
       reviewScreenshotPaths.sourceScreenshot &&
       reviewScreenshotPaths.sourceScreenshot === reviewScreenshotPaths.targetScreenshot
     ) {
@@ -2351,11 +2487,11 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
     const matchingReviews = routeReviews.filter((review) => {
       const routeKey = normalizeRouteRequestKey(review.route);
       const targetKey = normalizeRouteRequestKey(review.targetUrlOrArtifact);
-      const sourceKey = normalizeRouteRequestKey(review.sourceTruthReference);
+      const sourceKey = briefMode ? primaryRoute.source : normalizeRouteRequestKey(review.sourceTruthReference);
       return (
         routeKey === primaryRoute.target &&
         targetKey === primaryRoute.target &&
-        sourceKey === primaryRoute.source
+        (briefMode || sourceKey === primaryRoute.source)
       );
     });
     const coveredDesktop = matchingReviews.some((review) => review.viewport === 'desktop');
@@ -2385,15 +2521,40 @@ async function validateBlindAdversarialReview(packetDir, blindReview, routeMatri
   if ((reviewInputs.sourceOfTruthMaterials ?? []).length === 0) {
     errors.push('blind-adversarial-review.json complete claims require source-of-truth materials from the brief.');
   }
-  const reviewedSourceUrls = arrayOrEmpty(reviewInputs.sourceOfTruthMaterials)
-    .filter((material) => material?.type === 'source_site')
-    .map((material) => httpUrl(material?.reference))
-    .filter(Boolean);
-  if (
-    reviewedSourceUrls.length === 0 ||
-    (declaredSourceUrl && reviewedSourceUrls.some((url) => url.origin !== declaredSourceUrl.origin))
-  ) {
-    errors.push('blind-adversarial-review.json reviewInputs.sourceOfTruthMaterials must include the declared source-site origin.');
+  if (briefMode) {
+    const briefMaterials = arrayOrEmpty(reviewInputs.sourceOfTruthMaterials).filter((material) => {
+      if (!['written_spec', 'design_file', 'screenshot', 'content_inventory', 'brand_guide', 'other'].includes(material?.type)) {
+        return false;
+      }
+      return resolveReviewEvidencePath(packetDir, packetDir, material?.reference) === briefContext?.briefPath;
+    });
+    if (briefMaterials.length === 0) {
+      errors.push('blind-adversarial-review.json brief mode must include the preserved original brief as a written source-of-truth material.');
+    }
+    const requiredIds = new Set(
+      arrayOrEmpty(briefAcceptance?.requirements).map((requirement) => String(requirement?.id ?? '').trim()).filter(Boolean)
+    );
+    const acceptedCriteria = new Set(
+      arrayOrEmpty(reviewInputs.acceptanceCriteria).map((criterion) =>
+        typeof criterion === 'string' ? criterion.trim().split(/\s+/, 1)[0] : String(criterion?.id ?? '').trim()
+      ).filter(Boolean)
+    );
+    for (const requirementId of requiredIds) {
+      if (!acceptedCriteria.has(requirementId)) {
+        errors.push(`blind-adversarial-review.json acceptanceCriteria must include brief requirement ${requirementId}.`);
+      }
+    }
+  } else {
+    const reviewedSourceUrls = arrayOrEmpty(reviewInputs.sourceOfTruthMaterials)
+      .filter((material) => material?.type === 'source_site')
+      .map((material) => httpUrl(material?.reference))
+      .filter(Boolean);
+    if (
+      reviewedSourceUrls.length === 0 ||
+      (declaredSourceUrl && reviewedSourceUrls.some((url) => url.origin !== declaredSourceUrl.origin))
+    ) {
+      errors.push('blind-adversarial-review.json reviewInputs.sourceOfTruthMaterials must include the declared source-site origin.');
+    }
   }
 
   return errors.length === startingErrorCount;
@@ -2981,7 +3142,7 @@ function referenceSlug(value) {
     .replace(/^-+|-+$/g, '');
 }
 
-function humanDecisionPresentationAssessment({ decisions, offRoad, records }) {
+function humanDecisionPresentationAssessment({ briefMode = false, decisions, offRoad, records }) {
   const structuralReasons = [];
   const contradictionReasons = [];
   const decisionRows = markdownDecisionRows(decisions);
@@ -3004,7 +3165,10 @@ function humanDecisionPresentationAssessment({ decisions, offRoad, records }) {
     'resolved'
   ]);
   const openDecisionStatuses = new Set(['blocked', 'deferred', 'open', 'pending']);
-  const identityComplete = ['Source URL', 'Target site name', 'Target workspace', 'Date'].every((field) =>
+  const identityFields = briefMode
+    ? ['Build basis', 'Brief file', 'Target site name', 'Target workspace', 'Date']
+    : ['Source URL', 'Target site name', 'Target workspace', 'Date'];
+  const identityComplete = identityFields.every((field) =>
     resolvedMarkdownField(decisions, field)
   );
   const summariesComplete = summaryFields.every((field) => resolvedMarkdownField(decisions, field));
@@ -3275,7 +3439,7 @@ function recordedHumanGateAssessment(texts) {
   };
 }
 
-async function markdownCompletionReadiness(packetDir, records = {}) {
+async function markdownCompletionReadiness(packetDir, records = {}, { briefMode = false } = {}) {
   const reasons = [];
   const texts = Object.fromEntries(
     await Promise.all(
@@ -3300,8 +3464,11 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
     'Retain another existing Drupal CMS substrate and extend it without replacing it.',
     'Use bounded custom overlays because maintained Recipes do not fit the audited source patterns.'
   ].filter((choice) => checkedStatement(recipe, choice));
+  const recipeIdentityFields = briefMode
+    ? ['Build basis', 'Brief file', 'Target site name', 'Target workspace', 'Decision date', 'Decision owner']
+    : ['Source URL', 'Target site name', 'Target workspace', 'Decision date', 'Decision owner'];
   if (
-    ['Source URL', 'Target site name', 'Target workspace', 'Decision date', 'Decision owner'].some(
+    recipeIdentityFields.some(
       (field) => !markdownField(recipe, field)
     ) ||
     selectedStartPoints.length !== 1 ||
@@ -3314,9 +3481,15 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
   }
 
   const gaps = texts['scoped-gap-list.md'];
+  const gapIdentityFields = briefMode
+    ? ['Build basis', 'Brief file', 'Target site name', 'Target workspace', 'Date']
+    : ['Source URL', 'Target site name', 'Target workspace', 'Date'];
+  const expectedGapStatus = briefMode
+    ? /^Overall status:\s*`?(?:complete-local-build-from-brief|local-complete)`?\s*$/mi
+    : /^Overall status:\s*`?(?:complete-local-rebuild|local-complete)`?\s*$/mi;
   if (
-    ['Source URL', 'Target site name', 'Target workspace', 'Date'].some((field) => !markdownField(gaps, field)) ||
-    !/^Overall status:\s*`?(?:complete-local-rebuild|local-complete)`?\s*$/mi.test(gaps) ||
+    gapIdentityFields.some((field) => !markdownField(gaps, field)) ||
+    !expectedGapStatus.test(gaps) ||
     unresolvedMarkdownUnknown(gaps) ||
     blockedTableRow(gaps)
   ) {
@@ -3325,7 +3498,7 @@ async function markdownCompletionReadiness(packetDir, records = {}) {
 
   const decisions = texts['open-decisions.md'];
   const offRoad = texts['off-road-inventory.md'];
-  const decisionPresentation = humanDecisionPresentationAssessment({ decisions, offRoad, records });
+  const decisionPresentation = humanDecisionPresentationAssessment({ briefMode, decisions, offRoad, records });
   reasons.push(...decisionPresentation.reasons);
 
   if (
@@ -4763,6 +4936,275 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   };
 }
 
+async function briefPacketCompletionReadiness(
+  packetDir,
+  gates,
+  records,
+  briefContext,
+  { blindAdversarialReviewSupportsCompletion = false, independentVerificationSupportsCompletion = false } = {}
+) {
+  const reasons = [];
+  const markdownAssessment = await markdownCompletionReadiness(packetDir, records, { briefMode: true });
+  if (!gates) {
+    return {
+      packetCompletionReady: false,
+      reasons: ['gates.json is unavailable.'],
+      humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+      recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+    };
+  }
+
+  const {
+    blindAdversarialReview,
+    briefAcceptance,
+    browserEvidence,
+    drupalReadback,
+    fieldOutputMatrix,
+    independentVerification,
+    negativeRouteConsent,
+    nextCycleVerification,
+    patternMap,
+    routeMatrix
+  } = records;
+  reasons.push(...markdownAssessment.reasons);
+  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
+
+  if (briefContext?.mode !== 'brief' || !briefContext?.briefPath || !briefContext?.briefSha256) {
+    reasons.push('build-input.json must bind brief mode to a preserved packet-local original brief.');
+  }
+  const requirements = arrayOrEmpty(briefAcceptance?.requirements)
+    .filter((requirement) => String(requirement?.id ?? '').trim());
+  const requirementIds = new Set();
+  const declaredTargetRoutes = new Set(
+    arrayOrEmpty(routeMatrix?.routes).map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean)
+  );
+  if (
+    briefAcceptance?.schemaVersion !== 'public-kit.brief-acceptance.1' ||
+    briefAcceptance?.briefSha256 !== briefContext?.briefSha256 ||
+    isoTimestamp(briefAcceptance?.checkedAt) === null ||
+    requirements.length === 0 ||
+    arrayOrEmpty(briefAcceptance?.blockers).length > 0
+  ) {
+    reasons.push('brief-acceptance.json must bind the preserved brief, include a UTC check time and requirements, and have no blockers.');
+  }
+  const requirementCategories = new Set([
+    'route', 'content', 'design', 'functionality', 'editorial', 'integration', 'accessibility', 'seo', 'other'
+  ]);
+  for (const [index, requirement] of requirements.entries()) {
+    const id = String(requirement.id).trim();
+    if (!/^BR-[A-Z0-9][A-Z0-9._-]*$/.test(id) || requirementIds.has(id)) {
+      reasons.push(`brief-acceptance.json requirements[${index}] needs a unique stable BR- identifier.`);
+    }
+    requirementIds.add(id);
+    const targetRoutes = arrayOrEmpty(requirement.targetRoutes).map(normalizeRouteRequestKey).filter(Boolean);
+    const evidenceResults = await Promise.all(
+      arrayOrEmpty(requirement.evidence).map((reference) => nonEmptyPacketEvidence(packetDir, reference))
+    );
+    if (
+      !String(requirement.requirement ?? '').trim() ||
+      !requirementCategories.has(requirement.category) ||
+      arrayOrEmpty(requirement.acceptanceChecks).length === 0 ||
+      requirement.status !== 'pass' ||
+      evidenceResults.length === 0 ||
+      !evidenceResults.every(Boolean) ||
+      (targetRoutes.length === 0 && !['integration', 'other'].includes(requirement.category)) ||
+      targetRoutes.some((route) => !declaredTargetRoutes.has(route))
+    ) {
+      reasons.push(`Brief requirement ${id || `(row ${index})`} must be explicit, passed, route-bound where applicable, and backed by packet-local evidence.`);
+    }
+  }
+  if (arrayOrEmpty(briefAcceptance?.assumptions).some((assumption) =>
+    assumption?.status === 'owner_decision_required' || !String(assumption?.id ?? '').trim() || !String(assumption?.assumption ?? '').trim()
+  )) {
+    reasons.push('brief-acceptance.json assumptions must be identified and resolved or recorded without owner-decision blockers.');
+  }
+
+  const targetBaseUrl = httpUrl(routeMatrix?.targetBaseUrl);
+  const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
+  const routeRows = arrayOrEmpty(routeMatrix?.routes);
+  if (!targetBaseUrl || String(routeMatrix?.sourceBaseUrl ?? '').trim()) {
+    reasons.push('Brief mode route-matrix.json must declare targetBaseUrl and leave sourceBaseUrl empty.');
+  }
+  if (primaryRoutes.length === 0) {
+    reasons.push('Brief mode route-matrix.json must declare at least one primary target route.');
+  }
+  const primaryRouteRequirements = new Map();
+  for (const [index, route] of primaryRoutes.entries()) {
+    const targetPath = normalizeRouteRequestKey(route?.targetPath);
+    const routeRequirementIds = arrayOrEmpty(route?.briefRequirementIds).map((id) => String(id).trim()).filter(Boolean);
+    const routeRow = routeRows.find((row) => normalizeRouteRequestKey(row?.targetPath) === targetPath);
+    if (
+      !targetPath ||
+      !ROUTE_ROLES.has(route?.routeRole) ||
+      route?.accepted !== true ||
+      routeRequirementIds.length === 0 ||
+      routeRequirementIds.some((id) => !requirementIds.has(id)) ||
+      !routeRow ||
+      routeRow.accepted !== true ||
+      (!successfulStatus(routeRow.targetStatus) && !(routeRow.expectedRedirect === true && redirectStatus(routeRow.targetStatus))) ||
+      !(String(routeRow.targetH1 ?? '').trim() || String(routeRow.targetTitle ?? '').trim())
+    ) {
+      reasons.push(`Brief primary route ${targetPath || `(row ${index})`} must be accepted, requirement-bound, and mapped to an accepted target route with identity evidence.`);
+    }
+    primaryRouteRequirements.set(targetPath, new Set(routeRequirementIds));
+  }
+  for (const requirement of requirements) {
+    for (const route of arrayOrEmpty(requirement.targetRoutes).map(normalizeRouteRequestKey).filter(Boolean)) {
+      const primaryIds = primaryRouteRequirements.get(route);
+      if (primaryIds && !primaryIds.has(requirement.id)) {
+        reasons.push(`Brief primary route ${route} must name requirement ${requirement.id}.`);
+      }
+    }
+  }
+  if (
+    primaryRouteRequirements.has('/') &&
+    (
+      routeMatrix?.homepageTargetAcceptance?.accepted !== true ||
+      !successfulStatus(routeMatrix?.homepageTargetAcceptance?.targetStatus) ||
+      !(String(routeMatrix?.homepageTargetAcceptance?.targetH1 ?? '').trim() ||
+        String(routeMatrix?.homepageTargetAcceptance?.targetTitle ?? '').trim())
+    )
+  ) {
+    reasons.push('Brief mode route-matrix.json must accept the target homepage with a successful status and target H1 or title.');
+  }
+  if (routeMatrix?.starterRouteCleanup?.accepted !== true || routeMatrix?.canvasPlaceholderDetection?.accepted !== true) {
+    reasons.push('Brief mode still requires accepted starter-route cleanup and Canvas placeholder disposition.');
+  }
+
+  const browserChecks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
+  if (!httpUrl(browserEvidence?.site) || isoTimestamp(browserEvidence?.checkedAt) === null || !String(browserEvidence?.toolOrMethod ?? '').trim()) {
+    reasons.push('browser-evidence.json must identify the brief target, UTC check time, and browser method.');
+  }
+  for (const [targetPath, expectedRequirementIds] of primaryRouteRequirements) {
+    for (const viewport of ['desktop', 'mobile']) {
+      const check = browserChecks.find((candidate) =>
+        normalizeRouteRequestKey(candidate?.targetUrl) === targetPath && candidate?.viewport?.name === viewport
+      );
+      const checkedIds = new Set(arrayOrEmpty(check?.briefRequirementIds).map((id) => String(id).trim()).filter(Boolean));
+      const screenshotPath = resolveReviewEvidencePath(packetDir, join(packetDir, 'evidence', 'browser'), check?.targetScreenshot);
+      const screenshot = screenshotPath ? await evidenceImageMetadata(screenshotPath) : null;
+      const dimensionsMatch = Boolean(screenshot) && (
+        viewport === 'desktop'
+          ? screenshot.width >= 1024 && screenshot.height >= 600
+          : screenshot.width >= 280 && screenshot.width <= 767 && screenshot.height >= 480
+      );
+      if (
+        !check ||
+        check.accepted !== true ||
+        arrayOrEmpty(check.blockers).length > 0 ||
+        !httpUrl(check.targetUrl) ||
+        !httpUrl(check.targetFinalUrl) ||
+        check.visualComparison?.status !== 'pass' ||
+        !(String(check.renderedSignals?.targetTitle ?? '').trim() || String(check.renderedSignals?.targetH1 ?? '').trim()) ||
+        check.renderedSeoSignals?.accepted !== true ||
+        check.accessibilityCheck?.status !== 'pass' ||
+        !dimensionsMatch ||
+        [...expectedRequirementIds].some((id) => !checkedIds.has(id))
+      ) {
+        reasons.push(`browser-evidence.json must provide accepted ${viewport} target evidence for brief route ${targetPath}, bound to its requirements.`);
+      }
+    }
+  }
+  const editorChecks = arrayOrEmpty(browserEvidence?.editorWorkflowChecks);
+  if (!editorChecks.some((check) =>
+    check?.status === 'pass' &&
+    check?.accepted === true &&
+    !privilegedEditorIdentity(check?.editorUser) &&
+    !privilegedEditorIdentity(check?.editorRole) &&
+    String(check?.drupalRoute ?? '').trim() &&
+    String(check?.publicOutputAffected ?? '').trim()
+  )) {
+    reasons.push('Brief mode requires at least one passing, accepted non-admin editor workflow that changes public output.');
+  }
+
+  const pageOwners = arrayOrEmpty(patternMap?.pageCompositionOwnership);
+  if (
+    isoTimestamp(patternMap?.checkedAt) === null ||
+    patternMap?.buildTypeDeclaration?.accepted !== true ||
+    patternMap?.compositionModel?.completedBeforeImplementation !== true ||
+    arrayOrEmpty(patternMap?.structuredContentModel?.blockers).length > 0
+  ) {
+    reasons.push('pattern-map.json must contain a reviewed Drupal-native build type and pre-implementation composition model without blockers.');
+  }
+  for (const targetPath of primaryRouteRequirements.keys()) {
+    if (!pageOwners.some((owner) =>
+      normalizeRouteRequestKey(owner?.targetRoute || owner?.sourceRoute) === targetPath &&
+      owner?.accepted === true &&
+      String(owner?.selectedOwner ?? '').trim() &&
+      String(owner?.ownerRationale ?? '').trim() &&
+      String(owner?.editorVerificationEvidence ?? '').trim()
+    )) {
+      reasons.push(`pattern-map.json must declare accepted composition and editor ownership for brief route ${targetPath}.`);
+    }
+  }
+
+  if (
+    isoTimestamp(drupalReadback?.checkedAt) === null ||
+    !httpUrl(drupalReadback?.site) ||
+    drupalReadback?.readbackComplete !== true ||
+    arrayOrEmpty(drupalReadback?.blockers).length > 0 ||
+    !String(drupalReadback?.drupal?.siteUuid ?? '').trim() ||
+    !String(drupalReadback?.drupal?.configSyncDirectory ?? '').trim() ||
+    drupalReadback?.drupal?.configStatusClean !== true ||
+    arrayOrEmpty(drupalReadback?.drupal?.trackedConfigYamlFiles).length === 0
+  ) {
+    reasons.push('drupal-readback.json must record a complete target-bound Drupal readback with clean tracked config and no blockers.');
+  }
+  const publicFieldRows = arrayOrEmpty(fieldOutputMatrix?.bundles).flatMap((bundle) =>
+    arrayOrEmpty(bundle?.fields).filter((field) => field?.affectsAnonymousOutput === true)
+  );
+  if (
+    isoTimestamp(fieldOutputMatrix?.checkedAt) === null ||
+    !httpUrl(fieldOutputMatrix?.site) ||
+    publicFieldRows.length === 0 ||
+    publicFieldRows.some((field) => field?.accepted !== true || field?.containsRawPresentationImplementation === true) ||
+    arrayOrEmpty(fieldOutputMatrix?.blockedFields).length > 0 ||
+    arrayOrEmpty(fieldOutputMatrix?.rawPresentationImplementationFields).length > 0
+  ) {
+    reasons.push('field-output-matrix.json must accept public-output fields, reject raw presentation implementation, and have no blockers.');
+  }
+
+  if (
+    nextCycleVerification?.applicability?.reviewed !== true ||
+    typeof nextCycleVerification?.applicability?.applies !== 'boolean' ||
+    (nextCycleVerification?.applicability?.applies === false && !String(nextCycleVerification?.applicability?.reason ?? '').trim()) ||
+    arrayOrEmpty(nextCycleVerification?.blockers).length > 0
+  ) {
+    reasons.push('next-cycle-verification.json must record a reviewed applicable or reasoned-not-applicable target disposition without blockers.');
+  }
+  if (!independentVerificationSupportsCompletion) {
+    reasons.push('Independent verification does not cover every brief requirement and shared completion gate.');
+  }
+  if (!blindAdversarialReviewSupportsCompletion) {
+    reasons.push('Blind review does not cover every primary target route and brief requirement.');
+  }
+
+  const timestampPairs = [
+    ['brief-acceptance.json', briefAcceptance?.checkedAt],
+    ['browser-evidence.json', browserEvidence?.checkedAt],
+    ['drupal-readback.json', drupalReadback?.checkedAt],
+    ['field-output-matrix.json', fieldOutputMatrix?.checkedAt],
+    ['pattern-map.json', patternMap?.checkedAt],
+    ['next-cycle-verification.json', nextCycleVerification?.checkedAt],
+    ['negative-route-consent.json', negativeRouteConsent?.checkedAt],
+    ['independent-verification.json', independentVerification?.checkedAt],
+    ['blind-adversarial-review.json', blindAdversarialReview?.checkedAt]
+  ];
+  const parsedTimestamps = timestampPairs.map(([, value]) => isoTimestamp(value)).filter((value) => value !== null);
+  if (parsedTimestamps.length !== timestampPairs.length) {
+    reasons.push('Every brief completion artifact must include a UTC ISO checkedAt timestamp.');
+  } else if (Math.max(...parsedTimestamps) - Math.min(...parsedTimestamps) > MAX_COMPLETION_EVIDENCE_SPAN_MS) {
+    reasons.push('Brief completion evidence timestamps span more than seven days and must be refreshed as one coherent run.');
+  }
+
+  return {
+    packetCompletionReady: reasons.length === 0,
+    reasons,
+    humanDecisionPresentationStatus: markdownAssessment.humanDecisionPresentationStatus,
+    recordedHumanGateStatus: markdownAssessment.recordedHumanGateStatus
+  };
+}
+
 // Independence declarations live in builder-writable packet JSON, so the strongest
 // honest machine label is self-attested; subagent independence is allowed, not proven.
 function independenceAttestation(actor) {
@@ -4800,6 +5242,8 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
 
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
+  const buildInput = await readJson(join(packetDir, 'build-input.json'), []);
+  const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
   const parityReport = await readJson(join(packetDir, 'parity-report.json'), []);
   const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), []);
@@ -4809,6 +5253,8 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
   const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), []);
+  const briefContext = await validateBuildInput(packetDir, buildInput, routeMatrix, errors);
+  const briefMode = briefContext.mode === 'brief';
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
   const independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
@@ -4822,18 +5268,22 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
       routeMatrix,
       sourceAudit
     },
-    errors
+    errors,
+    { briefAcceptance, briefMode }
   );
   const blindAdversarialReviewSupportsCompletion = await validateBlindAdversarialReview(
     packetDir,
     blindAdversarialReview,
     routeMatrix,
-    errors
+    errors,
+    { briefAcceptance, briefContext, briefMode }
   );
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
-  const completionReadiness = await packetCompletionReadiness(packetDir, gates, {
+  const completionRecords = {
     blindAdversarialReview,
+    briefAcceptance,
+    buildInput,
     browserEvidence,
     drupalReadback,
     fieldOutputMatrix,
@@ -4844,12 +5294,19 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     patternMap,
     routeMatrix,
     sourceAudit
-  });
+  };
+  const completionReadiness = briefMode
+    ? await briefPacketCompletionReadiness(packetDir, gates, completionRecords, briefContext, {
+        blindAdversarialReviewSupportsCompletion,
+        independentVerificationSupportsCompletion
+      })
+    : await packetCompletionReadiness(packetDir, gates, completionRecords);
 
   return {
     schemaVersion: 'public-kit.packet-verification.1',
     checkedAt: new Date().toISOString(),
-    claimScope: 'complete-local-rebuild',
+    buildMode: briefMode ? 'brief' : 'source_site',
+    claimScope: briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild',
     productionReadinessEvaluated: false,
     launchReady: false,
     packetDir: sharedPacketDir(packetDir),
@@ -4875,6 +5332,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         completionReadiness.packetCompletionReady
     },
     completeLocalRebuildClaimAllowed: false,
+    completeLocalBuildFromBriefClaimAllowed: false,
     valid: errors.length === 0,
     errors: errors.map((error) => sharedPacketMessage(error, packetDir)),
     warnings: warnings.map((warning) => sharedPacketMessage(warning, packetDir))

@@ -2,7 +2,9 @@
 
 ## Site
 
+- Build basis: `source_site | brief`
 - Source URL:
+- Brief file:
 - Target site name:
 - Target workspace:
 - Source-use boundary:
@@ -24,9 +26,9 @@ Rationale:
 
 Installed substrate evidence (installed Recipe/template, Drupal CMS/core versions, public theme, front page, and starter content):
 
-## Source Pattern Drivers
+## Build Pattern Drivers
 
-List the source patterns that affect the post-install assembly decision.
+List the observed source patterns or brief requirements that affect the post-install assembly decision.
 
 | Source pattern | Evidence | Drupal CMS implication | Confidence |
 | --- | --- | --- | --- |

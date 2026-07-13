@@ -53,6 +53,7 @@
   "routeViewportReviews": [
     {
       "route": "",
+      "briefRequirementIds": [],
       "sourceTruthReference": "",
       "targetUrlOrArtifact": "",
       "viewport": "desktop | mobile | tablet | custom",

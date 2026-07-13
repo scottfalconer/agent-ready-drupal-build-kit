@@ -2,7 +2,9 @@
 
 ## Site
 
+- Build basis: `source_site | brief`
 - Source URL:
+- Brief file:
 - Target site name:
 - Target workspace:
 - Date:
@@ -11,7 +13,7 @@
 
 Overall status: `blocked`
 
-This gap list names what remains before the build can be considered a complete local rebuild, production-equivalent target, or launch candidate. It uses the hard launch gate vocabulary from the installed skill's `gates.json` and `references/output-inventory.md`.
+This gap list names what remains before the build can be considered a complete local rebuild, complete local build from a brief, production-equivalent target, or launch candidate. It uses the hard launch gate vocabulary from the installed skill's `gates.json` and `references/output-inventory.md`.
 
 Human-only decisions belong in `open-decisions.md`. Do not use this gap list or `open-decisions.md` to hide work the agent can still resolve.
 

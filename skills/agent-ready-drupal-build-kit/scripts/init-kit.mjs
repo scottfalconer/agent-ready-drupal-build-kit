@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   copyFileSync,
@@ -16,16 +17,18 @@ import { fileURLToPath } from 'node:url';
 
 const START_MARKER = '<!-- agent-ready-drupal-build-kit:start -->';
 const END_MARKER = '<!-- agent-ready-drupal-build-kit:end -->';
+const MAX_BRIEF_BYTES = 1024 * 1024;
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const skillRoot = resolve(scriptDir, '..');
 
 function usage() {
-  return `Usage: node scripts/init-kit.mjs --source-url <url> [options]
+  return `Usage: node scripts/init-kit.mjs (--source-url <url> | --brief-file <path>) [options]
 
 Initialize the Agent-Ready Drupal Build Kit inside an existing Drupal/DDEV target.
 
 Options:
-  --source-url <url>  Required public source site URL (http or https)
+  --source-url <url>  Public source site URL (http or https; default workflow)
+  --brief-file <path> Brief to build from when no source site exists
   --project <path>    Target project root (default: nearest target at or above cwd)
   --packet <path>     Packet directory inside the target (default: review-packet)
   --dry-run           Validate and report without writing files
@@ -35,6 +38,7 @@ Options:
 
 function parseArgs(argv) {
   const result = {
+    briefFile: null,
     dryRun: false,
     packet: 'review-packet',
     project: null,
@@ -42,6 +46,7 @@ function parseArgs(argv) {
   };
 
   const valueOptions = new Map([
+    ['--brief-file', 'briefFile'],
     ['--source-url', 'sourceUrl'],
     ['--project', 'project'],
     ['--packet', 'packet']
@@ -74,23 +79,28 @@ function parseArgs(argv) {
     result[valueOptions.get(option)] = value;
   }
 
-  if (!result.sourceUrl) {
-    throw new Error('--source-url is required');
+  if (!result.sourceUrl && !result.briefFile) {
+    throw new Error('exactly one of --source-url or --brief-file is required');
+  }
+  if (result.sourceUrl && result.briefFile) {
+    throw new Error('--source-url and --brief-file are mutually exclusive starting points');
   }
 
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(result.sourceUrl);
-  } catch {
-    throw new Error('--source-url must be a valid http or https URL');
+  if (result.sourceUrl) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(result.sourceUrl);
+    } catch {
+      throw new Error('--source-url must be a valid http or https URL');
+    }
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      throw new Error('--source-url must be a valid http or https URL');
+    }
+    if (parsedUrl.username || parsedUrl.password) {
+      throw new Error('--source-url must not contain embedded credentials');
+    }
+    result.sourceUrl = parsedUrl.href;
   }
-  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-    throw new Error('--source-url must be a valid http or https URL');
-  }
-  if (parsedUrl.username || parsedUrl.password) {
-    throw new Error('--source-url must not contain embedded credentials');
-  }
-  result.sourceUrl = parsedUrl.href;
 
   return result;
 }
@@ -186,13 +196,13 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function renderManagedBlock({ packetPath, projectRoot, sourceUrl }) {
+function renderManagedBlock({ buildBasisBlock, packetPath, projectRoot }) {
   const templatePath = join(skillRoot, 'assets', 'AGENTS.block.md');
   const template = readFileSync(templatePath, 'utf8').trim();
   const relativeSkillPath = relative(projectRoot, skillRoot).split(sep).join('/') || '.';
   const relativePacketPath = relative(projectRoot, packetPath).split(sep).join('/') || '.';
   const replacements = new Map([
-    ['{{SOURCE_URL}}', sourceUrl],
+    ['{{BUILD_BASIS_BLOCK}}', buildBasisBlock],
     ['{{SKILL_PATH}}', relativeSkillPath],
     ['{{PACKET_PATH}}', relativePacketPath],
     ['{{SHELL_SKILL_PATH}}', shellQuote(relativeSkillPath)],
@@ -208,6 +218,34 @@ function renderManagedBlock({ packetPath, projectRoot, sourceUrl }) {
   }
 
   return `${START_MARKER}\n${rendered}\n${END_MARKER}`;
+}
+
+function sha256(value) {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function parseExistingJson(path, label) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error(`${label} is malformed; no files were changed`);
+  }
+}
+
+function isTemplateBuildInput(record) {
+  return record?.schemaVersion === 'public-kit.build-input.1' &&
+    record?.mode === 'source_site' &&
+    !String(record?.sourceUrl ?? '').trim() &&
+    record?.brief === null;
+}
+
+function isTemplateBriefAcceptance(record) {
+  const requirements = Array.isArray(record?.requirements) ? record.requirements : [];
+  return record?.schemaVersion === 'public-kit.brief-acceptance.1' &&
+    !String(record?.briefSha256 ?? '').trim() &&
+    !String(record?.checkedAt ?? '').trim() &&
+    requirements.length === 1 &&
+    !String(requirements[0]?.id ?? '').trim();
 }
 
 function mergeManagedBlock(existing, managedBlock) {
@@ -318,16 +356,35 @@ function main() {
     throw new Error('--packet must name a directory');
   }
 
+  let briefBytes = null;
+  let briefSha256 = '';
+  if (options.briefFile) {
+    const briefPath = resolve(process.cwd(), options.briefFile);
+    if (!pathEntryExists(briefPath) || lstatSync(briefPath).isSymbolicLink() || !statSync(briefPath).isFile()) {
+      throw new Error('--brief-file must name an existing regular non-symlink file');
+    }
+    if (statSync(briefPath).size > MAX_BRIEF_BYTES) {
+      throw new Error(`--brief-file must be ${MAX_BRIEF_BYTES} bytes or smaller`);
+    }
+    briefBytes = readFileSync(briefPath);
+    if (!briefBytes.toString('utf8').trim()) {
+      throw new Error('--brief-file must not be empty');
+    }
+    briefSha256 = sha256(briefBytes);
+  }
+
   const agentsPath = join(projectRoot, 'AGENTS.md');
   if (pathEntryExists(agentsPath) && lstatSync(agentsPath).isSymbolicLink()) {
     throw new Error('AGENTS.md is a symbolic link; refusing to update a target outside this project');
   }
   const existingAgents = pathEntryExists(agentsPath) ? readFileSync(agentsPath, 'utf8') : '';
-  const managedBlock = renderManagedBlock({
-    packetPath,
-    projectRoot,
-    sourceUrl: options.sourceUrl
-  });
+  const relativePacketPath = relative(projectRoot, packetPath).split(sep).join('/') || '.';
+  const originalBriefPath = join(packetPath, 'original-brief.md');
+  const originalBriefProjectPath = `${relativePacketPath}/original-brief.md`;
+  const buildBasisBlock = options.sourceUrl
+    ? `Build basis: \`source_site\`\n\nSource site: \`${options.sourceUrl}\``
+    : `Build basis: \`brief\`\n\nOriginal brief: [\`${originalBriefProjectPath}\`](${originalBriefProjectPath})\n\nSource-site parity is not claimed. Completion is measured against the preserved brief and its accepted requirements.`;
+  const managedBlock = renderManagedBlock({ buildBasisBlock, packetPath, projectRoot });
   const nextAgents = mergeManagedBlock(existingAgents, managedBlock);
   const plannedTemplates = packetPlan(packetPath);
   const invalidExistingTemplates = plannedTemplates.filter(
@@ -340,10 +397,70 @@ function main() {
   }
   const missingTemplates = plannedTemplates.filter(({ destination }) => !pathEntryExists(destination));
 
+  if (briefBytes && pathEntryExists(originalBriefPath)) {
+    if (lstatSync(originalBriefPath).isSymbolicLink() || !statSync(originalBriefPath).isFile()) {
+      throw new Error('review-packet/original-brief.md must be a regular non-symlink file');
+    }
+    if (!readFileSync(originalBriefPath).equals(briefBytes)) {
+      throw new Error('The preserved original brief differs from --brief-file; use a new packet path for a different starting brief');
+    }
+  }
+
+  const buildInputPath = join(packetPath, 'build-input.json');
+  if (pathEntryExists(buildInputPath)) {
+    const existingBuildInput = parseExistingJson(buildInputPath, 'review-packet/build-input.json');
+    const requestedMode = options.sourceUrl ? 'source_site' : 'brief';
+    if (!isTemplateBuildInput(existingBuildInput) && existingBuildInput.mode !== requestedMode) {
+      throw new Error('The existing review packet uses a different build basis; use a new packet path instead of mixing source and brief evidence');
+    }
+    if (
+      requestedMode === 'brief' &&
+      !isTemplateBuildInput(existingBuildInput) &&
+      existingBuildInput?.brief?.sha256 !== briefSha256
+    ) {
+      throw new Error('The existing review packet is bound to a different brief; use a new packet path');
+    }
+  }
+
+  const briefAcceptancePath = join(packetPath, 'brief-acceptance.json');
+  if (briefBytes && pathEntryExists(briefAcceptancePath)) {
+    const existingAcceptance = parseExistingJson(briefAcceptancePath, 'review-packet/brief-acceptance.json');
+    if (!isTemplateBriefAcceptance(existingAcceptance) && existingAcceptance.briefSha256 !== briefSha256) {
+      throw new Error('review-packet/brief-acceptance.json is bound to a different brief; use a new packet path');
+    }
+  }
+
   if (!options.dryRun) {
     mkdirSync(packetPath, { recursive: true });
     for (const { destination, source } of missingTemplates) {
       copyFileSync(source, destination, constants.COPYFILE_EXCL);
+    }
+    const buildInput = options.sourceUrl
+      ? {
+          schemaVersion: 'public-kit.build-input.1',
+          mode: 'source_site',
+          sourceUrl: options.sourceUrl,
+          brief: null
+        }
+      : {
+          schemaVersion: 'public-kit.build-input.1',
+          mode: 'brief',
+          sourceUrl: '',
+          brief: {
+            path: originalBriefProjectPath,
+            sha256: briefSha256
+          }
+        };
+    writeFileSync(buildInputPath, `${JSON.stringify(buildInput, null, 2)}\n`, 'utf8');
+    if (briefBytes) {
+      if (!pathEntryExists(originalBriefPath)) {
+        writeFileSync(originalBriefPath, briefBytes);
+      }
+      const currentAcceptance = parseExistingJson(briefAcceptancePath, 'review-packet/brief-acceptance.json');
+      if (isTemplateBriefAcceptance(currentAcceptance)) {
+        currentAcceptance.briefSha256 = briefSha256;
+        writeFileSync(briefAcceptancePath, `${JSON.stringify(currentAcceptance, null, 2)}\n`, 'utf8');
+      }
     }
     // Keep the project contract unchanged unless the review packet is ready.
     // Packet creation can still fail after validation (for example, because

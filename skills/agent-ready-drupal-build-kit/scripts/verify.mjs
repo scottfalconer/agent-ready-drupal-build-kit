@@ -1141,12 +1141,12 @@ function sourceBoundaryDisposition(routeMatrix, independentVerification, path, s
     : null;
 }
 
-function sourceSurfaceNotRun(reason) {
+function sourceSurfaceNotRun(reason, { status = 'not_run', authoritative = false } = {}) {
   return {
     schemaVersion: 'public-kit.source-surface-census.1',
     checkedAt: new Date().toISOString(),
-    status: 'not_run',
-    authoritative: false,
+    status,
+    authoritative,
     sourceOrigin: '',
     routes: [],
     sitemaps: [],
@@ -4381,7 +4381,11 @@ function sharedConfigSyncDirectory(value) {
   return path.split(/[/\\]+/).filter(Boolean).slice(-2).join('/');
 }
 
-function agentContinuation({ complete = false, blockedReasons = [] } = {}) {
+function agentContinuation({
+  complete = false,
+  blockedReasons = [],
+  claimLabel = 'complete-local-rebuild'
+} = {}) {
   const reasons = [...new Set((Array.isArray(blockedReasons) ? blockedReasons : [])
     .map((reason) => String(reason ?? '').trim())
     .filter(Boolean))];
@@ -4396,7 +4400,7 @@ function agentContinuation({ complete = false, blockedReasons = [] } = {}) {
     externalBlockerMayPauseOnlyWhenRecorded: true,
     blockedReasons: complete ? [] : reasons,
     instruction: complete
-      ? 'The lifecycle-verified complete-local-rebuild machine bar passed; handoff may proceed.'
+      ? `The lifecycle-verified ${claimLabel} machine bar passed; handoff may proceed.`
       : 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
   };
 }
@@ -5239,11 +5243,15 @@ function expectedRenderedSeo(browserEvidence, targetPath, requestTarget = '') {
   };
 }
 
-function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
+function expectedRoute(routeMatrix, primaryRoute, browserEvidence, { briefMode = false } = {}) {
   const requestTarget = requestPathAndSearch(primaryRoute?.targetPath || primaryRoute?.sourcePath);
   const targetPath = normalizePath(requestTarget);
   const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
-  const homepage = targetPath === '/' ? routeMatrix.homepageParity ?? {} : {};
+  const homepage = targetPath === '/'
+    ? briefMode
+      ? routeMatrix.homepageTargetAcceptance ?? {}
+      : routeMatrix.homepageParity ?? {}
+    : {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
     ? Number(declaredStatus)
@@ -5257,7 +5265,7 @@ function expectedRoute(routeMatrix, primaryRoute, browserEvidence) {
     expectedStatus,
     expectedTitle: normalizeText(record.targetTitle || homepage.targetTitle),
     identityRequired: true,
-    matchesBrowserRenderedSource: primaryRoute?.matchesBrowserRenderedSource === true,
+    matchesBrowserRenderedSource: briefMode || primaryRoute?.matchesBrowserRenderedSource === true,
     renderedSeo: expectedRenderedSeo(browserEvidence, targetPath, requestTarget),
     requestTarget,
     routeKind: 'primary',
@@ -5549,9 +5557,11 @@ function completionEvidenceTargetErrors({
 }) {
   const errors = [];
   const targetOrigin = targetUrl.origin;
-  const sourceOrigin = sourceUrl.origin;
-  requiredOriginMatch(errors, 'source-audit.json site.baseUrl', sourceAudit?.site?.baseUrl, sourceOrigin);
-  requiredOriginMatch(errors, 'pattern-map.json sourceSite', patternMap?.sourceSite, sourceOrigin);
+  const sourceOrigin = sourceUrl?.origin ?? '';
+  if (sourceOrigin) {
+    requiredOriginMatch(errors, 'source-audit.json site.baseUrl', sourceAudit?.site?.baseUrl, sourceOrigin);
+    requiredOriginMatch(errors, 'pattern-map.json sourceSite', patternMap?.sourceSite, sourceOrigin);
+  }
   requiredOriginMatch(errors, 'field-output-matrix.json site', fieldOutputMatrix?.site, targetOrigin);
   requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
@@ -5582,13 +5592,15 @@ function completionEvidenceTargetErrors({
   for (const [index, check] of (Array.isArray(browserEvidence?.publicRouteChecks)
     ? browserEvidence.publicRouteChecks
     : []).entries()) {
-    requiredOriginMatch(errors, `browser-evidence.json publicRouteChecks[${index}].sourceUrl`, check?.sourceUrl, sourceOrigin);
-    requiredOriginMatch(
-      errors,
-      `browser-evidence.json publicRouteChecks[${index}].sourceFinalUrl`,
-      check?.sourceFinalUrl,
-      sourceOrigin
-    );
+    if (sourceOrigin) {
+      requiredOriginMatch(errors, `browser-evidence.json publicRouteChecks[${index}].sourceUrl`, check?.sourceUrl, sourceOrigin);
+      requiredOriginMatch(
+        errors,
+        `browser-evidence.json publicRouteChecks[${index}].sourceFinalUrl`,
+        check?.sourceFinalUrl,
+        sourceOrigin
+      );
+    }
     requiredOriginMatch(errors, `browser-evidence.json publicRouteChecks[${index}].targetUrl`, check?.targetUrl, targetOrigin);
     requiredOriginMatch(
       errors,
@@ -6414,6 +6426,8 @@ export async function verifyLive({
   assertVerificationPacketInputs(absolutePacketDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
   const packetReport = await validatePacket({ packetDir: absolutePacketDir });
+  const briefMode = packetReport.buildMode === 'brief';
+  const claimScope = briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild';
   let routeMatrixText = '';
   let routeMatrix = {};
   let routeMatrixError = '';
@@ -6470,7 +6484,7 @@ export async function verifyLive({
   const liveErrors = routeMatrixError ? [routeMatrixError] : [];
   const declaredSource = String(routeMatrix.sourceBaseUrl ?? '').trim();
   const declaredTarget = String(routeMatrix.targetBaseUrl ?? '').trim();
-  if (!declaredSource) {
+  if (!briefMode && !declaredSource) {
     liveErrors.push('route-matrix.json must declare sourceBaseUrl for target/source identity checking.');
   }
   if (!declaredTarget) {
@@ -6581,7 +6595,12 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
-  const sourceSurfaceCensusPromise = runtimeAuthoritativeForCompletion && declaredSource
+  const sourceSurfaceCensusPromise = briefMode
+    ? Promise.resolve(sourceSurfaceNotRun(
+        'Source-site discovery does not apply to a brief-based build.',
+        { status: 'not_applicable', authoritative: true }
+      ))
+    : runtimeAuthoritativeForCompletion && declaredSource
     ? inspectSourceSurface({ independentVerification, routeMatrix })
     : Promise.resolve(sourceSurfaceNotRun(
         runtimeWasInjected
@@ -6602,7 +6621,7 @@ export async function verifyLive({
   const liveRouteTasks = [
     ...primaryRoutes.map((route) => ({
       bucket: 'primary',
-      expected: expectedRoute(routeMatrix, route, browserEvidence)
+      expected: expectedRoute(routeMatrix, route, browserEvidence, { briefMode })
     })),
     ...targetRequiredRoutes.map((route) => ({
       bucket: 'target-required',
@@ -6863,9 +6882,11 @@ export async function verifyLive({
           : []
       };
 
-  if (target && (packetSupportsCompletion || packetClaimsQualifyingReview) && declaredSource) {
+  if (target && (packetSupportsCompletion || packetClaimsQualifyingReview) && (briefMode || declaredSource)) {
     try {
-      const sourceUrl = parseHttpUrl(declaredSource, 'route-matrix.json sourceBaseUrl');
+      const sourceUrl = briefMode
+        ? null
+        : parseHttpUrl(declaredSource, 'route-matrix.json sourceBaseUrl');
       liveErrors.push(
         ...completionEvidenceTargetErrors({
           blindReview,
@@ -7150,12 +7171,14 @@ export async function verifyLive({
     drupalRuntimeTrackedConfigReadbackMatches &&
     drupalRuntimeSeoUrlsPortable &&
     buildStateReady;
-  const completeLocalRebuildClaimAllowed =
+  const completionClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion;
+  const completeLocalRebuildClaimAllowed = !briefMode && completionClaimAllowed;
+  const completeLocalBuildFromBriefClaimAllowed = briefMode && completionClaimAllowed;
   const completionBlockedReasons = [];
   if (!packetReport.valid) {
     completionBlockedReasons.push('Packet validation failed.');
@@ -7163,7 +7186,7 @@ export async function verifyLive({
   if (!liveTargetValid) {
     completionBlockedReasons.push('Live target identity or route verification failed.');
   }
-  if (runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
+  if (!briefMode && runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
     completionBlockedReasons.push('Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.');
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
@@ -7292,7 +7315,8 @@ export async function verifyLive({
   return {
     schemaVersion: 'public-kit.live-verification.1',
     checkedAt: new Date().toISOString(),
-    claimScope: 'complete-local-rebuild',
+    buildMode: briefMode ? 'brief' : 'source_site',
+    claimScope,
     productionReadinessEvaluated: false,
     launchReady: false,
     verificationMode: 'live-target-and-packet',
@@ -7379,13 +7403,15 @@ export async function verifyLive({
     packetVerification: sharedPacketReport,
     recordedHumanGateStatus: sharedPacketReport.recordedHumanGateStatus,
     completeLocalRebuildClaimAllowed,
-    verdict: completeLocalRebuildClaimAllowed
-      ? 'complete-local-rebuild'
+    completeLocalBuildFromBriefClaimAllowed,
+    verdict: completionClaimAllowed
+      ? claimScope
       : packetReport.valid && liveTargetValid
         ? 'machine-incomplete'
         : 'blocked',
     agentContinuation: agentContinuation({
-      complete: completeLocalRebuildClaimAllowed,
+      complete: completionClaimAllowed,
+      claimLabel: claimScope,
       blockedReasons: completionBlockedReasons
     }),
     completionBlockedReasons,
@@ -7413,7 +7439,10 @@ async function main() {
         outPath: args.out
       });
   if (!args.packetOnly) {
-    const operationCanRun = !args.changeId || report.completeLocalRebuildClaimAllowed === true;
+    const completionClaimAllowed =
+      report.completeLocalRebuildClaimAllowed === true ||
+      report.completeLocalBuildFromBriefClaimAllowed === true;
+    const operationCanRun = !args.changeId || completionClaimAllowed;
     const lifecycle = applyVerificationLifecycle({
       packetDir: args.packet,
       report,
@@ -7432,7 +7461,7 @@ async function main() {
         : null
     };
     report.currentSiteClaimAllowed =
-      report.completeLocalRebuildClaimAllowed === true &&
+      completionClaimAllowed &&
       report.lifecycle.currentStateVerified === true;
     report.currentStateBlockedReasons = report.lifecycle.currentStateVerified
       ? []
@@ -7442,6 +7471,7 @@ async function main() {
         : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
     report.agentContinuation = agentContinuation({
       complete: report.currentSiteClaimAllowed === true,
+      claimLabel: report.claimScope,
       blockedReasons: [
         ...report.completionBlockedReasons,
         ...report.currentStateBlockedReasons
@@ -7464,7 +7494,10 @@ async function main() {
   }
   if (args.packetOnly) {
     process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
-  } else if (report.completeLocalRebuildClaimAllowed && report.currentSiteClaimAllowed) {
+  } else if (
+    (report.completeLocalRebuildClaimAllowed || report.completeLocalBuildFromBriefClaimAllowed) &&
+    report.currentSiteClaimAllowed
+  ) {
     const independence = report.packetVerification?.completionEvidence?.independence ?? {};
     const independenceSummary = [
       ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
@@ -7475,14 +7508,25 @@ async function main() {
       : report.lifecycle?.initialBaseline?.status === 'passed'
         ? ' The create-once, integrity-checked initial baseline remains recorded.'
         : '';
-    process.stdout.write(`Live target and packet verification passed; complete local rebuild machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded local-rebuild operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote} Report: ${args.out}\n`);
+    const claimDescription = report.claimScope === 'complete-local-build-from-brief'
+      ? 'complete local build-from-brief'
+      : 'complete local rebuild';
+    const recordedStatusLabel = report.claimScope === 'complete-local-build-from-brief'
+      ? 'local-build'
+      : 'local-rebuild';
+    process.stdout.write(`Live target and packet verification passed; ${claimDescription} machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded ${recordedStatusLabel} operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote} Report: ${args.out}\n`);
   } else {
     const baselineNote = report.lifecycle?.initialBaseline?.status === 'passed'
       ? ' The create-once, integrity-checked initial baseline remains passed; the current derived state is not yet verified.'
       : '';
-    const reason = report.completeLocalRebuildClaimAllowed && !report.currentSiteClaimAllowed
-      ? 'Full rebuild checks passed, but the changed current state is not classified and lifecycle-verified.'
-      : 'Live target checks passed, but complete local rebuild machine authorization remains blocked by required machine evidence.';
+    const completionClaimAllowed =
+      report.completeLocalRebuildClaimAllowed || report.completeLocalBuildFromBriefClaimAllowed;
+    const claimDescription = report.claimScope === 'complete-local-build-from-brief'
+      ? 'complete local build-from-brief'
+      : 'complete local rebuild';
+    const reason = completionClaimAllowed && !report.currentSiteClaimAllowed
+      ? `Full ${claimDescription} checks passed, but the changed current state is not classified and lifecycle-verified.`
+      : `Live target checks passed, but ${claimDescription} machine authorization remains blocked by required machine evidence.`;
     process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
     process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     process.exitCode = 2;

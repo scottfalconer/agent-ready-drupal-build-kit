@@ -1,6 +1,6 @@
 ## Agent-Ready Drupal Build Kit
 
-Source site: `{{SOURCE_URL}}`
+{{BUILD_BASIS_BLOCK}}
 
 This repository is the existing Drupal rebuild target. Work in place. Do not create a sibling Drupal project, clone another copy of the kit, substitute a static frontend, or overwrite this `AGENTS.md` file.
 

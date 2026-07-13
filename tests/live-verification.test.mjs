@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -1680,6 +1681,104 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+}
+
+function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
+  const brief = '# Brief\n\nCreate a public homepage that editors can maintain.\n';
+  const briefHash = `sha256:${createHash('sha256').update(brief).digest('hex')}`;
+  const briefReference = 'review-packet/original-brief.md';
+  const requirementEvidence = 'evidence/brief/BR-001.txt';
+  writeFileSync(join(packetDir, 'original-brief.md'), brief);
+  mkdirSync(join(packetDir, 'evidence', 'brief'), { recursive: true });
+  writeFileSync(
+    join(packetDir, requirementEvidence),
+    'BR-001 passed: the public homepage renders and the non-admin editor workflow changes its output.\n'
+  );
+  writeJson(join(packetDir, 'build-input.json'), {
+    schemaVersion: 'public-kit.build-input.1',
+    mode: 'brief',
+    sourceUrl: '',
+    brief: { path: briefReference, sha256: briefHash }
+  });
+  writeJson(join(packetDir, 'brief-acceptance.json'), {
+    schemaVersion: 'public-kit.brief-acceptance.1',
+    briefSha256: briefHash,
+    checkedAt: testCheckedAt,
+    requirements: [
+      {
+        id: 'BR-001',
+        requirement: 'Create a public homepage that a non-admin editor can maintain.',
+        category: 'editorial',
+        targetRoutes: ['/'],
+        acceptanceChecks: [
+          'The homepage returns 200 with the expected identity.',
+          'A non-admin editor changes content that appears on the public homepage.'
+        ],
+        status: 'pass',
+        evidence: [requirementEvidence]
+      }
+    ],
+    assumptions: [],
+    outOfScope: [],
+    blockers: []
+  });
+
+  mutateJson(join(packetDir, 'route-matrix.json'), (matrix) => {
+    matrix.sourceBaseUrl = '';
+    matrix.homepageTargetAcceptance = {
+      targetPath: '/',
+      targetStatus: 200,
+      targetFinalPath: '/',
+      targetH1: 'Target home',
+      targetTitle: 'Target site',
+      targetKeyBodyIntent: 'Maintainable public homepage',
+      accepted: true,
+      rationale: 'The target homepage is required by BR-001.'
+    };
+    for (const route of matrix.primaryRoutes) route.briefRequirementIds = ['BR-001'];
+    for (const route of matrix.routes) route.briefRequirementIds = ['BR-001'];
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks) check.briefRequirementIds = ['BR-001'];
+  });
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.sourceSite = '';
+    for (const owner of patternMap.pageCompositionOwnership) owner.targetRoute = owner.sourceRoute;
+    for (const owner of patternMap.sectionOwnershipMatrix) owner.targetRoute = owner.sourceRoute;
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.briefRequirementChecks = [
+      {
+        requirementId: 'BR-001',
+        falsificationChecks: [
+          'Fetched the target homepage and repeated the editor workflow as a non-admin user.'
+        ],
+        status: 'pass',
+        evidence: [requirementEvidence]
+      }
+    ];
+  });
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.reviewInputs.originalBrief = briefReference;
+    blind.reviewInputs.acceptanceCriteria = ['BR-001 Maintainable public homepage'];
+    blind.reviewInputs.sourceOfTruthMaterials = [
+      { type: 'written_spec', reference: briefReference, notes: 'Preserved original brief.' }
+    ];
+    for (const review of blind.routeViewportReviews) {
+      review.sourceTruthReference = briefReference;
+      review.briefRequirementIds = ['BR-001'];
+    }
+  });
+
+  for (const file of ['recipe-start-point.md', 'scoped-gap-list.md', 'open-decisions.md']) {
+    mutateText(join(packetDir, file), (text) => text.replace(
+      /^- Source URL:.*$/m,
+      '- Build basis: brief\n- Brief file: review-packet/original-brief.md'
+    ));
+  }
+  mutateText(join(packetDir, 'scoped-gap-list.md'), (text) =>
+    text.replace('Overall status: `complete-local-rebuild`', 'Overall status: `complete-local-build-from-brief`')
+  );
 }
 
 function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode = 'local_mail_capture') {
@@ -3613,6 +3712,51 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
         liveReport.completionBlockedReasons.join('\n'),
         /injected.*non-authoritative|non-authoritative.*injected/i
       );
+    }
+  );
+});
+
+test('brief mode verifies target routes without requiring or implying a source site', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'live-brief-mode-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix(baseUrl));
+      addQualifyingReviewEvidence(packetDir, baseUrl);
+      convertQualifyingPacketToBrief(packetDir, baseUrl);
+
+      const packetReport = await validatePacket({ packetDir });
+      assert.equal(packetReport.valid, true, packetReport.errors.join('\n'));
+      assert.equal(
+        packetReport.completionEvidence.packetSupportsCompletion,
+        true,
+        JSON.stringify(packetReport.completionEvidence, null, 2)
+      );
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.valid, true, report.errors.join('\n'));
+      assert.equal(report.buildMode, 'brief');
+      assert.equal(report.claimScope, 'complete-local-build-from-brief');
+      assert.equal(report.completeLocalRebuildClaimAllowed, false);
+      assert.equal(report.completeLocalBuildFromBriefClaimAllowed, false);
+      assert.equal(report.packetVerification.completionEvidence.packetSupportsCompletion, true);
+      assert.equal(report.sourceSurfaceCensus.status, 'not_applicable');
+      assert.equal(report.sourceSurfaceCensus.authoritative, true);
+      assert.equal(report.routeChecks[0].passed, true, report.routeChecks[0].errors.join('\n'));
+      assert.doesNotMatch(report.completionBlockedReasons.join('\n'), /source route discovery|sourceBaseUrl/i);
+      assert.match(report.completionBlockedReasons.join('\n'), /non-authoritative/i);
     }
   );
 });

@@ -4,6 +4,16 @@
   "checkedAt": "",
   "sourceBaseUrl": "",
   "targetBaseUrl": "",
+  "homepageTargetAcceptance": {
+    "targetPath": "/",
+    "targetStatus": null,
+    "targetFinalPath": "",
+    "targetH1": "",
+    "targetTitle": "",
+    "targetKeyBodyIntent": "",
+    "accepted": false,
+    "rationale": ""
+  },
   "browserFirstRouteExpansion": {
     "browserRenderedSeedRoutes": [],
     "candidateRoutesFromBrowserRenderedLinks": [],
@@ -123,6 +133,7 @@
     {
       "sourcePath": "/",
       "targetPath": "/",
+      "briefRequirementIds": [],
       "routeRole": "homepage | landing | listing | detail | taxonomy | search | form | legal | media | other",
       "sourceIntent": "",
       "targetIntent": "",
@@ -134,6 +145,7 @@
   "routes": [
     {
       "sourcePath": "",
+      "briefRequirementIds": [],
       "sourceStatus": null,
       "sourceFinalPath": "",
       "sourceTitle": "",

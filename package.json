@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent instructions and packet verification for local Drupal CMS rebuilds.",
+  "description": "Agent instructions and packet verification for source-site rebuilds and brief-driven Drupal CMS builds.",
   "license": "MIT",
   "homepage": "https://github.com/scottfalconer/agent-ready-drupal-build-kit#readme",
   "bugs": {
