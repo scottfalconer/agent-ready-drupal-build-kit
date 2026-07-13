@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   cpSync,
@@ -28,6 +29,18 @@ function runInitializer(script, cwd, extraArgs = []) {
     script,
     '--source-url',
     'https://source.example/site',
+    ...extraArgs
+  ], {
+    cwd,
+    encoding: 'utf8'
+  });
+}
+
+function runBriefInitializer(script, cwd, briefFile, extraArgs = []) {
+  return spawnSync(process.execPath, [
+    script,
+    '--brief-file',
+    briefFile,
     ...extraArgs
   ], {
     cwd,
@@ -141,7 +154,7 @@ test('initializer dry-run honors an explicit project and nested packet without w
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Dry run valid:/);
   assert.match(result.stdout, /AGENTS\.md: would update kit block/);
-  assert.match(result.stdout, /Review packet: 20 missing, 0 preserved/);
+  assert.match(result.stdout, /Review packet: 22 missing, 0 preserved/);
   assert.equal(existsSync(join(root, 'AGENTS.md')), false);
   assert.equal(existsSync(join(root, 'evidence')), false);
 });
@@ -274,7 +287,7 @@ User-authored tail.
   const second = runInitializer(initializer, root);
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /AGENTS\.md: unchanged/);
-  assert.match(second.stdout, /0 created, 20 preserved/);
+  assert.match(second.stdout, /0 created, 22 preserved/);
   assert.equal(readFileSync(agentsPath, 'utf8'), firstAgents);
   assert.equal(readFileSync(sourceAudit, 'utf8'), '{"preserve":"user evidence"}\n');
 
@@ -287,6 +300,88 @@ User-authored tail.
   assert.equal(occurrenceCount(changedAgents, startMarker), 1);
   assert.equal(occurrenceCount(changedAgents, endMarker), 1);
   assert.equal(readFileSync(sourceAudit, 'utf8'), '{"preserve":"user evidence"}\n');
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, 'review-packet', 'build-input.json'), 'utf8')),
+    {
+      schemaVersion: 'public-kit.build-input.1',
+      mode: 'source_site',
+      sourceUrl: 'https://changed.example/',
+      brief: null
+    }
+  );
+});
+
+test('initializer creates a hash-bound brief packet without inventing a source site', () => {
+  const root = makeDrupalTarget('skill-brief-mode-');
+  const briefPath = join(root, 'site-brief.md');
+  const brief = '# Site brief\n\nBuild a public homepage and an editable event listing.\n';
+  writeFileSync(briefPath, brief);
+
+  const result = runBriefInitializer(initializer, root, 'site-brief.md');
+
+  assert.equal(result.status, 0, result.stderr);
+  const expectedHash = `sha256:${createHash('sha256').update(brief).digest('hex')}`;
+  assert.equal(readFileSync(join(root, 'review-packet', 'original-brief.md'), 'utf8'), brief);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, 'review-packet', 'build-input.json'), 'utf8')),
+    {
+      schemaVersion: 'public-kit.build-input.1',
+      mode: 'brief',
+      sourceUrl: '',
+      brief: {
+        path: 'review-packet/original-brief.md',
+        sha256: expectedHash
+      }
+    }
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(root, 'review-packet', 'brief-acceptance.json'), 'utf8')).briefSha256,
+    expectedHash
+  );
+  const agents = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+  assert.match(agents, /Build basis: `brief`/);
+  assert.match(agents, /Source-site parity is not claimed/);
+  assert.doesNotMatch(agents, /https:\/\/source\.example/);
+
+  const repeated = runBriefInitializer(initializer, root, 'site-brief.md');
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.match(repeated.stdout, /AGENTS\.md: unchanged/);
+  assert.match(repeated.stdout, /0 created, 22 preserved/);
+
+  const packetOnly = spawnSync(process.execPath, [
+    join(skillRoot, 'scripts', 'verify.mjs'),
+    '--packet',
+    'review-packet',
+    '--packet-only'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.equal(packetOnly.status, 0, packetOnly.stderr);
+  const packetReport = JSON.parse(
+    readFileSync(join(root, 'review-packet', 'evidence', 'packet-verification.json'), 'utf8')
+  );
+  assert.equal(packetReport.valid, true);
+  assert.equal(packetReport.buildMode, 'brief');
+  assert.equal(packetReport.claimScope, 'complete-local-build-from-brief');
+  assert.equal(packetReport.completeLocalBuildFromBriefClaimAllowed, false);
+});
+
+test('initializer requires exactly one source or brief and keeps packet modes separate', () => {
+  const root = makeDrupalTarget('skill-build-input-choice-');
+  writeFileSync(join(root, 'brief.md'), '# Brief\n');
+
+  const missing = spawnSync(process.execPath, [initializer], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /exactly one of --source-url or --brief-file is required/);
+
+  const conflicting = runInitializer(initializer, root, ['--brief-file=brief.md']);
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /mutually exclusive starting points/);
+
+  const source = runInitializer(initializer, root);
+  assert.equal(source.status, 0, source.stderr);
+  const switchToBrief = runBriefInitializer(initializer, root, 'brief.md');
+  assert.notEqual(switchToBrief.status, 0);
+  assert.match(switchToBrief.stderr, /different build basis/);
+  assert.equal(existsSync(join(root, 'review-packet', 'original-brief.md')), false);
 });
 
 test('initializer fails closed on malformed markers before changing the target', () => {
@@ -384,7 +479,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(37 files\)/);
+  assert.match(result.stdout, /is in sync \(39 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -426,7 +521,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(37 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(39 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

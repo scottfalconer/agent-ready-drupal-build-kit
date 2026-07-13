@@ -432,9 +432,20 @@ function validateBuildState(buildState, label = 'buildState') {
   return stateFingerprint;
 }
 
+function reportCompletionClaimAllowed(report) {
+  const rebuild = report?.completeLocalRebuildClaimAllowed === true;
+  const brief = report?.completeLocalBuildFromBriefClaimAllowed === true;
+  if (rebuild === brief) {
+    return false;
+  }
+  return rebuild
+    ? report?.claimScope === 'complete-local-rebuild'
+    : report?.claimScope === 'complete-local-build-from-brief';
+}
+
 function authoritativePassingReport(report) {
   return isObject(report) &&
-    report.completeLocalRebuildClaimAllowed === true &&
+    reportCompletionClaimAllowed(report) &&
     report.verificationMode === 'live-target-and-packet' &&
     report.drupalRuntime?.authoritativeForCompletion === true &&
     report.valid === true;
@@ -442,7 +453,7 @@ function authoritativePassingReport(report) {
 
 function validatePassingReport(report, label) {
   if (!authoritativePassingReport(report)) {
-    throw new Error(`${label} must be a valid, authoritative live-target report that allows the complete local rebuild claim.`);
+    throw new Error(`${label} must be a valid, authoritative live-target report that allows its typed completion claim.`);
   }
   timestamp(report.checkedAt, `${label}.checkedAt`);
   return validateBuildState(report.buildState, `${label}.buildState`);
@@ -1596,7 +1607,7 @@ function createInitialBaseline(root, report) {
     baselineId: 'initial',
     status: 'passed',
     passedAt: report.checkedAt,
-    claimScope: 'complete-local-rebuild',
+    claimScope: report.claimScope,
     siteStateFingerprint: stateFingerprint,
     buildState: cloneCanonical(report.buildState),
     passingReport: cloneCanonical(report)
@@ -1798,6 +1809,7 @@ function currentStateForReport(root, baseline, report, { boundChangeId = '', che
     currentVerification: {
       checkedAt: report.checkedAt,
       completeLocalRebuildClaimAllowed: report.completeLocalRebuildClaimAllowed === true,
+      completeLocalBuildFromBriefClaimAllowed: report.completeLocalBuildFromBriefClaimAllowed === true,
       authoritative: report.drupalRuntime?.authoritativeForCompletion === true,
       boundChangeId,
       checkpointCreated: checkpointId

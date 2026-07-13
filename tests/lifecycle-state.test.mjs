@@ -156,8 +156,11 @@ function passingReport(buildState = siteState(), overrides = {}) {
   return {
     schemaVersion: 'public-kit.live-verification.1',
     checkedAt: new Date().toISOString(),
+    buildMode: 'source_site',
+    claimScope: 'complete-local-rebuild',
     verificationMode: 'live-target-and-packet',
     completeLocalRebuildClaimAllowed: true,
+    completeLocalBuildFromBriefClaimAllowed: false,
     valid: true,
     buildState: { ...buildState, complete: true, blockers: [] },
     liveTargetValid: true,
@@ -689,6 +692,29 @@ test('the first authoritative pass creates one create-only baseline and later st
   const status = readLifecycleStatus(packetDir);
   assert.equal(status.initialBaseline.status, 'passed');
   assert.equal(status.currentState.relation, 'changed-since-latest-anchor');
+});
+
+test('a brief-mode authoritative pass creates a baseline for its typed completion claim', () => {
+  const { packetDir } = lifecycleFixture();
+  const report = passingReport(siteState(), {
+    buildMode: 'brief',
+    claimScope: 'complete-local-build-from-brief',
+    completeLocalRebuildClaimAllowed: false,
+    completeLocalBuildFromBriefClaimAllowed: true
+  });
+
+  const state = applyVerificationLifecycle({ packetDir, report });
+  const baseline = JSON.parse(readFileSync(
+    join(packetDir, 'evidence', 'lifecycle', 'initial-baseline.json'),
+    'utf8'
+  ));
+
+  assert.equal(state.initialBaseline.status, 'passed');
+  assert.equal(state.currentStateVerified, true);
+  assert.equal(baseline.claimScope, 'complete-local-build-from-brief');
+  assert.equal(baseline.passingReport.completeLocalBuildFromBriefClaimAllowed, true);
+  assert.equal(state.currentVerification.completeLocalRebuildClaimAllowed, false);
+  assert.equal(state.currentVerification.completeLocalBuildFromBriefClaimAllowed, true);
 });
 
 test('a non-passing report records current state but cannot mint an initial baseline', () => {

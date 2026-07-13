@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "public-kit.brief-acceptance.1",
+  "briefSha256": "",
+  "checkedAt": "",
+  "requirements": [
+    {
+      "id": "",
+      "requirement": "",
+      "category": "route | content | design | functionality | editorial | integration | accessibility | seo | other",
+      "targetRoutes": [],
+      "acceptanceChecks": [],
+      "status": "pending | pass | blocked",
+      "evidence": []
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "",
+      "assumption": "",
+      "impact": "",
+      "status": "recorded | owner_decision_required | resolved",
+      "evidence": []
+    }
+  ],
+  "outOfScope": [],
+  "blockers": []
+}

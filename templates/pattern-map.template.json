@@ -142,6 +142,7 @@
   "pageCompositionOwnership": [
     {
       "sourceRoute": "",
+      "targetRoute": "",
       "routeRole": "homepage | landing | campaign | splash | about | marketing | legal | other",
       "selectedOwner": "canvas_page | experience_builder_page | utility_page | node | view | block_layout | entity_display | documented_exception",
       "ownerRationale": "",
@@ -158,6 +159,7 @@
   "sectionOwnershipMatrix": [
     {
       "sourceRoute": "",
+      "targetRoute": "",
       "section": "hero | hero_image | gallery | sponsor_strip | cta | layout_order | media_embed | related_items | footer_cta | other",
       "editorFacingName": "",
       "editorOwnedBy": "field | media_field | view | canvas_component | block | menu | config | theme_exception | documented_exception",

@@ -210,6 +210,8 @@ test('README leads with the same concise bootstrap prompt as USAGE', () => {
   const start = readFileSync(join(repoRoot, 'START.md'), 'utf8');
   const readmePrompt = textPromptAfter(readme, '## Copy This Prompt');
   const usagePrompt = textPromptAfter(usage, '## Canonical Prompt');
+  const readmeBriefPrompt = textPromptAfter(readme, '### No source site? Use a brief');
+  const usageBriefPrompt = textPromptAfter(usage, '## Brief-Only Prompt');
 
   assert.equal(usagePrompt, readmePrompt);
   assert.match(usagePrompt, /Source site: \[SOURCE_URL\]/);
@@ -218,6 +220,13 @@ test('README leads with the same concise bootstrap prompt as USAGE', () => {
   assert.match(usagePrompt, /first meaningful source-shaped route/);
   assert.match(usagePrompt, /real Drupal site passes the kit's verification/);
   assert.ok(usagePrompt.split('\n').length <= 12, 'canonical prompt should stay concise');
+  assert.equal(usageBriefPrompt, readmeBriefPrompt);
+  assert.match(usageBriefPrompt, /Brief: \[BRIEF_FILE\]/);
+  assert.match(usageBriefPrompt, /initialize the kit in brief mode/);
+  assert.match(usageBriefPrompt, /do not claim source-site parity/);
+  assert.doesNotMatch(usageBriefPrompt, /Source site: \[SOURCE_URL\]/);
+  assert.ok(readme.indexOf('## Copy This Prompt') < readme.indexOf('### No source site? Use a brief'));
+  assert.match(readme, /if the project starts from requirements instead/i);
   assert.ok(readme.indexOf('```text') < readme.indexOf('bash <('), 'copy-paste prompt should precede manual setup');
   assert.match(start, /on macOS, Docker Desktop or OrbStack installed and running/);
   assert.doesNotMatch(start, /supplies the rest: Docker/);

@@ -1,6 +1,6 @@
 {
   "packageName": "agent-ready-drupal-build-kit",
-  "packageDate": "2026-07-11",
+  "packageDate": "2026-07-13",
   "status": "public_shareable_instruction_kit",
   "containsImplementationCode": true,
   "containsSiteImplementationCode": false,
@@ -43,8 +43,8 @@
     "Private vulnerability reporting policy for security-sensitive findings",
     "Newcomer-facing README and START.md that position the kit for Drupal-curious developers, designers, agencies, and site builders",
     "Positioning page reframed around trying Drupal CMS with an AI coding agent and keeping the result reviewable",
-    "README quickstart with one required source URL input, local-agent requirement, and copy-paste escape hatch",
-    "START.md one-screen onboarding with prerequisites, workspace topology, one prompt, four moves, and stake-my-name review bar",
+    "README quickstart with a recommended source-site prompt and a separate brief-only prompt, each requiring exactly one build input",
+    "START.md one-screen onboarding with prerequisites, workspace topology, two clearly separated input prompts, four moves, and stake-my-name review bar",
     "docs/parity-spec.md",
     "docs/build-playbook.md",
     "docs/cookbook.md executable Drupal cookbook mirrored as references/cookbook.md: non-admin editor role/user seeding with Drush 13 sequences, filtered text formats for imported HTML, import hygiene (named authors, alt-derived media names, per-bundle Pathauto patterns), custom-theme block/template checklist, cache-correctness snippets, path/preview API warnings, Metatag-owned route SEO, and menu/block section branding",

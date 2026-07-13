@@ -2,7 +2,9 @@
 
 ## Site
 
+- Build basis: `source_site | brief`
 - Source URL:
+- Brief file:
 - Target site name:
 - Target workspace:
 - Date:

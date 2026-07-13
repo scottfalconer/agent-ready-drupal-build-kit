@@ -1,10 +1,10 @@
 # Start Here
 
-**Turn an existing site into a real Drupal site, and let your AI agent do the Drupal.**
+**Turn an existing site—or a clear brief—into a real Drupal site, and let your AI agent do the Drupal.**
 
-This page walks you through it step by step. You bring a site you want to rebuild and a coding agent. The kit brings the Drupal expertise, so you do not have to learn it first.
+This page walks you through it step by step. By default, you bring a site you want to rebuild and a coding agent. If there is no source site, you can bring a written brief instead. The kit brings the Drupal expertise, so you do not have to learn it first.
 
-By the end of a run you will have a working Drupal site on your machine that looks, functions, and edits like the source site's public experience, plus a written record of every decision the agent made, a short list of the calls only a human can make, and evidence a senior Drupal developer could put their name on. You do not even need to know the difference between "Drupal" and "Drupal CMS"; the kit handles that.
+By the end of a run you will have a working Drupal site on your machine that either matches the source site's public experience or satisfies the accepted brief, plus a written record of every decision the agent made, a short list of the calls only a human can make, and evidence a senior Drupal developer could put their name on. You do not even need to know the difference between "Drupal" and "Drupal CMS"; the kit handles that.
 
 A partial or representative site is not a successful run. If the site is missing reachable public content, media, source-like design, public behavior, or editor forms, the agent keeps working or records the real blocker.
 
@@ -14,8 +14,8 @@ Want the fast path? Use the canonical copy-paste prompt in [USAGE.md](USAGE.md).
 
 You need:
 
-- a public source URL.
-- permission to inspect and rebuild that site.
+- either a public source URL or a local brief file;
+- permission to inspect and rebuild the source site, when one is used;
 - on macOS, Docker Desktop or OrbStack installed and running. The installer can provision Docker on supported Linux systems, but its macOS path expects a working Docker runtime.
 
 The official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) checks and prepares the remaining stack: DDEV, Drupal CMS, and an in-container coding agent. Run it from the folder that should contain the new project:
@@ -53,9 +53,9 @@ Expect an iterative local build, not a single short chat response. Small sites c
 
 The first successful full verification creates a create-once, integrity-checked historical baseline under kit tooling. The initial rebuild remains done if the site is later changed. The installed kit can remain in the project to guide repairs and extensions and report whether the latest inspected state is unclassified, evidence-recorded, or fully verified.
 
-## One Prompt
+## Choose One Prompt
 
-Copy the prompt from [USAGE.md](USAGE.md). Replace the bracketed source URL and send it to the agent.
+Copy the recommended source-site prompt from [USAGE.md](USAGE.md), replace the bracketed URL, and send it to the agent. If there is no source site, use the clearly separated brief-only prompt and replace its bracketed file path.
 
 You will not hand-edit anything yourself. The agent does the setup and review loop for you:
 
@@ -63,8 +63,8 @@ You will not hand-edit anything yourself. The agent does the setup and review lo
 2. it initializes the installed skill in that target;
 3. it merges a concise build-kit project block into `AGENTS.md` while preserving regions managed by Drupal CMS, AI Best Practices, and the One Line Installer; that block points to the detailed contract packaged as `references/build-contract.md`;
 4. it fills in the build-kit placeholders from your prompt and builds in the existing Drupal CMS site;
-5. once the first meaningful source-shaped route works, it shares that real DDEV URL with you and then keeps building;
-6. it verifies the result, fixes the highest-impact gaps, and repeats until the complete local rebuild bar is met or a real blocker is recorded;
+5. once the first meaningful source-shaped or brief-defined route works, it shares that real DDEV URL with you and then keeps building;
+6. it verifies the result, fixes the highest-impact gaps, and repeats until the typed completion bar is met or a real blocker is recorded;
 7. it runs an independent live verification pass that tries to falsify packet and real-site claims;
 8. it runs a blind adversarial product review against the original brief/source-of-truth and target, without showing the reviewer the builder's rationale first;
 9. it produces `open-decisions.md` with only the decisions a human can make;
@@ -105,14 +105,14 @@ Do not clone the kit beside this project, create a nested DDEV project, or repla
 
 Under the hood, the agent works in four moves and repeats them as a review loop. You do not have to drive these, but they are what keeps the result inspectable instead of a black box:
 
-1. **Introspect:** read the source site: routes, content inventory, media, design system, public behaviors, and unresolved facts it must not invent.
-2. **Assemble:** work on the Drupal CMS substrate already installed in the DDEV target, decide which bounded Recipes fit the audited source, declare the composition owner for flexible pages, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, Canvas/Experience Builder or another declared owner where appropriate, theme/config work, and source-like public behavior.
+1. **Introspect:** read the source site's routes, content, media, design system, and public behaviors—or translate the preserved brief into stable requirements, target routes, assumptions, and unresolved facts it must not invent.
+2. **Assemble:** work on the Drupal CMS substrate already installed in the DDEV target, decide which bounded Recipes fit the audited source or accepted brief, declare the composition owner for flexible pages, then build with Drupal-native content types, fields, taxonomy, media, menus, Views, aliases, workflows, Canvas/Experience Builder or another declared owner where appropriate, and theme/config work.
 3. **Capture intent:** record why each load-bearing decision was made, so a later agent or human is not guessing.
 4. **Name gaps and decisions:** list remaining implementation gaps by role, then separately present only the decisions a human must make: production target, provider credentials, legal/privacy approval, accepted route/content dispositions, maintainer signoff, launch go/no-go, and authenticated acceptance of evidence-backed out-of-scope items. The local packet can record self-attested attribution but cannot provide that authentication. This decision list is not a reason to stop early; the agent keeps building everything it can before final handoff. An external blocker stays blocked and does not count as completed route coverage.
 
 Before handoff, the agent also needs two skeptic passes. A fresh independent verifier checks the live Drupal site for missing routes, dropped collection items, broken embeds, unresolved footer/legal links, placeholder content, starter routes, composition model drift, fake Canvas component models, editor add-a-row failures, and stale evidence. The default target-local command independently identifies the DDEV target; binds its origin to the Drupal site UUID, front-page setting, config-sync directory, and clean config status read from that runtime; requires real Git-tracked YAML in that current sync directory; fetches every accepted route and target-required public route; checks links present in server-rendered response HTML; requires discovered same-origin targets to be declared or exactly dispositioned; validates expected external redirects without fetching the external origin; blocks unaccepted direct links back to the source origin; rejects non-success responses even when packet data repeats the same `5xx`; and checks the fetched primary routes' response canonical, meta description, and `og:image` against browser evidence. This HTTP check does not execute JavaScript; browser-only links must come from browser-first expansion and be represented in the route matrix. Every discovered route role needs a representative primary route, including detail pages when present. It does not independently perform authenticated editor tasks or prove collection/editor behavior without the separately required falsification evidence. Packet-only data and injected test runtimes cannot authorize completion. The blind adversarial reviewer sees only the original brief, the target, and source-of-truth materials before public review, then decides whether the produced site is actually good enough.
 
-Before inspecting target parity, that same full verifier performs a separately budgeted source census from `sourceBaseUrl`: homepage and declared primary routes, same-origin server-rendered links, `robots.txt` Sitemap directives, bounded sitemap indexes, and bounded URL sets. It stores source status, final URL, title, H1, canonical, body hashes, and provenance. Every newly discovered reachable public path must be represented by an accepted source route; a builder-authored legacy, test, or intentionally-drop disposition cannot clear it. The agent adds and implements the route, then reruns. A private or persistently unreachable response may use a matching machine-evidenced boundary record without waiting for human review.
+In source-site mode, before inspecting target parity, that same full verifier performs a separately budgeted source census from `sourceBaseUrl`: homepage and declared primary routes, same-origin server-rendered links, `robots.txt` Sitemap directives, bounded sitemap indexes, and bounded URL sets. It stores source status, final URL, title, H1, canonical, body hashes, and provenance. Every newly discovered reachable public path must be represented by an accepted source route; a builder-authored legacy, test, or intentionally-drop disposition cannot clear it. The agent adds and implements the route, then reruns. A private or persistently unreachable response may use a matching machine-evidenced boundary record without waiting for human review. In brief mode, no source census runs; every accepted brief requirement must instead be mapped to target evidence and independently falsified.
 
 The same verifier probes a random missing route and access walls, resolves rendered legal/privacy links under the shared HTTP budget, and reconciles active consent config with verifier-owned before-consent network evidence. Optional or disabled controlled resources—including selector-only and attachment-only controls—require fresh per-primary-route CDP capture under the browser route ceiling and aggregate deadline.
 The same verifier probes a random missing route and access walls, resolves rendered legal/privacy links under the shared HTTP budget, and reconciles active consent config with verifier-owned before-consent network evidence. Every declared application with controlled resources—including selector-only and attachment-only controls—requires fresh per-primary-route CDP capture under the browser route ceiling and aggregate deadline, regardless of enabled or `required` status. A required application may load before consent only with an explicit, evidence-backed essential-service classification.
@@ -145,6 +145,6 @@ ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --
 
 Use `scripts/verify-packet.mjs` only for explicit packet-only lint. Packet-only success never authorizes a complete rebuild claim.
 
-An explicit verifier target must match one of the current project's authoritative DDEV web origins. Configured custom FQDNs qualify; service URLs such as Mailpit do not. Exit `0` authorizes the complete-local-rebuild machine claim, exit `2` means required machine evidence is incomplete, and exit `1` means packet or live-target validation failed. The report also carries `recordedHumanGateStatus`, but those builder-writable names and choices are self-attested status only and do not affect the machine verdict. Authenticated human approval, production readiness, and launch approval remain separate.
+An explicit verifier target must match one of the current project's authoritative DDEV web origins. Configured custom FQDNs qualify; service URLs such as Mailpit do not. Exit `0` authorizes the active typed machine claim—`complete-local-rebuild` or `complete-local-build-from-brief`—exit `2` means required machine evidence is incomplete, and exit `1` means packet or live-target validation failed. The report also carries `recordedHumanGateStatus`, but those builder-writable names and choices are self-attested status only and do not affect the machine verdict. Authenticated human approval, production readiness, and launch approval remain separate.
 
 Early runs still create blocked stubs for gate records that are not earned yet. Missing gate files are worse than blocked ones, because missing files hide what remains.
