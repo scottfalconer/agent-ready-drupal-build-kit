@@ -2315,7 +2315,11 @@ async function validateBlindAdversarialReview(
 ) {
   if (!isJsonObject(blindReview)) {
     errors.push('blind-adversarial-review.json must be a JSON object (blocked stub at minimum).');
-    return false;
+    return {
+      externalBlockers: [],
+      externalBlockersOnly: false,
+      supportsCompletion: false
+    };
   }
 
   const startingErrorCount = errors.length;
@@ -2336,9 +2340,21 @@ async function validateBlindAdversarialReview(
   const strictCompletionReview =
     BLIND_COMPLETE_VERDICTS.has(summary.verdict) &&
     ['parity_reviewed', 'human_accepted', 'complete'].includes(summary.completionState);
+  const externalPauseReview =
+    summary.verdict === 'blocked' &&
+    summary.completionState === 'blocked' &&
+    (
+      defects.some((defect) => defect?.status === 'external_blocker') ||
+      omittedPrimaryRoutes.some((omission) => omission?.disposition === 'external_blocker')
+    );
+  const externalBlockers = [];
 
-  if (!strictCompletionReview) {
-    return false;
+  if (!strictCompletionReview && !externalPauseReview) {
+    return {
+      externalBlockers,
+      externalBlockersOnly: false,
+      supportsCompletion: false
+    };
   }
 
   if (isoTimestamp(blindReview.checkedAt) === null) {
@@ -2369,7 +2385,7 @@ async function validateBlindAdversarialReview(
     );
   }
 
-  if (!BLIND_COMPLETE_VERDICTS.has(summary.verdict)) {
+  if (strictCompletionReview && !BLIND_COMPLETE_VERDICTS.has(summary.verdict)) {
     errors.push('blind-adversarial-review.json can allow completion only with summary.verdict good or good_enough.');
   }
 
@@ -2435,18 +2451,36 @@ async function validateBlindAdversarialReview(
       const evidenceResults = await Promise.all(
         arrayOrEmpty(defect.evidence).map((reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir))
       );
+      const reason = String(defect.acceptedReason || defect.reason || defect.rationale || '').trim();
+      const missingInput = String(defect.missingInput ?? '').trim();
+      const nextAction = String(defect.nextAction ?? defect.recommendedFix ?? '').trim();
       if (
         (defect.status === 'accepted_out_of_scope' && !String(defect.acceptedBy ?? '').trim()) ||
-        !String(defect.acceptedReason || defect.reason || defect.rationale || '').trim() ||
+        !reason ||
         !evidenceResults.some(Boolean)
       ) {
         errors.push(
           `blind-adversarial-review.json productDefects[${index}] ${defect.status} requires a reason${defect.status === 'accepted_out_of_scope' ? ', acceptedBy,' : ','} and concrete packet-local evidence.`
         );
       }
-    }
-    if (defect.status === 'external_blocker') {
-      errors.push(`blind-adversarial-review.json productDefects[${index}] external blocker blocks completion.`);
+      if (defect.status === 'external_blocker') {
+        if (!missingInput || !nextAction) {
+          errors.push(
+            `blind-adversarial-review.json productDefects[${index}] external_blocker requires missingInput and nextAction.`
+          );
+        } else if (reason && evidenceResults.some(Boolean)) {
+          externalBlockers.push({
+            attemptedEvidence: arrayOrEmpty(defect.evidence).map((reference) => String(reference).trim()).filter(Boolean),
+            code: `blind.defect.${String(defect.id ?? index).trim() || index}`,
+            message: String(defect.title || reason).trim(),
+            missingInput,
+            nextAction,
+            origin: `packet-verifier:blind-adversarial-review.productDefects[${index}]`,
+            resolutionClass: 'external',
+            verifierConfirmedExternal: true
+          });
+        }
+      }
     }
   }
 
@@ -2458,9 +2492,12 @@ async function validateBlindAdversarialReview(
     const evidenceResults = await Promise.all(
       arrayOrEmpty(omission.evidence).map((reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir))
     );
+    const rationale = String(omission.reason || omission.rationale || '').trim();
+    const missingInput = String(omission.missingInput ?? '').trim();
+    const nextAction = String(omission.nextAction ?? '').trim();
     if (
       (omission.disposition === 'accepted_out_of_scope' && !String(omission.acceptedBy ?? '').trim()) ||
-      !String(omission.reason || omission.rationale || '').trim() ||
+      !rationale ||
       !evidenceResults.some(Boolean)
     ) {
       errors.push(
@@ -2468,7 +2505,23 @@ async function validateBlindAdversarialReview(
       );
     }
     if (omission.disposition === 'external_blocker') {
-      errors.push(`blind-adversarial-review.json routeCoverage.omittedPrimaryRoutes[${index}] external blocker blocks completion.`);
+      if (!missingInput || !nextAction) {
+        errors.push(
+          `blind-adversarial-review.json routeCoverage.omittedPrimaryRoutes[${index}] external_blocker requires missingInput and nextAction.`
+        );
+      } else if (rationale && evidenceResults.some(Boolean)) {
+        const route = normalizeRouteKey(omission.route || omission.targetPath || omission.sourcePath || omission.path);
+        externalBlockers.push({
+          attemptedEvidence: arrayOrEmpty(omission.evidence).map((reference) => String(reference).trim()).filter(Boolean),
+          code: `blind.route.${route || index}`,
+          message: `Primary route ${route || `(row ${index})`} is externally blocked: ${rationale}`,
+          missingInput,
+          nextAction,
+          origin: `packet-verifier:blind-adversarial-review.routeCoverage.omittedPrimaryRoutes[${index}]`,
+          resolutionClass: 'external',
+          verifierConfirmedExternal: true
+        });
+      }
     }
   }
 
@@ -2708,10 +2761,13 @@ async function validateBlindAdversarialReview(
   const acceptedOmissions = new Map(
     omittedPrimaryRoutes
       .filter((route) =>
-        route.disposition === 'accepted_out_of_scope' &&
-        String(route.acceptedBy ?? '').trim() &&
+        ['accepted_out_of_scope', 'external_blocker'].includes(route.disposition) &&
+        (route.disposition === 'external_blocker' || String(route.acceptedBy ?? '').trim()) &&
         String(route.rationale ?? '').trim() &&
-        arrayOrEmpty(route.evidence).length > 0
+        arrayOrEmpty(route.evidence).length > 0 &&
+        (route.disposition !== 'external_blocker' || (
+          String(route.missingInput ?? '').trim() && String(route.nextAction ?? '').trim()
+        ))
       )
       .map((route) => [normalizeRouteRequestKey(route.route || route.targetPath || route.sourcePath || route.path), route])
   );
@@ -2790,7 +2846,18 @@ async function validateBlindAdversarialReview(
     }
   }
 
-  return errors.length === startingErrorCount;
+  const structurallyValidForRequestedState = errors.length === startingErrorCount;
+  return {
+    externalBlockers,
+    externalBlockersOnly:
+      externalPauseReview &&
+      externalBlockers.length > 0 &&
+      structurallyValidForRequestedState,
+    supportsCompletion:
+      strictCompletionReview &&
+      externalBlockers.length === 0 &&
+      structurallyValidForRequestedState
+  };
 }
 
 async function validateDurableIntent(packetDir, errors) {
@@ -5557,13 +5624,15 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     errors,
     { briefAcceptance, briefMode }
   );
-  const blindAdversarialReviewSupportsCompletion = await validateBlindAdversarialReview(
+  const blindAdversarialReviewValidation = await validateBlindAdversarialReview(
     packetDir,
     blindAdversarialReview,
     routeMatrix,
     errors,
     { briefAcceptance, briefContext, briefMode }
   );
+  const blindAdversarialReviewSupportsCompletion =
+    blindAdversarialReviewValidation.supportsCompletion === true;
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
   const completionRecords = {
@@ -5616,6 +5685,8 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     completionEvidence: {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
+      externalBlockers: blindAdversarialReviewValidation.externalBlockers,
+      externalBlockersOnly: blindAdversarialReviewValidation.externalBlockersOnly,
       scopeDispositionAttribution: 'builder-writable-self-attested',
       humanDecisionPresentationStatus: completionReadiness.humanDecisionPresentationStatus,
       independence: {
