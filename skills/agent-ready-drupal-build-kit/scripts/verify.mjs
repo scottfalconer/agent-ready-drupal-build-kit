@@ -4690,6 +4690,81 @@ function yamlFilesOnDisk(projectRoot, roots) {
   return [...files].sort(comparePortable);
 }
 
+const REGULAR_GIT_FILE_MODES = new Set(['100644', '100755']);
+
+function gitBlobObjectId(bytes, objectFormat) {
+  const context = createHash(objectFormat);
+  context.update(`blob ${bytes.length}\0`);
+  context.update(bytes);
+  return context.digest('hex');
+}
+
+export function yamlTreeMatchesHead(projectRoot, yamlFiles, relativeDirectories) {
+  if (!Array.isArray(yamlFiles) || !Array.isArray(relativeDirectories)) {
+    throw new TypeError('YAML files and config directories must be arrays.');
+  }
+  const normalizedYamlFiles = yamlFiles.map((path) => String(path).replaceAll('\\', '/'));
+  if (new Set(normalizedYamlFiles).size !== normalizedYamlFiles.length) {
+    return false;
+  }
+
+  const headOutput = execFileSync(
+    'git',
+    ['ls-tree', '-r', '-z', '--full-tree', 'HEAD', '--', ...relativeDirectories],
+    {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000
+    }
+  );
+  const headYamlEntries = headOutput
+    .split('\0')
+    .filter(Boolean)
+    .map((record) => {
+      const separator = record.indexOf('\t');
+      if (separator === -1) {
+        throw new Error('HEAD config tree returned malformed Git metadata.');
+      }
+      const [mode, type, objectId] = record.slice(0, separator).split(' ');
+      return {
+        mode,
+        objectId,
+        path: record.slice(separator + 1).replaceAll('\\', '/'),
+        type
+      };
+    })
+    .filter((entry) => /\.ya?ml$/i.test(entry.path))
+    .sort((left, right) => comparePortable(left.path, right.path));
+
+  const sortedYamlFiles = [...normalizedYamlFiles].sort(comparePortable);
+  if (
+    headYamlEntries.length !== sortedYamlFiles.length ||
+    headYamlEntries.some((entry, index) =>
+      entry.path !== sortedYamlFiles[index] ||
+      entry.type !== 'blob' ||
+      !REGULAR_GIT_FILE_MODES.has(entry.mode)
+    )
+  ) {
+    return false;
+  }
+
+  const objectFormat = execFileSync('git', ['rev-parse', '--show-object-format=storage'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000
+  }).trim();
+  if (!['sha1', 'sha256'].includes(objectFormat)) {
+    throw new Error(`Unsupported Git object format: ${objectFormat || '(missing)'}.`);
+  }
+
+  return headYamlEntries.every((entry) => {
+    const bytes = readFileSync(join(projectRoot, entry.path));
+    return gitBlobObjectId(bytes, objectFormat) === entry.objectId;
+  });
+}
+
 function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, configSplitDirectories = []) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   const splitPaths = [];
@@ -4737,17 +4812,6 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, con
     let matchesHead = false;
     if (yamlFiles.length > 0) {
       try {
-        const headOutput = execFileSync('git', ['ls-tree', '-r', '--name-only', 'HEAD', '--', ...relativeDirectories], {
-          cwd: projectRoot,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 10_000
-        });
-        const headYamlFiles = headOutput
-          .split(/\r?\n/)
-          .map((path) => path.trim())
-          .filter((path) => /\.ya?ml$/i.test(path))
-          .sort(comparePortable);
         const status = execFileSync(
           'git',
           ['status', '--porcelain=v1', '--untracked-files=all', '--', ...relativeDirectories],
@@ -4760,8 +4824,7 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, con
         );
         matchesHead =
           status.length === 0 &&
-          allYamlFiles.length === headYamlFiles.length &&
-          allYamlFiles.every((path, index) => path === headYamlFiles[index]);
+          yamlTreeMatchesHead(projectRoot, allYamlFiles, relativeDirectories);
       } catch {
         matchesHead = false;
       }
