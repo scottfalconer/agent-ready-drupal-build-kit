@@ -26,11 +26,13 @@
     "test": "node --test tests/*.test.mjs",
     "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs",
+    "verify-reproduction": "node bin/verify-reproduction.mjs",
     "lifecycle": "node bin/lifecycle.mjs"
   },
   "bin": {
     "agent-ready-drupal-verify": "bin/verify.mjs",
     "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs",
+    "agent-ready-drupal-verify-reproduction": "bin/verify-reproduction.mjs",
     "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs"
   },
   "engines": {

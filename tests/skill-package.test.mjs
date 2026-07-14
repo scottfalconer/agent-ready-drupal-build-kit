@@ -440,7 +440,7 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.doesNotMatch(agents, /\.\.\/.*(?:private\/)?tmp\/.*\.agents\/skills/);
   assert.doesNotMatch(agents, /\/Users\//);
 
-  for (const verifier of ['verify.mjs', 'verify-packet.mjs']) {
+  for (const verifier of ['verify.mjs', 'verify-packet.mjs', 'verify-reproduction.mjs']) {
     const verifierPath = join(installedSkill, 'scripts', verifier);
     assert.equal(existsSync(verifierPath), true, verifier);
     assert.notEqual(statSync(verifierPath).mode & 0o111, 0, `${verifier} should be executable`);
@@ -482,7 +482,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(48 files\)/);
+  assert.match(result.stdout, /is in sync \(52 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -552,7 +552,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(48 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(52 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

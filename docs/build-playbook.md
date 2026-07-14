@@ -203,7 +203,7 @@ For DDEV Drupal CMS projects with a `web` docroot, set the active config sync di
 
 The local handoff gate independently runs Git against the actual project and proves that Drupal's current active sync directory contains real tracked YAML and that `drush config:status` reports no active-to-sync drift. Packet-authored paths are not sufficient. Also inspect representative YAML for the public theme, custom content types and fields, Views, menus, roles, and workflows expected by the rebuild.
 
-A clean install plus `drush config:import` into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. Record its commands and readbacks when actually run; do not infer it from a clean config status and do not perform a destructive reinstall of the working target merely to satisfy wording.
+A clean install plus tracked config/content/files import into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. When exact-HEAD inputs can be declared, use the typed host-side runner in [disposable-reproduction.md](disposable-reproduction.md); it records verifier-owned commands and portable before/disposable/after readbacks without reinstalling the working target. A database snapshot run remains labeled `snapshot_restore`, not clean-install evidence. Do not infer either result from a clean config status.
 
 ## Continue After The Verified Baseline
 

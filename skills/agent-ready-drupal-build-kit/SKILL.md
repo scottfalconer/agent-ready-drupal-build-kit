@@ -137,8 +137,9 @@ Everything required at runtime is inside this skill directory:
 - `scripts/repair-browser-runtime.sh` is the only supported host repair entrypoint and recreates only the browser service.
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
+- `scripts/verify-reproduction.mjs` performs optional exact-HEAD disposable DDEV reproduction from a typed, digest-bound plan; run it from the DDEV host and treat its result as maintainer/launch evidence, not default handoff authority.
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
 - `assets/browser-runtime/` contains the pinned add-on/image manifest and the narrow last-sorting DDEV override template.
-- `references/` contains the complete build contract, output inventory, parity specification, playbook, command cookbook, and companion-skill guidance.
+- `references/` contains the complete build contract, output inventory, parity specification, playbook, disposable-reproduction contract, command cookbook, and companion-skill guidance.

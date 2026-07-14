@@ -97,7 +97,7 @@ ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ```
 
-Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; record it only when it was actually performed. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
+Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; when it is required and exact-HEAD inputs can be declared, use the typed host-side workflow in `references/disposable-reproduction.md`. Record it only when it actually ran, and keep `snapshot_restore` distinct from `clean_install_config_import`. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
 
 ## Build Input Handling
 
