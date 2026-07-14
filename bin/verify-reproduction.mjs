@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   assertDeclaredEmptyAdapters,
   cleanupDisposable,
+  confirmDisposableDdevIdentity,
   createDisposableClone,
   createRecordedExecutor,
   exactHeadRuntimeBinding,
@@ -140,31 +141,8 @@ function firstError(error) {
   return String(error?.message ?? error ?? 'Unknown error').trim().split(/\r?\n/)[0];
 }
 
-function descriptionHasName(value, expected) {
-  if (!value || typeof value !== 'object') return false;
-  for (const [key, child] of Object.entries(value)) {
-    if (['name', 'project_name', 'projectName'].includes(key) && String(child) === expected) return true;
-    if (descriptionHasName(child, expected)) return true;
-  }
-  return false;
-}
-
 function confirmDisposableIdentity(execute, disposable) {
-  const output = commandOutput(execute, 'ddev', ['describe', '-j'], {
-    cwd: disposable.root,
-    phase: 'confirm-disposable-ddev-identity',
-    target: 'disposable',
-    timeout: 20_000
-  });
-  let description;
-  try {
-    description = JSON.parse(output);
-  } catch {
-    throw new Error('Disposable DDEV description returned invalid JSON.');
-  }
-  if (!descriptionHasName(description, disposable.name)) {
-    throw new Error('DDEV did not confirm the verifier-owned disposable project identity.');
-  }
+  confirmDisposableDdevIdentity({ disposable, execute });
 }
 
 function runStep(execute, disposable, step) {

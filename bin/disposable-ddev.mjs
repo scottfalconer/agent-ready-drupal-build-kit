@@ -539,10 +539,48 @@ export function assertDisposableOwnership(disposable) {
   return root;
 }
 
+function descriptionHasName(value, expected) {
+  if (!value || typeof value !== 'object') return false;
+  for (const [key, child] of Object.entries(value)) {
+    if (['name', 'project_name', 'projectName'].includes(key) && String(child) === expected) return true;
+    if (descriptionHasName(child, expected)) return true;
+  }
+  return false;
+}
+
+/** Confirm that DDEV resolves this owned clone to the verifier-generated project name. */
+export function confirmDisposableDdevIdentity({ disposable, execute, phase = 'confirm-disposable-ddev-identity' }) {
+  const root = assertDisposableOwnership(disposable);
+  const output = requiredCommand(execute, 'ddev', ['describe', '-j'], {
+    cwd: root,
+    phase,
+    target: 'disposable',
+    timeout: 20_000
+  }).stdout;
+  let description;
+  try {
+    description = JSON.parse(output);
+  } catch {
+    throw new Error('Disposable DDEV description returned invalid JSON.');
+  }
+  if (!descriptionHasName(description, disposable.name)) {
+    throw new Error('DDEV did not confirm the verifier-owned disposable project identity.');
+  }
+}
+
 /** Delete only the UUID-owned DDEV project, then remove only its temp clone. */
 export function cleanupDisposable({ ddevStartAttempted, disposable, execute }) {
   const root = assertDisposableOwnership(disposable);
   if (ddevStartAttempted) {
+    // A failed or partial `ddev start` can register a different project under
+    // the generated name. Re-confirm the live DDEV identity immediately before
+    // deletion; on failure this throws before either the project or clone is
+    // removed, leaving the owned target available for manual inspection.
+    confirmDisposableDdevIdentity({
+      disposable,
+      execute,
+      phase: 'confirm-disposable-ddev-identity-before-delete'
+    });
     requiredCommand(execute, 'ddev', ['delete', '--omit-snapshot', '--yes', disposable.name], {
       cwd: root,
       phase: 'delete-owned-disposable-ddev',

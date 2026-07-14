@@ -2,7 +2,7 @@
 
 `verify-reproduction.mjs` is an optional host-side maintainer/launch verifier for `G-REPRO-01`. It proves that exact Git `HEAD` plus declared, digest-bound inputs can produce the same portable Drupal state in a separately cloned DDEV project. It does not participate in the default handoff verdict.
 
-The runner never reinstalls or imports into the working target. It reads that target before and after the run, provisions only a UUID-named `agent-ready-repro-*` project in an independent temporary clone, and deletes only a clone whose ownership marker and DDEV name match the current run. Its one intentional working-tree write happens after the after-readback: `review-packet/evidence/reproduction-verification.json`.
+The runner never reinstalls or imports into the working target. It reads that target before and after the run, provisions only a UUID-named `agent-ready-repro-*` project in an independent temporary clone, and deletes only a clone whose ownership marker and live DDEV identity match the current run immediately before cleanup. If that live identity cannot be reconfirmed, cleanup fails closed and retains the owned temporary target for manual inspection. Its one intentional working-tree write happens after the after-readback: `review-packet/evidence/reproduction-verification.json`.
 
 ## Preconditions
 

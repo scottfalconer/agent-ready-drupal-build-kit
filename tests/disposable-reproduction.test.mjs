@@ -191,6 +191,33 @@ test('independent clone uses config.local identity and cleanup refuses to target
   }
 });
 
+test('cleanup retains the owned clone when live DDEV identity cannot be reconfirmed', () => {
+  const { root } = fixture();
+  let disposable;
+  try {
+    const execute = realExecutor();
+    disposable = createDisposableClone({ execute, head: git(root, ['rev-parse', 'HEAD']), projectRoot: root });
+    const calls = [];
+    const unsafeExecute = (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === 'ddev' && args[0] === 'describe') {
+        return { status: 0, stdout: JSON.stringify({ raw: { name: 'another-project' } }), stderr: '', signal: null };
+      }
+      throw new Error(`Unexpected cleanup command: ${command} ${args.join(' ')}`);
+    };
+
+    assert.throws(
+      () => cleanupDisposable({ ddevStartAttempted: true, disposable, execute: unsafeExecute }),
+      /did not confirm the verifier-owned disposable project identity/
+    );
+    assert.equal(calls.some(({ args }) => args[0] === 'delete'), false);
+    assert.equal(existsSync(disposable.root), true);
+  } finally {
+    if (disposable?.root) rmSync(disposable.root, { force: true, recursive: true });
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
 test('mocked end-to-end run proves exact-HEAD reproduction and working-target before/after equality', () => {
   const { root } = fixture();
   const commandLog = [];
