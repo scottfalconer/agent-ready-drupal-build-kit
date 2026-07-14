@@ -66,6 +66,7 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'parity-spec.md'), destination: join(skillRoot, 'references', 'parity-spec.md') },
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
+    { source: join(repoRoot, 'docs', 'disposable-assembly.md'), destination: join(skillRoot, 'references', 'disposable-assembly.md') },
     { source: join(repoRoot, 'docs', 'disposable-reproduction.md'), destination: join(skillRoot, 'references', 'disposable-reproduction.md') },
     { source: join(repoRoot, 'docs', 'cookbook.md'), destination: join(skillRoot, 'references', 'cookbook.md') },
     ...['runtime.json', 'docker-compose.zz-agent-ready-verifier.yaml'].map((name) => ({
@@ -98,9 +99,22 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'verify-assembly.mjs'),
+        destination: join(skillRoot, 'scripts', 'verify-assembly.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'verify-reproduction.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-reproduction.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'assembly-contract.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-contract.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'assembly-fixtures.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-fixtures.mjs')
       },
       {
         source: join(repoRoot, 'bin', 'disposable-ddev.mjs'),

@@ -141,10 +141,6 @@ function firstError(error) {
   return String(error?.message ?? error ?? 'Unknown error').trim().split(/\r?\n/)[0];
 }
 
-function confirmDisposableIdentity(execute, disposable) {
-  confirmDisposableDdevIdentity({ disposable, execute });
-}
-
 function runStep(execute, disposable, step) {
   const result = execute(step.command, step.args, {
     cwd: disposable.root,
@@ -242,7 +238,7 @@ export function runDisposableReproduction({
     for (const step of provisioningSteps(validated.plan)) {
       if (step.adapter === 'ddev_start') ddevStartAttempted = true;
       runStep(run, disposable, step);
-      if (step.adapter === 'ddev_start') confirmDisposableIdentity(run, disposable);
+      if (step.adapter === 'ddev_start') confirmDisposableDdevIdentity({ disposable, execute: run });
     }
     disposableState = captureState({
       execute: disposableRun,

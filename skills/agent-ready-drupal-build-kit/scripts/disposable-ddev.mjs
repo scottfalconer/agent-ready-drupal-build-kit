@@ -217,7 +217,7 @@ function assertHeadExact(execute, projectRoot, path) {
   if (!result || result.status !== 0) throw new Error(`Git could not compare required input ${path} to HEAD.`);
 }
 
-function validateBoundInput({ execute, expectedKind, label, projectRoot, source }) {
+export function validateBoundInput({ execute, expectedKind, label, projectRoot, source }) {
   if (machineLocalInputPath(source.path)) throw new Error(`${label} must not use a machine-local input path: ${source.path}.`);
   const path = resolve(projectRoot, source.path);
   if (!isInside(projectRoot, path)) throw new Error(`${label} escaped the project root.`);
@@ -449,7 +449,7 @@ export function createRecordedExecutor({ commandLog, environment = process.env, 
       encoding: 'utf8',
       env: environment,
       input: options.input,
-      maxBuffer: 64 * 1024 * 1024,
+      maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: options.timeout ?? 60_000

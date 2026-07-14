@@ -205,6 +205,8 @@ The local handoff gate independently runs Git against the actual project and pro
 
 A clean install plus tracked config/content/files import into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. When exact-HEAD inputs can be declared, use the typed host-side runner in [disposable-reproduction.md](disposable-reproduction.md); it records verifier-owned commands and portable before/disposable/after readbacks without reinstalling the working target. A database snapshot run remains labeled `snapshot_restore`, not clean-install evidence. Do not infer either result from a clean config status.
 
+Assembly rerun claims are a different launch exercise. When an assembly script is claimed to be idempotent, extension-safe, or recoverable, use [disposable-assembly.md](disposable-assembly.md). Its verifier starts from an exact-HEAD pre-assembly substrate, reconciles the script's dry-run rows to independently read Drupal state, requires an immediate no-op rerun, inserts live-applicable extension fixtures before another rerun, and observes a partial failure followed by exact restoration. Do not use final-state reproduction, builder logs, or screenshots as a substitute.
+
 ## Continue After The Verified Baseline
 
 The first successful full verifier run creates a create-once, integrity-checked historical baseline under kit tooling for the exact Drupal state inspected. Treat the initial rebuild as done. Later code, config, content, route, or composition changes do not make the historical result false; they create a new current-state question. This is not a claim of cryptographic immutability or tamper-proof storage.
