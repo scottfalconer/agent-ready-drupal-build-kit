@@ -1,19 +1,30 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   BEFORE_CONSENT_NETWORK_SCHEMA,
   BROWSER_CAPTURE_LIMITS,
+  DEFAULT_SELENIUM_GRID_URL,
+  SELENIUM_ADD_ON_RELEASE,
+  SELENIUM_CHROMIUM_IMAGE,
   VERIFIER_AXE_SCHEMA,
   VERIFIER_AXE_SOURCE_SHA256,
   VERIFIER_AXE_TAGS,
   VERIFIER_AXE_VERSION,
+  VERIFIER_WEBSOCKET_BUNDLE_SHA256,
+  VERIFIER_WEBSOCKET_SOURCE_SHA256,
+  VERIFIER_WEBSOCKET_VERSION,
   captureBeforeConsentNetwork,
   captureGlobalChrome,
+  captureSummary,
+  canonicalizeSeleniumCdpUrl,
   cleanupBrowserProfile,
   compareGlobalChromeCaptures,
   createBrowserCaptureBudget,
@@ -22,6 +33,7 @@ import {
   findBrowserExecutable,
   globalChromeImpact,
   normalizeGlobalChromeContract,
+  openSeleniumCdpBackend,
   validateBeforeConsentNetworkCapture,
   validateScreenshotArtifacts,
   verifierAxeCompletionErrors
@@ -33,7 +45,43 @@ import {
 } from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
 
+const { WebSocketServer } = await import('../vendor/ws/8.21.0/ws.mjs');
+
 const state = (seed) => `sha256:${seed.repeat(64)}`;
+
+function jsonResponse(value, status = 200) {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { 'content-type': 'application/json' }
+  });
+}
+
+class FixtureWebSocket extends EventEmitter {
+  constructor(respond) {
+    super();
+    this.respond = respond;
+    this.closed = false;
+    this.terminated = false;
+  }
+
+  send(value) {
+    const message = JSON.parse(value);
+    queueMicrotask(() => this.respond(message, (response) => {
+      this.emit('message', JSON.stringify(response), false);
+    }, this));
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    queueMicrotask(() => this.emit('close'));
+  }
+
+  terminate() {
+    this.terminated = true;
+    this.close();
+  }
+}
 
 function beforeConsentCaptureFixture({
   requests = [],
@@ -108,6 +156,360 @@ test('browser capture budget enforces an absolute route ceiling and aggregate de
   clock += 10;
   assert.throws(() => deadlineBudget.assertWithinDeadline(), /50 ms total wall-clock deadline/i);
   assert.equal(deadlineBudget.metrics().deadlineExceeded, true);
+});
+
+test('Selenium se:cdp canonicalization keeps only the session path and trusted Grid origin', () => {
+  assert.equal(
+    canonicalizeSeleniumCdpUrl(
+      'ws://192.168.97.32:4444/session/session-123/se/cdp',
+      'session-123',
+      DEFAULT_SELENIUM_GRID_URL
+    ),
+    'ws://selenium-chrome:4444/session/session-123/se/cdp'
+  );
+  assert.equal(
+    canonicalizeSeleniumCdpUrl(
+      'wss://untrusted.example/session/session-123/se/cdp',
+      'session-123',
+      'https://grid.internal:4444'
+    ),
+    'wss://grid.internal:4444/session/session-123/se/cdp'
+  );
+  for (const advertised of [
+    'ws://bridge:4444/session/other/se/cdp',
+    'ws://bridge:4444/session/session-123/se/cdp?token=secret',
+    'ws://user:password@bridge:4444/session/session-123/se/cdp',
+    'ws://bridge:4444/devtools/browser/session-123'
+  ]) {
+    assert.throws(
+      () => canonicalizeSeleniumCdpUrl(advertised, 'session-123'),
+      /exact session-scoped path/i
+    );
+  }
+  assert.throws(
+    () => canonicalizeSeleniumCdpUrl('ws://bridge:4444/session/session-123/se/cdp', '../session'),
+    /invalid session ID/i
+  );
+});
+
+test('vendored ws client matches its pinned upstream source and generated-bundle integrity record', () => {
+  const vendorRoot = fileURLToPath(new URL(`../vendor/ws/${VERIFIER_WEBSOCKET_VERSION}/`, import.meta.url));
+  const integrity = JSON.parse(readFileSync(join(vendorRoot, 'INTEGRITY.json'), 'utf8'));
+  const bundle = readFileSync(join(vendorRoot, 'ws.mjs'));
+  assert.equal(integrity.package, 'ws');
+  assert.equal(integrity.version, VERIFIER_WEBSOCKET_VERSION);
+  assert.equal(`sha256:${integrity.sourceSha256}`, VERIFIER_WEBSOCKET_SOURCE_SHA256);
+  assert.equal(sha256(bundle), VERIFIER_WEBSOCKET_BUNDLE_SHA256);
+  assert.equal(`sha256:${integrity.bundle.sha256}`, VERIFIER_WEBSOCKET_BUNDLE_SHA256);
+  assert.match(readFileSync(join(vendorRoot, 'LICENSE'), 'utf8'), /Permission is hereby granted, free of charge/);
+});
+
+test('global chrome disables project-resolved ws native addons before loading the pinned client', () => {
+  const project = mkdtempSync(join(tmpdir(), 'global-chrome-ws-boundary-'));
+  const skillRoot = join(project, '.agents', 'skills', 'agent-ready-drupal-build-kit');
+  mkdirSync(join(skillRoot, 'scripts'), { recursive: true });
+  mkdirSync(join(skillRoot, 'assets', 'vendor'), { recursive: true });
+  mkdirSync(join(skillRoot, 'vendor'), { recursive: true });
+  cpSync(fileURLToPath(new URL('../bin/global-chrome.mjs', import.meta.url)), join(skillRoot, 'scripts', 'global-chrome.mjs'));
+  cpSync(fileURLToPath(new URL('../bin/state-fingerprint.mjs', import.meta.url)), join(skillRoot, 'scripts', 'state-fingerprint.mjs'));
+  cpSync(fileURLToPath(new URL('../assets/vendor/axe-core', import.meta.url)), join(skillRoot, 'assets', 'vendor', 'axe-core'), { recursive: true });
+  cpSync(fileURLToPath(new URL('../vendor/ws', import.meta.url)), join(skillRoot, 'vendor', 'ws'), { recursive: true });
+
+  for (const packageName of ['bufferutil', 'utf-8-validate']) {
+    const packageRoot = join(project, 'node_modules', packageName);
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: packageName, main: 'index.js' }));
+    writeFileSync(
+      join(packageRoot, 'index.js'),
+      `process.env.AGENT_READY_UNTRUSTED_WS_ADDON = ${JSON.stringify(packageName)}; module.exports = {};\n`
+    );
+  }
+
+  const moduleUrl = pathToFileURL(join(skillRoot, 'scripts', 'global-chrome.mjs')).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    delete process.env.WS_NO_BUFFER_UTIL;
+    delete process.env.WS_NO_UTF_8_VALIDATE;
+    await import(${JSON.stringify(moduleUrl)});
+    if (process.env.AGENT_READY_UNTRUSTED_WS_ADDON) throw new Error('project addon loaded: ' + process.env.AGENT_READY_UNTRUSTED_WS_ADDON);
+    if (process.env.WS_NO_BUFFER_UTIL || process.env.WS_NO_UTF_8_VALIDATE) throw new Error('ws guard environment was not restored');
+  `], { cwd: project, encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+});
+
+test('vendored ws client imports and carries real CDP request/response frames over an HTTP upgrade', async () => {
+  const server = createServer();
+  const webSocketServer = new WebSocketServer({ server, perMessageDeflate: false });
+  webSocketServer.on('connection', (socket) => {
+    socket.on('message', (data, binary) => {
+      assert.equal(binary, false);
+      const message = JSON.parse(data.toString('utf8'));
+      socket.send(JSON.stringify({
+        id: message.id,
+        result: { product: 'Chrome/149.0', protocolVersion: '1.3' }
+      }));
+    });
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const gridUrl = `http://127.0.0.1:${server.address().port}`;
+  const budget = createBrowserCaptureBudget({ label: 'Real ws fixture', routeCount: 1, viewportCount: 1 });
+  let backend;
+  try {
+    backend = await openSeleniumCdpBackend({
+      budget,
+      gridUrl,
+      async fetchImpl(_url, init) {
+        if (init.method === 'POST') {
+          return jsonResponse({
+            value: {
+              sessionId: 'fixture-session',
+              capabilities: { 'se:cdp': 'ws://untrusted/session/fixture-session/se/cdp' }
+            }
+          });
+        }
+        return jsonResponse({ value: null });
+      }
+    });
+    assert.deepEqual(await backend.cdp.send('Browser.getVersion'), {
+      product: 'Chrome/149.0',
+      protocolVersion: '1.3'
+    });
+    assert.deepEqual(await backend.close(), { errors: [], warnings: [] });
+  } finally {
+    if (backend) await backend.close();
+    for (const client of webSocketServer.clients) client.terminate();
+    await new Promise((resolveClose) => webSocketServer.close(resolveClose));
+    await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+  }
+});
+
+test('remote Selenium backend bounds WebDriver lifecycle, routes CDP messages, and always deletes its known session', async () => {
+  const requests = [];
+  let connectedUrl = '';
+  const socket = new FixtureWebSocket((message, reply) => {
+    reply({ id: message.id, result: { product: 'Chrome/149.0', protocolVersion: '1.3' } });
+  });
+  const fetchImpl = async (url, init) => {
+    requests.push({
+      url,
+      method: init.method,
+      redirect: init.redirect,
+      body: init.body ? JSON.parse(init.body) : null
+    });
+    if (init.method === 'POST') {
+      return jsonResponse({
+        value: {
+          sessionId: 'fixture-session',
+          capabilities: { 'se:cdp': 'ws://172.20.0.9:4444/session/fixture-session/se/cdp' }
+        }
+      });
+    }
+    return jsonResponse({ value: null });
+  };
+  const budget = createBrowserCaptureBudget({ label: 'Remote fixture', routeCount: 1, viewportCount: 1 });
+  const backend = await openSeleniumCdpBackend({
+    budget,
+    fetchImpl,
+    async webSocketConnector(url, { signal }) {
+      assert.equal(signal.aborted, false);
+      connectedUrl = url;
+      return socket;
+    }
+  });
+  assert.deepEqual(await backend.cdp.send('Browser.getVersion'), { product: 'Chrome/149.0', protocolVersion: '1.3' });
+  const firstClose = backend.close();
+  assert.strictEqual(backend.close(), firstClose);
+  assert.deepEqual(await firstClose, { errors: [], warnings: [] });
+  assert.equal(socket.terminated, true, 'remote CDP transport should close immediately before WebDriver session deletion');
+  assert.equal(connectedUrl, 'ws://selenium-chrome:4444/session/fixture-session/se/cdp');
+  assert.deepEqual(requests.map(({ method, url }) => `${method} ${url}`), [
+    'POST http://selenium-chrome:4444/session',
+    'DELETE http://selenium-chrome:4444/session/fixture-session'
+  ]);
+  assert.deepEqual(requests.map(({ redirect }) => redirect), ['error', 'error']);
+  assert.deepEqual(requests[0].body.capabilities.alwaysMatch, {
+    browserName: 'chrome',
+    acceptInsecureCerts: true,
+    'goog:chromeOptions': {
+      args: ['--headless=new', '--disable-gpu', '--no-sandbox', '--window-size=1280,800']
+    }
+  });
+});
+
+test('remote Selenium backend deletes a created session when se:cdp validation fails', async () => {
+  const methods = [];
+  const budget = createBrowserCaptureBudget({ label: 'Remote invalid fixture', routeCount: 1, viewportCount: 1 });
+  await assert.rejects(
+    () => openSeleniumCdpBackend({
+      budget,
+      async fetchImpl(url, init) {
+        methods.push(`${init.method} ${new URL(url).pathname}`);
+        if (init.method === 'POST') {
+          return jsonResponse({
+            value: {
+              sessionId: 'fixture-session',
+              capabilities: { 'se:cdp': 'ws://bridge:4444/session/a-different-session/se/cdp' }
+            }
+          });
+        }
+        return jsonResponse({ value: null });
+      },
+      async webSocketConnector() {
+        assert.fail('A rejected se:cdp path must not be connected.');
+      }
+    }),
+    /Verifier Selenium runtime is unavailable.*exact session-scoped path/i
+  );
+  assert.deepEqual(methods, ['POST /session', 'DELETE /session/fixture-session']);
+});
+
+test('DDEV container mode uses the remote Grid, owns its global context, and reports runtime readiness', async () => {
+  const commands = [];
+  const httpMethods = [];
+  const targetUrl = 'https://fixture.ddev.site/';
+  const axeReport = {
+    testEngine: { name: 'axe-core', version: VERIFIER_AXE_VERSION },
+    testRunner: { name: 'axe' },
+    testEnvironment: {},
+    timestamp: '2026-07-13T00:00:00.000Z',
+    url: targetUrl,
+    toolOptions: {},
+    passes: [],
+    incomplete: [],
+    inapplicable: [],
+    violations: []
+  };
+  const socket = new FixtureWebSocket((message, reply, fixtureSocket) => {
+    commands.push(message);
+    let result = {};
+    if (message.method === 'Browser.getVersion') result = { product: 'Chrome/149.0', protocolVersion: '1.3' };
+    if (message.method === 'Browser.getBrowserCommandLine') result = { arguments: ['/usr/bin/chromium', '--headless=new'] };
+    if (message.method === 'Target.createBrowserContext') result = { browserContextId: 'owned-context' };
+    if (message.method === 'Target.createTarget') result = { targetId: 'owned-target' };
+    if (message.method === 'Target.attachToTarget') result = { sessionId: 'page-session' };
+    if (message.method === 'Runtime.evaluate') {
+      if (message.params.expression.includes('agent-ready-axe-core-4.10.3-preflight.js')) {
+        result = { result: { value: VERIFIER_AXE_VERSION } };
+      } else if (message.params.expression.includes('globalThis.axe')) result = { result: { value: axeReport } };
+      else if (message.params.expression.includes('document.fonts')) result = { result: { value: true } };
+      else {
+        result = {
+          result: {
+            value: {
+              title: 'Fixture',
+              finalUrl: targetUrl,
+              maskViolations: [],
+              maskedRegionCount: 0,
+              roles: {},
+              meaningfulHrefs: [],
+              placeholderHrefs: [],
+              mobileMenu: {},
+              layout: {}
+            }
+          }
+        };
+      }
+    }
+    if (message.method === 'Page.getLayoutMetrics') result = { cssContentSize: { width: 800, height: 600 } };
+    if (message.method === 'Page.captureScreenshot') result = { data: Buffer.from('fixture-png').toString('base64') };
+    reply({ id: message.id, result });
+    if (message.method === 'Page.navigate') {
+      queueMicrotask(() => fixtureSocket.emit('message', JSON.stringify({
+        method: 'Page.loadEventFired',
+        sessionId: message.sessionId,
+        params: { timestamp: 1 }
+      }), false));
+    }
+  });
+  const raw = await captureGlobalChrome({
+    baseUrl: targetUrl,
+    primaryRoutes: ['/'],
+    environment: { IS_DDEV_PROJECT: 'true', CHROME_PATH: '/bin/true' },
+    async fetchImpl(url, init) {
+      httpMethods.push(`${init.method} ${new URL(url).pathname}`);
+      if (init.method === 'POST') {
+        return jsonResponse({
+          value: {
+            sessionId: 'fixture-session',
+            capabilities: { 'se:cdp': 'ws://bridge:4444/session/fixture-session/se/cdp' }
+          }
+        });
+      }
+      return jsonResponse({ value: null });
+    },
+    async webSocketConnector() { return socket; }
+  });
+  assert.equal(raw.status, 'captured', raw.errors.join('\n'));
+  assert.equal(raw.runtime.ready, true);
+  assert.deepEqual(raw.runtime, {
+    backend: 'selenium-grid-cdp',
+    executionBoundary: 'ddev-add-on-sidecar',
+    service: 'selenium-chrome',
+    addOnRelease: SELENIUM_ADD_ON_RELEASE,
+    image: SELENIUM_CHROMIUM_IMAGE,
+    executable: '/usr/bin/chromium',
+    product: 'Chrome/149.0',
+    protocolVersion: '1.3',
+    ready: true
+  });
+  assert.deepEqual(captureSummary(raw).runtime, raw.runtime);
+  assert.equal(commands.filter(({ method }) => method === 'Target.createBrowserContext').length, 1);
+  assert.deepEqual(commands.find(({ method }) => method === 'Target.createTarget').params, {
+    url: 'about:blank',
+    browserContextId: 'owned-context'
+  });
+  assert.ok(commands.some(({ method, params }) => method === 'Target.disposeBrowserContext' && params.browserContextId === 'owned-context'));
+  assert.ok(commands.some(({ method }) => method === 'Network.enable'));
+  assert.ok(commands.some(({ method }) => method === 'Page.captureScreenshot'));
+  assert.deepEqual(httpMethods, ['POST /session', 'DELETE /session/fixture-session']);
+});
+
+test('DDEV remote runtime failure never falls back to an ambient local executable', async () => {
+  const unavailable = await captureBeforeConsentNetwork({
+    baseUrl: 'https://fixture.ddev.site',
+    primaryRoutes: ['/'],
+    environment: { IS_DDEV_PROJECT: 'true', CHROME_PATH: '/bin/true' },
+    async fetchImpl() { throw new Error('fixture Grid refusal'); }
+  });
+  assert.equal(unavailable.status, 'unavailable');
+  assert.equal(unavailable.runtime.backend, 'selenium-grid-cdp');
+  assert.equal(unavailable.runtime.ready, false);
+  assert.match(unavailable.errors.join('\n'), /fixture Grid refusal/i);
+});
+
+test('DDEV remote runtime fails preflight when the observed browser major drifts from the pinned image', async () => {
+  const commands = [];
+  const socket = new FixtureWebSocket((message, reply) => {
+    commands.push(message.method);
+    const result = message.method === 'Browser.getVersion'
+      ? { product: 'Chrome/148.0.0.0', protocolVersion: '1.3' }
+      : {};
+    reply({ id: message.id, result });
+  });
+  const capture = await captureGlobalChrome({
+    baseUrl: 'https://fixture.ddev.site',
+    primaryRoutes: ['/'],
+    environment: { IS_DDEV_PROJECT: 'true' },
+    async fetchImpl(_url, init) {
+      if (init.method === 'POST') {
+        return jsonResponse({
+          value: {
+            sessionId: 'fixture-session',
+            capabilities: { 'se:cdp': 'ws://bridge:4444/session/fixture-session/se/cdp' }
+          }
+        });
+      }
+      return jsonResponse({ value: null });
+    },
+    async webSocketConnector() { return socket; }
+  });
+  assert.equal(capture.status, 'blocked');
+  assert.equal(capture.runtime.ready, false);
+  assert.equal(capture.runtime.product, 'Chrome/148.0.0.0');
+  assert.match(capture.errors.join('\n'), /does not match pinned Chromium major 149/i);
+  assert.deepEqual(commands, ['Browser.getVersion']);
 });
 
 test('global chrome capture fails closed before browser launch when route or wall-clock bounds are exceeded', async () => {

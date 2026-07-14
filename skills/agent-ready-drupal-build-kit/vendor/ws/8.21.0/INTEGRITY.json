@@ -1,0 +1,18 @@
+{
+  "package": "ws",
+  "version": "8.21.0",
+  "source": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz",
+  "npmSha1": "012e413fc07429945121b0c153158c4343086951",
+  "npmIntegrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
+  "sourceSha256": "d08b726b3aae3a0fed5218a0d9a4b2ac8d75d4ad453a9271db55fe38e94eb4cf",
+  "bundle": {
+    "path": "ws.mjs",
+    "sha256": "6eaf56d9fa8443aeaa354c74d0e6ca2eef8f8194c25ba47ab8c0d92f3037191b",
+    "format": "esm",
+    "platform": "node",
+    "target": "node20",
+    "builder": "esbuild@0.25.6",
+    "entrypoint": "package/wrapper.mjs",
+    "command": "esbuild package/wrapper.mjs --bundle --platform=node --format=esm --target=node20 --legal-comments=eof --banner:js=<createRequire shim>"
+  }
+}

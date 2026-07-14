@@ -24,3 +24,34 @@ jobs:
         run: node scripts/sync-skill-package.mjs --check
       - name: Check package contents
         run: npm pack --dry-run --json
+
+  browser-runtime:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: ddev/github-action-setup-ddev@v1
+        with:
+          autostart: false
+          version: 1.25.3
+      - name: Assemble the copied skill in the DDEV fixture
+        run: |
+          mkdir -p tests/fixtures/browser-runtime/.agents/skills
+          cp -R skills/agent-ready-drupal-build-kit tests/fixtures/browser-runtime/.agents/skills/
+      - name: Provision and run the non-skipping Chrome CDP axe smoke
+        working-directory: tests/fixtures/browser-runtime
+        run: bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh
+      - name: Re-run the real browser boundary smoke
+        working-directory: tests/fixtures/browser-runtime
+        run: |
+          ddev exec --service web --dir /var/www/html env \
+            AGENT_READY_BROWSER_GRID_URL=http://selenium-chrome:4444 \
+            node .agents/skills/agent-ready-drupal-build-kit/scripts/browser-runtime-smoke.mjs
+      - name: Stop the DDEV fixture
+        if: always()
+        working-directory: tests/fixtures/browser-runtime
+        run: ddev stop --unlist

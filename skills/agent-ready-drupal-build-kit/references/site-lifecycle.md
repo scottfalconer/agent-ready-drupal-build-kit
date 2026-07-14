@@ -43,11 +43,11 @@ Classify each meaningful task before implementation:
 
 The kind explains why the change exists. Impact determines what must be checked. A Canvas extension that changes a global page region, for example, needs Canvas/editor evidence for the new route and executable header, navigation, footer, brand, link, mobile-menu, and material-layout regression evidence across existing routes.
 
-`global-chrome-regression` is machine-evaluated. Declared Canvas, global-theme, and navigation surfaces select it, and the lifecycle also detects changed `canvas.page_region`, brand/global Canvas assets, block placement, menus/navigation, shared entity displays, custom-theme files, and public `menu_link_content` state. Chrome/Chromium is driven directly over CDP at 1280x800 and 390x844; no authored status can replace the computed comparison. Capture is capped at 64 declared routes and one 120-second aggregate wall-clock budget across both viewports, with route, viewport, duration, and completion counts recorded in the verifier-owned capture. Explicit dynamic selectors are frozen in the verified anchor, visually masked outside global chrome, and rejected if they intersect brand/header/navigation/footer elements. Missing chrome, lost meaningful links, a broken mobile menu, a capture-budget failure, or material normalized page-height/main-offset changes fail even when HTTP status, title, and H1 still pass.
+`global-chrome-regression` is machine-evaluated. Declared Canvas, global-theme, and navigation surfaces select it, and the lifecycle also detects changed `canvas.page_region`, brand/global Canvas assets, block placement, menus/navigation, shared entity displays, custom-theme files, and public `menu_link_content` state. In the canonical DDEV workflow, the verifier drives the pinned `selenium-chrome` add-on service over Grid-proxied raw CDP at 1280x800 and 390x844; no authored status can replace the computed comparison. Capture is capped at 64 declared routes and one aggregate wall-clock budget across both viewports, with route, viewport, duration, browser identity, execution boundary, and completion counts recorded in the verifier-owned capture. Explicit dynamic selectors are frozen in the verified anchor, visually masked outside global chrome, and rejected if they intersect brand/header/navigation/footer elements. An unavailable managed runtime, lost meaningful links, a broken mobile menu, a capture-budget failure, or material normalized page-height/main-offset changes fail even when HTTP status, title, and H1 still pass. Repair the service only through the kit's host-side `repair-browser-runtime.sh`; do not switch to a host or in-container browser.
 
 ## Lifecycle Workflow
 
-From the Drupal project root, inspect the cached lifecycle status before editing. The examples use host `node`; if Node is available only inside DDEV, replace the leading `node` with `ddev exec node` for every lifecycle and verifier command below.
+From the Drupal project root, inspect the cached lifecycle status before editing. Cached-state commands such as `status`, `begin`, and `abandon` may use host `node`. Commands that perform live inspection—every `verify.mjs` run and `lifecycle.mjs complete`—must execute inside DDEV. The examples below use `ddev exec node` for those commands; omit only the `ddev exec` prefix when already inside the active DDEV agent.
 
 ```bash
 node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
@@ -58,7 +58,7 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --
 Before `begin`, refresh the live snapshot when `status.currentStateFresh` is false or when you are returning to the project after other work:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
 ```
 
 Exit `2` can be expected when already-existing edits differ from the latest anchor. Classify those edits with `--adopt-current`; do not use a stale cached fingerprint.
@@ -86,7 +86,7 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs begin --p
 After implementation, run the default full verifier once to refresh the exact live-state fingerprint:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
 ```
 
 Exit `2` can be expected while the changed state has not yet been classified by lifecycle evidence. Fix any actual packet, runtime, or gate failure; do not mistake every nonzero result for the expected lifecycle condition.
@@ -152,7 +152,7 @@ Set `checkedAt` to a real current UTC timestamp no earlier than the intent's `op
 Then complete the active record:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs complete --packet review-packet --id personalized-bios --verification review-packet/change-verification-personalized-bios.json
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs complete --packet review-packet --id personalized-bios --verification review-packet/change-verification-personalized-bios.json
 ```
 
 `complete` performs its own fresh live inspection before it records the result. It verifies the base/result binding, required-check coverage, evidence paths and hashes, and current state, then records the status as `evidence_recorded`. The semantic observations are authored evidence: they are integrity-bound to the inspected state, but the kit does not independently evaluate whether those observations are true. Targeted completion is not independent verification and does not issue a new complete-local-rebuild certificate.
@@ -185,7 +185,7 @@ Detected component impact can only widen this set. Components include target ide
 Only after targeted evidence is recorded may the change use the conservative full-verification path:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet --change personalized-bios
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet --change personalized-bios
 ```
 
 This re-evaluates the current packet and exact live state against the full original verifier gates, then binds that full report to the already evidence-recorded change. It does not synthesize passing semantic checks from the targeted evidence. A failure remains a failure even if the authored record says the same check passed.
@@ -193,7 +193,7 @@ This re-evaluates the current packet and exact live state against the full origi
 When the full run passes, the exact state may also become an optional checkpoint:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet --change personalized-bios --checkpoint post-bios
+ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet --change personalized-bios --checkpoint post-bios
 ```
 
 A checkpoint is a newer fully verified anchor for later work. It never replaces or rewrites the historical initial baseline. Do not create one from pending, failed, stale, differently fingerprinted, or merely authored targeted evidence.

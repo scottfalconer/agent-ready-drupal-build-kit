@@ -299,7 +299,7 @@ The blind review claim set comes from the brief, source-truth materials, target,
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
-After independent verification, run the installed skill's default target-local verifier from the target workspace:
+After independent verification, run the installed skill's default target-local verifier from the target workspace inside the active DDEV agent. The plain `node` command below assumes that context; from a host terminal, prefix it with `ddev exec`:
 
 ```bash
 node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
@@ -330,7 +330,7 @@ After a baseline exists, answer two questions separately:
 1. Did the initial rebuild pass? A strongly bound initial baseline remains `passed`.
 2. What is known about the latest inspected derived state? It may match the historical baseline, match a later fully verified checkpoint, match an evidence-recorded change, contain an active change, or contain unclassified changes.
 
-Before post-baseline work, inspect lifecycle state. `status` reports the last inspected cached state; it does not inspect the live Drupal runtime. Commands below use host `node`; use `ddev exec node` instead when Node is available only inside DDEV:
+Before post-baseline work, inspect lifecycle state. `status` reports the last inspected cached state; it does not inspect the live Drupal runtime. Cached `status`, `begin`, and `abandon` commands may use host `node`. Every `verify.mjs` run and `lifecycle.mjs complete` performs live inspection and must run inside DDEV: use plain `node` from the active DDEV agent, as in the live examples below, or prefix the command with `ddev exec` from a host terminal:
 
 ```bash
 node [KIT_LOCAL_PATH]/scripts/lifecycle.mjs status --packet review-packet
@@ -345,7 +345,7 @@ Classify one coherent active change before implementation:
 
 Create the record before editing with `lifecycle.mjs begin --id <change-id> --kind repair|extension --summary "..." --acceptance "..." --route </affected-path>`. It records `baseAnchorId` from the latest fully verified or evidence-recorded anchor. Do not use the change kind as a substitute for impact analysis. Record affected content, content model, composition, global presentation, routing/navigation, access/workflow, code/dependencies, integrations, every anonymous route expected to change, and editor workflows as applicable. Use explicit `--no-public-route` only when the change intentionally has no anonymous route effect; omission of both choices is rejected. If changes already exist, use `--adopt-current` explicitly; adopted work always adds conservative `unknown` impact. If the active change will not be completed, close it with `lifecycle.mjs abandon --id <change-id> --reason "..."` rather than deleting or rewriting its record.
 
-Canvas/PageRegion, global theme, block placement, shared entity display, menu, navigation, and detected custom-theme or public menu-link impact automatically require the machine-evaluated `global-chrome-regression` check. The live verifier uses Chrome/Chromium through CDP to capture every primary route at desktop and mobile widths within a fixed 64-route ceiling and one 120-second aggregate capture deadline, binds the capture and budget metrics to the exact Drupal state fingerprint, and compares brand, header, navigation, footer, meaningful hrefs, mobile-menu activation, and material layout/page-height signals to the latest verified anchor. Dynamic-region selectors come from that anchor and may not intersect global chrome. Authored screenshots or pass booleans cannot clear this check. If no Chrome/Chromium runtime is available or the bounded capture cannot complete, applicable work remains blocked; set `CHROME_PATH` or install Chrome/Chromium when the browser is missing.
+Canvas/PageRegion, global theme, block placement, shared entity display, menu, navigation, and detected custom-theme or public menu-link impact automatically require the machine-evaluated `global-chrome-regression` check. The live verifier uses the setup-provisioned `selenium-chrome` DDEV add-on service through Grid-proxied raw CDP to capture every primary route at desktop and mobile widths within a fixed 64-route ceiling and one aggregate capture deadline, binds the capture, managed-runtime identity, execution boundary, and budget metrics to the exact Drupal state fingerprint, and compares brand, header, navigation, footer, meaningful hrefs, mobile-menu activation, and material layout/page-height signals to the latest verified anchor. Dynamic-region selectors come from that anchor and may not intersect global chrome. Authored screenshots or pass booleans cannot clear this check. If the managed runtime is unavailable or the bounded capture cannot complete, applicable work remains blocked. Leave the agent running and run `bash .agents/skills/agent-ready-drupal-build-kit/scripts/repair-browser-runtime.sh` from a separate host terminal at the DDEV project root; do not install Chrome or set `CHROME_PATH` as a fallback.
 
 Verification after the baseline is impact-targeted:
 

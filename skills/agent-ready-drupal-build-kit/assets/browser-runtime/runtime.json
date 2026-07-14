@@ -1,0 +1,42 @@
+{
+  "$schema": "https://agent-ready-drupal-build-kit.dev/schemas/browser-runtime-v1.json",
+  "schemaVersion": "1",
+  "runtimeId": "ddev-selenium-standalone-chromium-149",
+  "ddevMinimumVersion": "1.25.3",
+  "addOnRepository": "ddev/ddev-selenium-standalone-chrome",
+  "addOnRelease": "2.2.1",
+  "addOnCommit": "2719f44bd16128629c2c77d93b71b7a10c32f73f",
+  "addOnMetadataDirectory": "ddev-selenium-standalone-chrome",
+  "addOnComposeSha256": "783d73d5840ca3a12c85113c0d40392b54935c289c5612cc5fba5794e6404eaf",
+  "addOnConfigSha256": "39b055780330512b56128fa18dcee54ed9f1518462cc5f571399f521547a57d9",
+  "serviceName": "selenium-chrome",
+  "gridUrl": "http://selenium-chrome:4444",
+  "browserName": "chrome",
+  "browserTag": "149.0",
+  "browserImage": "selenium/standalone-chromium:149.0@sha256:9b10a9ccf68e3a18153a68a0705577157e20665d88d00bd4393a42e5839aa3d3",
+  "browserManifestDigest": "sha256:9b10a9ccf68e3a18153a68a0705577157e20665d88d00bd4393a42e5839aa3d3",
+  "supportedPlatforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "maxSessions": "1",
+  "overrideMaxSessions": "false",
+  "sharedMemory": "2gb",
+  "sharedMemoryBytes": "2147483648",
+  "healthcheckUrl": "http://localhost:4444/status",
+  "healthcheckInterval": "2s",
+  "healthcheckTimeout": "5s",
+  "healthcheckRetries": "30",
+  "healthcheckStartPeriod": "10s",
+  "smokeTimeoutMs": "90000",
+  "capabilities": {
+    "browserName": "chrome",
+    "acceptInsecureCerts": true,
+    "goog:chromeOptions": {
+      "args": [
+        "--headless=new",
+        "--no-sandbox"
+      ]
+    }
+  }
+}

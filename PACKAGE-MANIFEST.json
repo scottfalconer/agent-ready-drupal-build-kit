@@ -26,7 +26,8 @@
     "scripts/",
     "skills/",
     "tests/",
-    "templates/"
+    "templates/",
+    "vendor/"
   ],
   "keyAdditions": [
     "Product-style README front door that points to the single canonical USAGE.md prompt",
@@ -40,6 +41,7 @@
     "Marker-managed AGENTS.md integration that preserves One Line Installer, Drupal AI best-practices, and user-authored instructions",
     "NPM packaging exclusions for local agent settings, lock state, and generated archives",
     "Node 20 continuous integration for tests, installed-skill synchronization, and package dry-run checks",
+    "Pinned DDEV Selenium/Chromium sidecar with host-side setup, fail-closed CDP and axe preflight, service-only repair, and a non-skipping real-browser CI smoke",
     "Private vulnerability reporting policy for security-sensitive findings",
     "Newcomer-facing README and START.md that position the kit for Drupal-curious developers, designers, agencies, and site builders",
     "Positioning page reframed around trying Drupal CMS with an AI coding agent and keeping the result reviewable",

@@ -76,6 +76,9 @@ test('installable skill describes an in-place target and only installed runtime 
   assert.doesNotMatch(content, /Create a clean Drupal CMS project workspace alongside/);
   assert.match(projectBlock, /non-empty tracked sync directory/);
   assert.match(projectBlock, /active configuration has no drift/);
+  assert.match(projectBlock, /perform live inspection and must run inside DDEV/);
+  assert.match(projectBlock, /plain `node` live commands below assume the\s+active DDEV agent/);
+  assert.doesNotMatch(projectBlock, /Commands below use host `node`/);
   assert.doesNotMatch(projectBlock, /survives clean import/);
 });
 
@@ -479,12 +482,40 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(39 files\)/);
+  assert.match(result.stdout, /is in sync \(48 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
     join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   )));
+  for (const relativePath of [
+    ['assets', 'browser-runtime', 'runtime.json'],
+    ['assets', 'browser-runtime', 'docker-compose.zz-agent-ready-verifier.yaml'],
+    ['scripts', 'browser-runtime-common.sh'],
+    ['scripts', 'browser-runtime-smoke.mjs'],
+    ['scripts', 'setup-browser-runtime.sh'],
+    ['scripts', 'repair-browser-runtime.sh'],
+    ['vendor', 'ws', '8.21.0', 'ws.mjs'],
+    ['vendor', 'ws', '8.21.0', 'LICENSE'],
+    ['vendor', 'ws', '8.21.0', 'INTEGRITY.json']
+  ]) {
+    assert.ok(readFileSync(
+      join(repoRoot, ...relativePath)
+    ).equals(readFileSync(
+      join(skillRoot, ...relativePath)
+    )), `${relativePath.join('/')} drifted from the canonical runtime`);
+  }
+  for (const relativePath of [
+    ['scripts', 'browser-runtime-smoke.mjs'],
+    ['scripts', 'setup-browser-runtime.sh'],
+    ['scripts', 'repair-browser-runtime.sh']
+  ]) {
+    assert.notEqual(
+      statSync(join(skillRoot, ...relativePath)).mode & 0o111,
+      0,
+      `${relativePath.join('/')} should be executable in the installed skill`
+    );
+  }
 });
 
 test('sync checker reports drift and write mode repairs bytes and executable bits', () => {
@@ -521,7 +552,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(39 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(48 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

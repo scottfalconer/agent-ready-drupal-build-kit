@@ -6,12 +6,36 @@ import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
+async function loadPinnedWebSocket() {
+  const keys = ['WS_NO_BUFFER_UTIL', 'WS_NO_UTF_8_VALIDATE'];
+  const previous = new Map(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) process.env[key] = '1';
+  try {
+    return (await import('../vendor/ws/8.21.0/ws.mjs')).default;
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+const WebSocket = await loadPinnedWebSocket();
+
 export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1';
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
 export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
 export const VERIFIER_AXE_SCHEMA = 'public-kit.verifier-axe.1';
 export const VERIFIER_AXE_VERSION = '4.10.3';
+export const DEFAULT_SELENIUM_GRID_URL = 'http://selenium-chrome:4444';
+export const SELENIUM_ADD_ON_RELEASE = '2.2.1';
+export const SELENIUM_CHROMIUM_IMAGE = 'selenium/standalone-chromium:149.0@sha256:9b10a9ccf68e3a18153a68a0705577157e20665d88d00bd4393a42e5839aa3d3';
+export const SELENIUM_CHROMIUM_MAJOR = '149';
+export const VERIFIER_WEBSOCKET_VERSION = '8.21.0';
+export const VERIFIER_WEBSOCKET_SOURCE_SHA256 = 'sha256:d08b726b3aae3a0fed5218a0d9a4b2ac8d75d4ad453a9271db55fe38e94eb4cf';
+export const VERIFIER_WEBSOCKET_BUNDLE_SHA256 = 'sha256:6eaf56d9fa8443aeaa354c74d0e6ca2eef8f8194c25ba47ab8c0d92f3037191b';
 export const VERIFIER_AXE_TAGS = Object.freeze([
   'wcag2a',
   'wcag2aa',
@@ -51,6 +75,49 @@ const FIXED_THRESHOLDS = Object.freeze({
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
+
+function connectWebSocket(value, { signal } = {}) {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('WebSocket connection aborted.'));
+  return new Promise((resolvePromise, rejectPromise) => {
+    let socket;
+    let settled = false;
+    const cleanup = () => {
+      signal?.removeEventListener('abort', abort);
+      socket?.removeListener('open', opened);
+      socket?.removeListener('error', failed);
+    };
+    const reject = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(error instanceof Error ? error : new Error(String(error)));
+    };
+    const abort = () => {
+      try { socket?.terminate(); } catch {}
+      reject(signal?.reason ?? new Error('WebSocket connection aborted.'));
+    };
+    const failed = (error) => reject(error);
+    const opened = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(socket);
+    };
+    try {
+      socket = new WebSocket(value, {
+        followRedirects: false,
+        maxPayload: 64 * 1024 * 1024,
+        perMessageDeflate: false
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+    socket.once('open', opened);
+    socket.once('error', failed);
+  });
+}
 
 function boundedPositiveLimit(value, ceiling, label) {
   if (value === undefined) return ceiling;
@@ -250,11 +317,9 @@ export function findBrowserExecutable(environment = process.env) {
   return candidates.find((path) => existsSync(path)) ?? '';
 }
 
-class CdpPipe {
-  constructor(child, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
-    this.child = child;
-    this.input = child.stdio[3];
-    this.output = child.stdio[4];
+class CdpConnection {
+  constructor(write, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
+    this.write = write;
     this.budget = budget;
     this.timeoutMs = timeoutMs;
     this.nextId = 1;
@@ -262,74 +327,93 @@ class CdpPipe {
     this.events = [];
     this.waiters = [];
     this.listeners = new Set();
-    this.buffer = Buffer.alloc(0);
-    this.output.on('data', (chunk) => this.onData(chunk));
-    child.once('exit', (code, signal) => this.failAll(new Error(`Headless browser exited (${code ?? signal ?? 'unknown'}).`)));
-    child.once('error', (error) => this.failAll(error));
+    this.failure = null;
   }
 
-  onData(chunk) {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (true) {
-      const boundary = this.buffer.indexOf(0);
-      if (boundary === -1) break;
-      const bytes = this.buffer.subarray(0, boundary);
-      this.buffer = this.buffer.subarray(boundary + 1);
-      if (bytes.length === 0) continue;
-      let message;
-      try {
-        message = JSON.parse(bytes.toString('utf8'));
-      } catch {
-        continue;
-      }
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) continue;
-        this.pending.delete(message.id);
-        clearTimeout(pending.timeout);
-        if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
-        else pending.resolve(message.result ?? {});
-        continue;
-      }
-      for (const listener of this.listeners) {
-        if (listener.method === message.method && (!listener.sessionId || listener.sessionId === message.sessionId)) {
-          listener.callback(message.params ?? {});
-        }
-      }
-      const waiterIndex = this.waiters.findIndex((waiter) =>
-        waiter.method === message.method && (!waiter.sessionId || waiter.sessionId === message.sessionId)
-      );
-      if (waiterIndex !== -1) {
-        const [waiter] = this.waiters.splice(waiterIndex, 1);
-        clearTimeout(waiter.timeout);
-        waiter.resolve(message.params ?? {});
+  receive(raw, { binary = false } = {}) {
+    if (this.failure) return;
+    if (binary) {
+      this.failAll(new Error('CDP WebSocket returned an unsupported binary message.'));
+      return;
+    }
+    let message;
+    try {
+      message = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw));
+    } catch {
+      this.failAll(new Error('CDP transport returned malformed JSON.'));
+      return;
+    }
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      this.failAll(new Error('CDP transport returned a non-object message.'));
+      return;
+    }
+    if (Number.isSafeInteger(message.id)) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      clearTimeout(pending.timeout);
+      if (message.error) {
+        const detail = String(message.error?.message ?? message.error?.code ?? 'unknown CDP error');
+        pending.reject(new Error(`${pending.method}: ${detail}`));
       } else {
-        this.events.push(message);
-        if (this.events.length > 200) this.events.shift();
+        pending.resolve(message.result ?? {});
       }
+      return;
+    }
+    if (typeof message.method !== 'string' || !message.method) return;
+    for (const listener of this.listeners) {
+      if (listener.method === message.method && (!listener.sessionId || listener.sessionId === message.sessionId)) {
+        listener.callback(message.params ?? {});
+      }
+    }
+    const waiterIndex = this.waiters.findIndex((waiter) =>
+      waiter.method === message.method && (!waiter.sessionId || waiter.sessionId === message.sessionId)
+    );
+    if (waiterIndex !== -1) {
+      const [waiter] = this.waiters.splice(waiterIndex, 1);
+      clearTimeout(waiter.timeout);
+      waiter.resolve(message.params ?? {});
+    } else {
+      this.events.push(message);
+      if (this.events.length > 200) this.events.shift();
     }
   }
 
   failAll(error) {
+    if (this.failure) return;
+    this.failure = error instanceof Error ? error : new Error(String(error));
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(error);
+      pending.reject(this.failure);
     }
     this.pending.clear();
     for (const waiter of this.waiters) {
       clearTimeout(waiter.timeout);
-      waiter.reject(error);
+      waiter.reject(this.failure);
     }
     this.waiters = [];
   }
 
   send(method, params = {}, sessionId = '') {
+    if (this.failure) return Promise.reject(this.failure);
     let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
     try {
       if (this.budget) timing = this.budget.operationTiming();
     } catch (error) {
       return Promise.reject(error);
     }
+    return this.sendWithTiming(method, params, sessionId, timing);
+  }
+
+  sendForCleanup(method, params = {}, sessionId = '') {
+    if (this.failure) return Promise.reject(this.failure);
+    return this.sendWithTiming(method, params, sessionId, {
+      deadlineLimited: false,
+      timeoutMs: Math.min(this.timeoutMs, 5_000)
+    });
+  }
+
+  sendWithTiming(method, params, sessionId, timing) {
     const id = this.nextId++;
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
@@ -341,11 +425,18 @@ class CdpPipe {
           : new Error(`${method} timed out after ${timing.timeoutMs} ms.`));
       }, timing.timeoutMs);
       this.pending.set(id, { method, resolve: resolvePromise, reject: rejectPromise, timeout });
-      this.input.write(`${JSON.stringify(message)}\0`);
+      try {
+        this.write(message);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        rejectPromise(error);
+      }
     });
   }
 
   waitFor(method, sessionId = '') {
+    if (this.failure) return Promise.reject(this.failure);
     let timing = { deadlineLimited: false, timeoutMs: this.timeoutMs };
     try {
       if (this.budget) timing = this.budget.operationTiming();
@@ -373,6 +464,232 @@ class CdpPipe {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
+}
+
+class CdpPipe extends CdpConnection {
+  constructor(child, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
+    const input = child.stdio[3];
+    super((message) => input.write(`${JSON.stringify(message)}\0`), budget, timeoutMs);
+    this.buffer = Buffer.alloc(0);
+    child.stdio[4].on('data', (chunk) => this.onData(chunk));
+    child.once('exit', (code, signal) => this.failAll(new Error(`Headless browser exited (${code ?? signal ?? 'unknown'}).`)));
+    child.once('error', (error) => this.failAll(error));
+  }
+
+  onData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const boundary = this.buffer.indexOf(0);
+      if (boundary === -1) break;
+      const bytes = this.buffer.subarray(0, boundary);
+      this.buffer = this.buffer.subarray(boundary + 1);
+      if (bytes.length > 0) this.receive(bytes);
+    }
+  }
+}
+
+class CdpWebSocket extends CdpConnection {
+  constructor(socket, budget = null, timeoutMs = BROWSER_CAPTURE_LIMITS.operationTimeoutMs) {
+    super((message) => socket.send(JSON.stringify(message)), budget, timeoutMs);
+    this.socket = socket;
+    socket.on('message', (data, binary = false) => this.receive(data, { binary }));
+    socket.once('error', (error) => this.failAll(error));
+    socket.once('close', () => this.failAll(new Error('CDP WebSocket closed.')));
+  }
+
+  close() {
+    this.failAll(new Error('CDP WebSocket was closed by the verifier.'));
+    try {
+      if (typeof this.socket.terminate === 'function') this.socket.terminate();
+      else this.socket.close();
+    } catch {}
+  }
+}
+
+function seleniumGridOrigin(value) {
+  const url = new URL(value);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('Selenium Grid URL must be an HTTP(S) origin without credentials, path, query, or fragment.');
+  }
+  return url.origin;
+}
+
+export function canonicalizeSeleniumCdpUrl(advertisedValue, sessionId, gridUrl = DEFAULT_SELENIUM_GRID_URL) {
+  const id = String(sessionId ?? '').trim();
+  if (!/^[A-Za-z0-9._-]{1,200}$/.test(id)) throw new Error('WebDriver returned an invalid session ID.');
+  let advertised;
+  try { advertised = new URL(advertisedValue); }
+  catch { throw new Error('WebDriver did not return a valid se:cdp WebSocket URL.'); }
+  const expectedPath = `/session/${id}/se/cdp`;
+  if (
+    !['ws:', 'wss:'].includes(advertised.protocol) ||
+    advertised.username || advertised.password || advertised.pathname !== expectedPath || advertised.search || advertised.hash
+  ) {
+    throw new Error(`WebDriver se:cdp must use the exact session-scoped path ${expectedPath}.`);
+  }
+  const trusted = new URL(seleniumGridOrigin(gridUrl));
+  trusted.protocol = trusted.protocol === 'https:' ? 'wss:' : 'ws:';
+  trusted.pathname = advertised.pathname;
+  return trusted.href;
+}
+
+async function boundedWebDriverRequest({
+  gridOrigin,
+  path,
+  method,
+  body,
+  budget,
+  fetchImpl,
+  phase,
+  timeoutMs
+}) {
+  const timing = timeoutMs === undefined
+    ? budget.operationTiming()
+    : { deadlineLimited: false, timeoutMs };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`${phase} timed out after ${timing.timeoutMs} ms.`)), timing.timeoutMs);
+  try {
+    const response = await fetchImpl(`${gridOrigin}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect: 'error',
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let payload = null;
+    if (text) {
+      try { payload = JSON.parse(text); }
+      catch { throw new Error(`${phase} returned malformed JSON.`); }
+    }
+    const webdriverError = payload?.value?.error;
+    if (!response.ok || webdriverError) {
+      const detail = String(payload?.value?.message ?? webdriverError ?? `HTTP ${response.status}`).replace(/\s+/g, ' ').slice(0, 500);
+      throw new Error(`${phase} failed: ${detail}`);
+    }
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      if (timing.deadlineLimited) throw budget.deadlineError();
+      throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error(`${phase} timed out.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function remoteChromeCapabilities() {
+  return {
+    capabilities: {
+      alwaysMatch: {
+        browserName: 'chrome',
+        acceptInsecureCerts: true,
+        'goog:chromeOptions': {
+          args: ['--headless=new', '--disable-gpu', '--no-sandbox', '--window-size=1280,800']
+        }
+      }
+    }
+  };
+}
+
+async function observedBrowserExecutable(cdp, backend, product) {
+  if (backend !== 'remote') return '';
+  const match = String(product).match(/^(?:HeadlessChrome|Chrome|Chromium)\/(\d+)(?:\.|$)/);
+  if (match?.[1] !== SELENIUM_CHROMIUM_MAJOR) {
+    throw new Error(
+      `Selenium runtime browser identity ${product || 'missing'} does not match pinned Chromium major ${SELENIUM_CHROMIUM_MAJOR}.`
+    );
+  }
+  const commandLine = await cdp.send('Browser.getBrowserCommandLine');
+  const executable = String(commandLine?.arguments?.[0] ?? '').trim();
+  if (!executable || executable.startsWith('-') || !/(?:chrome|chromium)/i.test(executable)) {
+    throw new Error('Selenium runtime did not report its selected Chrome/Chromium executable.');
+  }
+  return executable.slice(0, 1024);
+}
+
+export async function openSeleniumCdpBackend({
+  budget,
+  gridUrl = DEFAULT_SELENIUM_GRID_URL,
+  fetchImpl = globalThis.fetch,
+  webSocketConnector = connectWebSocket
+} = {}) {
+  if (!budget || typeof budget.operationTiming !== 'function') throw new Error('Remote browser backend requires a capture budget.');
+  if (typeof fetchImpl !== 'function') throw new Error('Remote browser backend requires fetch support.');
+  if (typeof webSocketConnector !== 'function') throw new Error('Remote browser backend requires a WebSocket connector.');
+  const gridOrigin = seleniumGridOrigin(gridUrl);
+  let sessionId = '';
+  let cdp = null;
+  let socket = null;
+  let closePromise = null;
+  const deleteSession = async () => {
+    if (!sessionId) return;
+    const deleting = sessionId;
+    sessionId = '';
+    await boundedWebDriverRequest({
+      gridOrigin,
+      path: `/session/${encodeURIComponent(deleting)}`,
+      method: 'DELETE',
+      budget,
+      fetchImpl,
+      phase: 'WebDriver session delete',
+      timeoutMs: BROWSER_CAPTURE_LIMITS.operationTimeoutMs
+    });
+  };
+  try {
+    const created = await boundedWebDriverRequest({
+      gridOrigin,
+      path: '/session',
+      method: 'POST',
+      body: remoteChromeCapabilities(),
+      budget,
+      fetchImpl,
+      phase: 'WebDriver session create'
+    });
+    const createdSessionId = String(created?.value?.sessionId ?? '').trim();
+    if (!/^[A-Za-z0-9._-]{1,200}$/.test(createdSessionId)) {
+      throw new Error('WebDriver returned an invalid session ID.');
+    }
+    sessionId = createdSessionId;
+    const cdpUrl = canonicalizeSeleniumCdpUrl(created?.value?.capabilities?.['se:cdp'], sessionId, gridOrigin);
+    const timing = budget.operationTiming();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(`CDP WebSocket connect timed out after ${timing.timeoutMs} ms.`)), timing.timeoutMs);
+    try {
+      socket = await webSocketConnector(cdpUrl, { signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        if (timing.deadlineLimited) throw budget.deadlineError();
+        throw controller.signal.reason instanceof Error ? controller.signal.reason : error;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+    cdp = new CdpWebSocket(socket, budget);
+  } catch (error) {
+    try { cdp?.close(); } catch {}
+    try { socket?.close(); } catch {}
+    let cleanupError = '';
+    try { await deleteSession(); } catch (cleanup) { cleanupError = ` WebDriver cleanup also failed: ${cleanup.message}`; }
+    throw new Error(`Verifier Selenium runtime is unavailable: ${error.message}${cleanupError}`);
+  }
+  return {
+    cdp,
+    executable: 'selenium-chrome',
+    gridOrigin,
+    close() {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        const errors = [];
+        cdp.close();
+        try { await deleteSession(); } catch (error) { errors.push(error.message); }
+        return { errors, warnings: [] };
+      })();
+      return closePromise;
+    }
+  };
 }
 
 function signalBrowserProcessGroup(child, signal) {
@@ -411,6 +728,119 @@ async function shutdownBrowser(child) {
   return closed || child.stdio.every((stream) => !stream || stream.destroyed)
     ? ''
     : 'Browser shutdown failed: the headless browser did not close after bounded SIGTERM and SIGKILL.';
+}
+
+function openLocalCdpBackend({
+  budget,
+  executable,
+  hideScrollbars = false,
+  profileCleanup,
+  profilePrefix
+}) {
+  const profile = join(tmpdir(), `${profilePrefix}-${process.pid}-${Date.now()}`);
+  mkdirSync(profile, { recursive: true });
+  const args = [
+    '--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--disable-extensions',
+    '--disable-sync', '--mute-audio', `--user-data-dir=${profile}`, 'about:blank'
+  ];
+  if (hideScrollbars) args.splice(args.length - 2, 0, '--hide-scrollbars');
+  // The verifier is restricted to the current local DDEV target; local routers may use a custom TLD and development CA.
+  args.unshift('--ignore-certificate-errors');
+  if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
+  const child = spawn(executable, args, {
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
+  });
+  const stderr = [];
+  child.stderr.on('data', (chunk) => {
+    if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
+  });
+  const cdp = new CdpPipe(child, budget);
+  let closePromise = null;
+  return {
+    cdp,
+    executable: basename(executable),
+    diagnostics() {
+      return stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800);
+    },
+    close() {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        const errors = [];
+        const warnings = [];
+        const shutdownError = await shutdownBrowser(child);
+        if (shutdownError) {
+          errors.push(shutdownError);
+          warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
+        } else {
+          try {
+            const cleanup = profileCleanup(profile);
+            warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
+          } catch (error) {
+            const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
+            warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
+          }
+        }
+        return { errors, warnings };
+      })();
+      return closePromise;
+    }
+  };
+}
+
+function ddevContainerMode(environment) {
+  return /^(?:1|true|yes)$/i.test(String(environment?.IS_DDEV_PROJECT ?? '').trim());
+}
+
+function browserBackendKind(browserBackend, browserExecutable, environment = process.env) {
+  const selected = browserBackend === undefined
+    ? (browserExecutable !== undefined || !ddevContainerMode(environment) ? 'local' : 'remote')
+    : String(browserBackend).trim();
+  if (!['remote', 'local'].includes(selected)) {
+    throw new Error('Browser backend must be remote or local.');
+  }
+  return selected;
+}
+
+function browserRuntimeEvidence({ backend, executable = '', product = '', protocolVersion = '', ready = false } = {}) {
+  const remote = backend === 'remote';
+  return {
+    backend: remote ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
+    executionBoundary: remote ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
+    service: remote ? 'selenium-chrome' : '',
+    addOnRelease: remote ? SELENIUM_ADD_ON_RELEASE : '',
+    image: remote ? SELENIUM_CHROMIUM_IMAGE : '',
+    executable,
+    product,
+    protocolVersion,
+    ready: ready === true
+  };
+}
+
+async function openCaptureBrowserBackend({
+  browserBackend,
+  browserExecutable,
+  budget,
+  environment,
+  fetchImpl,
+  gridUrl,
+  hideScrollbars,
+  profileCleanup,
+  profilePrefix,
+  webSocketConnector
+}) {
+  const kind = browserBackendKind(browserBackend, browserExecutable, environment);
+  if (kind === 'remote') {
+    return openSeleniumCdpBackend({ budget, gridUrl, fetchImpl, webSocketConnector });
+  }
+  const executable = browserExecutable === undefined
+    ? findBrowserExecutable(environment)
+    : String(browserExecutable ?? '').trim();
+  if (!executable || !existsSync(executable)) {
+    throw new Error('No Chrome/Chromium executable was found for the explicit local maintainer backend.');
+  }
+  return openLocalCdpBackend({ budget, executable, hideScrollbars, profileCleanup, profilePrefix });
 }
 
 function collectorExpression(contract, mobile) {
@@ -654,6 +1084,30 @@ function verifierAxeExpression() {
   })()`;
 }
 
+async function preflightVerifierAxe(cdp, sessionId) {
+  const installed = await cdp.send('Runtime.evaluate', {
+    expression: `${VERIFIER_AXE_SOURCE}\n//# sourceURL=agent-ready-axe-core-${VERIFIER_AXE_VERSION}-preflight.js\n;globalThis.axe?.version`,
+    returnByValue: true
+  }, sessionId);
+  if (installed.exceptionDetails || installed.result?.value !== VERIFIER_AXE_VERSION) {
+    throw new Error(`Pinned axe-core ${VERIFIER_AXE_VERSION} could not be installed during browser runtime preflight.`);
+  }
+  const evaluated = await cdp.send('Runtime.evaluate', {
+    expression: verifierAxeExpression(),
+    awaitPromise: true,
+    returnByValue: true
+  }, sessionId);
+  const report = evaluated.result?.value;
+  if (
+    evaluated.exceptionDetails ||
+    String(report?.testEngine?.name ?? '').toLowerCase() !== 'axe-core' ||
+    String(report?.testEngine?.version ?? '') !== VERIFIER_AXE_VERSION ||
+    !['passes', 'incomplete', 'inapplicable', 'violations'].every((key) => Array.isArray(report?.[key]))
+  ) {
+    throw new Error(`Pinned axe-core ${VERIFIER_AXE_VERSION} did not execute during browser runtime preflight.`);
+  }
+}
+
 async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: viewport.width,
@@ -731,6 +1185,11 @@ export async function captureGlobalChrome({
   primaryRoutes,
   contract = {},
   environment = process.env,
+  browserExecutable,
+  browserBackend,
+  gridUrl = DEFAULT_SELENIUM_GRID_URL,
+  fetchImpl = globalThis.fetch,
+  webSocketConnector = connectWebSocket,
   limits = {},
   now = Date.now,
   profileCleanup = cleanupBrowserProfile
@@ -746,6 +1205,34 @@ export async function captureGlobalChrome({
     viewportCount: VIEWPORTS.length
   });
   const base = new URL(baseUrl);
+  let selectedBackend;
+  try { selectedBackend = browserBackendKind(browserBackend, browserExecutable, environment); }
+  catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: '', product: '' },
+      runtime: browserRuntimeEvidence({ backend: 'local' }),
+      primaryRoutes: [],
+      routes: [],
+      budget: budget.metrics(),
+      warnings: [],
+      errors: [error.message]
+    };
+  }
+  const browserLabel = selectedBackend === 'remote'
+    ? ''
+    : basename(String(browserExecutable === undefined ? findBrowserExecutable(environment) : browserExecutable));
+  const runtimeEvidence = (overrides = {}) => browserRuntimeEvidence({
+    backend: selectedBackend,
+    executable: browserLabel,
+    ...overrides
+  });
   let routes = [];
   try {
     budget.assertRouteLimit();
@@ -761,29 +1248,12 @@ export async function captureGlobalChrome({
       targetOrigin: base.origin,
       contract: normalizedContract,
       browser: { executable: '', product: '' },
+      runtime: runtimeEvidence(),
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
       warnings: [],
       errors: [error.message]
-    };
-  }
-  const executable = findBrowserExecutable(environment);
-  if (!executable) {
-    return {
-      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
-      checkedAt,
-      status: 'unavailable',
-      authoritative: false,
-      captureMode: 'verifier-owned-browser',
-      targetOrigin: base.origin,
-      contract: normalizedContract,
-      browser: { executable: '', product: '' },
-      primaryRoutes: routes,
-      routes: [],
-      budget: budget.metrics(),
-      warnings: [],
-      errors: ['No Chrome/Chromium executable was found. Set CHROME_PATH or install Chrome/Chromium.']
     };
   }
   if (routes.length === 0) {
@@ -795,7 +1265,8 @@ export async function captureGlobalChrome({
       captureMode: 'verifier-owned-browser',
       targetOrigin: base.origin,
       contract: normalizedContract,
-      browser: { executable: basename(executable), product: '' },
+      browser: { executable: browserLabel, product: '' },
+      runtime: runtimeEvidence(),
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
@@ -814,7 +1285,8 @@ export async function captureGlobalChrome({
       captureMode: 'verifier-owned-browser',
       targetOrigin: base.origin,
       contract: normalizedContract,
-      browser: { executable: basename(executable), product: '' },
+      browser: { executable: browserLabel, product: '' },
+      runtime: runtimeEvidence(),
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
@@ -822,33 +1294,57 @@ export async function captureGlobalChrome({
       errors: [error.message]
     };
   }
-  const profile = join(tmpdir(), `agent-ready-chrome-${process.pid}-${Date.now()}`);
-  mkdirSync(profile, { recursive: true });
-  const args = [
-    '--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
-    '--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--disable-extensions',
-    '--disable-sync', '--hide-scrollbars', '--mute-audio', `--user-data-dir=${profile}`, 'about:blank'
-  ];
-  // The verifier is restricted to the current local DDEV target; local routers may use a custom TLD and development CA.
-  args.unshift('--ignore-certificate-errors');
-  if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
-  const child = spawn(executable, args, {
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
-  });
-  const stderr = [];
-  child.stderr.on('data', (chunk) => {
-    if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
-  });
-  const cdp = new CdpPipe(child, budget);
+  let backend;
+  try {
+    backend = await openCaptureBrowserBackend({
+      browserBackend: selectedBackend,
+      browserExecutable,
+      budget,
+      environment,
+      fetchImpl,
+      gridUrl,
+      hideScrollbars: true,
+      profileCleanup,
+      profilePrefix: 'agent-ready-chrome',
+      webSocketConnector
+    });
+  } catch (error) {
+    return {
+      schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
+      checkedAt,
+      status: 'unavailable',
+      authoritative: false,
+      captureMode: 'verifier-owned-browser',
+      targetOrigin: base.origin,
+      contract: normalizedContract,
+      browser: { executable: browserLabel, product: '' },
+      runtime: runtimeEvidence(),
+      primaryRoutes: routes,
+      routes: [],
+      budget: budget.metrics({ attempted: true }),
+      warnings: [],
+      errors: [error.message]
+    };
+  }
+  const cdp = backend.cdp;
   const captured = [];
   const errors = [];
   const warnings = [];
   let product = '';
+  let protocolVersion = '';
+  let executable = browserLabel;
+  let runtimeReady = false;
+  let browserContextId = '';
+  let targetId = '';
   try {
     const version = await cdp.send('Browser.getVersion');
     product = String(version.product ?? '');
-    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    protocolVersion = String(version.protocolVersion ?? '');
+    if (selectedBackend === 'remote') {
+      executable = await observedBrowserExecutable(cdp, selectedBackend, product);
+    }
+    ({ browserContextId } = await cdp.send('Target.createBrowserContext', { disposeOnDetach: true }));
+    ({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', browserContextId }));
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
@@ -857,6 +1353,8 @@ export async function captureGlobalChrome({
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `${VERIFIER_AXE_SOURCE}\n//# sourceURL=agent-ready-axe-core-${VERIFIER_AXE_VERSION}.js`
     }, sessionId);
+    await preflightVerifierAxe(cdp, sessionId);
+    runtimeReady = true;
     captureLoop:
     for (const path of routes) {
       for (const viewport of VIEWPORTS) {
@@ -871,26 +1369,25 @@ export async function captureGlobalChrome({
         }
       }
     }
-    if (!budget.hasExceededDeadline()) await cdp.send('Target.closeTarget', { targetId });
   } catch (error) {
     errors.push(error.message);
   } finally {
-    const shutdownError = await shutdownBrowser(child);
-    if (shutdownError) {
-      errors.push(shutdownError);
-      warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
-    } else {
-      try {
-        const cleanup = profileCleanup(profile);
-        warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
-      } catch (error) {
-        const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
-        warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
-      }
+    if (targetId) {
+      try { await cdp.sendForCleanup('Target.closeTarget', { targetId }); }
+      catch (error) { warnings.push(`Browser target cleanup failed: ${error.message}`); }
     }
+    if (browserContextId) {
+      try { await cdp.sendForCleanup('Target.disposeBrowserContext', { browserContextId }); }
+      catch (error) { warnings.push(`Browser context cleanup failed: ${error.message}`); }
+    }
+    const closed = await backend.close();
+    runtimeReady = runtimeReady && closed.errors.length === 0;
+    errors.push(...closed.errors);
+    warnings.push(...closed.warnings);
   }
-  if (captured.length !== routes.length * VIEWPORTS.length && stderr.length) {
-    errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
+  const diagnostics = backend.diagnostics?.() ?? '';
+  if (captured.length !== routes.length * VIEWPORTS.length && diagnostics) {
+    errors.push(`Browser diagnostics: ${diagnostics}`);
   }
   return {
     schemaVersion: GLOBAL_CHROME_CAPTURE_SCHEMA,
@@ -900,7 +1397,13 @@ export async function captureGlobalChrome({
     captureMode: 'verifier-owned-browser',
     targetOrigin: base.origin,
     contract: normalizedContract,
-    browser: { executable: basename(executable), product },
+    browser: { executable: executable || backend.executable, product },
+    runtime: runtimeEvidence({
+      executable: executable || backend.executable,
+      product,
+      protocolVersion,
+      ready: runtimeReady
+    }),
     primaryRoutes: routes,
     routes: captured,
     budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
@@ -1020,10 +1523,10 @@ async function captureBeforeConsentRoute(cdp, baseUrl, path, budget) {
   } finally {
     for (const unsubscribe of unsubscribers) unsubscribe();
     if (targetId) {
-      try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
+      try { await cdp.sendForCleanup('Target.closeTarget', { targetId }); } catch {}
     }
     if (browserContextId) {
-      try { await cdp.send('Target.disposeBrowserContext', { browserContextId }); } catch {}
+      try { await cdp.sendForCleanup('Target.disposeBrowserContext', { browserContextId }); } catch {}
     }
   }
 }
@@ -1033,6 +1536,10 @@ export async function captureBeforeConsentNetwork({
   primaryRoutes,
   environment = process.env,
   browserExecutable,
+  browserBackend,
+  gridUrl = DEFAULT_SELENIUM_GRID_URL,
+  fetchImpl = globalThis.fetch,
+  webSocketConnector = connectWebSocket,
   limits = {},
   now = Date.now,
   profileCleanup = cleanupBrowserProfile
@@ -1046,6 +1553,33 @@ export async function captureBeforeConsentNetwork({
     now,
     routeCount: routeInputs.length,
     viewportCount: 1
+  });
+  let selectedBackend;
+  try { selectedBackend = browserBackendKind(browserBackend, browserExecutable, environment); }
+  catch (error) {
+    return {
+      schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
+      checkedAt,
+      status: 'blocked',
+      authoritative: false,
+      captureMode: 'verifier-owned-cdp-network',
+      targetOrigin: base.origin,
+      browser: { executable: '', product: '' },
+      runtime: browserRuntimeEvidence({ backend: 'local' }),
+      primaryRoutes: [],
+      routes: [],
+      budget: budget.metrics(),
+      warnings: [],
+      errors: [error.message]
+    };
+  }
+  const browserLabel = selectedBackend === 'remote'
+    ? ''
+    : basename(String(browserExecutable === undefined ? findBrowserExecutable(environment) : browserExecutable));
+  const runtimeEvidence = (overrides = {}) => browserRuntimeEvidence({
+    backend: selectedBackend,
+    executable: browserLabel,
+    ...overrides
   });
   let routes = [];
   try {
@@ -1061,6 +1595,7 @@ export async function captureBeforeConsentNetwork({
       captureMode: 'verifier-owned-cdp-network',
       targetOrigin: base.origin,
       browser: { executable: '', product: '' },
+      runtime: runtimeEvidence(),
       primaryRoutes: routes,
       routes: [],
       budget: budget.metrics(),
@@ -1068,26 +1603,21 @@ export async function captureBeforeConsentNetwork({
       errors: [error.message]
     };
   }
-  const executable = browserExecutable === undefined
-    ? findBrowserExecutable(environment)
-    : String(browserExecutable ?? '').trim();
-  const unavailable = (message, status = 'unavailable') => ({
+  const unavailable = (message, status = 'unavailable', attempted = false) => ({
     schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
     checkedAt,
     status,
     authoritative: false,
     captureMode: 'verifier-owned-cdp-network',
     targetOrigin: base.origin,
-    browser: { executable: '', product: '' },
+    browser: { executable: browserLabel, product: '' },
+    runtime: runtimeEvidence(),
     primaryRoutes: routes,
     routes: [],
-    budget: budget.metrics(),
+    budget: budget.metrics({ attempted }),
     warnings: [],
     errors: [message]
   });
-  if (!executable || !existsSync(executable)) {
-    return unavailable('No Chrome/Chromium executable was found for before-consent network capture. Set CHROME_PATH or install Chrome/Chromium.');
-  }
   if (routes.length === 0) {
     return unavailable('No primary routes were available for before-consent network capture.', 'blocked');
   }
@@ -1096,31 +1626,38 @@ export async function captureBeforeConsentNetwork({
   } catch (error) {
     return unavailable(error.message, 'blocked');
   }
-  const profile = join(tmpdir(), `agent-ready-consent-chrome-${process.pid}-${Date.now()}`);
-  mkdirSync(profile, { recursive: true });
-  const args = [
-    '--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
-    '--disable-background-networking', '--disable-component-update', '--disable-default-apps', '--disable-extensions',
-    '--disable-sync', '--mute-audio', `--user-data-dir=${profile}`, 'about:blank'
-  ];
-  args.unshift('--ignore-certificate-errors');
-  if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
-  const child = spawn(executable, args, {
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
-  });
-  const stderr = [];
-  child.stderr.on('data', (chunk) => {
-    if (stderr.join('').length < 8000) stderr.push(chunk.toString('utf8'));
-  });
-  const cdp = new CdpPipe(child, budget);
+  let backend;
+  try {
+    backend = await openCaptureBrowserBackend({
+      browserBackend: selectedBackend,
+      browserExecutable,
+      budget,
+      environment,
+      fetchImpl,
+      gridUrl,
+      hideScrollbars: false,
+      profileCleanup,
+      profilePrefix: 'agent-ready-consent-chrome',
+      webSocketConnector
+    });
+  } catch (error) {
+    return unavailable(error.message, 'unavailable', true);
+  }
+  const cdp = backend.cdp;
   const captured = [];
   const errors = [];
   const warnings = [];
   let product = '';
+  let protocolVersion = '';
+  let executable = browserLabel;
+  let cleanupSucceeded = true;
   try {
     const version = await cdp.send('Browser.getVersion');
     product = String(version.product ?? '');
+    protocolVersion = String(version.protocolVersion ?? '');
+    if (selectedBackend === 'remote') {
+      executable = await observedBrowserExecutable(cdp, selectedBackend, product);
+    }
     captureLoop:
     for (const path of routes) {
       try {
@@ -1135,22 +1672,14 @@ export async function captureBeforeConsentNetwork({
   } catch (error) {
     errors.push(error.message);
   } finally {
-    const shutdownError = await shutdownBrowser(child);
-    if (shutdownError) {
-      errors.push(shutdownError);
-      warnings.push('Browser profile cleanup was deferred because browser shutdown was not confirmed.');
-    } else {
-      try {
-        const cleanup = profileCleanup(profile);
-        warnings.push(...(Array.isArray(cleanup?.warnings) ? cleanup.warnings : []));
-      } catch (error) {
-        const code = String(error?.code ?? 'unknown-error').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'unknown-error';
-        warnings.push(`Browser profile cleanup was deferred after bounded retries (${code}).`);
-      }
-    }
+    const closed = await backend.close();
+    cleanupSucceeded = closed.errors.length === 0;
+    errors.push(...closed.errors);
+    warnings.push(...closed.warnings);
   }
-  if (captured.length !== routes.length && stderr.length) {
-    errors.push(`Browser diagnostics: ${stderr.join('').replace(/\s+/g, ' ').trim().slice(0, 800)}`);
+  const diagnostics = backend.diagnostics?.() ?? '';
+  if (captured.length !== routes.length && diagnostics) {
+    errors.push(`Browser diagnostics: ${diagnostics}`);
   }
   return {
     schemaVersion: BEFORE_CONSENT_NETWORK_SCHEMA,
@@ -1159,7 +1688,13 @@ export async function captureBeforeConsentNetwork({
     authoritative: errors.length === 0,
     captureMode: 'verifier-owned-cdp-network',
     targetOrigin: base.origin,
-    browser: { executable: basename(executable), product },
+    browser: { executable: executable || backend.executable, product },
+    runtime: runtimeEvidence({
+      executable: executable || backend.executable,
+      product,
+      protocolVersion,
+      ready: captured.length > 0 && cleanupSucceeded
+    }),
     primaryRoutes: routes,
     routes: captured,
     budget: budget.metrics({ attempted: true, capturedCount: captured.length }),
@@ -1685,6 +2220,7 @@ export function captureSummary(capture) {
     authoritative: capture?.authoritative === true,
     stateFingerprint: capture?.resultStateFingerprint ?? '',
     captureFingerprint: capture?.captureFingerprint ?? '',
+    runtime: capture?.runtime ?? null,
     routeViewportCount: Array.isArray(capture?.routes) ? capture.routes.length : 0,
     verifierAxe: {
       sourceVersion: VERIFIER_AXE_VERSION,

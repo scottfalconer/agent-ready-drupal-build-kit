@@ -44,6 +44,29 @@ function textPromptAfter(content, heading) {
   return section.match(/```text\n([\s\S]*?)\n```/)?.[1] ?? '';
 }
 
+function assertCanonicalBrowserBootstrap(content, surface) {
+  const skillInstall = content.indexOf('ddev exec npx --yes skills add');
+  const runtimeSetup = content.indexOf(
+    'bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh'
+  );
+  const agentLaunches = ['ddev codex', 'ddev claude', 'ddev opencode']
+    .map((command) => content.indexOf(command))
+    .filter((index) => index >= 0);
+
+  assert.notEqual(skillInstall, -1, `${surface} must install the copied skill`);
+  assert.notEqual(runtimeSetup, -1, `${surface} must run the supported browser setup`);
+  assert.ok(skillInstall < runtimeSetup, `${surface} must install the skill before browser setup`);
+  assert.ok(agentLaunches.length > 0, `${surface} must name a canonical DDEV agent launch`);
+  assert.ok(
+    agentLaunches.every((index) => runtimeSetup < index),
+    `${surface} must finish browser setup before any DDEV agent launch`
+  );
+  assert.doesNotMatch(content, /(?:export\s+CHROME_PATH|CHROME_PATH\s*=)/);
+  for (const line of content.split('\n').filter((candidate) => candidate.includes('CHROME_PATH'))) {
+    assert.match(line, /\b(?:do not|not)\b/i, `${surface} must not recommend CHROME_PATH as a runtime path`);
+  }
+}
+
 test('each required review packet file has a matching template', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
   const missing = gates.reviewPacketFiles.filter((file) => !existsSync(join(templatesDir, requiredTemplateName(file))));
@@ -197,6 +220,10 @@ test('public repository surface includes conventional license, CI, and contribut
   assert.match(workflow, /npm test/);
   assert.match(workflow, /sync-skill-package\.mjs --check/);
   assert.match(workflow, /npm pack --dry-run --json/);
+  assert.match(workflow, /browser-runtime:[\s\S]*runs-on: ubuntu-24\.04/);
+  assert.match(workflow, /ddev\/github-action-setup-ddev@v1[\s\S]*autostart: false[\s\S]*version: 1\.25\.3/);
+  assert.match(workflow, /setup-browser-runtime\.sh/);
+  assert.match(workflow, /browser-runtime-smoke\.mjs/);
   assert.match(contributing, /sync-skill-package\.mjs --write/);
   assert.match(security, /private vulnerability reporting/);
   assert.equal(packageJson.homepage, 'https://github.com/scottfalconer/agent-ready-drupal-build-kit#readme');
@@ -230,6 +257,9 @@ test('README leads with the same concise bootstrap prompt as USAGE', () => {
   assert.ok(readme.indexOf('```text') < readme.indexOf('bash <('), 'copy-paste prompt should precede manual setup');
   assert.match(start, /on macOS, Docker Desktop or OrbStack installed and running/);
   assert.doesNotMatch(start, /supplies the rest: Docker/);
+  assertCanonicalBrowserBootstrap(readme, 'README.md');
+  assertCanonicalBrowserBootstrap(start, 'START.md');
+  assertCanonicalBrowserBootstrap(usage, 'USAGE.md');
 });
 
 test('cookbook stays executable, Drush 13 compatible, and referenced from skill surfaces', () => {

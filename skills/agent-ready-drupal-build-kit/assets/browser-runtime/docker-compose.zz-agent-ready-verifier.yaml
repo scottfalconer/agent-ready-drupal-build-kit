@@ -1,0 +1,19 @@
+#ddev-silent-no-warn
+# agent-ready-drupal-build-kit browser-runtime-schema: @@SCHEMA_VERSION@@
+# agent-ready-drupal-build-kit:browser-runtime:start
+# This entire file is managed by the Agent-Ready Drupal Build Kit.
+services:
+  selenium-chrome:
+    image: @@BROWSER_IMAGE@@
+    shm_size: @@SHARED_MEMORY@@
+    environment:
+      SE_NODE_GRID_URL: @@GRID_URL@@
+      SE_NODE_MAX_SESSIONS: "@@MAX_SESSIONS@@"
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "@@OVERRIDE_MAX_SESSIONS@@"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS @@HEALTHCHECK_URL@@ | grep -Eq '\"ready\"[[:space:]]*:[[:space:]]*true'"]
+      interval: @@HEALTHCHECK_INTERVAL@@
+      timeout: @@HEALTHCHECK_TIMEOUT@@
+      retries: @@HEALTHCHECK_RETRIES@@
+      start_period: @@HEALTHCHECK_START_PERIOD@@
+# agent-ready-drupal-build-kit:browser-runtime:end

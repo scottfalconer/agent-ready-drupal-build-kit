@@ -67,6 +67,10 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
     { source: join(repoRoot, 'docs', 'cookbook.md'), destination: join(skillRoot, 'references', 'cookbook.md') },
+    ...['runtime.json', 'docker-compose.zz-agent-ready-verifier.yaml'].map((name) => ({
+      source: join(repoRoot, 'assets', 'browser-runtime', name),
+      destination: join(skillRoot, 'assets', 'browser-runtime', name)
+    })),
     ...['axe.min.js', 'LICENSE', 'LICENSE-3RD-PARTY.txt'].map((name) => ({
       source: join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', name),
       destination: join(skillRoot, 'assets', 'vendor', 'axe-core', '4.10.3', name)
@@ -104,7 +108,30 @@ function copyPlan(assetsOnly) {
       {
         source: join(repoRoot, 'bin', 'global-chrome.mjs'),
         destination: join(skillRoot, 'scripts', 'global-chrome.mjs')
-      }
+      },
+      {
+        source: join(repoRoot, 'scripts', 'browser-runtime-common.sh'),
+        destination: join(skillRoot, 'scripts', 'browser-runtime-common.sh')
+      },
+      {
+        source: join(repoRoot, 'scripts', 'browser-runtime-smoke.mjs'),
+        destination: join(skillRoot, 'scripts', 'browser-runtime-smoke.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'scripts', 'setup-browser-runtime.sh'),
+        destination: join(skillRoot, 'scripts', 'setup-browser-runtime.sh'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'scripts', 'repair-browser-runtime.sh'),
+        destination: join(skillRoot, 'scripts', 'repair-browser-runtime.sh'),
+        executable: true
+      },
+      ...['ws.mjs', 'LICENSE', 'INTEGRITY.json'].map((name) => ({
+        source: join(repoRoot, 'vendor', 'ws', '8.21.0', name),
+        destination: join(skillRoot, 'vendor', 'ws', '8.21.0', name)
+      }))
     );
   }
   return plan;

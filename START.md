@@ -26,16 +26,22 @@ bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupal
 
 The current installer supports macOS and Linux.
 
+The managed browser runtime requires DDEV 1.25.3 or newer. Its setup script checks this before changing the project.
+
 Choose **Drupal CMS** and your preferred coding agent. The installer creates the project and leaves your shell in its root. This is the one Drupal target for the rebuild.
 
 Install the build kit into that target and start Codex:
 
 ```bash
-ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy
+ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy &&
+bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh &&
 ddev codex
 ```
 
-`ddev codex` is the Codex example. Use `ddev claude` or `ddev opencode` for the matching installer choice.
+The middle step installs the kit's pinned DDEV browser runtime and runs a real-site Chrome/CDP/axe smoke before
+the agent starts. The first image pull can take several minutes, but there is no browser selection or fallback.
+`ddev codex` is the Codex example. Change only the final command to `ddev claude` or `ddev opencode` for the
+matching installer choice.
 
 Node.js is provided inside DDEV, so a host Node installation is not required. From the project root, the relevant environment checks are:
 
@@ -78,7 +84,7 @@ After the initial rebuild passes, do not restart the source-rebuild workflow for
 node .agents/skills/agent-ready-drupal-build-kit/scripts/lifecycle.mjs status --packet review-packet
 ```
 
-These examples use host `node`; when Node is available only in DDEV, use `ddev exec node` in place of the leading `node`.
+Cached lifecycle commands such as `status`, `begin`, and `abandon` may use host `node`. Every live verifier and `lifecycle.mjs complete` run must execute inside DDEV: use plain `node` from the active DDEV agent, or prefix it with `ddev exec` from the host.
 
 A repair addresses an original omission, regression, or defect. An extension adds new scope such as a feature, content model, integration, or composed experience. The original baseline remains passed in either case. If lifecycle `status` is not fresh, run the default verifier before `begin`; use `--adopt-current` when that inspection exposes existing drift. Begin the record before editing and declare each anonymous route expected to change with `--route`, or explicitly use `--no-public-route` for work with no anonymous route effect; omission is not an opt-out. Every concrete route must also be in the packet route matrix so the verifier actually fetches it. After implementation, run the full verifier once to refresh the exact live-state fingerprint; exit `2` can be expected while the changed state awaits lifecycle evidence. Then `complete` performs another fresh live inspection and records integrity-bound, authored evidence for the exact result. This targeted result is `evidence_recorded`, not independent verification or a new completion certificate. Every generated acceptance criterion needs its own evidence claim. After abandonment, refresh the live state and revert or explicitly adopt any leftover edits before beginning again.
 
