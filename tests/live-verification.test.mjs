@@ -23,7 +23,8 @@ import {
   liveSurfaceReconciliationErrors,
   verifyLive
 } from '../bin/verify.mjs';
-import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import { MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import { validatePacket as validateInstalledPacket } from '../skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -956,6 +957,12 @@ No off-road moves were used in this fixture.
   writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1
 site: "${targetBaseUrl}"
 intent_records: []
+empty_intent_acceptance:
+  disposition: "accepted_no_durable_intent"
+  accepted_by: "Fixture Maintainer"
+  rationale: "The reviewed fixture has no durable intent beyond its packet-owned architecture facts."
+  evidence:
+    - "pattern-map.json"
 evidence_scope: "No durable intent records apply to this fixture."
 `);
 }
@@ -1133,6 +1140,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     staleOrMissingEvidence: false,
     status: 'pass'
   }));
+  const completionGateIds = {
+    accessibility: 'G-A11Y-01',
+    architecture: 'G-COMPOSITION-01',
+    behavior: 'G-BROWSER-01',
+    content: 'G-CONTENT-01',
+    editor: 'G-EDITOR-01',
+    media: 'G-PARITY-01',
+    packet: 'G-VERIFY-01',
+    route: 'G-ROUTE-01',
+    security_privacy: 'G-PRIVACY-01',
+    seo: 'G-SEO-01',
+    visual: 'G-BROWSER-02'
+  };
   independent.completionClaims = [
     'content',
     'media',
@@ -1149,6 +1169,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claimId: `${gate}-checked`,
     claim: `The ${gate} completion evidence was independently checked.`,
     gate,
+    gateId: completionGateIds[gate],
     builderEvidence: [],
     falsificationChecks: [`Attempted to falsify the ${gate} evidence against the target and packet.`],
     verifierEvidence: ['claim-evidence.json'],
@@ -1173,6 +1194,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claims: independent.completionClaims.map((claim) => ({
       claimId: claim.claimId,
       gate: claim.gate,
+      gateId: claim.gateId,
       checks: [
         {
           name: `${claim.gate} falsification`,
@@ -1349,7 +1371,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   patternMap.sectionOwnershipMatrix = [
     {
       sourceRoute: '/',
-      section: 'intro',
+      section: 'other',
       editorFacingName: 'Introduction',
       editorOwnedBy: 'field',
       repeatability: 'singleton',
@@ -1827,7 +1849,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     patternMap.sectionOwnershipMatrix.push({
       ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
       sourceRoute: '/contact',
-      section: 'contact form',
+      section: 'other',
       editorFacingName: 'Contact form',
       dataSource: 'webform.contact',
       expectedEditorAction: 'Edit the Contact Webform.',
@@ -5996,6 +6018,115 @@ intent_records:
   assert.match(staleReport.completionEvidence.packetCompletionBlockedReasons.join('\n'), /durable-intent\.yml/);
 });
 
+test('empty durable intent requires a named evidence-backed acceptance', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-empty-acceptance-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const acceptedReport = await validatePacket({ packetDir });
+  assert.equal(acceptedReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(acceptedReport, null, 2));
+
+  const path = join(packetDir, 'durable-intent.yml');
+  const withoutAcceptance = readFileSync(path, 'utf8').replace(
+    /^empty_intent_acceptance:\s*$[\s\S]*?(?=^evidence_scope:)/m,
+    ''
+  );
+  writeFileSync(path, withoutAcceptance);
+  const rejectedReport = await validatePacket({ packetDir });
+
+  assert.equal(rejectedReport.valid, true, rejectedReport.errors.join('\n'));
+  assert.equal(rejectedReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    rejectedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted_no_durable_intent/
+  );
+});
+
+test('durable intent rejects statuses outside the canonical enum', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-status-enum-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const path = join(packetDir, 'durable-intent.yml');
+  writeFileSync(path, `schema_version: public-kit.1
+site: "https://target.example"
+intent_records:
+  - id: "homepage-owner"
+    target_config: "system.site"
+    rationale: "Keep the homepage owner explicit."
+    asserted_by: "Fixture Maintainer"
+    last_reviewed: "2026-07-09"
+    config_hash: "not-applicable"
+    status: "looks-good"
+`);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(report.errors.join('\n'), /invalid durable intent status looks-good/);
+});
+
+test('structured artifacts reject unknown gate ids and ad hoc enum values', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'structured-enums-gates-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'independent-verification.json'), (record) => {
+    record.completionClaims[0].gateId = 'G-MADE-UP-99';
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (record) => {
+    record.publicRouteChecks[0].visualComparison.status = 'mostly-pass';
+  });
+
+  const report = await validatePacket({ packetDir });
+  const installedReport = await validateInstalledPacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.equal(installedReport.valid, false);
+  assert.match(report.errors.join('\n'), /canonical gate id from gates\.json/);
+  assert.match(report.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+  assert.match(installedReport.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+});
+
+test('per-gate results distinguish packet execution, live execution, and human review', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const packetResults = new Map(perGateResults(gates, []).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [packetResults.get('G-ROUTE-01').status, packetResults.get('G-ROUTE-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-CONFIG-01').status, packetResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['not_evaluated', false]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-MAINTAINER-01').status, packetResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+  const packetFailureResults = new Map(
+    perGateResults(gates, ['browser-evidence.json has an invalid status.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.deepEqual(
+    [packetFailureResults.get('G-BROWSER-01').status, packetFailureResults.get('G-BROWSER-01').evaluatorCompleted],
+    ['fail', false]
+  );
+
+  const liveResults = new Map(perGateResults(gates, [], { mode: 'live' }).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [liveResults.get('G-CONFIG-01').status, liveResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [liveResults.get('G-MAINTAINER-01').status, liveResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+});
+
 test('independent completion claims require target-bound concrete check evidence', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'generic-claim-evidence-'));
   const packetDir = join(temp, 'review-packet');
@@ -6011,7 +6142,7 @@ test('independent completion claims require target-bound concrete check evidence
 
   assert.equal(report.valid, false);
   assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
-  assert.match(report.errors.join('\n'), /bound to its claimId, gate, target, checkedAt time, and concrete passing checks/);
+  assert.match(report.errors.join('\n'), /bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks/);
 });
 
 test('blind completion evidence fails closed on missing declarations, all-N/A checks, and copied captures', async () => {

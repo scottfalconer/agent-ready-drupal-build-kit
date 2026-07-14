@@ -125,6 +125,8 @@ The review packet shows what is built, what is still blocked, and what another d
 
 This is a typed local-completion machine bar, not production or human approval: `complete-local-rebuild` for source-site mode and `complete-local-build-from-brief` for brief mode. The default verifier can authorize only the active mode's claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
 
+Generated packet and live reports include a `gateResults` row for every canonical gate. A gate is `pass` only when its evaluator ran in that verification mode and produced no finding; packet-only dependencies remain `not_evaluated`, and human gates remain `human_review`.
+
 ## After The First Verification
 
 Keep the installed kit in the Drupal project. Future agents can use it as a stewardship layer instead of starting the source rebuild again.

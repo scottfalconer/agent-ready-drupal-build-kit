@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +88,29 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
+const FREEFORM_TEMPLATE_PIPE_FIELDS = new Set(['nameOrRole', 'task']);
+const PACKET_EXECUTED_GATE_IDS = new Set([
+  'G-ROUTE-01',
+  'G-COMPOSITION-01',
+  'G-RECIPE-01',
+  'G-INTENT-01',
+  'G-VERIFY-01',
+  'G-HANDOFF-01',
+  'G-BLIND-01'
+]);
+const COMPLETION_GATE_IDS = Object.freeze({
+  accessibility: 'G-A11Y-01',
+  architecture: 'G-COMPOSITION-01',
+  behavior: 'G-BROWSER-01',
+  content: 'G-CONTENT-01',
+  editor: 'G-EDITOR-01',
+  media: 'G-PARITY-01',
+  packet: 'G-VERIFY-01',
+  route: 'G-ROUTE-01',
+  security_privacy: 'G-PRIVACY-01',
+  seo: 'G-SEO-01',
+  visual: 'G-BROWSER-02'
+});
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -124,6 +147,191 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-EDITOR-02': 'nextCycleEditorWorkflow',
   'G-PRIVACY-01': 'negativeRouteConsent'
 });
+
+function collectTemplateEnumRules(value, path = [], rules = new Map()) {
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      collectTemplateEnumRules(child, [...path, '*'], rules);
+    }
+    return rules;
+  }
+  if (!isJsonObject(value)) {
+    return rules;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = [...path, key];
+    if (
+      typeof child === 'string' &&
+      child.includes(' | ') &&
+      !FREEFORM_TEMPLATE_PIPE_FIELDS.has(key)
+    ) {
+      const allowed = child.split(/\s*\|\s*/).map((item) => item.trim()).filter(Boolean);
+      if (allowed.length > 1) {
+        rules.set(JSON.stringify(childPath), { allowed, path: childPath });
+      }
+    } else {
+      collectTemplateEnumRules(child, childPath, rules);
+    }
+  }
+  return rules;
+}
+
+function structuredEnumRules(gates) {
+  const byFile = new Map();
+  for (const file of arrayOrEmpty(gates?.reviewPacketFiles).filter((name) => name.endsWith('.json'))) {
+    const templatePath = installedTemplatePath(file);
+    if (!templatePath) {
+      continue;
+    }
+    try {
+      const template = JSON.parse(readFileSync(templatePath, 'utf8'));
+      byFile.set(file, [...collectTemplateEnumRules(template).values()]);
+    } catch {
+      // Template readability and JSON validity are covered by release-readiness tests.
+    }
+  }
+  return byFile;
+}
+
+function valuesAtStructuredPath(value, path, index = 0, display = '') {
+  if (index >= path.length) {
+    return [{ display, value }];
+  }
+  const segment = path[index];
+  if (segment === '*') {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.flatMap((child, childIndex) =>
+      valuesAtStructuredPath(child, path, index + 1, `${display}[${childIndex}]`)
+    );
+  }
+  if (!isJsonObject(value) || !Object.hasOwn(value, segment)) {
+    return [];
+  }
+  const nextDisplay = display ? `${display}.${segment}` : segment;
+  return valuesAtStructuredPath(value[segment], path, index + 1, nextDisplay);
+}
+
+function validateStructuredEnums(gates, records, errors) {
+  for (const [file, rules] of structuredEnumRules(gates)) {
+    const record = records[file];
+    if (!isJsonObject(record)) {
+      continue;
+    }
+    for (const rule of rules) {
+      for (const candidate of valuesAtStructuredPath(record, rule.path)) {
+        if (candidate.value === rule.allowed.join(' | ')) {
+          // The shipped template sentinel is a valid blocked-stub placeholder. It
+          // never supports completion and is rejected separately when unresolved.
+          continue;
+        }
+        if (typeof candidate.value !== 'string' || !rule.allowed.includes(candidate.value)) {
+          errors.push(
+            `${file} ${candidate.display} must be one of: ${rule.allowed.join(', ')}.`
+          );
+        }
+      }
+    }
+  }
+}
+
+function visitArtifactGateIds(value, visit, path = '') {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => visitArtifactGateIds(child, visit, `${path}[${index}]`));
+    return;
+  }
+  if (!isJsonObject(value)) {
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = path ? `${path}.${key}` : key;
+    if (key === 'gateId') {
+      visit(child, childPath);
+    } else if (key === 'gateIds' && Array.isArray(child)) {
+      child.forEach((gateId, index) => visit(gateId, `${childPath}[${index}]`));
+    } else {
+      visitArtifactGateIds(child, visit, childPath);
+    }
+  }
+}
+
+function validateArtifactGateIds(gates, records, errors) {
+  const knownGateIds = new Set(arrayOrEmpty(gates?.gates).map((gate) => gate?.id).filter(Boolean));
+  for (const [file, record] of Object.entries(records)) {
+    visitArtifactGateIds(record, (value, path) => {
+      if (typeof value === 'string' && value.trim() === '') {
+        return;
+      }
+      if (typeof value !== 'string' || !knownGateIds.has(value)) {
+        errors.push(`${file} ${path} must reference a canonical gate id from gates.json.`);
+      }
+    });
+  }
+}
+
+function gateFindingMap(gates, messages) {
+  const findings = new Map();
+  const attach = (gateId, message) => {
+    if (!findings.has(gateId)) {
+      findings.set(gateId, []);
+    }
+    if (!findings.get(gateId).includes(message)) {
+      findings.get(gateId).push(message);
+    }
+  };
+  for (const rawMessage of messages) {
+    const message = String(rawMessage ?? '').trim();
+    if (!message) {
+      continue;
+    }
+    let attributed = false;
+    for (const gateId of message.match(/\bG-[A-Z]+-\d{2}\b/g) ?? []) {
+      if (arrayOrEmpty(gates?.gates).some((gate) => gate?.id === gateId)) {
+        attach(gateId, message);
+        attributed = true;
+      }
+    }
+    for (const gate of arrayOrEmpty(gates?.gates)) {
+      const evidenceFile = String(gate?.evidenceFile ?? '');
+      const evidenceName = basename(evidenceFile);
+      if (evidenceName && message.includes(evidenceName)) {
+        attach(gate.id, message);
+        attributed = true;
+      }
+    }
+    if (!attributed) {
+      attach('G-VERIFY-01', message);
+    }
+  }
+  return findings;
+}
+
+export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
+  const findings = gateFindingMap(gates, messages);
+  return arrayOrEmpty(gates?.gates)
+    .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
+    .map((gate) => {
+      const errors = findings.get(gate.id) ?? [];
+      const evaluated = mode === 'live'
+        ? gate.checkedBy !== 'human'
+        : PACKET_EXECUTED_GATE_IDS.has(gate.id);
+      const status = errors.length > 0
+        ? 'fail'
+        : gate.checkedBy === 'human'
+          ? 'human_review'
+          : evaluated
+            ? 'pass'
+            : 'not_evaluated';
+      return {
+        gateId: gate.id,
+        evaluator: MACHINE_GATE_EVALUATORS[gate.id] ?? 'human-record',
+        evaluatorCompleted: evaluated,
+        status,
+        errors
+      };
+    });
+}
 
 class UsageError extends Error {}
 
@@ -551,6 +759,7 @@ async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
         evidence?.schemaVersion === 'public-kit.independent-claim-evidence.1' &&
         candidate?.claimId === claim.claimId &&
         candidate?.gate === claim.gate &&
+        candidate?.gateId === claim.gateId &&
         evidenceTargetUrl?.origin === independentTargetUrl.origin &&
         timestampIsFresh(checkedAt) &&
         checks.length > 0 &&
@@ -1956,8 +2165,18 @@ async function validateIndependentVerification(
       errors.push(`independent-verification.json completionClaims[${index}] must be an object.`);
       continue;
     }
-    if (!String(claim.claimId ?? '').trim() || !String(claim.claim ?? '').trim() || !String(claim.gate ?? '').trim()) {
-      errors.push(`independent-verification.json completionClaims[${index}] requires claimId, claim, and gate.`);
+    if (
+      !String(claim.claimId ?? '').trim() ||
+      !String(claim.claim ?? '').trim() ||
+      !String(claim.gate ?? '').trim() ||
+      !String(claim.gateId ?? '').trim()
+    ) {
+      errors.push(`independent-verification.json completionClaims[${index}] requires claimId, claim, gate, and gateId.`);
+    }
+    if (COMPLETION_GATE_IDS[claim.gate] && claim.gateId !== COMPLETION_GATE_IDS[claim.gate]) {
+      errors.push(
+        `independent-verification.json completionClaims[${index}] gateId must be ${COMPLETION_GATE_IDS[claim.gate]} for the ${claim.gate} completion gate.`
+      );
     }
     if (claim.status !== 'pass') {
       errors.push(`independent-verification.json completionClaims[${index}] must pass before completion can be supported.`);
@@ -1990,7 +2209,7 @@ async function validateIndependentVerification(
     }
     if (!semanticallyBoundEvidence) {
       errors.push(
-        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, target, checkedAt time, and concrete passing checks.`
+        `independent-verification.json completionClaims[${index}] requires JSON verifier evidence bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks.`
       );
     }
   }
@@ -2567,12 +2786,18 @@ async function validateDurableIntent(packetDir, errors) {
   }
 
   const text = await readFile(path, 'utf8');
-  const statusBlocks = text.split(/\n(?=\s*-\s+id:)/);
+  const statusBlocks = [...text.matchAll(/^\s*-\s+id:\s*["']?([^"'\n]*)["']?\s*$([\s\S]*?)(?=^\s*-\s+id:|(?![\s\S]))/gm)];
+  const allowedStatuses = new Set(['draft', 'hash-valid', 'accepted', 'superseded']);
 
-  for (const block of statusBlocks) {
-    const id = block.match(/\bid:\s*"?([^"\n]+)"?/)?.[1] ?? '(unknown intent)';
-    const status = block.match(/\bstatus:\s*"?([^"\n]+)"?/)?.[1] ?? '';
-    const configHash = block.match(/\bconfig_hash:\s*"?([^"\n]*)"?/)?.[1] ?? '';
+  for (const match of statusBlocks) {
+    const block = match[0];
+    const id = match[1]?.trim() || '(unknown intent)';
+    const status = block.match(/^\s*status:\s*["']?([^"'\n]+)["']?\s*(?:#.*)?$/m)?.[1]?.trim() ?? '';
+    const configHash = block.match(/^\s*config_hash:\s*["']?([^"'\n]*)["']?\s*(?:#.*)?$/m)?.[1]?.trim() ?? '';
+
+    if (!allowedStatuses.has(status)) {
+      errors.push(`${id} has invalid durable intent status ${status || '(blank)'}; expected draft, hash-valid, accepted, or superseded.`);
+    }
 
     if ((status === 'hash-valid' || status === 'accepted') && !HASH_RE.test(configHash) && configHash !== 'not-applicable') {
       errors.push(`${id} has status ${status} but config_hash is not sha256:<64 hex chars> or not-applicable.`);
@@ -2582,6 +2807,23 @@ async function validateDurableIntent(packetDir, errors) {
       errors.push(`${id} has status ${status} but config_hash is blank or UNKNOWN.`);
     }
   }
+}
+
+function durableEmptyIntentAcceptance(text) {
+  const section = text.match(/^empty_intent_acceptance:\s*$([\s\S]*?)(?=^[^\s#][^\n]*:|(?![\s\S]))/m)?.[1] ?? '';
+  const field = (name) => section.match(
+    new RegExp(`^\\s+${name}:\\s*["']?([^"'\\n#]+)["']?\\s*(?:#.*)?$`, 'm')
+  )?.[1]?.trim() ?? '';
+  const evidenceBlock = section.match(/^\s+evidence:\s*$([\s\S]*?)(?=^\s+[a-zA-Z_][\w-]*:|(?![\s\S]))/m)?.[1] ?? '';
+  const evidence = [...evidenceBlock.matchAll(/^\s+-\s*["']?([^"'\n#]+)["']?\s*(?:#.*)?$/gm)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+  return {
+    acceptedBy: field('accepted_by'),
+    disposition: field('disposition'),
+    evidence,
+    rationale: field('rationale')
+  };
 }
 
 async function validateRecipeStartPoint(packetDir, errors) {
@@ -3513,6 +3755,17 @@ async function markdownCompletionReadiness(packetDir, records = {}, { briefMode 
 
   const durableIntent = texts['durable-intent.yml'];
   const explicitEmptyIntent = /^\s*intent_records:\s*\[\s*\]\s*$/m.test(durableIntent);
+  const emptyIntentAcceptance = durableEmptyIntentAcceptance(durableIntent);
+  const emptyIntentEvidenceResults = await Promise.all(
+    emptyIntentAcceptance.evidence.map((reference) => nonEmptyPacketEvidence(packetDir, reference))
+  );
+  const acceptedEmptyIntent =
+    explicitEmptyIntent &&
+    emptyIntentAcceptance.disposition === 'accepted_no_durable_intent' &&
+    Boolean(emptyIntentAcceptance.acceptedBy) &&
+    Boolean(emptyIntentAcceptance.rationale) &&
+    emptyIntentEvidenceResults.length > 0 &&
+    emptyIntentEvidenceResults.every(Boolean);
   const intentBlocks = [...durableIntent.matchAll(/^\s*-\s+id:\s*["']?([^"'\n]*)["']?\s*$([\s\S]*?)(?=^\s*-\s+id:|(?![\s\S]))/gm)];
   const allIntentRecordsCurrent =
     intentBlocks.length > 0 &&
@@ -3532,9 +3785,11 @@ async function markdownCompletionReadiness(packetDir, records = {}, { briefMode 
     });
   if (
     !/^site:\s*["']?\S.+?["']?\s*$/m.test(durableIntent) ||
-    (!explicitEmptyIntent && !allIntentRecordsCurrent)
+    (!acceptedEmptyIntent && !allIntentRecordsCurrent)
   ) {
-    reasons.push('durable-intent.yml must name the site and contain current accepted/hash-valid intent or an explicit empty intent record list.');
+    reasons.push(
+      'durable-intent.yml must name the site and contain current accepted/hash-valid intent, or an empty record list with a named accepted_no_durable_intent disposition, rationale, and non-empty packet evidence.'
+    );
   }
 
   return {
@@ -5253,6 +5508,23 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
   const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
   const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), []);
+  const structuredRecords = {
+    'blind-adversarial-review.json': blindAdversarialReview,
+    'brief-acceptance.json': briefAcceptance,
+    'browser-evidence.json': browserEvidence,
+    'build-input.json': buildInput,
+    'drupal-readback.json': drupalReadback,
+    'field-output-matrix.json': fieldOutputMatrix,
+    'independent-verification.json': independentVerification,
+    'negative-route-consent.json': negativeRouteConsent,
+    'next-cycle-verification.json': nextCycleVerification,
+    'parity-report.json': parityReport,
+    'pattern-map.json': patternMap,
+    'route-matrix.json': routeMatrix,
+    'source-audit.json': sourceAudit
+  };
+  validateStructuredEnums(gates, structuredRecords, errors);
+  validateArtifactGateIds(gates, structuredRecords, errors);
   const briefContext = await validateBuildInput(packetDir, buildInput, routeMatrix, errors);
   const briefMode = briefContext.mode === 'brief';
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
@@ -5301,9 +5573,20 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         independentVerificationSupportsCompletion
       })
     : await packetCompletionReadiness(packetDir, gates, completionRecords);
+  const sharedErrors = errors.map((error) => sharedPacketMessage(error, packetDir));
+  const sharedCompletionBlockedReasons = completionReadiness.reasons.map((reason) =>
+    sharedPacketMessage(reason, packetDir)
+  );
+  const gateFindings = [...sharedErrors, ...sharedCompletionBlockedReasons];
+  if (!independentVerificationSupportsCompletion) {
+    gateFindings.push('G-VERIFY-01 independent verification did not support completion.');
+  }
+  if (!blindAdversarialReviewSupportsCompletion) {
+    gateFindings.push('G-BLIND-01 blind adversarial review did not support completion.');
+  }
 
   return {
-    schemaVersion: 'public-kit.packet-verification.1',
+    schemaVersion: 'public-kit.packet-verification.2',
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope: briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild',
@@ -5314,6 +5597,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     gateCount: gates?.gates?.length ?? 0,
     requiredFileCount: gates?.reviewPacketFiles?.length ?? 0,
     verificationMode: 'packet-only',
+    gateResults: perGateResults(gates, gateFindings, { mode: 'packet' }),
     recordedHumanGateStatus: completionReadiness.recordedHumanGateStatus,
     completionEvidence: {
       independentVerificationSupportsCompletion,
@@ -5325,7 +5609,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
         blindAdversarialReview: independenceAttestation(blindAdversarialReview?.reviewer)
       },
       packetCompletionReady: completionReadiness.packetCompletionReady,
-      packetCompletionBlockedReasons: completionReadiness.reasons,
+      packetCompletionBlockedReasons: sharedCompletionBlockedReasons,
       packetSupportsCompletion:
         independentVerificationSupportsCompletion &&
         blindAdversarialReviewSupportsCompletion &&
@@ -5334,7 +5618,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     completeLocalRebuildClaimAllowed: false,
     completeLocalBuildFromBriefClaimAllowed: false,
     valid: errors.length === 0,
-    errors: errors.map((error) => sharedPacketMessage(error, packetDir)),
+    errors: sharedErrors,
     warnings: warnings.map((warning) => sharedPacketMessage(warning, packetDir))
   };
 }
