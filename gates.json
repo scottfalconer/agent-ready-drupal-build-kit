@@ -311,6 +311,14 @@
       "blocking": "handoff"
     },
     {
+      "id": "G-CODE-01",
+      "title": "Custom code inventory, representative routes, and config schema reconcile",
+      "phase": 6,
+      "evidenceFile": "drupal-readback.json",
+      "checkedBy": "verify-script",
+      "blocking": "handoff"
+    },
+    {
       "id": "G-INTENT-01",
       "title": "Durable intent is current or treated as advisory",
       "phase": 3,

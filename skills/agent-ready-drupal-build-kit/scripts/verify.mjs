@@ -4638,6 +4638,1637 @@ function ddevDocroot(projectRoot) {
   }
 }
 
+const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.1';
+const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.1';
+const CUSTOM_EXTENSION_DIRECTORY_LIMIT = 10_000;
+const CUSTOM_EXTENSION_FILE_LIMIT = 10_000;
+const CUSTOM_EXTENSION_SCAN_DEADLINE_MS = 5_000;
+const CUSTOM_EXTENSION_FILE_BYTES_LIMIT = 5 * 1024 * 1024;
+const CUSTOM_EXTENSION_TOTAL_BYTES_LIMIT = 100 * 1024 * 1024;
+const CUSTOM_CODE_EXTENSION_LIMIT = 256;
+const CUSTOM_CODE_DIRECTORY_LIMIT = 25_000;
+const CUSTOM_CODE_FILE_LIMIT = 25_000;
+const CUSTOM_CODE_SCAN_DEADLINE_MS = 30_000;
+const CUSTOM_CODE_TOTAL_BYTES_LIMIT = 250 * 1024 * 1024;
+const CUSTOM_CODE_SURFACES_PER_FILE_LIMIT = 5_000;
+const CUSTOM_CODE_SURFACE_LIMIT = 50_000;
+const CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT = 5_000;
+const CUSTOM_CODE_TEST_METHOD_LIMIT = 50_000;
+const CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT = 48 * 1024;
+const CUSTOM_EXTENSION_WALK_EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor']);
+const CUSTOM_SOURCE_EXCLUDED_SEGMENTS = new Set([
+  '.cache', '.ddev', '.git', '.github', '.idea', '.vscode', 'bower_components', 'coverage',
+  'docs', 'fixture', 'fixtures', 'node_modules', 'scripts', 'test', 'test-data',
+  'test_data', 'testdata', 'tests', 'tmp', 'tooling', 'tools', 'translations', 'vendor'
+]);
+export const CUSTOM_SOLUTION_LADDER_STAGES = Object.freeze([
+  'core',
+  'installed_drupal_cms',
+  'recipe',
+  'maintained_contrib',
+  'custom_exception'
+]);
+
+export function customExtensionFiles(root, label, options = {}) {
+  const directoryLimit = options.directoryLimit ?? CUSTOM_EXTENSION_DIRECTORY_LIMIT;
+  const fileLimit = options.fileLimit ?? CUSTOM_EXTENSION_FILE_LIMIT;
+  const deadlineMs = options.deadlineMs ?? CUSTOM_EXTENSION_SCAN_DEADLINE_MS;
+  const fileBytesLimit = options.fileBytesLimit ?? CUSTOM_EXTENSION_FILE_BYTES_LIMIT;
+  const totalBytesLimit = options.totalBytesLimit ?? CUSTOM_EXTENSION_TOTAL_BYTES_LIMIT;
+  const now = options.now ?? Date.now;
+  const startedAt = now();
+  const sharedBudget = options.sharedBudget ?? null;
+  const errors = [];
+  const files = [];
+  let bytesScanned = 0;
+  let filesVisited = 0;
+  const deadlineError = () => {
+    const currentTime = now();
+    if (sharedBudget && currentTime - sharedBudget.startedAt > sharedBudget.deadlineMs) {
+      return `Custom code inventory aggregate exceeded its ${sharedBudget.deadlineMs}ms deadline.`;
+    }
+    if (currentTime - startedAt > deadlineMs) {
+      return `Custom extension inventory exceeded its ${deadlineMs}ms deadline under ${label}.`;
+    }
+    return '';
+  };
+  let rootRealPath = '';
+  try {
+    rootRealPath = realpathSync(root);
+    if (!statSync(rootRealPath).isDirectory()) {
+      return { bytesScanned, errors: [`${label} is not a directory and cannot be inventoried as a custom extension.`], files };
+    }
+  } catch (error) {
+    return { bytesScanned, errors: [`${label} could not be resolved for custom extension inventory: ${error.message}`], files };
+  }
+
+  const pending = [{ logicalPath: root, realPath: rootRealPath }];
+  const visitedRealDirectories = new Set();
+  scan: while (pending.length > 0) {
+    const deadline = deadlineError();
+    if (deadline) {
+      errors.push(deadline);
+      break;
+    }
+    const directory = pending.pop();
+    if (visitedRealDirectories.has(directory.realPath)) {
+      continue;
+    }
+    visitedRealDirectories.add(directory.realPath);
+    if (visitedRealDirectories.size > directoryLimit) {
+      errors.push(`Custom extension inventory exceeded ${directoryLimit} directories under ${label}.`);
+      break;
+    }
+    if (sharedBudget) {
+      sharedBudget.directoriesVisited += 1;
+      if (sharedBudget.directoriesVisited > sharedBudget.directoryLimit) {
+        errors.push(`Custom code inventory aggregate exceeded ${sharedBudget.directoryLimit} directories.`);
+        break;
+      }
+    }
+
+    let entries = [];
+    try {
+      entries = readdirSync(directory.logicalPath, { withFileTypes: true });
+    } catch (error) {
+      errors.push(`${label} could not read ${directory.logicalPath}: ${error.message}`);
+      continue;
+    }
+    for (const entry of entries.sort((left, right) => comparePortable(left.name, right.name))) {
+      if (CUSTOM_EXTENSION_WALK_EXCLUDED_DIRECTORIES.has(entry.name)) {
+        continue;
+      }
+      const entryDeadline = deadlineError();
+      if (entryDeadline) {
+        errors.push(entryDeadline);
+        break scan;
+      }
+      const logicalPath = join(directory.logicalPath, entry.name);
+      let realPath = '';
+      let stats;
+      try {
+        realPath = realpathSync(logicalPath);
+        if (!pathIsInside(rootRealPath, realPath)) {
+          errors.push(`${logicalPath} resolves outside custom extension root ${label}.`);
+          continue;
+        }
+        stats = statSync(realPath);
+      } catch (error) {
+        errors.push(`${logicalPath} could not be resolved for custom extension inventory: ${error.message}`);
+        continue;
+      }
+      if (stats.isDirectory()) {
+        pending.push({ logicalPath, realPath });
+      } else if (stats.isFile()) {
+        filesVisited += 1;
+        if (filesVisited > fileLimit) {
+          errors.push(`Custom extension inventory exceeded ${fileLimit} files under ${label}.`);
+          break scan;
+        }
+        if (sharedBudget) {
+          sharedBudget.filesVisited += 1;
+          if (sharedBudget.filesVisited > sharedBudget.fileLimit) {
+            errors.push(`Custom code inventory aggregate exceeded ${sharedBudget.fileLimit} files.`);
+            break scan;
+          }
+        }
+        if (customInventoryFileNeedsContent(root, logicalPath)) {
+          if (stats.size > fileBytesLimit) {
+            errors.push(`${logicalPath} exceeds the ${fileBytesLimit}-byte custom source file limit.`);
+            continue;
+          }
+          if (bytesScanned + stats.size > totalBytesLimit) {
+            errors.push(`Custom extension inventory exceeded ${totalBytesLimit} total source bytes under ${label}.`);
+            break scan;
+          }
+          if (sharedBudget && sharedBudget.bytesScanned + stats.size > sharedBudget.totalBytesLimit) {
+            errors.push(`Custom code inventory aggregate exceeded ${sharedBudget.totalBytesLimit} total source bytes.`);
+            break scan;
+          }
+          bytesScanned += stats.size;
+          if (sharedBudget) {
+            sharedBudget.bytesScanned += stats.size;
+          }
+        }
+        files.push(logicalPath);
+      }
+    }
+  }
+  const finalDeadline = deadlineError();
+  if (finalDeadline && !errors.includes(finalDeadline)) {
+    errors.push(finalDeadline);
+  }
+  return { bytesScanned, errors, files: files.sort(comparePortable) };
+}
+
+function customSourceKind(extensionRelativePath) {
+  const normalized = extensionRelativePath.toLowerCase().replaceAll('\\', '/');
+  const filename = basename(normalized);
+  if (/(?:^|\/)config\/(?:install|optional)\//.test(normalized)) {
+    return 'shipped_config';
+  }
+  if (/(?:^|\/)components?\/.*\.component\.ya?ml$/.test(normalized) || filename === 'component.yml') {
+    return 'sdc_component';
+  }
+  if (/\.info\.ya?ml$/.test(filename)) {
+    return 'extension_metadata';
+  }
+  if (/\.(?:module|theme|install|inc)$/.test(filename)) {
+    return 'procedural_php';
+  }
+  if (/\.php$/.test(filename)) {
+    return 'php_class';
+  }
+  if (/\.html\.twig$/.test(filename)) {
+    return 'twig_template';
+  }
+  if (/\.(?:js|mjs|ts)$/.test(filename)) {
+    return 'javascript';
+  }
+  if (/\.(?:css|less|sass|scss)$/.test(filename)) {
+    return 'stylesheet';
+  }
+  if (/\.ya?ml$/.test(filename)) {
+    return 'drupal_registration';
+  }
+  return '';
+}
+
+function customSourceFileEligible(extensionRelativePath) {
+  const normalized = extensionRelativePath.split(sep).join('/');
+  const segments = normalized.toLowerCase().split('/');
+  const filename = basename(normalized).toLowerCase();
+  if (segments.some((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment)) || filename.startsWith('.')) {
+    return false;
+  }
+  if (/\.map$/.test(filename) || /^(?:readme|changelog|license)(?:\.|$)/.test(filename)) {
+    return false;
+  }
+  return Boolean(customSourceKind(normalized));
+}
+
+function customInventoryFileNeedsContent(extensionRoot, file) {
+  const extensionRelativePath = relative(extensionRoot, file);
+  const normalized = extensionRelativePath.split(sep).join('/');
+  return customSourceFileEligible(extensionRelativePath) || (
+    /(?:^|\/)tests?(?:\/|$)/i.test(normalized) &&
+    /\.(?:php|js|mjs|ts)$/i.test(normalized)
+  );
+}
+
+function sourceLineLocator(text) {
+  let line = 1;
+  let offset = 0;
+  let previousTarget = 0;
+  return (index) => {
+    const target = Math.max(0, index);
+    if (target < previousTarget) {
+      line = 1;
+      offset = 0;
+    }
+    let newline = text.indexOf('\n', offset);
+    while (newline !== -1 && newline < target) {
+      line += 1;
+      offset = newline + 1;
+      newline = text.indexOf('\n', offset);
+    }
+    previousTarget = target;
+    return line;
+  };
+}
+
+function customSourceSurface(extension, path, kind, name, locateLine, index = 0) {
+  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}`;
+  return {
+    id: `SURFACE-${sha256(identity).slice(0, 16)}`,
+    kind,
+    name,
+    line: locateLine(index)
+  };
+}
+
+function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FILE_LIMIT + 1) {
+  const lines = text.split('\n');
+  let offset = 0;
+  let rootIndent = -1;
+  let childIndent = -1;
+  const children = [];
+  for (const line of lines) {
+    const mapping = line.match(/^(\s*)(['"]?)([A-Za-z0-9_.\\-]+)\2:\s*(?:#.*)?$/);
+    const indent = line.match(/^\s*/)?.[0]?.length ?? 0;
+    if (rootIndent < 0) {
+      if (mapping?.[3] === rootKey) {
+        rootIndent = mapping[1].length;
+      }
+      offset += line.length + 1;
+      continue;
+    }
+    if (!line.trim() || line.trimStart().startsWith('#')) {
+      offset += line.length + 1;
+      continue;
+    }
+    if (indent <= rootIndent) {
+      break;
+    }
+    if (mapping) {
+      if (childIndent < 0) {
+        childIndent = mapping[1].length;
+      }
+      if (mapping[1].length === childIndent && !mapping[3].startsWith('_')) {
+        children.push({ index: offset + mapping[1].length, name: mapping[3] });
+        if (children.length >= limit) {
+          break;
+        }
+      }
+    }
+    offset += line.length + 1;
+  }
+  return children;
+}
+
+function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind, text) {
+  const surfaces = [];
+  const locateLine = sourceLineLocator(text);
+  let truncated = false;
+  const add = (surfaceKind, name, index = 0) => {
+    if (surfaces.length >= CUSTOM_CODE_SURFACES_PER_FILE_LIMIT) {
+      truncated = true;
+      return false;
+    }
+    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index));
+    return true;
+  };
+  const normalized = extensionRelativePath.split(sep).join('/');
+  if (kind === 'procedural_php') {
+    for (const match of text.matchAll(/^[ \t]*function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm)) {
+      const surfaceKind = match[1].startsWith(`${extension}_`) ? 'hook_or_callback' : 'function';
+      if (!add(surfaceKind, match[1], match.index)) break;
+    }
+  } else if (kind === 'php_class') {
+    for (const match of text.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
+      const surfaceKind = /(?:^|\/)src\/Controller\//i.test(normalized)
+        ? 'controller_class'
+        : /(?:^|\/)src\/Plugin\//i.test(normalized)
+          ? 'plugin_class'
+          : match[1];
+      if (!add(surfaceKind, match[2], match.index)) break;
+    }
+  } else if (kind === 'javascript') {
+    for (const match of text.matchAll(/^[ \t]*Drupal\.behaviors\.([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
+      if (!add('drupal_behavior', match[1], match.index)) break;
+    }
+  } else if (kind === 'drupal_registration') {
+    if (/\.services\.ya?ml$/i.test(sharedPath)) {
+      for (const registration of yamlMappingChildren(text, 'services')) {
+        if (!add('service_registration', registration.name, registration.index)) break;
+      }
+    } else if (/\.routing\.ya?ml$/i.test(sharedPath)) {
+      for (const match of text.matchAll(/^([A-Za-z0-9_.\\-]+):\s*(?:#.*)?$/gm)) {
+        if (!add('route', match[1], match.index)) break;
+      }
+    } else {
+      for (const match of text.matchAll(/^([A-Za-z0-9_.\\-]+):\s*(?:#.*)?$/gm)) {
+        if (!match[1].startsWith('_')) {
+          if (!add('registration', match[1], match.index)) break;
+        }
+      }
+    }
+  } else if (kind === 'shipped_config') {
+    add('shipped_config', basename(sharedPath).replace(/\.ya?ml$/i, ''));
+  } else if (kind === 'sdc_component') {
+    add('sdc_component', basename(dirname(sharedPath)));
+  } else if (kind === 'twig_template') {
+    add('twig_template', basename(sharedPath));
+  } else if (kind === 'stylesheet') {
+    add('stylesheet', basename(sharedPath));
+  }
+  if (surfaces.length === 0) {
+    add(`${kind}_file`, basename(sharedPath));
+  }
+  return {
+    surfaces: [...new Map(surfaces.map((surface) => [surface.id, surface])).values()]
+      .sort((left, right) => comparePortable(left.id, right.id)),
+    truncated
+  };
+}
+
+function routingRecords(text, file, extension) {
+  return text
+    .split(/\n(?=[A-Za-z0-9_.-]+:\s*(?:#.*)?\n)/)
+    .map((block) => {
+      const name = block.match(/^([A-Za-z0-9_.-]+):\s*(?:#.*)?$/m)?.[1] ?? '';
+      const path = block.match(/^\s+path:\s*['"]?([^'"\n#]+)['"]?\s*(?:#.*)?$/m)?.[1]?.trim() ?? '';
+      const controller = block.match(/^\s+_controller:\s*['"]?([^'"\n#]+)['"]?\s*(?:#.*)?$/m)?.[1]?.trim() ?? '';
+      return { controller, extension, file, name, path, discovery: 'routing_yaml' };
+    })
+    .filter((route) => route.name && route.path);
+}
+
+function inspectCustomTestFile(extension, projectRoot, file) {
+  const sharedPath = relative(projectRoot, file).split(sep).join('/');
+  if (!/(?:^|\/)tests?(?:\/|$)/i.test(sharedPath) || !/\.(?:php|js|mjs|ts)$/i.test(sharedPath)) {
+    return null;
+  }
+  const bytes = readFileSync(file);
+  const text = bytes.toString('utf8');
+  const testMethods = [];
+  let truncated = false;
+  const add = (name) => {
+    if (testMethods.length >= CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT) {
+      truncated = true;
+      return false;
+    }
+    testMethods.push(name);
+    return true;
+  };
+  for (const match of text.matchAll(/^[ \t]*(?:(?:public|protected|private|static|final|abstract)\s+)*function\s+(test[A-Za-z0-9_]+)\s*\(/gm)) {
+    if (!add(match[1])) break;
+  }
+  if (!truncated) {
+    for (const match of text.matchAll(/^[ \t]*(?:test|it)\s*\(\s*['"]([^'"]{1,200})['"]/gm)) {
+      if (!add(match[1])) break;
+    }
+  }
+  return {
+    id: `TEST-${sha256(`${extension}\u0000${sharedPath}`).slice(0, 16)}`,
+    extension,
+    path: sharedPath,
+    sha256: `sha256:${sha256(bytes)}`,
+    testMethods: [...new Set(testMethods)].sort(comparePortable),
+    truncated
+  };
+}
+
+function topLevelYamlScalar(text, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.match(new RegExp(`^${escaped}:\\s*["']?([^\\s#"']+)["']?\\s*(?:#.*)?$`, 'mi'))?.[1]?.trim() ?? '';
+}
+
+export function customCapabilityId(extension, capabilityKey) {
+  return `CAP-${sha256(`${extension}\u0000${capabilityKey}`).slice(0, 16)}`;
+}
+
+export function inspectCustomCodeFilesystem(projectRoot, options = {}) {
+  let projectRealPath = '';
+  try {
+    projectRealPath = realpathSync(projectRoot);
+  } catch (error) {
+    return {
+      schemaVersion: CUSTOM_CODE_SCHEMA,
+      bounded: true,
+      completed: false,
+      errors: [`Project root could not be resolved for custom extension inventory: ${error.message}`],
+      extensions: [], sourceFiles: [], controllers: [], routes: [], tests: [], fingerprint: ''
+    };
+  }
+  const docroot = ddevDocroot(projectRoot);
+  const extensions = [];
+  const sourceFiles = [];
+  const controllers = [];
+  const routes = [];
+  const tests = [];
+  const errors = [];
+  const now = options.now ?? Date.now;
+  const extensionLimit = options.extensionLimit ?? CUSTOM_CODE_EXTENSION_LIMIT;
+  const aggregateBudget = {
+    startedAt: now(),
+    deadlineMs: options.deadlineMs ?? CUSTOM_CODE_SCAN_DEADLINE_MS,
+    directoryLimit: options.directoryLimit ?? CUSTOM_CODE_DIRECTORY_LIMIT,
+    directoriesVisited: 0,
+    fileLimit: options.fileLimit ?? CUSTOM_CODE_FILE_LIMIT,
+    filesVisited: 0,
+    totalBytesLimit: options.totalBytesLimit ?? CUSTOM_CODE_TOTAL_BYTES_LIMIT,
+    bytesScanned: 0
+  };
+  let extensionCount = 0;
+  let surfaceCount = 0;
+  let testMethodCount = 0;
+  extensionRoots: for (const [type, relativeRoot] of [
+    ['module', join(docroot, 'modules', 'custom')],
+    ['theme', join(docroot, 'themes', 'custom')]
+  ]) {
+    const root = join(projectRoot, relativeRoot);
+    if (!existsSync(root)) {
+      continue;
+    }
+    let entries = [];
+    try {
+      entries = readdirSync(root, { withFileTypes: true });
+    } catch (error) {
+      errors.push(`${relativeRoot.split(sep).join('/')} could not be read: ${error.message}`);
+      continue;
+    }
+    for (const entry of entries.sort((left, right) => comparePortable(left.name, right.name))) {
+      const extensionRoot = join(root, entry.name);
+      let extensionRealPath = '';
+      try {
+        extensionRealPath = realpathSync(extensionRoot);
+        if (!statSync(extensionRealPath).isDirectory()) {
+          continue;
+        }
+      } catch (error) {
+        if (entry.isDirectory() || entry.isSymbolicLink()) {
+          errors.push(`${relative(projectRoot, extensionRoot).split(sep).join('/')} could not be resolved: ${error.message}`);
+        }
+        continue;
+      }
+      const extensionPath = relative(projectRoot, extensionRoot).split(sep).join('/');
+      if (!pathIsInside(projectRealPath, extensionRealPath)) {
+        errors.push(`${extensionPath} resolves outside the project root and cannot be inventoried as custom code.`);
+        continue;
+      }
+      extensionCount += 1;
+      if (extensionCount > extensionLimit) {
+        errors.push(`Custom code inventory aggregate exceeded ${extensionLimit} custom extensions.`);
+        break extensionRoots;
+      }
+      const walked = customExtensionFiles(extensionRoot, extensionPath, { now, sharedBudget: aggregateBudget });
+      errors.push(...walked.errors.map((error) => error.replaceAll(extensionRoot, extensionPath)));
+      if (walked.errors.some((error) => error.startsWith('Custom code inventory aggregate exceeded'))) {
+        break extensionRoots;
+      }
+      const nestedInfoFiles = walked.files.filter((file) =>
+        dirname(file) !== extensionRoot &&
+        /\.info\.yml$/i.test(basename(file)) &&
+        customSourceFileEligible(relative(extensionRoot, file))
+      );
+      if (nestedInfoFiles.length > 0) {
+        errors.push(`${extensionPath} contains ${nestedInfoFiles.length} nested custom extension(s); nested production extension layouts are rejected instead of being attributed to the parent extension.`);
+        continue;
+      }
+      const infoFiles = walked.files.filter((file) =>
+        dirname(file) === extensionRoot && /\.info\.yml$/i.test(basename(file))
+      );
+      if (infoFiles.length !== 1) {
+        errors.push(`${extensionPath} must contain exactly one top-level *.info.yml file; found ${infoFiles.length}.`);
+        continue;
+      }
+      const infoFile = infoFiles[0];
+      const machineName = basename(infoFile).replace(/\.info\.yml$/i, '');
+      let declaredType = '';
+      try {
+        declaredType = topLevelYamlScalar(readFileSync(infoFile, 'utf8'), 'type');
+      } catch (error) {
+        errors.push(`${relative(projectRoot, infoFile).split(sep).join('/')} could not be read: ${error.message}`);
+      }
+      if (machineName !== entry.name) {
+        errors.push(`${extensionPath} directory name does not match derived extension machine name ${machineName}.`);
+      }
+      if (!/^[a-z][a-z0-9_]*$/.test(machineName)) {
+        errors.push(`${extensionPath} does not derive a valid Drupal extension machine name.`);
+      }
+      if (declaredType !== type) {
+        errors.push(`${extensionPath} must declare type: ${type}; found ${declaredType || '(missing)'}.`);
+      }
+
+      const extensionSourceIds = [];
+      const extensionTestIds = [];
+      const extensionRouteNames = [];
+      const extensionSchemaFiles = [];
+      const extensionShippedConfigNames = [];
+      for (const file of walked.files) {
+        if (now() - aggregateBudget.startedAt > aggregateBudget.deadlineMs) {
+          errors.push(`Custom code inventory aggregate exceeded its ${aggregateBudget.deadlineMs}ms deadline.`);
+          break extensionRoots;
+        }
+        const sharedPath = relative(projectRoot, file).split(sep).join('/');
+        const extensionRelativePath = relative(extensionRoot, file);
+        try {
+          const test = inspectCustomTestFile(machineName, projectRoot, file);
+          if (test) {
+            if (test.truncated) {
+              errors.push(`${sharedPath} exceeded ${CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT} discovered test methods.`);
+              break extensionRoots;
+            }
+            testMethodCount += test.testMethods.length;
+            if (testMethodCount > CUSTOM_CODE_TEST_METHOD_LIMIT) {
+              errors.push(`Custom code inventory aggregate exceeded ${CUSTOM_CODE_TEST_METHOD_LIMIT} discovered test methods.`);
+              break extensionRoots;
+            }
+            delete test.truncated;
+            tests.push(test);
+            extensionTestIds.push(test.id);
+          }
+          if (customSourceFileEligible(extensionRelativePath)) {
+            const bytes = readFileSync(file);
+            const text = bytes.toString('utf8');
+            const kind = customSourceKind(extensionRelativePath);
+            const surfaceInventory = customSourceSurfaces(machineName, sharedPath, extensionRelativePath, kind, text);
+            if (surfaceInventory.truncated) {
+              errors.push(`${sharedPath} exceeded ${CUSTOM_CODE_SURFACES_PER_FILE_LIMIT} lexical/registration custom-code surfaces.`);
+              break extensionRoots;
+            }
+            surfaceCount += surfaceInventory.surfaces.length;
+            if (surfaceCount > CUSTOM_CODE_SURFACE_LIMIT) {
+              errors.push(`Custom code inventory aggregate exceeded ${CUSTOM_CODE_SURFACE_LIMIT} lexical/registration surfaces.`);
+              break extensionRoots;
+            }
+            const source = {
+              id: `SOURCE-${sha256(`${machineName}\u0000${sharedPath}`).slice(0, 16)}`,
+              extension: machineName,
+              path: sharedPath,
+              kind,
+              sha256: `sha256:${sha256(bytes)}`,
+              surfaces: surfaceInventory.surfaces
+            };
+            sourceFiles.push(source);
+            extensionSourceIds.push(source.id);
+            if (source.surfaces.some((surface) => surface.kind === 'controller_class')) {
+              controllers.push({
+                extension: machineName,
+                path: sharedPath,
+                sourceFileId: source.id,
+                surfaceIds: source.surfaces.filter((surface) => surface.kind === 'controller_class').map((surface) => surface.id)
+              });
+            }
+            if (kind === 'shipped_config') {
+              extensionShippedConfigNames.push(basename(sharedPath).replace(/\.ya?ml$/i, ''));
+            }
+          }
+          if (/(?:^|\/)config\/schema\/.*\.schema\.ya?ml$/i.test(extensionRelativePath.split(sep).join('/'))) {
+            extensionSchemaFiles.push(sharedPath);
+          }
+          if (/\.routing\.ya?ml$/i.test(sharedPath)) {
+            const discovered = routingRecords(readFileSync(file, 'utf8'), sharedPath, machineName);
+            routes.push(...discovered);
+            extensionRouteNames.push(...discovered.map((route) => route.name));
+          }
+        } catch (error) {
+          errors.push(`Custom code inventory could not read ${sharedPath}: ${error.message}`);
+        }
+      }
+      extensions.push({
+        id: `EXTENSION-${sha256(`${type}\u0000${machineName}`).slice(0, 16)}`,
+        machineName,
+        type,
+        path: extensionPath,
+        drupalPath: relative(join(projectRoot, docroot), extensionRoot).split(sep).join('/'),
+        infoFile: relative(projectRoot, infoFile).split(sep).join('/'),
+        sourceFileIds: [...new Set(extensionSourceIds)].sort(comparePortable),
+        testFileIds: [...new Set(extensionTestIds)].sort(comparePortable),
+        routeNames: [...new Set(extensionRouteNames)].sort(comparePortable),
+        schemaFiles: [...new Set(extensionSchemaFiles)].sort(comparePortable),
+        shippedConfigNames: [...new Set(extensionShippedConfigNames)].sort(comparePortable)
+      });
+    }
+  }
+  const routeNames = new Set();
+  for (const route of routes) {
+    if (routeNames.has(route.name)) {
+      errors.push(`Custom route name ${route.name} is declared more than once.`);
+    }
+    routeNames.add(route.name);
+  }
+  const extensionNames = new Set();
+  for (const extension of extensions) {
+    if (extensionNames.has(extension.machineName)) {
+      errors.push(`Custom extension machine name ${extension.machineName} is declared more than once across modules and themes.`);
+    }
+    extensionNames.add(extension.machineName);
+  }
+  if (
+    now() - aggregateBudget.startedAt > aggregateBudget.deadlineMs &&
+    !errors.some((error) => error === `Custom code inventory aggregate exceeded its ${aggregateBudget.deadlineMs}ms deadline.`)
+  ) {
+    errors.push(`Custom code inventory aggregate exceeded its ${aggregateBudget.deadlineMs}ms deadline.`);
+  }
+  extensions.sort((left, right) => comparePortable(left.path, right.path));
+  sourceFiles.sort((left, right) => comparePortable(left.path, right.path));
+  controllers.sort((left, right) => comparePortable(left.path, right.path));
+  routes.sort((left, right) => comparePortable(`${left.file}\u0000${left.name}`, `${right.file}\u0000${right.name}`));
+  tests.sort((left, right) => comparePortable(left.path, right.path));
+  const fingerprintInput = { extensions, sourceFiles, controllers, routes, tests };
+  return {
+    schemaVersion: CUSTOM_CODE_SCHEMA,
+    bounded: true,
+    limits: {
+      directoriesPerExtension: CUSTOM_EXTENSION_DIRECTORY_LIMIT,
+      filesPerExtension: CUSTOM_EXTENSION_FILE_LIMIT,
+      sourceBytesPerFile: CUSTOM_EXTENSION_FILE_BYTES_LIMIT,
+      sourceBytesPerExtension: CUSTOM_EXTENSION_TOTAL_BYTES_LIMIT,
+      millisecondsPerExtension: CUSTOM_EXTENSION_SCAN_DEADLINE_MS,
+      extensionsTotal: extensionLimit,
+      directoriesTotal: aggregateBudget.directoryLimit,
+      filesTotal: aggregateBudget.fileLimit,
+      sourceBytesTotal: aggregateBudget.totalBytesLimit,
+      millisecondsTotal: aggregateBudget.deadlineMs,
+      surfacesPerFile: CUSTOM_CODE_SURFACES_PER_FILE_LIMIT,
+      surfacesTotal: CUSTOM_CODE_SURFACE_LIMIT,
+      testMethodsPerFile: CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT,
+      testMethodsTotal: CUSTOM_CODE_TEST_METHOD_LIMIT,
+      phpInputBytes: CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT
+    },
+    completed: errors.length === 0,
+    applies: extensions.length > 0,
+    errors,
+    extensions,
+    sourceFiles,
+    controllers,
+    routes,
+    tests,
+    fingerprint: `sha256:${sha256(JSON.stringify(fingerprintInput))}`
+  };
+}
+
+export const CUSTOM_ROUTE_AUDIT_PHP = String.raw`
+$output = ['completed' => FALSE, 'routes' => [], 'violations' => []];
+$route_provider = \Drupal::service('router.route_provider');
+$url_generator = \Drupal::service('url_generator');
+$access_manager = \Drupal::service('access_manager');
+$router = \Drupal::service('router.no_access_checks');
+$request_stack = \Drupal::service('request_stack');
+$container = \Drupal::getContainer();
+$anonymous = new \Drupal\Core\Session\AnonymousUserSession();
+$route_inputs = is_array($audit_input['routes'] ?? NULL) ? $audit_input['routes'] : [];
+$route_bindings = is_array($audit_input['bindings'] ?? NULL) ? $audit_input['bindings'] : [];
+$custom_extensions = is_array($audit_input['extensions'] ?? NULL) ? $audit_input['extensions'] : [];
+$base_url = rtrim((string) ($audit_input['baseUrl'] ?? 'http://localhost'), '/');
+$route_scan_limit = 5000;
+$core_extensions = \Drupal::service('config.storage')->read('core.extension') ?: [];
+$active_custom_extensions = [];
+foreach ($custom_extensions as $extension) {
+  $machine_name = (string) ($extension['machineName'] ?? '');
+  $type = (string) ($extension['type'] ?? '');
+  $expected_path = trim((string) ($extension['drupalPath'] ?? ''), '/');
+  if ($machine_name === '' || !in_array($type, ['module', 'theme'], TRUE) || $expected_path === '') {
+    $output['violations'][] = ['name' => '', 'extension' => $machine_name, 'reason' => 'invalid_custom_extension_identity'];
+    continue;
+  }
+  try {
+    $list = \Drupal::service($type === 'module' ? 'extension.list.module' : 'extension.list.theme');
+    $runtime_path = trim((string) $list->getPath($machine_name), '/');
+    if ($runtime_path !== $expected_path) {
+      $output['violations'][] = [
+        'name' => '',
+        'extension' => $machine_name,
+        'reason' => 'custom_extension_runtime_path_mismatch',
+        'expectedPath' => $expected_path,
+        'runtimePath' => $runtime_path,
+      ];
+      continue;
+    }
+    if (array_key_exists($machine_name, is_array($core_extensions[$type] ?? NULL) ? $core_extensions[$type] : [])) {
+      $active_custom_extensions[] = $extension;
+    }
+  }
+  catch (\Throwable $error) {
+    $output['violations'][] = [
+      'name' => '',
+      'extension' => $machine_name,
+      'reason' => 'custom_extension_runtime_path_unavailable',
+      'errorType' => get_class($error),
+      'errorSha256' => hash('sha256', $error->getMessage()),
+    ];
+  }
+}
+$active_custom_extension_names = array_fill_keys(array_column($active_custom_extensions, 'machineName'), TRUE);
+
+$bindings_by_name = [];
+foreach ($route_bindings as $binding) {
+  if (is_array($binding) && !empty($binding['name'])) {
+    $bindings_by_name[(string) $binding['name']] = $binding;
+  }
+}
+$inputs_by_name = [];
+foreach ($route_inputs as $input) {
+  if (!is_array($input) || empty($input['name'])) {
+    continue;
+  }
+  if (!isset($active_custom_extension_names[(string) ($input['extension'] ?? '')])) {
+    continue;
+  }
+  $name = (string) $input['name'];
+  if (isset($inputs_by_name[$name])) {
+    $output['violations'][] = ['name' => $name, 'reason' => 'duplicate_custom_route_name'];
+    continue;
+  }
+  $inputs_by_name[$name] = $input;
+}
+
+$custom_route_callback_class = static function (string $definition, string $kind, $container): string {
+  $definition = ltrim(trim($definition), '\\');
+  if ($definition === '') {
+    return '';
+  }
+  if (str_contains($definition, '::')) {
+    return ltrim(explode('::', $definition, 2)[0], '\\');
+  }
+  if ($kind === '_form' && class_exists($definition)) {
+    return $definition;
+  }
+  if (str_contains($definition, ':')) {
+    [$service_id] = explode(':', $definition, 2);
+    if ($container->has($service_id)) {
+      return get_class($container->get($service_id));
+    }
+  }
+  if ($container->has($definition)) {
+    return get_class($container->get($definition));
+  }
+  return class_exists($definition) ? $definition : '';
+};
+
+$custom_route_extension_for_class = static function (string $class, array $extensions): string {
+  $normalized = ltrim($class, '\\');
+  $class_file = '';
+  try {
+    $class_file = (new \ReflectionClass($normalized))->getFileName() ?: '';
+    $class_file = $class_file ? str_replace('\\', '/', realpath($class_file) ?: $class_file) : '';
+  }
+  catch (\Throwable) {
+    // Namespace ownership can still identify an unreflectable class.
+  }
+  foreach ($extensions as $extension) {
+    $machine_name = (string) ($extension['machineName'] ?? '');
+    $type = (string) ($extension['type'] ?? '');
+    if ($machine_name === '' || !in_array($type, ['module', 'theme'], TRUE)) {
+      continue;
+    }
+    if (str_starts_with($normalized, 'Drupal\\' . $machine_name . '\\')) {
+      return $machine_name;
+    }
+    try {
+      $list = \Drupal::service($type === 'module' ? 'extension.list.module' : 'extension.list.theme');
+      $extension_root = str_replace('\\', '/', realpath(DRUPAL_ROOT . '/' . $list->getPath($machine_name)) ?: '');
+      if ($class_file && $extension_root && ($class_file === $extension_root || str_starts_with($class_file, $extension_root . '/'))) {
+        return $machine_name;
+      }
+    }
+    catch (\Throwable) {
+      // Try the remaining custom extensions.
+    }
+  }
+  return '';
+};
+
+// Include attribute/callback routes whose executable callback resolves to a
+// custom extension even when no routing YAML record exists.
+$routes_scanned = 0;
+foreach ($route_provider->getAllRoutes() as $live_name => $live_route) {
+  $routes_scanned++;
+  if ($routes_scanned > $route_scan_limit) {
+    $output['violations'][] = ['name' => '', 'reason' => 'live_route_scan_limit_exceeded'];
+    break;
+  }
+  if (isset($inputs_by_name[$live_name])) {
+    continue;
+  }
+  $definitions = [];
+  foreach (['_controller', '_form', '_title_callback'] as $key) {
+    $value = $live_route->getDefault($key);
+    if (is_string($value) && $value !== '') {
+      $definitions[$key] = $value;
+    }
+  }
+  foreach ($live_route->getRequirements() as $key => $value) {
+    if (is_string($value) && str_starts_with((string) $key, '_') && str_contains((string) $key, 'access')) {
+      $definitions[(string) $key] = $value;
+    }
+  }
+  foreach ($definitions as $kind => $definition) {
+    $class = $custom_route_callback_class($definition, $kind, $container);
+    $extension = $class ? $custom_route_extension_for_class($class, $active_custom_extensions) : '';
+    if ($extension === '') {
+      continue;
+    }
+    $binding = $bindings_by_name[(string) $live_name] ?? [];
+    $inputs_by_name[(string) $live_name] = [
+      'name' => (string) $live_name,
+      'extension' => $extension,
+      'file' => 'live-router:' . $extension,
+      'path' => (string) $live_route->getPath(),
+      'controller' => (string) $live_route->getDefault('_controller'),
+      'routeParameters' => is_array($binding['routeParameters'] ?? NULL) ? $binding['routeParameters'] : [],
+      'requestMethod' => (string) ($binding['requestMethod'] ?? ''),
+      'requestContentType' => (string) ($binding['requestContentType'] ?? ''),
+      'discovery' => 'live_callback',
+    ];
+    break;
+  }
+}
+
+ksort($inputs_by_name);
+foreach (array_values($inputs_by_name) as $input) {
+  $binding = $bindings_by_name[(string) ($input['name'] ?? '')] ?? [];
+  $request_body = (string) ($binding['requestBody'] ?? '');
+  $record = [
+    'name' => (string) ($input['name'] ?? ''),
+    'extension' => (string) ($input['extension'] ?? ''),
+    'file' => (string) ($input['file'] ?? ''),
+    'filesystemPath' => (string) ($input['path'] ?? ''),
+    'filesystemController' => (string) ($input['controller'] ?? ''),
+    'routeParameters' => is_array($binding['routeParameters'] ?? NULL) ? $binding['routeParameters'] : [],
+    'requestMethod' => strtoupper((string) ($binding['requestMethod'] ?? '')),
+    'requestContentType' => (string) ($binding['requestContentType'] ?? ''),
+    'requestBodyPresent' => $request_body !== '',
+    'requestBodySha256' => $request_body !== '' ? hash('sha256', $request_body) : '',
+    'expectedAnonymousAccess' => (string) ($binding['expectedAnonymousAccess'] ?? ''),
+    'discovery' => (string) ($input['discovery'] ?? 'routing_yaml'),
+    'accessCheckCompleted' => FALSE,
+    'parameterConversionCompleted' => FALSE,
+    'requestMatched' => FALSE,
+    'anonymousAccess' => '',
+    'representativePath' => '',
+    'convertedParameterTypes' => [],
+  ];
+  try {
+    $route = $route_provider->getRouteByName($record['name']);
+    $record['path'] = (string) $route->getPath();
+    $record['controller'] = (string) $route->getDefault('_controller');
+    $record['requirements'] = $route->getRequirements();
+    $record['allowedMethods'] = array_values($route->getMethods());
+    preg_match_all('/\{([^}]+)\}/', $record['path'], $matches);
+    $record['parameterNames'] = array_values($matches[1] ?? []);
+    $defaults = $route->getDefaults();
+    $missing = array_values(array_filter($record['parameterNames'], static fn ($name) =>
+      !array_key_exists($name, $record['routeParameters']) && !array_key_exists($name, $defaults)
+    ));
+    if ($missing) {
+      $record['reason'] = 'missing_route_parameters';
+      $record['missingParameters'] = $missing;
+      $output['violations'][] = $record;
+    }
+    elseif ($record['requestMethod'] === '') {
+      $record['reason'] = 'missing_request_method';
+      $output['violations'][] = $record;
+    }
+    else {
+      $record['representativePath'] = (string) $url_generator->generateFromRoute(
+        $record['name'],
+        $record['routeParameters'],
+        ['absolute' => FALSE]
+      );
+      $server = $record['requestContentType'] !== ''
+        ? ['CONTENT_TYPE' => $record['requestContentType'], 'HTTP_ACCEPT' => $record['requestContentType']]
+        : [];
+      $request = \Symfony\Component\HttpFoundation\Request::create(
+        ($base_url ?: 'http://localhost') . $record['representativePath'],
+        $record['requestMethod'],
+        [], [], [], $server, $request_body
+      );
+      $request_stack->push($request);
+      try {
+        $matched = $router->matchRequest($request);
+        $record['matchedRouteName'] = (string) ($matched[\Drupal\Core\Routing\RouteObjectInterface::ROUTE_NAME] ?? '');
+        if ($record['matchedRouteName'] !== $record['name']) {
+          $record['reason'] = 'representative_request_route_mismatch';
+          $output['violations'][] = $record;
+          $output['routes'][] = $record;
+          continue;
+        }
+        $record['requestMatched'] = TRUE;
+        // router.no_access_checks applies routing enhancers, including parameter
+        // conversion, before the access manager evaluates the same request.
+        $request->attributes->add($matched);
+        foreach ($record['parameterNames'] as $parameter_name) {
+          if ($request->attributes->has($parameter_name)) {
+            $record['convertedParameterTypes'][$parameter_name] = get_debug_type($request->attributes->get($parameter_name));
+          }
+        }
+        $record['parameterConversionCompleted'] = TRUE;
+        $access = $access_manager->checkRequest($request, $anonymous, TRUE);
+        $record['anonymousAccess'] = $access->isAllowed()
+          ? 'allowed'
+          : ($access->isForbidden() ? 'denied' : 'neutral');
+        $record['accessCheckCompleted'] = TRUE;
+        if (!in_array($record['expectedAnonymousAccess'], ['allowed', 'denied'], TRUE)) {
+          $record['reason'] = 'missing_expected_anonymous_access';
+          $output['violations'][] = $record;
+        }
+        elseif ($record['anonymousAccess'] === 'neutral') {
+          $record['reason'] = 'neutral_access_result';
+          $output['violations'][] = $record;
+        }
+        elseif ($record['anonymousAccess'] !== $record['expectedAnonymousAccess']) {
+          $record['reason'] = 'anonymous_access_mismatch';
+          $output['violations'][] = $record;
+        }
+      }
+      finally {
+        $request_stack->pop();
+      }
+    }
+    if ($record['filesystemPath'] !== $record['path']) {
+      $output['violations'][] = $record + ['reason' => 'route_path_mismatch'];
+    }
+    if ($record['filesystemController'] !== '' && $record['filesystemController'] !== $record['controller']) {
+      $output['violations'][] = $record + ['reason' => 'route_controller_mismatch'];
+    }
+  }
+  catch (\Throwable $error) {
+    $record['reason'] = 'live_route_audit_failed';
+    $record['errorType'] = get_class($error);
+    $record['errorSha256'] = hash('sha256', $error->getMessage());
+    $output['violations'][] = $record;
+  }
+  $output['routes'][] = $record;
+}
+usort($output['routes'], static fn (array $left, array $right) => strcmp((string) ($left['name'] ?? ''), (string) ($right['name'] ?? '')));
+usort($output['violations'], static fn (array $left, array $right) => strcmp(
+  json_encode($left, JSON_UNESCAPED_SLASHES),
+  json_encode($right, JSON_UNESCAPED_SLASHES)
+));
+$output['completed'] = TRUE;
+print json_encode($output, JSON_UNESCAPED_SLASHES);
+`;
+
+export function inspectCustomRouteRuntime(projectRoot, environment, routes, extensions = [], routeBindings = []) {
+  if (routes.length === 0 && extensions.length === 0) {
+    return { completed: true, routes: [], violations: [] };
+  }
+  const baseUrl = environmentTargetUrl(environment) || ddevTargetUrl(projectRoot) || 'http://localhost';
+  const auditInput = JSON.stringify({
+    baseUrl,
+    bindings: routeBindings.map((binding) => ({
+      name: binding?.name,
+      routeParameters: binding?.routeParameters,
+      requestMethod: binding?.requestMethod,
+      requestContentType: binding?.requestContentType,
+      requestBody: binding?.requestBody,
+      expectedAnonymousAccess: binding?.expectedAnonymousAccess
+    })),
+    extensions: extensions.map((extension) => ({
+      machineName: extension?.machineName,
+      type: extension?.type,
+      drupalPath: extension?.drupalPath
+    })),
+    routes: routes.map((route) => ({
+      name: route?.name,
+      extension: route?.extension,
+      file: route?.file,
+      path: route?.path,
+      controller: route?.controller,
+      discovery: route?.discovery
+    }))
+  });
+  if (Buffer.byteLength(auditInput, 'utf8') > CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT) {
+    return {
+      completed: false,
+      error: `Live Drupal custom-route audit input exceeded ${CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT} bytes.`,
+      routes: [],
+      violations: []
+    };
+  }
+  const encodedInput = Buffer.from(auditInput, 'utf8').toString('base64');
+  const php = `$audit_input = json_decode(base64_decode('${encodedInput}'), TRUE);\n${CUSTOM_ROUTE_AUDIT_PHP}`;
+  const result = runDrushResult(projectRoot, environment, ['php:eval', php], 30_000);
+  if (!result.ok) {
+    return { completed: false, error: 'Live Drupal custom-route audit could not run.', routes: [], violations: [] };
+  }
+  try {
+    const audit = JSON.parse(result.output);
+    return {
+      completed: audit?.completed === true,
+      routes: Array.isArray(audit?.routes) ? audit.routes : [],
+      violations: Array.isArray(audit?.violations) ? audit.violations : []
+    };
+  } catch {
+    return { completed: false, error: 'Live Drupal custom-route audit returned invalid JSON.', routes: [], violations: [] };
+  }
+}
+
+export const CUSTOM_CONFIG_SCHEMA_AUDIT_PHP = String.raw`
+$output = ['completed' => FALSE, 'extensions' => [], 'violations' => []];
+$extensions = is_array($audit_input['extensions'] ?? NULL) ? $audit_input['extensions'] : [];
+$active_storage = \Drupal::service('config.storage');
+$typed_config = \Drupal::service('config.typed');
+$core_extensions = $active_storage->read('core.extension') ?: [];
+$active_names = $active_storage->listAll();
+$schema_files_seen = 0;
+$shipped_files_seen = 0;
+$ownership_names_scanned = 0;
+$ownership_nodes_scanned = 0;
+$schema_datasets_checked = 0;
+$checker = new class {
+  use \Drupal\Core\Config\Schema\SchemaCheckTrait;
+};
+
+$custom_schema_pattern_matches = static function (string $pattern, string $config_name): bool {
+  $quoted = preg_quote($pattern, '/');
+  return preg_match('/^' . str_replace('\\*', '[^.]+', $quoted) . '$/', $config_name) === 1;
+};
+
+$custom_schema_data_contains = static function (mixed $value, array $tokens) use (&$ownership_nodes_scanned): ?bool {
+  $pending = [$value];
+  $visited = 0;
+  while ($pending) {
+    $current = array_pop($pending);
+    $visited++;
+    $ownership_nodes_scanned++;
+    if ($visited > 10000 || $ownership_nodes_scanned > 1000000) {
+      return NULL;
+    }
+    if (is_string($current) && in_array($current, $tokens, TRUE)) {
+      return TRUE;
+    }
+    if (is_array($current)) {
+      foreach ($current as $key => $child) {
+        if (is_string($key) && in_array($key, $tokens, TRUE)) {
+          return TRUE;
+        }
+        $pending[] = $child;
+      }
+    }
+  }
+  return FALSE;
+};
+
+foreach ($extensions as $extension) {
+  $machine_name = (string) ($extension['machineName'] ?? '');
+  $type = (string) ($extension['type'] ?? '');
+  $record = [
+    'machineName' => $machine_name,
+    'schemaFiles' => [],
+    'schemaTypes' => [],
+    'candidateConfigNames' => [],
+    'checkedConfigNames' => [],
+    'checkedShippedConfigNames' => [],
+    'skippedInactiveOptionalConfigNames' => [],
+    'active' => FALSE,
+    'notApplicable' => FALSE,
+    'status' => 'fail',
+    'violations' => [],
+  ];
+  try {
+    if ($machine_name === '' || !in_array($type, ['module', 'theme'], TRUE)) {
+      throw new \InvalidArgumentException('invalid_extension_identity');
+    }
+    $list = \Drupal::service($type === 'module' ? 'extension.list.module' : 'extension.list.theme');
+    $extension_path = (string) $list->getPath($machine_name);
+    if ($extension_path === '') {
+      throw new \RuntimeException('extension_path_unavailable');
+    }
+    $expected_path = trim((string) ($extension['drupalPath'] ?? ''), '/');
+    if ($expected_path === '' || trim($extension_path, '/') !== $expected_path) {
+      throw new \RuntimeException('custom_extension_runtime_path_mismatch');
+    }
+    $record['active'] = array_key_exists(
+      $machine_name,
+      is_array($core_extensions[$type] ?? NULL) ? $core_extensions[$type] : []
+    );
+    if (!$record['active']) {
+      $record['notApplicable'] = TRUE;
+      $record['status'] = 'not_applicable';
+      $output['extensions'][] = $record;
+      continue;
+    }
+    $absolute_root = DRUPAL_ROOT . '/' . trim($extension_path, '/');
+    $schema_files = array_merge(
+      glob($absolute_root . '/config/schema/*.schema.yml') ?: [],
+      glob($absolute_root . '/config/schema/*.schema.yaml') ?: []
+    );
+    if (count($schema_files) > 1000) {
+      throw new \RuntimeException('custom_schema_file_limit_exceeded');
+    }
+    $schema_files_seen += count($schema_files);
+    if ($schema_files_seen > 5000) {
+      throw new \RuntimeException('aggregate_custom_schema_file_limit_exceeded');
+    }
+    foreach ($schema_files as $schema_file) {
+      $parsed = \Symfony\Component\Yaml\Yaml::parseFile($schema_file);
+      if (!is_array($parsed)) {
+        throw new \RuntimeException('schema_file_not_mapping:' . basename($schema_file));
+      }
+      $record['schemaFiles'][] = str_replace('\\', '/', substr($schema_file, strlen(DRUPAL_ROOT) + 1));
+      foreach (array_keys($parsed) as $schema_type) {
+        if (is_string($schema_type) && $schema_type !== '') {
+          $record['schemaTypes'][] = $schema_type;
+        }
+      }
+    }
+    $record['schemaFiles'] = array_values(array_unique($record['schemaFiles']));
+    sort($record['schemaFiles']);
+    $record['schemaTypes'] = array_values(array_unique($record['schemaTypes']));
+    sort($record['schemaTypes']);
+    $schema_value_tokens = [];
+    foreach ($record['schemaTypes'] as $schema_type) {
+      $segments = explode('.', $schema_type);
+      $token = end($segments);
+      $extension_owned_top_level = $schema_type === $machine_name || str_starts_with($schema_type, $machine_name . '.');
+      $extension_prefixed_token = is_string($token) && (
+        $token === $machine_name ||
+        str_starts_with($token, $machine_name . '_') ||
+        str_starts_with($token, $machine_name . '-') ||
+        str_starts_with($token, $machine_name . ':')
+      );
+      if (
+        !$extension_owned_top_level &&
+        $extension_prefixed_token &&
+        preg_match('/^[a-z][a-z0-9_:-]{2,}$/', $token)
+      ) {
+        $schema_value_tokens[$token] = TRUE;
+      }
+    }
+
+    $shipped_data = [];
+    $shipped_file_count = 0;
+    foreach (['install', 'optional'] as $directory) {
+      $files = array_merge(
+        glob($absolute_root . '/config/' . $directory . '/*.yml') ?: [],
+        glob($absolute_root . '/config/' . $directory . '/*.yaml') ?: []
+      );
+      $shipped_file_count += count($files);
+      if ($shipped_file_count > 1000) {
+        throw new \RuntimeException('shipped_config_file_limit_exceeded');
+      }
+      $shipped_files_seen += count($files);
+      if ($shipped_files_seen > 5000) {
+        throw new \RuntimeException('aggregate_shipped_config_file_limit_exceeded');
+      }
+      foreach ($files as $config_file) {
+        $config_name = preg_replace('/\.ya?ml$/', '', basename($config_file));
+        $parsed = \Symfony\Component\Yaml\Yaml::parseFile($config_file);
+        if (!is_array($parsed)) {
+          throw new \RuntimeException('shipped_config_not_mapping:' . basename($config_file));
+        }
+        if (isset($shipped_data[$config_name])) {
+          throw new \RuntimeException('duplicate_shipped_config_name:' . $config_name);
+        }
+        $shipped_data[$config_name] = ['data' => $parsed, 'directory' => $directory];
+      }
+    }
+
+    $candidate_names = array_fill_keys(array_keys($shipped_data), TRUE);
+    if (count($active_names) > 10000) {
+      throw new \RuntimeException('active_config_name_limit_exceeded');
+    }
+    foreach ($active_names as $config_name) {
+      $ownership_names_scanned++;
+      if ($ownership_names_scanned > 100000) {
+        throw new \RuntimeException('aggregate_config_ownership_name_limit_exceeded');
+      }
+      $owned = $config_name === $machine_name || str_starts_with($config_name, $machine_name . '.');
+      foreach ($record['schemaTypes'] as $schema_type) {
+        if ($custom_schema_pattern_matches($schema_type, $config_name)) {
+          $owned = TRUE;
+          break;
+        }
+      }
+      if (!$owned && $schema_value_tokens) {
+        $active_data = $active_storage->read($config_name);
+        $contains_token = is_array($active_data)
+          ? $custom_schema_data_contains($active_data, array_keys($schema_value_tokens))
+          : FALSE;
+        if ($contains_token === NULL) {
+          throw new \RuntimeException('config_ownership_scan_limit_exceeded:' . $config_name);
+        }
+        $owned = $contains_token;
+      }
+      if ($owned) {
+        $candidate_names[$config_name] = TRUE;
+      }
+    }
+    $record['candidateConfigNames'] = array_keys($candidate_names);
+    sort($record['candidateConfigNames']);
+    if (count($record['candidateConfigNames']) > 10000) {
+      throw new \RuntimeException('candidate_config_name_limit_exceeded');
+    }
+    foreach ($record['candidateConfigNames'] as $config_name) {
+      $datasets = [];
+      $skipped_inactive_optional = FALSE;
+      $active_data = $active_storage->read($config_name);
+      if (is_array($active_data)) {
+        $datasets[] = ['source' => 'active', 'data' => $active_data];
+      }
+      if (isset($shipped_data[$config_name])) {
+        $shipped = $shipped_data[$config_name];
+        if ($shipped['directory'] === 'install' || is_array($active_data)) {
+          $datasets[] = ['source' => 'shipped', 'data' => $shipped['data']];
+        }
+        else {
+          $record['skippedInactiveOptionalConfigNames'][] = $config_name;
+          $skipped_inactive_optional = TRUE;
+        }
+      }
+      if (!$datasets) {
+        if ($skipped_inactive_optional) {
+          continue;
+        }
+        $record['violations'][] = ['configName' => $config_name, 'reason' => 'config_unreadable'];
+        continue;
+      }
+      foreach ($datasets as $dataset) {
+        $schema_datasets_checked++;
+        if ($schema_datasets_checked > 10000) {
+          throw new \RuntimeException('aggregate_config_schema_dataset_limit_exceeded');
+        }
+        try {
+          $result = $checker->checkConfigSchema($typed_config, $config_name, $dataset['data'], TRUE);
+        }
+        catch (\Throwable $error) {
+          $record['violations'][] = [
+            'configName' => $config_name,
+            'source' => $dataset['source'],
+            'reason' => 'schema_validation_exception',
+            'errorType' => get_class($error),
+            'errorSha256' => hash('sha256', $error->getMessage()),
+          ];
+          continue;
+        }
+        if ($result === FALSE) {
+          $record['violations'][] = [
+            'configName' => $config_name,
+            'source' => $dataset['source'],
+            'reason' => 'missing_schema',
+          ];
+        }
+        elseif (is_array($result)) {
+          $error_strings = array_values(array_map('strval', $result));
+          $record['violations'][] = [
+            'configName' => $config_name,
+            'source' => $dataset['source'],
+            'reason' => 'invalid_config_schema',
+            'errorCount' => count($error_strings),
+            'errorsSha256' => hash('sha256', implode("\0", $error_strings)),
+          ];
+        }
+        else {
+          $record['checkedConfigNames'][] = $config_name;
+          if ($dataset['source'] === 'shipped') {
+            $record['checkedShippedConfigNames'][] = $config_name;
+          }
+        }
+      }
+    }
+    $record['checkedConfigNames'] = array_values(array_unique($record['checkedConfigNames']));
+    sort($record['checkedConfigNames']);
+    $record['checkedShippedConfigNames'] = array_values(array_unique($record['checkedShippedConfigNames']));
+    sort($record['checkedShippedConfigNames']);
+    $record['skippedInactiveOptionalConfigNames'] = array_values(array_unique($record['skippedInactiveOptionalConfigNames']));
+    sort($record['skippedInactiveOptionalConfigNames']);
+    $record['notApplicable'] = count($record['checkedConfigNames']) === 0 && count($record['violations']) === 0;
+    $record['status'] = count($record['violations']) === 0 ? 'pass' : 'fail';
+  }
+  catch (\Throwable $error) {
+    $record['violations'][] = [
+      'configName' => '',
+      'reason' => 'config_schema_audit_failed',
+      'errorType' => get_class($error),
+      'errorSha256' => hash('sha256', $error->getMessage()),
+    ];
+  }
+  foreach ($record['violations'] as $violation) {
+    $output['violations'][] = ['extension' => $machine_name] + $violation;
+  }
+  $output['extensions'][] = $record;
+}
+usort($output['extensions'], static fn (array $left, array $right) => strcmp((string) ($left['machineName'] ?? ''), (string) ($right['machineName'] ?? '')));
+usort($output['violations'], static fn (array $left, array $right) => strcmp(
+  json_encode($left, JSON_UNESCAPED_SLASHES),
+  json_encode($right, JSON_UNESCAPED_SLASHES)
+));
+$output['completed'] = TRUE;
+print json_encode($output, JSON_UNESCAPED_SLASHES);
+`;
+
+export function inspectCustomConfigSchema(projectRoot, environment, extensions) {
+  if (extensions.length === 0) {
+    return { completed: true, extensions: [], violations: [] };
+  }
+  const auditInput = JSON.stringify({
+    extensions: extensions.map((extension) => ({
+      machineName: extension?.machineName,
+      type: extension?.type,
+      drupalPath: extension?.drupalPath
+    }))
+  });
+  if (Buffer.byteLength(auditInput, 'utf8') > CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT) {
+    return {
+      completed: false,
+      error: `Live Drupal custom config-schema audit input exceeded ${CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT} bytes.`,
+      extensions: [],
+      violations: []
+    };
+  }
+  const encodedInput = Buffer.from(auditInput, 'utf8').toString('base64');
+  const php = `$audit_input = json_decode(base64_decode('${encodedInput}'), TRUE);\n${CUSTOM_CONFIG_SCHEMA_AUDIT_PHP}`;
+  const result = runDrushResult(projectRoot, environment, ['php:eval', php], 30_000);
+  if (!result.ok) {
+    return {
+      completed: false,
+      error: 'Live Drupal custom config-schema audit could not run.',
+      extensions: [],
+      violations: []
+    };
+  }
+  try {
+    const audit = JSON.parse(result.output);
+    return {
+      completed: audit?.completed === true,
+      extensions: Array.isArray(audit?.extensions) ? audit.extensions : [],
+      violations: Array.isArray(audit?.violations) ? audit.violations : []
+    };
+  } catch {
+    return {
+      completed: false,
+      error: 'Live Drupal custom config-schema audit returned invalid JSON.',
+      extensions: [],
+      violations: []
+    };
+  }
+}
+
+export function inspectCustomCode(projectRoot, environment, routeBindings = []) {
+  const filesystem = inspectCustomCodeFilesystem(projectRoot);
+  const routeAudit = filesystem.completed
+    ? inspectCustomRouteRuntime(projectRoot, environment, filesystem.routes, filesystem.extensions, routeBindings)
+    : { completed: false, error: 'Filesystem custom-code inventory did not complete.', routes: [], violations: [] };
+  const configSchema = filesystem.completed
+    ? inspectCustomConfigSchema(projectRoot, environment, filesystem.extensions)
+    : { completed: false, error: 'Filesystem custom-code inventory did not complete.', extensions: [], violations: [] };
+  const errors = [...filesystem.errors];
+  if (!routeAudit.completed) {
+    errors.push(routeAudit.error || 'Live custom-route audit did not complete.');
+  }
+  if (routeAudit.violations.length > 0) {
+    errors.push(`Live custom-route audit found ${routeAudit.violations.length} violation(s).`);
+  }
+  if (!configSchema.completed) {
+    errors.push(configSchema.error || 'Live custom config-schema audit did not complete.');
+  }
+  if (configSchema.violations.length > 0) {
+    errors.push(`Live custom config-schema audit found ${configSchema.violations.length} violation(s).`);
+  }
+  const fingerprintInput = {
+    extensions: filesystem.extensions,
+    sourceFiles: filesystem.sourceFiles,
+    controllers: filesystem.controllers,
+    routes: filesystem.routes,
+    tests: filesystem.tests,
+    routeAudit,
+    configSchema
+  };
+  return {
+    ...filesystem,
+    completed: filesystem.completed && routeAudit.completed && configSchema.completed && errors.length === 0,
+    errors,
+    routeAudit,
+    configSchema,
+    fingerprint: `sha256:${sha256(JSON.stringify(fingerprintInput))}`
+  };
+}
+
+export function customCodeReconciliationErrors(runtimeInventory, review, packetDir = '') {
+  const errors = [];
+  const push = (message) => {
+    if (errors.length < 200) {
+      errors.push(message);
+    } else if (errors.length === 200) {
+      errors.push('Custom-code reconciliation produced more than 200 errors; remaining errors were bounded.');
+    }
+  };
+  if (runtimeInventory?.completed !== true) {
+    push(runtimeInventory?.errors?.[0] || 'Verifier-owned custom-code inventory did not complete.');
+    return errors;
+  }
+  if (!review || typeof review !== 'object' || Array.isArray(review)) {
+    push('drupal-readback.json implementationQuality.customCodeInventory must be an object.');
+    return errors;
+  }
+  if (review.schemaVersion !== CUSTOM_CODE_REVIEW_SCHEMA) {
+    push(`Custom-code review must use schemaVersion ${CUSTOM_CODE_REVIEW_SCHEMA}.`);
+  }
+  if (review.inventoryComplete !== true || !Array.isArray(review.blockers) || review.blockers.length > 0) {
+    push('Custom-code review must be complete with an explicit empty blockers array.');
+  }
+  if (review.applies !== (runtimeInventory.extensions.length > 0)) {
+    push('Custom-code review applicability does not match the current custom extension inventory.');
+  }
+  if (
+    (runtimeInventory.extensions.length > 0 || String(review.runtimeFingerprint ?? '')) &&
+    String(review.runtimeFingerprint ?? '') !== String(runtimeInventory.fingerprint ?? '')
+  ) {
+    push('Custom-code review runtimeFingerprint does not match the current verifier-owned inventory.');
+  }
+  if (runtimeInventory.configSchema?.completed !== true) {
+    push('Verifier-owned custom config-schema validation did not complete.');
+  }
+  for (const violation of Array.isArray(runtimeInventory.configSchema?.violations)
+    ? runtimeInventory.configSchema.violations
+    : []) {
+    push(`Custom config schema violation for ${violation?.extension || '(unknown extension)'} ${violation?.configName || '(unknown config)'}: ${violation?.reason || 'invalid schema'}.`);
+  }
+  if (runtimeInventory.routeAudit?.completed !== true) {
+    push('Verifier-owned custom-route runtime audit did not complete.');
+  }
+  for (const violation of Array.isArray(runtimeInventory.routeAudit?.violations)
+    ? runtimeInventory.routeAudit.violations
+    : []) {
+    push(`Custom route ${violation?.name || '(unknown route)'} failed runtime audit: ${violation?.reason || 'unknown violation'}.`);
+  }
+
+  const runtimeExtensions = new Set(runtimeInventory.extensions.map((extension) => extension.machineName));
+  const runtimeSurfaces = new Map(
+    runtimeInventory.sourceFiles.flatMap((source) => source.surfaces.map((surface) => [surface.id, {
+      ...surface,
+      extension: source.extension,
+      path: source.path,
+      sourceFileId: source.id
+    }]))
+  );
+  const runtimeTests = new Map(
+    (Array.isArray(runtimeInventory.tests) ? runtimeInventory.tests : [])
+      .map((test) => [String(test?.id ?? ''), test])
+      .filter(([id]) => id)
+  );
+  const capabilities = Array.isArray(review.capabilities) ? review.capabilities : [];
+  const capabilityIds = new Set();
+  const acceptanceCriterionIds = new Set();
+  const boundSurfaces = new Map();
+  const capabilityExtensions = new Set();
+  for (const [index, capability] of capabilities.entries()) {
+    const extension = String(capability?.extension ?? '').trim();
+    const capabilityKey = String(capability?.capabilityKey ?? '').trim();
+    const capabilityId = String(capability?.capabilityId ?? '').trim();
+    if (!runtimeExtensions.has(extension)) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} names unknown extension ${extension || '(missing)'}.`);
+    } else {
+      capabilityExtensions.add(extension);
+    }
+    if (!/^[a-z][a-z0-9_]*$/.test(capabilityKey) || capabilityId !== customCapabilityId(extension, capabilityKey)) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} must use the stable verifier-derived ID for its extension and capabilityKey.`);
+    }
+    if (!capabilityId || capabilityIds.has(capabilityId)) {
+      push(`Custom capability row ${index} has a missing or duplicate capabilityId.`);
+    }
+    capabilityIds.add(capabilityId);
+    if (
+      !String(capability?.need ?? '').trim() ||
+      !String(capability?.responsibility ?? '').trim() ||
+      typeof capability?.loadBearing !== 'boolean'
+    ) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} needs a bounded need, responsibility, and loadBearing boolean.`);
+    }
+    const acceptanceCriteria = Array.isArray(capability?.acceptanceCriteria) ? capability.acceptanceCriteria : [];
+    const criterionIds = acceptanceCriteria.map((criterion) => String(criterion?.id ?? '').trim());
+    if (
+      acceptanceCriteria.length === 0 ||
+      criterionIds.some((id) => !/^AC-[A-Z0-9][A-Z0-9._-]*$/.test(id)) ||
+      new Set(criterionIds).size !== criterionIds.length ||
+      criterionIds.some((id) => acceptanceCriterionIds.has(id)) ||
+      acceptanceCriteria.some((criterion) => !String(criterion?.criterion ?? '').trim())
+    ) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} needs unique stable AC- acceptance criteria.`);
+    }
+    for (const id of criterionIds) {
+      acceptanceCriterionIds.add(id);
+    }
+    const ladder = Array.isArray(capability?.solutionLadder) ? capability.solutionLadder : [];
+    if (
+      ladder.length !== CUSTOM_SOLUTION_LADDER_STAGES.length ||
+      ladder.some((stage, stageIndex) => stage?.stage !== CUSTOM_SOLUTION_LADDER_STAGES[stageIndex])
+    ) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} must record the five native-first solution-ladder stages in order.`);
+    } else {
+      for (const stage of ladder) {
+        const evidence = Array.isArray(stage?.evidence) ? stage.evidence : [];
+        const allowedDecisions = stage.stage === 'custom_exception'
+          ? new Set(['accepted'])
+          : new Set(['rejected', 'no_candidate']);
+        if (
+          stage.checked !== true ||
+          !allowedDecisions.has(stage.decision) ||
+          !String(stage.rationale ?? '').trim() ||
+          evidence.length === 0 ||
+          evidence.some((reference) => !String(reference ?? '').trim()) ||
+          (packetDir && evidence.some((reference) => !nonEmptyPacketFile(packetDir, reference, { requireFragment: true })))
+        ) {
+          push(`Custom capability ${capabilityId || `(row ${index})`} has an incomplete ${stage.stage} solution-ladder record or a missing packet-local file#fragment reference.`);
+        }
+      }
+    }
+    const surfaceIds = Array.isArray(capability?.sourceSurfaceIds) ? capability.sourceSurfaceIds : [];
+    if (surfaceIds.length === 0 || new Set(surfaceIds).size !== surfaceIds.length) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} must bind one or more unique sourceSurfaceIds.`);
+    }
+    for (const surfaceId of surfaceIds) {
+      const runtimeSurface = runtimeSurfaces.get(String(surfaceId));
+      if (!runtimeSurface) {
+        push(`Custom capability ${capabilityId || `(row ${index})`} binds unknown source surface ${surfaceId}.`);
+        continue;
+      }
+      if (runtimeSurface.extension !== extension) {
+        push(`Custom capability ${capabilityId || `(row ${index})`} binds ${surfaceId} from extension ${runtimeSurface.extension}.`);
+      }
+      if (boundSurfaces.has(surfaceId)) {
+        push(`Custom source surface ${surfaceId} is bound by more than one capability.`);
+      }
+      boundSurfaces.set(surfaceId, capabilityId);
+    }
+    const testFileIds = Array.isArray(capability?.testFileIds) ? capability.testFileIds.map(String) : [];
+    if (new Set(testFileIds).size !== testFileIds.length) {
+      push(`Custom capability ${capabilityId || `(row ${index})`} repeats a testFileId.`);
+    }
+    for (const testFileId of testFileIds) {
+      const runtimeTest = runtimeTests.get(testFileId);
+      if (!runtimeTest) {
+        push(`Custom capability ${capabilityId || `(row ${index})`} binds unknown test file ${testFileId}.`);
+      } else if (runtimeTest.extension !== extension) {
+        push(`Custom capability ${capabilityId || `(row ${index})`} binds test ${testFileId} from extension ${runtimeTest.extension}.`);
+      }
+    }
+  }
+  for (const [surfaceId, surface] of runtimeSurfaces) {
+    if (!boundSurfaces.has(surfaceId)) {
+      push(`Custom source surface ${surfaceId} (${surface.path}) is not bound to a capability.`);
+    }
+  }
+  for (const extension of runtimeExtensions) {
+    if (!capabilityExtensions.has(extension)) {
+      push(`Custom extension ${extension} has no capability record.`);
+    }
+  }
+
+  const routeBindings = Array.isArray(review.routeBindings) ? review.routeBindings : [];
+  const bindingsByName = new Map();
+  for (const [index, binding] of routeBindings.entries()) {
+    const name = String(binding?.name ?? '').trim();
+    if (!name || bindingsByName.has(name)) {
+      push(`Custom route binding row ${index} has a missing or duplicate name.`);
+      continue;
+    }
+    bindingsByName.set(name, binding);
+    if (
+      !/^[A-Z]+$/.test(String(binding?.requestMethod ?? '')) ||
+      !binding?.routeParameters ||
+      typeof binding.routeParameters !== 'object' ||
+      Array.isArray(binding.routeParameters) ||
+      !['allowed', 'denied'].includes(binding?.expectedAnonymousAccess)
+    ) {
+      push(`Custom route binding ${name} needs an uppercase requestMethod, routeParameters object, and expectedAnonymousAccess of allowed or denied.`);
+    }
+  }
+  const auditedRoutes = Array.isArray(runtimeInventory.routeAudit?.routes) ? runtimeInventory.routeAudit.routes : [];
+  const auditedNames = new Set(auditedRoutes.map((route) => String(route?.name ?? '')).filter(Boolean));
+  for (const route of auditedRoutes) {
+    const binding = bindingsByName.get(route.name);
+    if (!binding) {
+      push(`Custom route ${route.name} has no representative request binding.`);
+    }
+    if (
+      route.requestMatched !== true ||
+      route.parameterConversionCompleted !== true ||
+      route.accessCheckCompleted !== true ||
+      !['allowed', 'denied'].includes(route.anonymousAccess)
+    ) {
+      push(`Custom route ${route.name} lacks a completed representative match, parameter-conversion, and anonymous access-manager result.`);
+    }
+    if (
+      binding &&
+      ['allowed', 'denied'].includes(binding.expectedAnonymousAccess) &&
+      route.anonymousAccess !== binding.expectedAnonymousAccess
+    ) {
+      push(`Custom route ${route.name} anonymous access ${route.anonymousAccess || '(missing)'} does not match expected ${binding.expectedAnonymousAccess}.`);
+    }
+  }
+  for (const name of bindingsByName.keys()) {
+    if (!auditedNames.has(name)) {
+      push(`Packet-only custom route binding ${name} is not present in the live custom-route audit.`);
+    }
+  }
+  return errors;
+}
+
 function hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot) {
   const configured = cleanScalar(configSyncDirectory);
   if (!configured) {
@@ -5030,7 +6661,7 @@ print json_encode(['schemaVersion' => 'public-kit.consent-runtime.1', 'confirmed
   }
 }
 
-function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEvidence, routeMatrix, patternMap) {
+function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEvidence, routeMatrix, patternMap, drupalReadback) {
   const projectRoot = findDrupalDdevRoot(cwd);
   if (!projectRoot) {
     return {
@@ -5046,6 +6677,17 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
       configSyncDirectory: '',
       configManifest: null,
       configSplitDirectories: [],
+      customCodeInventory: {
+        schemaVersion: CUSTOM_CODE_SCHEMA,
+        bounded: true,
+        completed: false,
+        applies: false,
+        errors: ['Drupal runtime is unavailable.'],
+        extensions: [], sourceFiles: [], controllers: [], routes: [], tests: [],
+        routeAudit: { completed: false, routes: [], violations: [] },
+        configSchema: { completed: false, extensions: [], violations: [] },
+        fingerprint: ''
+      },
       liveSurfaceInventory: {
         bounded: true,
         confirmed: false,
@@ -5124,6 +6766,13 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     patternMap
   );
   const consentInventory = inspectConsentInventory(projectRoot, environment);
+  const customCodeInventory = inspectCustomCode(
+    projectRoot,
+    environment,
+    Array.isArray(drupalReadback?.implementationQuality?.customCodeInventory?.routeBindings)
+      ? drupalReadback.implementationQuality.customCodeInventory.routeBindings
+      : []
+  );
   const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
   const identityReadbackFailed = !bootstrapResult.ok || !uuidResult.ok;
@@ -5166,6 +6815,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     configSyncDirectory,
     configManifest: trackedConfig.configManifest,
     configSplitDirectories: trackedConfig.configSplitDirectories,
+    customCodeInventory,
     drupalRoot,
     entityInventory,
     liveSurfaceInventory,
@@ -6555,7 +8205,8 @@ export async function verifyLive({
     fieldOutputMatrix,
     browserEvidence,
     routeMatrix,
-    patternMap
+    patternMap,
+    drupalReadback
   );
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
@@ -6999,6 +8650,14 @@ export async function verifyLive({
     )
     : [];
   liveErrors.push(...surfaceReconciliationErrors);
+  const customCodeErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'customCodeInventory')
+    ? customCodeReconciliationErrors(
+      inspectedDrupalRuntime.customCodeInventory,
+      drupalReadback?.implementationQuality?.customCodeInventory,
+      absolutePacketDir
+    )
+    : [];
+  liveErrors.push(...customCodeErrors);
   const packetSiteUuid = String(drupalReadback?.drupal?.siteUuid ?? '').trim().toLowerCase();
   const packetFrontPage = normalizePath(drupalReadback?.drupal?.frontPage);
   const runtimeFrontPage = normalizePath(inspectedDrupalRuntime.frontPage);
@@ -7094,6 +8753,9 @@ export async function verifyLive({
   }
   if (surfaceReconciliationErrors.length > 0) {
     stateBlockers.push('The current live-derived Drupal public surface is not exactly reconciled to packet declarations or owned exclusions.');
+  }
+  if (customCodeErrors.length > 0) {
+    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability-bound or its representative-route/config-schema checks failed.');
   }
   if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
     stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
@@ -7379,7 +9041,8 @@ export async function verifyLive({
       roleDeclarations: liveEditorSurfaceReconciliation.roleDeclarations,
       confirmed: liveEditorSurfaceReconciliation.censusTrusted,
       passed: liveEditorSurfaceReconciliation.passed
-    }
+    },
+    customCodeInventoryFingerprint: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? ''
   });
   const sharedPacketReport = {
     ...sharedValue(packetReport, absolutePacketDir),
@@ -7414,6 +9077,7 @@ export async function verifyLive({
         }
       : null,
     evidenceBinding: {
+      customCodeInventorySha256: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
