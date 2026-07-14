@@ -69,6 +69,7 @@ browser_runtime_load_manifest() {
   BROWSER_RUNTIME_DDEV_MINIMUM=$(browser_runtime_manifest_string ddevMinimumVersion "$manifest") || return 1
   BROWSER_RUNTIME_ADDON=$(browser_runtime_manifest_string addOnRepository "$manifest") || return 1
   BROWSER_RUNTIME_ADDON_RELEASE=$(browser_runtime_manifest_string addOnRelease "$manifest") || return 1
+  BROWSER_RUNTIME_ADDON_COMMIT=$(browser_runtime_manifest_string addOnCommit "$manifest") || return 1
   BROWSER_RUNTIME_ADDON_METADATA_DIRECTORY=$(browser_runtime_manifest_string addOnMetadataDirectory "$manifest") || return 1
   BROWSER_RUNTIME_ADDON_COMPOSE_SHA256=$(browser_runtime_manifest_string addOnComposeSha256 "$manifest") || return 1
   BROWSER_RUNTIME_ADDON_CONFIG_SHA256=$(browser_runtime_manifest_string addOnConfigSha256 "$manifest") || return 1
@@ -90,6 +91,10 @@ browser_runtime_load_manifest() {
     selenium/standalone-chromium:*@sha256:????????????????????????????????????????????????????????????????) ;;
     *) browser_runtime_error "browserImage must be an exact Selenium Chromium tag and sha256 manifest-list digest."; return 1 ;;
   esac
+  if ! printf '%s\n' "$BROWSER_RUNTIME_ADDON_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+    browser_runtime_error "addOnCommit must be an exact 40-character Git commit SHA."
+    return 1
+  fi
   if [ "$BROWSER_RUNTIME_GRID_URL" != "http://$BROWSER_RUNTIME_SERVICE:4444" ]; then
     browser_runtime_error "gridUrl must use the selected DDEV service DNS name on port 4444."
     return 1
@@ -203,14 +208,14 @@ browser_runtime_addon_matches() {
   repository=$(awk -F ': *' '$1 == "repository" { print $2 }' "$metadata")
   version=$(awk -F ': *' '$1 == "version" { print $2 }' "$metadata")
   [ "$repository" = "$BROWSER_RUNTIME_ADDON" ] || return 1
-  [ "$version" = "$BROWSER_RUNTIME_ADDON_RELEASE" ] || return 1
+  [ "$version" = "$BROWSER_RUNTIME_ADDON_COMMIT" ] || return 1
   [ "$(browser_runtime_sha256 "$compose")" = "$BROWSER_RUNTIME_ADDON_COMPOSE_SHA256" ] || return 1
   [ "$(browser_runtime_sha256 "$config")" = "$BROWSER_RUNTIME_ADDON_CONFIG_SHA256" ] || return 1
 }
 
 browser_runtime_require_addon() {
   if ! browser_runtime_addon_matches; then
-    browser_runtime_error "the installed DDEV browser add-on does not match release $BROWSER_RUNTIME_ADDON_RELEASE and its recorded checksums. Run the host setup command before launching an agent."
+    browser_runtime_error "the installed DDEV browser add-on does not match release $BROWSER_RUNTIME_ADDON_RELEASE at commit $BROWSER_RUNTIME_ADDON_COMMIT and its recorded checksums."
     return 1
   fi
 }
@@ -245,17 +250,23 @@ browser_runtime_compose_service_block() {
   '
 }
 
-browser_runtime_validate_effective_compose() {
-  local compose service_block expected
-  compose=$(browser_runtime_ddev utility compose-config) || {
+browser_runtime_read_effective_compose() {
+  BROWSER_RUNTIME_EFFECTIVE_COMPOSE=$(browser_runtime_ddev utility compose-config) || {
     browser_runtime_error "DDEV could not resolve the effective Compose configuration."
     return 1
   }
-  service_block=$(browser_runtime_compose_service_block "$compose" "$BROWSER_RUNTIME_SERVICE")
+}
+
+browser_runtime_validate_effective_compose() {
+  local service_block expected forbidden
+  browser_runtime_read_effective_compose || return 1
+  service_block=$(browser_runtime_compose_service_block "$BROWSER_RUNTIME_EFFECTIVE_COMPOSE" "$BROWSER_RUNTIME_SERVICE")
   [ -n "$service_block" ] || { browser_runtime_error "effective Compose does not contain $BROWSER_RUNTIME_SERVICE."; return 1; }
 
   for expected in \
     "    image: $BROWSER_RUNTIME_IMAGE" \
+    '      SE_START_NO_VNC: "false"' \
+    '      SE_START_VNC: "false"' \
     "      SE_NODE_GRID_URL: $BROWSER_RUNTIME_GRID_URL" \
     "      SE_NODE_MAX_SESSIONS: \"$BROWSER_RUNTIME_MAX_SESSIONS\"" \
     "      SE_NODE_OVERRIDE_MAX_SESSIONS: \"$BROWSER_RUNTIME_OVERRIDE_MAX_SESSIONS\"" \
@@ -269,12 +280,24 @@ browser_runtime_validate_effective_compose() {
       return 1
     fi
   done
+  for forbidden in \
+    '    expose:' \
+    '    ports:' \
+    '    volumes:' \
+    '      HTTP_EXPOSE:' \
+    '      HTTPS_EXPOSE:' \
+    '      VIRTUAL_HOST:' \
+    '      VNC_NO_PASSWORD:'; do
+    if printf '%s\n' "$service_block" | grep -Fq "$forbidden"; then
+      browser_runtime_error "effective Compose retained a forbidden browser UI, router, port, or project-mount surface: '$forbidden'."
+      return 1
+    fi
+  done
   if ! printf '%s\n' "$service_block" | grep -Fq "curl -fsS $BROWSER_RUNTIME_HEALTHCHECK_URL" ||
      ! printf '%s\n' "$service_block" | grep -Fq '"ready"'; then
     browser_runtime_error "effective Compose healthcheck must require Grid value.ready=true."
     return 1
   fi
-  BROWSER_RUNTIME_EFFECTIVE_COMPOSE=$compose
   BROWSER_RUNTIME_EFFECTIVE_SERVICE=$service_block
 }
 
@@ -310,10 +333,21 @@ browser_runtime_require_running_service() {
 }
 
 browser_runtime_web_container_id() {
-  local container
-  container=$(browser_runtime_container_name web)
-  [ -n "$container" ] || { browser_runtime_error "effective Compose does not expose the DDEV web container name."; return 1; }
-  browser_runtime_docker inspect --format '{{.Id}}' "$container" 2>/dev/null
+  local containers count
+  containers=$(browser_runtime_docker ps \
+    --filter "label=com.ddev.approot=$BROWSER_RUNTIME_PROJECT_ROOT" \
+    --filter 'label=com.docker.compose.service=web' \
+    --filter 'status=running' \
+    --format '{{.ID}}') || {
+      browser_runtime_error "Docker could not inspect the active DDEV web boundary."
+      return 1
+    }
+  count=$(printf '%s\n' "$containers" | awk 'NF { count += 1 } END { print count + 0 }')
+  if [ "$count" -ne 1 ]; then
+    browser_runtime_error "repair requires exactly one running DDEV web container for $BROWSER_RUNTIME_PROJECT_ROOT; found $count."
+    return 1
+  fi
+  printf '%s\n' "$containers"
 }
 
 browser_runtime_smoke_relative_path() {

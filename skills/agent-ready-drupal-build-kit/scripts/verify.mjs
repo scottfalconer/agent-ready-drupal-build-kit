@@ -192,20 +192,22 @@ function assertVerificationPacketInputs(packetDir) {
   }
 }
 
-function verifierFingerprint() {
-  const scriptDirectory = dirname(SCRIPT_PATH);
+export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PATH } = {}) {
+  const scriptDirectory = dirname(scriptPath);
   const files = [
-    SCRIPT_PATH,
+    scriptPath,
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
-    join(KIT_ROOT, 'gates.json'),
-    join(KIT_ROOT, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
+    join(kitRoot, 'gates.json'),
+    join(kitRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js'),
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'INTEGRITY.json'),
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs')
   ]
     .filter((path) => existsSync(path))
-    .map((path) => relative(KIT_ROOT, path));
-  return collectFileManifest(KIT_ROOT, files).fingerprint;
+    .map((path) => relative(kitRoot, path));
+  return collectFileManifest(kitRoot, files).fingerprint;
 }
 
 function redactedUrl(value, baseUrl = undefined) {

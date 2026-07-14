@@ -53,6 +53,8 @@ services:
       SE_NODE_GRID_URL: http://selenium-chrome:4444
       SE_NODE_MAX_SESSIONS: "${maxSessions}"
       SE_NODE_OVERRIDE_MAX_SESSIONS: "false"
+      SE_START_NO_VNC: "false"
+      SE_START_VNC: "false"
     healthcheck:
       test:
         - CMD-SHELL
@@ -121,13 +123,21 @@ case "\${1:-}:\${2:-}" in
     exit
     ;;
   utility:dockercheck) exit 0 ;;
-  utility:compose-config) cat "$FAKE_COMPOSE"; exit 0 ;;
+  utility:compose-config)
+    if [ -f "$FAKE_PROJECT/.ddev/docker-compose.zz-agent-ready-verifier.yaml" ] &&
+       grep -Fqx 'stale' "$FAKE_PROJECT/.ddev/docker-compose.zz-agent-ready-verifier.yaml"; then
+      printf 'invalid managed override reached compose parsing\n' >&2
+      exit 91
+    fi
+    cat "$FAKE_COMPOSE"
+    exit 0
+    ;;
   utility:rebuild) touch "$FAKE_RUNNING"; exit 0 ;;
   add-on:get)
     mkdir -p "$FAKE_PROJECT/.ddev/addon-metadata/ddev-selenium-standalone-chrome"
     printf '#ddev-generated\\nfixture compose\\n' > "$FAKE_PROJECT/.ddev/docker-compose.selenium-chrome.yaml"
     printf '#ddev-generated\\nfixture config\\n' > "$FAKE_PROJECT/.ddev/config.selenium-standalone-chrome.yaml"
-    printf 'name: ddev-selenium-standalone-chrome\\nrepository: ddev/ddev-selenium-standalone-chrome\\nversion: 2.2.1\\n' > "$FAKE_PROJECT/.ddev/addon-metadata/ddev-selenium-standalone-chrome/manifest.yaml"
+    printf 'name: ddev-selenium-standalone-chrome\\nrepository: ddev/ddev-selenium-standalone-chrome\\nversion: %s\\n' "$FAKE_ADDON_COMMIT" > "$FAKE_PROJECT/.ddev/addon-metadata/ddev-selenium-standalone-chrome/manifest.yaml"
     exit 0
     ;;
   restart:-y) touch "$FAKE_RUNNING"; exit 0 ;;
@@ -138,7 +148,12 @@ exit 1
 `);
   makeScript(join(fakeBin, 'docker'), `#!/usr/bin/env bash
 set -eu
-[ "\${1:-}" = inspect ] || exit 1
+[ "\${1:-}" = ps ] || [ "\${1:-}" = inspect ] || exit 1
+if [ "\${1:-}" = ps ]; then
+  [ -f "$FAKE_RUNNING" ] || exit 1
+  printf 'stable-web-container-id\n'
+  exit 0
+fi
 format=\${3:-}
 container=\${4:-}
 if [ "$format" = '{{.Id}}' ] && [ "$container" = ddev-browser-runtime-test-web ]; then
@@ -156,6 +171,7 @@ printf '%s|running|healthy|2147483648|["SE_NODE_GRID_URL=http://selenium-chrome:
     PATH: `${fakeBin}:${process.env.PATH}`,
     FAKE_ADDON_COMPOSE_SHA256: manifest.addOnComposeSha256,
     FAKE_ADDON_CONFIG_SHA256: manifest.addOnConfigSha256,
+    FAKE_ADDON_COMMIT: manifest.addOnCommit,
     FAKE_BROWSER_IMAGE: manifest.browserImage,
     FAKE_COMPOSE: composePath,
     FAKE_DDEV_LOG: logPath,
@@ -201,6 +217,12 @@ test('override rendering is complete and refuses an unmarked destination', () =>
   assert.match(rendered, /^#ddev-silent-no-warn$/m);
   assert.match(rendered, /browser-runtime-schema: 1/);
   assert.match(rendered, new RegExp(manifest.browserManifestDigest));
+  assert.match(rendered, /expose: !reset \[\]/);
+  assert.match(rendered, /ports: !reset \[\]/);
+  assert.match(rendered, /volumes: !reset \[\]/);
+  assert.match(rendered, /environment: !override/);
+  assert.match(rendered, /SE_START_NO_VNC: "false"/);
+  assert.match(rendered, /SE_START_VNC: "false"/);
   assert.match(rendered, /SE_NODE_GRID_URL: http:\/\/selenium-chrome:4444/);
   assert.match(rendered, /SE_NODE_MAX_SESSIONS: "1"/);
   assert.match(rendered, /shm_size: 2gb/);
@@ -238,6 +260,31 @@ test('effective Compose validation accepts the pinned service and rejects sessio
   });
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /SE_NODE_MAX_SESSIONS/);
+
+  writeFileSync(
+    composePath,
+    effectiveCompose().replace(
+      '      SE_START_VNC: "false"',
+      '      SE_START_VNC: "false"\n      VIRTUAL_HOST: browser-runtime-test.ddev.site\n    expose:\n      - "7900"'
+    )
+  );
+  const exposed = runBash(command, [commonScript, manifestPath, fakeDdev], {
+    env: { ...process.env, FAKE_COMPOSE: composePath }
+  });
+  assert.notEqual(exposed.status, 0);
+  assert.match(exposed.stderr, /forbidden browser UI, router, port, or project-mount surface/);
+
+  writeFileSync(
+    composePath,
+    effectiveCompose().replace(
+      'ddev-browser-runtime-test-selenium-chrome',
+      'ddev-client-7900-selenium-chrome'
+    )
+  );
+  const numericProjectName = runBash(command, [commonScript, manifestPath, fakeDdev], {
+    env: { ...process.env, FAKE_COMPOSE: composePath }
+  });
+  assert.equal(numericProjectName.status, 0, numericProjectName.stderr);
 });
 
 test('host setup installs once, writes atomically, and becomes a smoke-only no-op', () => {
@@ -249,7 +296,7 @@ test('host setup installs once, writes atomically, and becomes a smoke-only no-o
   });
   assert.equal(first.status, 0, first.stderr);
   const firstLog = readFileSync(fixture.logPath, 'utf8');
-  assert.match(firstLog, /add-on get ddev\/ddev-selenium-standalone-chrome --version 2\.2\.1/);
+  assert.match(firstLog, new RegExp(`add-on get ddev/ddev-selenium-standalone-chrome --version ${manifest.addOnCommit}`));
   assert.match(firstLog, /^restart -y$/m);
   assert.match(firstLog, /^exec --service web --dir \/var\/www\/html env /m);
   assert.equal(readFileSync(fixture.overridePath, 'utf8'), renderOverride());
@@ -302,6 +349,50 @@ test('repair uses the supported service-only rebuild and preserves the web bound
   assert.doesNotMatch(log, /^restart /m);
   assert.match(log, /^exec --service web /m);
   assert.doesNotMatch(readFileSync(fixture.repairScript, 'utf8'), /browser_runtime_ddev restart/);
+});
+
+test('repair converges a missing add-on and override without replacing the running web service', () => {
+  const fixture = makeProvisioningFixture();
+  writeFileSync(fixture.runningPath, 'running\n');
+
+  const repaired = spawnSync('bash', [fixture.repairScript], {
+    cwd: fixture.project,
+    encoding: 'utf8',
+    env: fixture.environment
+  });
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const log = readFileSync(fixture.logPath, 'utf8');
+  assert.match(log, new RegExp(`add-on get ddev/ddev-selenium-standalone-chrome --version ${manifest.addOnCommit}`));
+  assert.match(log, /^utility rebuild --service selenium-chrome --cache$/m);
+  assert.doesNotMatch(log, /^restart /m);
+  assert.equal(readFileSync(fixture.overridePath, 'utf8'), renderOverride());
+});
+
+test('repair replaces a stale marker-owned override without restarting web', () => {
+  const fixture = makeProvisioningFixture();
+  const setup = spawnSync('bash', [fixture.setupScript], {
+    cwd: fixture.project,
+    encoding: 'utf8',
+    env: fixture.environment
+  });
+  assert.equal(setup.status, 0, setup.stderr);
+  writeFileSync(
+    fixture.overridePath,
+    '# agent-ready-drupal-build-kit:browser-runtime:start\nstale\n# agent-ready-drupal-build-kit:browser-runtime:end\n'
+  );
+  writeFileSync(fixture.logPath, '');
+
+  const repaired = spawnSync('bash', [fixture.repairScript], {
+    cwd: fixture.project,
+    encoding: 'utf8',
+    env: fixture.environment
+  });
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const log = readFileSync(fixture.logPath, 'utf8');
+  assert.doesNotMatch(log, /add-on get/);
+  assert.match(log, /^utility rebuild --service selenium-chrome --cache$/m);
+  assert.doesNotMatch(log, /^restart /m);
+  assert.equal(readFileSync(fixture.overridePath, 'utf8'), renderOverride());
 });
 
 test('host repair refuses in-container execution before invoking DDEV', () => {

@@ -33,8 +33,9 @@ main() {
 
   addon_changed=false
   if ! browser_runtime_addon_matches; then
-    printf 'Installing pinned browser add-on %s release %s...\n' "$BROWSER_RUNTIME_ADDON" "$BROWSER_RUNTIME_ADDON_RELEASE"
-    browser_runtime_ddev add-on get "$BROWSER_RUNTIME_ADDON" --version "$BROWSER_RUNTIME_ADDON_RELEASE"
+    printf 'Installing pinned browser add-on %s release %s at commit %s...\n' \
+      "$BROWSER_RUNTIME_ADDON" "$BROWSER_RUNTIME_ADDON_RELEASE" "$BROWSER_RUNTIME_ADDON_COMMIT"
+    browser_runtime_ddev add-on get "$BROWSER_RUNTIME_ADDON" --version "$BROWSER_RUNTIME_ADDON_COMMIT"
     addon_changed=true
   fi
   browser_runtime_require_addon

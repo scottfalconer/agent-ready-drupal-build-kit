@@ -6,12 +6,19 @@ import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
+const PINNED_WEBSOCKET_VERSION = '8.21.0';
+const PINNED_WEBSOCKET_BUNDLE_SHA256 = 'sha256:6eaf56d9fa8443aeaa354c74d0e6ca2eef8f8194c25ba47ab8c0d92f3037191b';
+
 async function loadPinnedWebSocket() {
+  const bundleUrl = new URL(`../vendor/ws/${PINNED_WEBSOCKET_VERSION}/ws.mjs`, import.meta.url);
+  if (sha256(readFileSync(bundleUrl)) !== PINNED_WEBSOCKET_BUNDLE_SHA256) {
+    throw new Error('Pinned WebSocket transport failed its runtime integrity check. Reinstall the build-kit skill.');
+  }
   const keys = ['WS_NO_BUFFER_UTIL', 'WS_NO_UTF_8_VALIDATE'];
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) process.env[key] = '1';
   try {
-    return (await import('../vendor/ws/8.21.0/ws.mjs')).default;
+    return (await import(bundleUrl.href)).default;
   } finally {
     for (const key of keys) {
       const value = previous.get(key);
@@ -33,9 +40,9 @@ export const DEFAULT_SELENIUM_GRID_URL = 'http://selenium-chrome:4444';
 export const SELENIUM_ADD_ON_RELEASE = '2.2.1';
 export const SELENIUM_CHROMIUM_IMAGE = 'selenium/standalone-chromium:149.0@sha256:9b10a9ccf68e3a18153a68a0705577157e20665d88d00bd4393a42e5839aa3d3';
 export const SELENIUM_CHROMIUM_MAJOR = '149';
-export const VERIFIER_WEBSOCKET_VERSION = '8.21.0';
+export const VERIFIER_WEBSOCKET_VERSION = PINNED_WEBSOCKET_VERSION;
 export const VERIFIER_WEBSOCKET_SOURCE_SHA256 = 'sha256:d08b726b3aae3a0fed5218a0d9a4b2ac8d75d4ad453a9271db55fe38e94eb4cf';
-export const VERIFIER_WEBSOCKET_BUNDLE_SHA256 = 'sha256:6eaf56d9fa8443aeaa354c74d0e6ca2eef8f8194c25ba47ab8c0d92f3037191b';
+export const VERIFIER_WEBSOCKET_BUNDLE_SHA256 = PINNED_WEBSOCKET_BUNDLE_SHA256;
 export const VERIFIER_AXE_TAGS = Object.freeze([
   'wcag2a',
   'wcag2aa',

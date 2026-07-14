@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: ddev/github-action-setup-ddev@v1
+      - uses: ddev/github-action-setup-ddev@fdf2f5c97943bae638f31df6df86f1defa6210c0 # v1
         with:
           autostart: false
           version: 1.25.3
@@ -45,6 +45,9 @@ jobs:
       - name: Provision and run the non-skipping Chrome CDP axe smoke
         working-directory: tests/fixtures/browser-runtime
         run: bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh
+      - name: Prove service-only repair preserves the active DDEV web boundary
+        working-directory: tests/fixtures/browser-runtime
+        run: bash .agents/skills/agent-ready-drupal-build-kit/scripts/repair-browser-runtime.sh
       - name: Re-run the real browser boundary smoke
         working-directory: tests/fixtures/browser-runtime
         run: |

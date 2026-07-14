@@ -1,17 +1,38 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
   browserRuntimePreflightUnavailable,
-  createLiveHttpContext
+  createLiveHttpContext,
+  verifierFingerprint
 } from '../bin/verify.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+
+test('verifier fingerprint binds the executable vendored WebSocket transport and its integrity record', () => {
+  const kitRoot = mkdtempSync(join(tmpdir(), 'verifier-fingerprint-'));
+  const scriptPath = join(kitRoot, 'bin', 'verify.mjs');
+  const vendorRoot = join(kitRoot, 'vendor', 'ws', '8.21.0');
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  mkdirSync(vendorRoot, { recursive: true });
+  writeFileSync(scriptPath, 'fixture verifier');
+  writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
+  writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "first";\n');
+
+  const before = verifierFingerprint({ kitRoot, scriptPath });
+  writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "second";\n');
+  const afterBundleChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterBundleChange, before);
+
+  writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
+  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterBundleChange);
+});
 
 async function withServer(handler, callback) {
   const server = createServer(handler);

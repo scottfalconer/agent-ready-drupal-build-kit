@@ -221,8 +221,9 @@ test('public repository surface includes conventional license, CI, and contribut
   assert.match(workflow, /sync-skill-package\.mjs --check/);
   assert.match(workflow, /npm pack --dry-run --json/);
   assert.match(workflow, /browser-runtime:[\s\S]*runs-on: ubuntu-24\.04/);
-  assert.match(workflow, /ddev\/github-action-setup-ddev@v1[\s\S]*autostart: false[\s\S]*version: 1\.25\.3/);
+  assert.match(workflow, /ddev\/github-action-setup-ddev@fdf2f5c97943bae638f31df6df86f1defa6210c0[\s\S]*autostart: false[\s\S]*version: 1\.25\.3/);
   assert.match(workflow, /setup-browser-runtime\.sh/);
+  assert.match(workflow, /repair-browser-runtime\.sh/);
   assert.match(workflow, /browser-runtime-smoke\.mjs/);
   assert.match(contributing, /sync-skill-package\.mjs --write/);
   assert.match(security, /private vulnerability reporting/);

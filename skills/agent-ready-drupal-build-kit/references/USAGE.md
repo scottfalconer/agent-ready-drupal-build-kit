@@ -17,7 +17,7 @@ As soon as the first meaningful source-shaped route works, share its DDEV URL wi
 
 You can stop here—the agent handles setup, the rebuild, real-site verification, and the review packet. Everything below is optional reference or manual setup.
 
-Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. If this file is inside an installed build-kit skill, setup is already complete.
+Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. If this file is inside an installed build-kit skill, that proves only that the skill copy is present, not that the managed browser is ready; the standard path runs `setup-browser-runtime.sh` before launching the agent.
 
 ## Brief-Only Prompt
 

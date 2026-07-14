@@ -234,6 +234,14 @@ test('global chrome disables project-resolved ws native addons before loading th
     if (process.env.WS_NO_BUFFER_UTIL || process.env.WS_NO_UTF_8_VALIDATE) throw new Error('ws guard environment was not restored');
   `], { cwd: project, encoding: 'utf8' });
   assert.equal(child.status, 0, child.stderr);
+
+  const bundlePath = join(skillRoot, 'vendor', 'ws', VERIFIER_WEBSOCKET_VERSION, 'ws.mjs');
+  writeFileSync(bundlePath, `${readFileSync(bundlePath, 'utf8')}\n// tampered after installation\n`);
+  const tampered = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    await import(${JSON.stringify(moduleUrl)});
+  `], { cwd: project, encoding: 'utf8' });
+  assert.notEqual(tampered.status, 0);
+  assert.match(tampered.stderr, /WebSocket transport failed its runtime integrity check/);
 });
 
 test('vendored ws client imports and carries real CDP request/response frames over an HTTP upgrade', async () => {
