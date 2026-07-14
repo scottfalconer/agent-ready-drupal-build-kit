@@ -33,10 +33,16 @@ Use the official One Line Installer to create the default DDEV Drupal CMS target
 ```bash
 bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
 ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy
+bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh
 ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/init-kit.mjs --source-url "https://example.com"
 ```
 
-Replace the example source URL with the authorized source. An existing clean DDEV `drupal/cms` project is also valid. After installation, gather Drush, Composer, Recipe-discovery, and config evidence with commands such as `ddev drush status`, `ddev composer show 'drupal/drupal_cms_*'`, and `ddev drush config:export -y`. Node for skill setup and verification runs inside DDEV; host Node is not required.
+Replace the example source URL with the authorized source. Browser setup pins the supported DDEV add-on and
+Chromium image, waits for readiness, and runs a real-target smoke from `web` before any DDEV agent session starts.
+An existing clean DDEV `drupal/cms` project is also valid. After installation, gather Drush, Composer,
+Recipe-discovery, and config evidence with commands such as `ddev drush status`,
+`ddev composer show 'drupal/drupal_cms_*'`, and `ddev drush config:export -y`. Node for skill setup and verification
+runs inside DDEV; host Node is not required.
 
 Before accepting a local build, record:
 

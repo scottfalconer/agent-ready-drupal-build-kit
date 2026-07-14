@@ -17,7 +17,7 @@ Use the build kit as your instructions and handle all setup yourself. If needed,
 As soon as the first meaningful source-shaped route works, share its DDEV URL with me, then continue. Do not hand back a partial or representative build as the result.
 ```
 
-Prerequisite: macOS or Linux. On macOS, start Docker Desktop or OrbStack. After that, the prompt is the whole human workflow: the agent handles Drupal setup, skill installation, the rebuild, live verification, and the review packet.
+Prerequisite: macOS or Linux. On macOS, start Docker Desktop or OrbStack. The managed browser runtime requires DDEV 1.25.3 or newer; its setup script checks this before changing the project. After that, the prompt is the whole human workflow: the agent handles Drupal setup, skill installation, the rebuild, live verification, and the review packet.
 
 Already have a clean DDEV Drupal CMS project? Open the coding agent in its root instead of an empty folder; the same prompt tells the agent to use it in place. The agent should stop only for a genuinely human decision or something it cannot access, such as private source content or external credentials.
 
@@ -61,11 +61,15 @@ Choose **Drupal CMS** and your preferred coding agent when prompted. The install
 From that new Drupal project, install this kit for the supported agent targets and start the agent you selected:
 
 ```bash
-ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy
+ddev exec npx --yes skills add https://github.com/scottfalconer/agent-ready-drupal-build-kit --skill agent-ready-drupal-build-kit -a codex -a claude-code -a opencode -y --copy &&
+bash .agents/skills/agent-ready-drupal-build-kit/scripts/setup-browser-runtime.sh &&
 ddev codex
 ```
 
-`ddev codex` is the Codex example. Use `ddev claude` or `ddev opencode` when that is the agent you selected.
+The setup step pins and starts the supported DDEV Selenium/Chromium runtime and proves it can reach the real DDEV
+site before the agent launches. The first image pull can take several minutes; it reports progress and requires no
+browser choice. `ddev codex` is the Codex example. Change only the final command to `ddev claude` or
+`ddev opencode` when that is the agent you selected.
 
 Then paste the prompt at the top of this README. The agent does the rest in the project the installer created and hands back a working site plus a `review-packet/` explaining what it built and why.
 
@@ -143,7 +147,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `AGENTS.md.template`: the canonical detailed build contract, packaged in the installed skill as `references/build-contract.md`. The initializer adds only a concise marker-managed project block to `AGENTS.md` that points agents to the detailed contract, preserving sections managed by Drupal CMS, AI Best Practices, and the One Line Installer.
 - `gates.json`: the stable machine-readable gate vocabulary.
 - `bin/lifecycle.mjs`: the status, repair/extension, completed-change, and checkpoint lifecycle interface used after the initial rebuild passes.
-- `bin/global-chrome.mjs`: dependency-free CDP capture and state-bound desktop/mobile global-chrome regression evaluation for applicable later changes.
+- `bin/global-chrome.mjs`: verifier-owned CDP capture and state-bound desktop/mobile global-chrome regression evaluation, using the pinned DDEV add-on runtime in the canonical workflow.
 - `bin/verify.mjs`: the default target-local verifier; it checks the detected DDEV site, rendered primary, target-required, and browser-representative routes under one bounded request budget, packet readiness, target origin, Drupal site UUID, front-page setting, config-sync directory, clean config status, and Git-tracked config YAML before authorizing local completion.
 - `bin/verify-packet.mjs`: the packet-lint layer used by the target-local verification flow. On its own it checks packet structure; it does not inspect or certify the live Drupal site.
 - `templates/`: packet templates for every required review artifact, from source audit to blind adversarial review.

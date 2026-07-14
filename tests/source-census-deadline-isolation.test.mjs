@@ -1,14 +1,38 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { createLiveHttpContext } from '../bin/verify.mjs';
+import {
+  browserRuntimePreflightUnavailable,
+  createLiveHttpContext,
+  verifierFingerprint
+} from '../bin/verify.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+
+test('verifier fingerprint binds the executable vendored WebSocket transport and its integrity record', () => {
+  const kitRoot = mkdtempSync(join(tmpdir(), 'verifier-fingerprint-'));
+  const scriptPath = join(kitRoot, 'bin', 'verify.mjs');
+  const vendorRoot = join(kitRoot, 'vendor', 'ws', '8.21.0');
+  mkdirSync(dirname(scriptPath), { recursive: true });
+  mkdirSync(vendorRoot, { recursive: true });
+  writeFileSync(scriptPath, 'fixture verifier');
+  writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
+  writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "first";\n');
+
+  const before = verifierFingerprint({ kitRoot, scriptPath });
+  writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "second";\n');
+  const afterBundleChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterBundleChange, before);
+
+  writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
+  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterBundleChange);
+});
 
 async function withServer(handler, callback) {
   const server = createServer(handler);
@@ -52,28 +76,65 @@ test('a liveHttpContext whose wall-clock elapses before first use fails even whe
   );
 });
 
-// Structural guard on verifyLive's scheduling: the verifier-owned source census
-// (which crawls a slow / large / CDN-gated SOURCE origin and has its own budget)
-// must be awaited only AFTER every target-side liveHttpContext check has run, so
-// its cost cannot consume the target context's wall-clock and produce false
-// target-side "deadline exceeded" failures. bin/ and skills/ copies are kept
-// byte-identical by the skill-package sync test, so checking bin/ suffices.
-test('verifyLive awaits the source census after every target-side check so source cost cannot starve the target wall-clock', () => {
+test('browser preflight distinguishes runtime failure from route/site capture failure', () => {
+  assert.equal(browserRuntimePreflightUnavailable({
+    status: 'unavailable',
+    budget: { attempted: true },
+    runtime: { ready: false }
+  }, { attempted: true }), true);
+  assert.equal(browserRuntimePreflightUnavailable({
+    status: 'blocked',
+    budget: { attempted: true },
+    runtime: { ready: false }
+  }, { attempted: true }), true, 'an attempted CDP/axe preflight that never becomes ready is a runtime failure');
+  assert.equal(browserRuntimePreflightUnavailable({
+    status: 'blocked',
+    budget: { attempted: true },
+    runtime: { ready: true }
+  }, { attempted: true }), false, 'site capture errors after a ready preflight must not suppress source/HTTP evidence');
+  assert.equal(browserRuntimePreflightUnavailable({
+    status: 'blocked',
+    budget: { attempted: false },
+    runtime: { ready: false }
+  }, { attempted: true }), false, 'route/input bounds that prevent launch are not a broken browser runtime');
+  assert.equal(browserRuntimePreflightUnavailable(null, { attempted: false }), false);
+});
+
+// Structural guard on verifyLive's scheduling: browser/CDP/axe capture is the
+// early runtime preflight. Only after it succeeds may the verifier start either
+// the source census or target HTTP work. Once started, the source census may run
+// concurrently, but it must be awaited only AFTER every target-side
+// liveHttpContext check has run so source cost cannot consume the target
+// context's wall-clock. bin/ and skills/ copies are kept byte-identical by the
+// skill-package sync test, so checking bin/ suffices.
+test('verifyLive preflights browser capture before source/target work and awaits source census after target checks', () => {
   const source = readFileSync(join(repoRoot, 'bin', 'verify.mjs'), 'utf8');
   const start = source.indexOf('export async function verifyLive');
   assert.ok(start >= 0, 'verifyLive must exist');
   const body = source.slice(start);
 
+  const browserCapture = body.indexOf('const rawGlobalChromeCapture = browserCaptureAttempted');
+  const censusStart = body.indexOf('const sourceSurfaceCensusPromise = briefMode');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
   const accessWallCheck = body.indexOf('Access-wall verification could not complete');
   const legalPrivacyCheck = body.indexOf('Legal/privacy-link verification could not complete');
   const censusAwait = body.indexOf('await sourceSurfaceCensusPromise');
 
+  assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
+  assert.ok(censusStart >= 0, 'source census scheduling must exist');
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
   assert.ok(accessWallCheck >= 0, 'access-wall target-side check must exist');
   assert.ok(legalPrivacyCheck >= 0, 'legal/privacy target-side check must exist');
   assert.ok(censusAwait >= 0, 'source census must be awaited');
 
+  assert.ok(
+    browserCapture < censusStart,
+    'browser capture must finish before source census scheduling'
+  );
+  assert.ok(
+    censusStart < contextCreation,
+    'source census scheduling must stay before target context creation after the browser preflight'
+  );
   assert.ok(
     censusAwait > contextCreation,
     'source census must be awaited after the target liveHttpContext is created'

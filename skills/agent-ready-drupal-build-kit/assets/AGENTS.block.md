@@ -28,7 +28,9 @@ node {{SHELL_SKILL_PATH}}/scripts/verify.mjs --packet {{SHELL_PACKET_PATH}}
 
 For later work, `status` reads the last inspected cached state. Refresh with the default verifier before `begin` when `currentStateFresh` is false. Begin one `repair` or `extension` before editing and declare every affected anonymous `--route`, or explicit `--no-public-route` when there is no anonymous route effect; use `--adopt-current` only for existing edits, which always adds conservative `unknown` impact. Every concrete route must be in the packet route matrix and pass the fresh fetch. Copy the base fingerprint from `begin` and the result fingerprint from the fresh report into the targeted JSON. Then complete with evidence for every criterion and non-machine check; `complete` performs its own fresh inspection and snapshots evidence bytes. Use `abandon --reason "..."` when the active record will not be completed. Only after targeted evidence is recorded may `verify --change` re-evaluate the current packet/live state against the full original verifier gates and optionally create a checkpoint; it validates existing review artifacts rather than recreating them.
 
-Commands below use host `node`; use `ddev exec node` instead when Node is available only inside DDEV.
+Cached `status`, `begin`, and `abandon` commands may use host `node`. The default verifier above, `complete`, and
+`verify --change` perform live inspection and must run inside DDEV. The plain `node` live commands below assume the
+active DDEV agent; from a host terminal, prefix them with `ddev exec`.
 
 ```bash
 node {{SHELL_SKILL_PATH}}/scripts/lifecycle.mjs status --packet {{SHELL_PACKET_PATH}}

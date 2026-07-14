@@ -192,20 +192,22 @@ function assertVerificationPacketInputs(packetDir) {
   }
 }
 
-function verifierFingerprint() {
-  const scriptDirectory = dirname(SCRIPT_PATH);
+export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PATH } = {}) {
+  const scriptDirectory = dirname(scriptPath);
   const files = [
-    SCRIPT_PATH,
+    scriptPath,
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
-    join(KIT_ROOT, 'gates.json'),
-    join(KIT_ROOT, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
+    join(kitRoot, 'gates.json'),
+    join(kitRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js'),
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'INTEGRITY.json'),
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs')
   ]
     .filter((path) => existsSync(path))
-    .map((path) => relative(KIT_ROOT, path));
-  return collectFileManifest(KIT_ROOT, files).fingerprint;
+    .map((path) => relative(kitRoot, path));
+  return collectFileManifest(kitRoot, files).fingerprint;
 }
 
 function redactedUrl(value, baseUrl = undefined) {
@@ -275,6 +277,50 @@ function sharedValue(value, absolutePacketDir) {
     );
   }
   return value;
+}
+
+function globalChromeCaptureWithoutArtifacts(capture, {
+  error = '',
+  resultStateFingerprint = '',
+  status = ''
+} = {}) {
+  const errors = [
+    ...(Array.isArray(capture?.errors) ? capture.errors : []),
+    error
+  ].filter(Boolean);
+  return {
+    schemaVersion: capture?.schemaVersion ?? 'public-kit.global-chrome-capture.1',
+    checkedAt: capture?.checkedAt ?? new Date().toISOString(),
+    status: status || capture?.status || 'unavailable',
+    authoritative: false,
+    captureMode: capture?.captureMode ?? 'verifier-owned-browser',
+    targetOrigin: capture?.targetOrigin ?? '',
+    ...(resultStateFingerprint ? { resultStateFingerprint } : {}),
+    contract: capture?.contract ?? {},
+    browser: capture?.browser ?? { executable: '', product: '' },
+    runtime: capture?.runtime ?? {
+      backend: 'unavailable',
+      executionBoundary: 'unavailable',
+      service: '',
+      addOnRelease: '',
+      image: '',
+      executable: '',
+      product: '',
+      protocolVersion: '',
+      ready: false
+    },
+    primaryRoutes: capture?.primaryRoutes ?? [],
+    routes: [],
+    budget: capture?.budget ?? null,
+    warnings: capture?.warnings ?? [],
+    errors
+  };
+}
+
+export function browserRuntimePreflightUnavailable(capture, { attempted = false } = {}) {
+  if (!attempted) return false;
+  if (capture?.status === 'unavailable') return true;
+  return capture?.budget?.attempted === true && capture?.runtime?.ready !== true;
 }
 
 function sharedRouteCheck(route, absolutePacketDir) {
@@ -6595,10 +6641,70 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
+
+  let chromeContext = { lifecyclePresent: false, latestVerifiedAnchor: null, contract: null };
+  try {
+    chromeContext = globalChromeCaptureContext({ packetDir: absolutePacketDir });
+  } catch (error) {
+    liveErrors.push(`Global chrome lifecycle context could not be read: ${error.message}`);
+  }
+  const browserBackend = inspectedDrupalRuntime.mode === 'ddev-container' ? 'remote' : 'local';
+  const browserCaptureAttempted = Boolean(
+    target &&
+    explicitTargetFetchAllowed &&
+    runtimeAuthoritativeForCompletion
+  );
+  const rawGlobalChromeCapture = browserCaptureAttempted
+    ? await captureGlobalChrome({
+        browserBackend,
+        baseUrl: target.url,
+        primaryRoutes,
+        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+        environment
+      })
+    : globalChromeCaptureWithoutArtifacts({
+        schemaVersion: 'public-kit.global-chrome-capture.1',
+        checkedAt: new Date().toISOString(),
+        status: 'unavailable',
+        authoritative: false,
+        captureMode: 'verifier-owned-browser',
+        targetOrigin: target?.url?.origin ?? '',
+        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+        browser: { executable: '', product: '' },
+        runtime: {
+          backend: browserBackend === 'remote' ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
+          executionBoundary: browserBackend === 'remote' ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
+          service: browserBackend === 'remote' ? 'selenium-chrome' : '',
+          addOnRelease: '',
+          image: '',
+          executable: '',
+          product: '',
+          protocolVersion: '',
+          ready: false
+        },
+        primaryRoutes: [],
+        routes: [],
+        budget: null,
+        warnings: [],
+        errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
+      });
+  const browserRuntimeUnavailable = browserRuntimePreflightUnavailable(rawGlobalChromeCapture, {
+    attempted: browserCaptureAttempted
+  });
+  if (browserRuntimeUnavailable) {
+    liveErrors.push(browserBackend === 'remote'
+      ? 'Verifier-owned browser preflight failed before source or target HTTP verification. From the DDEV host run: bash .agents/skills/agent-ready-drupal-build-kit/scripts/repair-browser-runtime.sh, then rerun verification.'
+      : 'Verifier-owned browser preflight failed before source or target HTTP verification. Use the canonical DDEV agent workflow, or set CHROME_PATH for an explicit host-side maintainer run.');
+  }
+
   const sourceSurfaceCensusPromise = briefMode
     ? Promise.resolve(sourceSurfaceNotRun(
         'Source-site discovery does not apply to a brief-based build.',
         { status: 'not_applicable', authoritative: true }
+      ))
+    : browserRuntimeUnavailable
+    ? Promise.resolve(sourceSurfaceNotRun(
+        'Browser runtime preflight failed; expensive verification was not started.'
       ))
     : runtimeAuthoritativeForCompletion && declaredSource
     ? inspectSourceSurface({ independentVerification, routeMatrix })
@@ -6632,7 +6738,11 @@ export async function verifyLive({
       expected: expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
     }))
   ];
-  const fetchChecksEnabled = Boolean(target && explicitTargetFetchAllowed);
+  const fetchChecksEnabled = Boolean(
+    target &&
+    explicitTargetFetchAllowed &&
+    (!runtimeAuthoritativeForCompletion || !browserRuntimeUnavailable)
+  );
   const liveHttpContext = createLiveHttpContext({
     allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
     attempted: fetchChecksEnabled,
@@ -6718,7 +6828,7 @@ export async function verifyLive({
   }
   liveErrors.push(...redirectMaterializationChecks.flatMap((check) => check.errors));
   let nextCycleCleanupCheck;
-  if (target && explicitTargetFetchAllowed) {
+  if (fetchChecksEnabled) {
     try {
       nextCycleCleanupCheck = nextCycleVerification?.applicability?.applies === true
         ? await liveHttpContext.runTask(
@@ -6758,34 +6868,6 @@ export async function verifyLive({
       liveErrors.push(error);
     }
   }
-  let chromeContext = { lifecyclePresent: false, latestVerifiedAnchor: null, contract: null };
-  try {
-    chromeContext = globalChromeCaptureContext({ packetDir: absolutePacketDir });
-  } catch (error) {
-    liveErrors.push(`Global chrome lifecycle context could not be read: ${error.message}`);
-  }
-  const rawGlobalChromeCapture = fetchChecksEnabled && runtimeAuthoritativeForCompletion
-    ? await captureGlobalChrome({
-        baseUrl: target.url,
-        primaryRoutes,
-        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-        environment
-      })
-    : {
-        schemaVersion: 'public-kit.global-chrome-capture.1',
-        checkedAt: new Date().toISOString(),
-        status: 'unavailable',
-        authoritative: false,
-        captureMode: 'verifier-owned-browser',
-        targetOrigin: target?.url?.origin ?? '',
-        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-        browser: { executable: '', product: '' },
-        primaryRoutes: [],
-        routes: [],
-        budget: null,
-        warnings: [],
-        errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
-      };
   let negativeRouteCheck = null;
   if (fetchChecksEnabled) {
     try {
@@ -6859,8 +6941,9 @@ export async function verifyLive({
     reason: runtimeWasInjected ? '' : 'Consent inventory is unavailable.'
   };
   const consentNetworkApplicable = consentNetworkCaptureRequired(negativeRouteConsent?.consent);
-  const rawBeforeConsentNetworkCapture = consentNetworkApplicable && target && explicitTargetFetchAllowed && runtimeAuthoritativeForCompletion
+  const rawBeforeConsentNetworkCapture = consentNetworkApplicable && fetchChecksEnabled && runtimeAuthoritativeForCompletion
     ? await captureBeforeConsentNetwork({
+        browserBackend,
         baseUrl: target.url,
         primaryRoutes,
         environment
@@ -7090,8 +7173,19 @@ export async function verifyLive({
     buildState.complete = buildStateReady;
     buildState.blockers = stateBlockers;
   }
-  let globalChromeCapture = null;
-  if (buildStateReady) {
+  let globalChromeCapture = globalChromeCaptureWithoutArtifacts(rawGlobalChromeCapture, {
+    status: rawGlobalChromeCapture.status === 'captured'
+      ? 'blocked'
+      : rawGlobalChromeCapture.status,
+    error: rawGlobalChromeCapture.status === 'captured'
+      ? 'Global chrome capture could not be bound to a complete Drupal build state.'
+      : ''
+  });
+  if (
+    buildStateReady &&
+    rawGlobalChromeCapture.status === 'captured' &&
+    rawGlobalChromeCapture.authoritative === true
+  ) {
     try {
       globalChromeCapture = finalizeGlobalChromeCapture({
         capture: rawGlobalChromeCapture,
@@ -7099,22 +7193,11 @@ export async function verifyLive({
         stateFingerprint: buildState.fingerprint
       });
     } catch (error) {
-      globalChromeCapture = {
-        schemaVersion: 'public-kit.global-chrome-capture.1',
-        checkedAt: rawGlobalChromeCapture.checkedAt,
+      globalChromeCapture = globalChromeCaptureWithoutArtifacts(rawGlobalChromeCapture, {
         status: 'blocked',
-        authoritative: false,
-        captureMode: 'verifier-owned-browser',
-        targetOrigin: target?.url?.origin ?? '',
         resultStateFingerprint: buildState.fingerprint,
-        contract: rawGlobalChromeCapture.contract,
-        browser: rawGlobalChromeCapture.browser,
-        primaryRoutes: rawGlobalChromeCapture.primaryRoutes ?? [],
-        routes: [],
-        budget: rawGlobalChromeCapture.budget ?? null,
-        warnings: rawGlobalChromeCapture.warnings ?? [],
-        errors: [`Global chrome capture finalization failed: ${error.message}`]
-      };
+        error: `Global chrome capture finalization failed: ${error.message}`
+      });
     }
   }
   let beforeConsentNetworkCapture = rawBeforeConsentNetworkCapture;
