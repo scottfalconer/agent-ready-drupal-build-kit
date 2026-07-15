@@ -10,6 +10,7 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
@@ -21,14 +22,170 @@ import {
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
+  yamlTreeMatchesHead,
+  reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
-import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import { MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import { validatePacket as validateInstalledPacket } from '../skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+
+function committedConfigTree() {
+  const root = mkdtempSync(join(tmpdir(), 'config-head-bytes-'));
+  const configDirectories = ['config/sync', 'config/split/local'];
+  const yamlFiles = [
+    'config/sync/system.site.yml',
+    'config/split/local/system.logging.yml'
+  ];
+  for (const directory of configDirectories) {
+    mkdirSync(join(root, directory), { recursive: true });
+  }
+  writeFileSync(join(root, yamlFiles[0]), 'name: Fixture\n');
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: hide\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['add', '--', ...yamlFiles], { cwd: root });
+  execFileSync('git', [
+    '-c', 'user.name=Fixture Committer',
+    '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false',
+    'commit', '-q', '--no-verify', '-m', 'Export fixture config'
+  ], { cwd: root });
+  return { configDirectories, root, yamlFiles };
+}
+
+function scopedConfigStatus(root, configDirectories) {
+  return execFileSync(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all', '--', ...configDirectories],
+    { cwd: root, encoding: 'utf8' }
+  );
+}
+
+test('config YAML blob comparison accepts an ordinary clean sync and Config Split tree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, [...yamlFiles].reverse(), configDirectories), true);
+});
+
+test('config YAML blob comparison rejects bytes hidden by assume-unchanged', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--assume-unchanged', '--', yamlFiles[0]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[0]), 'name: Changed\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('config YAML blob comparison rejects Config Split bytes hidden by skip-worktree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--skip-worktree', '--', yamlFiles[1]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: verbose\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('agent continuation pauses only for verifier-confirmed external-only blockers', () => {
+  const externalBlocker = {
+    attemptedEvidence: ['evidence/provider-response.json'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable.',
+    missingInput: 'A provider-issued API credential.',
+    nextAction: 'The owner supplies the credential, then the agent reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+  const externalOnly = agentContinuation({ blockers: [externalBlocker] });
+  assert.equal(externalOnly.status, 'externally_blocked');
+  assert.equal(externalOnly.requiredAction, 'pause-and-report');
+  assert.equal(externalOnly.shouldContinue, false);
+  assert.equal(externalOnly.agentMayPause, true);
+  assert.equal(externalOnly.agentMayStop, false);
+  assert.equal(externalOnly.blockers[0].resolutionClass, 'external');
+  assert.deepEqual(externalOnly.blockers[0].attemptedEvidence, externalBlocker.attemptedEvidence);
+
+  const mixed = agentContinuation({
+    blockers: [
+      externalBlocker,
+      {
+        code: 'runtime.config-status',
+        message: 'Current DDEV config status is not clean.',
+        origin: 'live-verifier',
+        resolutionClass: 'agent_resolvable'
+      }
+    ]
+  });
+  assert.equal(mixed.status, 'continue_required');
+  assert.equal(mixed.requiredAction, 'repair-and-reverify');
+  assert.equal(mixed.shouldContinue, true);
+  assert.equal(mixed.agentMayPause, false);
+  assert.match(mixed.instruction, /Do not hand off or pause while any agent-resolvable blocker remains/);
+
+  const unconfirmedAuthoredLabel = agentContinuation({
+    blockers: [{ ...externalBlocker, verifierConfirmedExternal: false }]
+  });
+  assert.equal(unconfirmedAuthoredLabel.status, 'continue_required');
+  assert.equal(unconfirmedAuthoredLabel.blockers[0].resolutionClass, 'agent_resolvable');
+
+  for (const [name, incompleteBlocker] of [
+    ['missing code', { ...externalBlocker, code: '' }],
+    ['non-verifier origin', { ...externalBlocker, origin: 'blind-adversarial-review.productDefects[0]' }],
+    ['missing attempted evidence', { ...externalBlocker, attemptedEvidence: [] }],
+    ['missing input', { ...externalBlocker, missingInput: '' }],
+    ['missing next action', { ...externalBlocker, nextAction: '' }]
+  ]) {
+    const incomplete = agentContinuation({ blockers: [incompleteBlocker] });
+    assert.equal(incomplete.status, 'continue_required', name);
+    assert.equal(incomplete.requiredAction, 'repair-and-reverify', name);
+    assert.equal(incomplete.shouldContinue, true, name);
+    assert.equal(incomplete.agentMayPause, false, name);
+    assert.equal(incomplete.blockers[0].resolutionClass, 'agent_resolvable', name);
+  }
+
+  const complete = agentContinuation({ complete: true, blockers: [externalBlocker] });
+  assert.equal(complete.status, 'complete');
+  assert.equal(complete.requiredAction, 'handoff');
+  assert.equal(complete.agentMayStop, true);
+  assert.equal(complete.agentMayPause, false);
+  assert.deepEqual(complete.blockers, []);
+});
+
+test('lifecycle continuation keeps canonical blockers and compatibility reasons aligned', () => {
+  const report = {
+    agentContinuation: null,
+    claimScope: 'complete-local-rebuild',
+    completionBlockers: [{
+      attemptedEvidence: ['evidence/provider-response.json'],
+      code: 'blind.defect.DEF-EXT-1',
+      message: 'Provider credentials are unavailable.',
+      missingInput: 'A provider-issued API credential.',
+      nextAction: 'Supply the credential and rerun verification.',
+      origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+      resolutionClass: 'external',
+      verifierConfirmedExternal: true
+    }],
+    completionBlockedReasons: ['stale compatibility value'],
+    currentSiteClaimAllowed: false,
+    currentStateBlockedReasons: ['Current lifecycle state is unclassified.']
+  };
+
+  reconcileLifecycleContinuation(report, { baseCompletionAllowed: true });
+
+  assert.deepEqual(
+    report.completionBlockedReasons,
+    report.completionBlockers.map((blocker) => blocker.message)
+  );
+  assert.equal(report.completionBlockers.at(-1).origin, 'lifecycle-verifier');
+  assert.equal(report.agentContinuation.status, 'continue_required');
+  assert.equal(report.agentContinuation.shouldContinue, true);
+  assert.equal(report.agentContinuation.blockers.length, report.completionBlockers.length);
+});
 
 test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /ContentEntityTypeInterface/);
@@ -422,6 +579,18 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
+  assert.deepEqual(
+    gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
+    {
+      id: 'G-REPRO-01',
+      title: 'Exact-HEAD Drupal build reproduced in a verifier-owned disposable DDEV environment',
+      phase: 6,
+      evidenceFile: 'evidence/reproduction-verification.json',
+      checkedBy: 'verify-script',
+      blocking: 'launch'
+    }
+  );
 });
 
 test('gates.json defines checker semantics, including the non-authoritative human-record rule', () => {
@@ -956,6 +1125,12 @@ No off-road moves were used in this fixture.
   writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1
 site: "${targetBaseUrl}"
 intent_records: []
+empty_intent_acceptance:
+  disposition: "accepted_no_durable_intent"
+  accepted_by: "Fixture Maintainer"
+  rationale: "The reviewed fixture has no durable intent beyond its packet-owned architecture facts."
+  evidence:
+    - "pattern-map.json"
 evidence_scope: "No durable intent records apply to this fixture."
 `);
 }
@@ -1133,6 +1308,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     staleOrMissingEvidence: false,
     status: 'pass'
   }));
+  const completionGateIds = {
+    accessibility: 'G-A11Y-01',
+    architecture: 'G-COMPOSITION-01',
+    behavior: 'G-BROWSER-01',
+    content: 'G-CONTENT-01',
+    editor: 'G-EDITOR-01',
+    media: 'G-PARITY-01',
+    packet: 'G-VERIFY-01',
+    route: 'G-ROUTE-01',
+    security_privacy: 'G-PRIVACY-01',
+    seo: 'G-SEO-01',
+    visual: 'G-BROWSER-02'
+  };
   independent.completionClaims = [
     'content',
     'media',
@@ -1149,6 +1337,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claimId: `${gate}-checked`,
     claim: `The ${gate} completion evidence was independently checked.`,
     gate,
+    gateId: completionGateIds[gate],
     builderEvidence: [],
     falsificationChecks: [`Attempted to falsify the ${gate} evidence against the target and packet.`],
     verifierEvidence: ['claim-evidence.json'],
@@ -1173,6 +1362,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claims: independent.completionClaims.map((claim) => ({
       claimId: claim.claimId,
       gate: claim.gate,
+      gateId: claim.gateId,
       checks: [
         {
           name: `${claim.gate} falsification`,
@@ -1349,7 +1539,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   patternMap.sectionOwnershipMatrix = [
     {
       sourceRoute: '/',
-      section: 'intro',
+      section: 'other',
       editorFacingName: 'Introduction',
       editorOwnedBy: 'field',
       repeatability: 'singleton',
@@ -1722,6 +1912,17 @@ function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
     outOfScope: [],
     blockers: []
   });
+  for (const artifact of ['source-audit.json', 'parity-report.json']) {
+    writeJson(join(packetDir, artifact), {
+      schemaVersion: 'public-kit.mode-disposition.1',
+      artifact,
+      buildMode: 'brief',
+      claimScope: 'complete-local-build-from-brief',
+      briefSha256: briefHash,
+      status: 'not_applicable',
+      reason: `Brief mode does not use ${artifact} as completion evidence.`
+    });
+  }
 
   mutateJson(join(packetDir, 'route-matrix.json'), (matrix) => {
     matrix.sourceBaseUrl = '';
@@ -1827,7 +2028,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     patternMap.sectionOwnershipMatrix.push({
       ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
       sourceRoute: '/contact',
-      section: 'contact form',
+      section: 'other',
       editorFacingName: 'Contact form',
       dataSource: 'webform.contact',
       expectedEditorAction: 'Edit the Contact Webform.',
@@ -2428,16 +2629,18 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.equal(report.target.resolutionSource, 'explicit');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
       assert.deepEqual(report.agentContinuation, {
-        schemaVersion: 'public-kit.agent-continuation.1',
+        schemaVersion: 'public-kit.agent-continuation.2',
         status: 'continue_required',
         requiredAction: 'repair-and-reverify',
         shouldContinue: true,
+        agentMayPause: false,
         agentMayStop: false,
         stopConditionMet: false,
         humanReviewRequiredBeforeContinuing: false,
         externalBlockerMayPauseOnlyWhenRecorded: true,
+        blockers: report.completionBlockers.map(({ verifierConfirmedExternal, ...blocker }) => blocker),
         blockedReasons: report.completionBlockedReasons,
-        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off or pause while any agent-resolvable blocker remains, even when other blockers are external. Do not wait for routine human review.'
       });
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
@@ -3750,6 +3953,18 @@ test('brief mode verifies target routes without requiring or implying a source s
         JSON.stringify(packetReport.completionEvidence, null, 2)
       );
 
+      const parityPath = join(packetDir, 'parity-report.json');
+      const parityDisposition = JSON.parse(readFileSync(parityPath, 'utf8'));
+      writeJson(parityPath, { ...parityDisposition, briefSha256: `sha256:${'f'.repeat(64)}` });
+      const staleDispositionReport = await validatePacket({ packetDir });
+      assert.equal(staleDispositionReport.valid, true, staleDispositionReport.errors.join('\n'));
+      assert.equal(staleDispositionReport.completionEvidence.packetSupportsCompletion, false);
+      assert.match(
+        staleDispositionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /parity-report\.json.*not-applicable disposition bound to the preserved brief/i
+      );
+      writeJson(parityPath, parityDisposition);
+
       const report = await verifyLive({
         packetDir,
         targetUrl: baseUrl,
@@ -4205,10 +4420,12 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.agentContinuation.requiredAction, 'handoff');
       assert.equal(cleanReport.agentContinuation.status, 'complete');
       assert.equal(cleanReport.agentContinuation.shouldContinue, false);
+      assert.equal(cleanReport.agentContinuation.agentMayPause, false);
       assert.equal(cleanReport.agentContinuation.agentMayStop, true);
       assert.equal(cleanReport.agentContinuation.stopConditionMet, true);
       assert.equal(cleanReport.agentContinuation.humanReviewRequiredBeforeContinuing, false);
       assert.deepEqual(cleanReport.agentContinuation.blockedReasons, []);
+      assert.deepEqual(cleanReport.agentContinuation.blockers, []);
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
       assert.equal(cleanReport.verifierOwnedAccessibility.passed, true);
@@ -6008,6 +6225,132 @@ intent_records:
   assert.match(staleReport.completionEvidence.packetCompletionBlockedReasons.join('\n'), /durable-intent\.yml/);
 });
 
+test('empty durable intent requires a named evidence-backed acceptance', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-empty-acceptance-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const acceptedReport = await validatePacket({ packetDir });
+  assert.equal(acceptedReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(acceptedReport, null, 2));
+
+  const path = join(packetDir, 'durable-intent.yml');
+  const withoutAcceptance = readFileSync(path, 'utf8').replace(
+    /^empty_intent_acceptance:\s*$[\s\S]*?(?=^evidence_scope:)/m,
+    ''
+  );
+  writeFileSync(path, withoutAcceptance);
+  const rejectedReport = await validatePacket({ packetDir });
+
+  assert.equal(rejectedReport.valid, true, rejectedReport.errors.join('\n'));
+  assert.equal(rejectedReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    rejectedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted_no_durable_intent/
+  );
+});
+
+test('durable intent rejects statuses outside the canonical enum', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-status-enum-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const path = join(packetDir, 'durable-intent.yml');
+  writeFileSync(path, `schema_version: public-kit.1
+site: "https://target.example"
+intent_records:
+  - id: "homepage-owner"
+    target_config: "system.site"
+    rationale: "Keep the homepage owner explicit."
+    asserted_by: "Fixture Maintainer"
+    last_reviewed: "2026-07-09"
+    config_hash: "not-applicable"
+    status: "looks-good"
+`);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(report.errors.join('\n'), /invalid durable intent status looks-good/);
+});
+
+test('structured artifacts reject unknown gate ids and ad hoc enum values', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'structured-enums-gates-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'independent-verification.json'), (record) => {
+    record.completionClaims[0].gateId = 'G-MADE-UP-99';
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (record) => {
+    record.publicRouteChecks[0].visualComparison.status = 'mostly-pass';
+    record.publicRouteChecks[0].gateIds = 'G-ROUTE-01';
+  });
+
+  const report = await validatePacket({ packetDir });
+  const installedReport = await validateInstalledPacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.equal(installedReport.valid, false);
+  assert.match(report.errors.join('\n'), /canonical gate id from gates\.json/);
+  assert.match(report.errors.join('\n'), /gateIds must be an array of canonical gate ids/);
+  assert.match(report.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+  assert.match(installedReport.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+});
+
+test('per-gate results distinguish packet execution, live execution, and human review', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const packetResults = new Map(perGateResults(gates, []).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [packetResults.get('G-ROUTE-01').status, packetResults.get('G-ROUTE-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-CONFIG-01').status, packetResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['not_evaluated', false]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-MAINTAINER-01').status, packetResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+  const packetFailureResults = new Map(
+    perGateResults(gates, ['browser-evidence.json has an invalid status.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.deepEqual(
+    [packetFailureResults.get('G-BROWSER-01').status, packetFailureResults.get('G-BROWSER-01').evaluatorCompleted],
+    ['fail', false]
+  );
+
+  const liveResults = new Map(perGateResults(gates, [], { mode: 'live' }).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [liveResults.get('G-CONFIG-01').status, liveResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [liveResults.get('G-MAINTAINER-01').status, liveResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+
+  const failedLiveResults = new Map(
+    perGateResults(gates, ['G-VERIFY-02 Live target route verification failed.'], { mode: 'live' })
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(failedLiveResults.get('G-ROUTE-01').status, 'fail');
+  assert.match(failedLiveResults.get('G-ROUTE-01').errors.join('\n'), /Live target route verification failed/);
+  assert.equal(failedLiveResults.get('G-MAINTAINER-01').status, 'human_review');
+
+  const humanFindingResults = new Map(
+    perGateResults(gates, ['maintainer-review.md is incomplete.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(humanFindingResults.get('G-MAINTAINER-01').status, 'human_review');
+  assert.match(humanFindingResults.get('G-MAINTAINER-01').errors.join('\n'), /is incomplete/);
+});
+
 test('independent completion claims require target-bound concrete check evidence', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'generic-claim-evidence-'));
   const packetDir = join(temp, 'review-packet');
@@ -6023,7 +6366,7 @@ test('independent completion claims require target-bound concrete check evidence
 
   assert.equal(report.valid, false);
   assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
-  assert.match(report.errors.join('\n'), /bound to its claimId, gate, target, checkedAt time, and concrete passing checks/);
+  assert.match(report.errors.join('\n'), /bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks/);
 });
 
 test('blind completion evidence fails closed on missing declarations, all-N/A checks, and copied captures', async () => {
@@ -6110,8 +6453,62 @@ test('blind review cannot treat an external blocker as an accepted primary-route
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     report.errors.join('\n'),
-    /external.blocker.*(?:cannot support|blocks).*completion|completion.*blocked.*external/i
+    /external_blocker requires missingInput and nextAction|requires a rationale.*concrete packet-local evidence/i
   );
+});
+
+test('packet verification normalizes evidenced external blockers without authorizing completion', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blind-external-pause-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects = [{
+      id: 'DEF-EXT-1',
+      severity: 'high',
+      title: 'Provider credentials are unavailable',
+      briefExpectation: 'The provider-backed behavior can be exercised.',
+      sourceTruthEvidence: 'source-desktop.png',
+      targetFinding: 'The verifier cannot exercise the provider without an owner-issued credential.',
+      evidence: ['target-desktop.png'],
+      recommendedFix: 'Supply the credential and rerun the provider behavior check.',
+      status: 'external_blocker',
+      resolvedByReviewPassId: '',
+      acceptedBy: '',
+      acceptedReason: 'The credential can be issued only by the external provider account owner.',
+      missingInput: 'An owner-issued provider API credential.',
+      nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.'
+    }];
+    blind.summary.verdict = 'blocked';
+    blind.summary.completionState = 'blocked';
+    blind.summary.externalBlockerIssueCount = 1;
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.equal(report.completionEvidence.externalBlockersOnly, true);
+  assert.equal(report.completionEvidence.externalBlockers.length, 1);
+  assert.deepEqual(report.completionEvidence.externalBlockers[0], {
+    attemptedEvidence: ['target-desktop.png'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable',
+    missingInput: 'An owner-issued provider API credential.',
+    nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  });
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects[0].id = 'unstable id';
+  });
+  const unstableIdReport = await validatePacket({ packetDir });
+  assert.equal(unstableIdReport.valid, false);
+  assert.match(unstableIdReport.errors.join('\n'), /requires a stable alphanumeric id/);
 });
 
 test('blind accepted-out-of-scope dispositions require an owner and reconciled summary counts', async () => {

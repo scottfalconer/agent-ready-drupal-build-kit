@@ -101,7 +101,7 @@ Already fluent in Drupal? Use this as a repeatable agent workflow and review har
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
-The live verifier makes that continuation machine-readable. Until `live-verification.json` reports `agentContinuation.requiredAction: handoff`, the agent repairs the listed failures and reruns the verifier without waiting for a human review checkpoint. Human approval remains separate from the autonomous local rebuild loop.
+The live verifier makes that continuation machine-readable. While `live-verification.json` reports `agentContinuation.shouldContinue: true`, the agent repairs the structured blockers and reruns without waiting for a human review checkpoint. It may pause only on `requiredAction: pause-and-report`, which the verifier emits when every remaining blocker is confirmed external; that state still forbids completion and handoff. Human approval remains separate from the autonomous local rebuild loop.
 
 The precise file-by-file packet and gate vocabulary are listed in [docs/output-inventory.md](docs/output-inventory.md).
 
@@ -125,6 +125,8 @@ The review packet shows what is built, what is still blocked, and what another d
 
 This is a typed local-completion machine bar, not production or human approval: `complete-local-rebuild` for source-site mode and `complete-local-build-from-brief` for brief mode. The default verifier can authorize only the active mode's claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
 
+Generated packet and live reports include a `gateResults` row for every canonical gate. A gate is `pass` only when its evaluator ran in that verification mode and produced no finding; packet-only dependencies remain `not_evaluated`, and human gates remain `human_review`.
+
 ## After The First Verification
 
 Keep the installed kit in the Drupal project. Future agents can use it as a stewardship layer instead of starting the source rebuild again.
@@ -147,9 +149,12 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `AGENTS.md.template`: the canonical detailed build contract, packaged in the installed skill as `references/build-contract.md`. The initializer adds only a concise marker-managed project block to `AGENTS.md` that points agents to the detailed contract, preserving sections managed by Drupal CMS, AI Best Practices, and the One Line Installer.
 - `gates.json`: the stable machine-readable gate vocabulary.
 - `bin/lifecycle.mjs`: the status, repair/extension, completed-change, and checkpoint lifecycle interface used after the initial rebuild passes.
+- `bin/reconcile.mjs`: a verifier-owned live-surface worksheet and guarded materializer that reduces mechanical packet shaping without accepting declarations or exclusions for the builder.
 - `bin/global-chrome.mjs`: verifier-owned CDP capture and state-bound desktop/mobile global-chrome regression evaluation, using the pinned DDEV add-on runtime in the canonical workflow.
 - `bin/verify.mjs`: the default target-local verifier; it checks the detected DDEV site, rendered primary, target-required, and browser-representative routes under one bounded request budget, packet readiness, target origin, Drupal site UUID, front-page setting, config-sync directory, clean config status, and Git-tracked config YAML before authorizing local completion.
 - `bin/verify-packet.mjs`: the packet-lint layer used by the target-local verification flow. On its own it checks packet structure; it does not inspect or certify the live Drupal site.
+- `bin/verify-assembly.mjs`: an optional launch-only exact-HEAD disposable verifier for provenance-bounded assembly planning, verifier-selected interrupted prefixes with owned database/file restoration, durable persistence and entity-identity checks, no-op reruns, and live-applicable extension survival; it never invokes Drupal in the working target or changes the default handoff verdict.
+- `bin/verify-reproduction.mjs`: an optional host-side exact-HEAD disposable DDEV runner for digest-bound clean-install or snapshot maintainer/launch evidence; it never changes the default handoff verdict.
 - `templates/`: packet templates for every required review artifact, from source audit to blind adversarial review.
 - `docs/recommended-agent-skills.md`: optional companion skill recommendations and install guidance.
 - `docs/positioning.md`: who this is for, why Drupal CMS, why the kit, and when not to use it.

@@ -97,7 +97,7 @@ ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ```
 
-Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; record it only when it was actually performed. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
+Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; when it is required and exact-HEAD inputs can be declared, use the typed host-side workflow in `references/disposable-reproduction.md`. Record it only when it actually ran, and keep `snapshot_restore` distinct from `clean_install_config_import`. If launch evidence claims a project-local assembly is idempotent, extension-safe, or recoverable, use the separate pre-assembly workflow in `references/disposable-assembly.md`; a self-reported rerun or browser transcript is not that proof. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
 
 ## Build Input Handling
 
@@ -215,6 +215,7 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 - For every major architectural decision, content type, View, workflow, integration boundary, custom controller, or recipe/overlay decision, append a durable intent record.
 - Include purpose, source evidence, rationale, asserted by, last reviewed date, config hash, status, and stale behavior. For config objects, compute `config_hash` as `sha256:<64 lowercase hex chars>` from the exported config YAML after deleting `uuid:` and `_core:` lines and trimming trailing whitespace. Use `config_hash: "not-applicable"` only for behavior or external decisions with no Drupal config object.
 - A solo-agent run may set durable intent status to `hash-valid` when the hash matches exported config. Only human maintainer review should set status to `accepted`. Blank or `UNKNOWN` hashes are advisory only and fail the packet verifier when paired with `hash-valid` or `accepted`.
+- An empty `intent_records` list is not self-justifying. Record `empty_intent_acceptance` with disposition `accepted_no_durable_intent`, a named accepter, rationale, and non-empty packet-local evidence; otherwise the completion claim remains blocked.
 - Produce `review-packet/durable-intent.yml`.
 
 ### Phase 4: Gap List
@@ -299,6 +300,14 @@ The blind review claim set comes from the brief, source-truth materials, target,
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
+Before the full verifier, bootstrap the exact live Drupal surface into a non-passing worksheet instead of hand-shaping hundreds of census rows:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Edit `review-packet/live-surface-reconciliation-draft.json` and explicitly disposition every row. `recommendedDisposition` and `candidatePacketReferences` are navigation aids only; the command never copies them into claim-bearing fields. Public declarations still require a specific non-empty `file#section` reference. Non-public exclusions still require a named owner, rationale, and real packet-local evidence. New or materially changed surfaces reset to unresolved, and deleted packet rows remain stale until acknowledged. When the worksheet is resolved, run `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --materialize`. Materialization reruns the live census, refuses unresolved or stale rows with exit `2`, and changes only `drupal-readback.json.liveSurfaceReconciliation`. It does not set `readbackComplete`, recreate reviewer evidence, or authorize completion. Run the default verifier afterward.
+
 After independent verification, run the installed skill's default target-local verifier from the target workspace inside the active DDEV agent. The plain `node` command below assumes that context; from a host terminal, prefix it with `ddev exec`:
 
 ```bash
@@ -311,7 +320,7 @@ The same live run generates a guaranteed-missing route, verifies declared access
 
 Before target parity can pass, the full verifier creates a separately budgeted source route census directly from `sourceBaseUrl`. It fetches `/` and every declared primary source route, recursively follows same-origin server-rendered document links, reads `robots.txt` Sitemap directives, and traverses bounded sitemap indexes and URL sets. It records source status, final URL, title, H1, canonical, body hash, and discovery provenance without using target aliases as source facts. Every reachable public `2xx` HTML path must be an accepted route-matrix source path. Builder-authored legacy, test, intentionally-drop, or accepted-out-of-scope records cannot waive one; add and implement the route, then rerun. A `401`/`403` or persistent `404`/`410` response is immediately rechecked and may use a matching structured boundary disposition without human review. Source truncation or budget exhaustion fails closed and leaves agent-resolvable work.
 
-Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
+Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, the completion `gate`, canonical `gateId`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
 Completion packet readiness is semantic, not a file-presence check. The active build-input contract, pattern map, field-output matrix, target evidence, Drupal readback, recipe decision, scoped gaps, open decisions, off-road inventory, and durable intent must contain run-specific evidence. Source-site mode additionally requires authoritative source audit and parity evidence; brief mode requires a hash-bound original brief and accepted requirement matrix. Referenced browser and blind-review screenshots must be real packet-local images and match desktop/mobile dimensions; source and target captures must be distinct in source-site mode. Operator, maintainer, launch, and production-target records remain required human-facing boundaries, but their pending or recorded choices are self-attested status and do not authorize or block the narrower typed machine claim.
 
@@ -378,7 +387,7 @@ A checkpoint is optional and never replaces the historical initial baseline. Do 
 
 Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
 
-The default verifier's `live-verification.json` contains `agentContinuation`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Stop only after `requiredAction: handoff`, or when a specific external blocker or genuinely owner-only decision is recorded with the attempted evidence and next action.
+The default verifier's `live-verification.json` contains `agentContinuation` and structured `completionBlockers`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Pause only when `requiredAction` is `pause-and-report` and `agentMayPause` is true; that state requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Only `requiredAction: handoff` authorizes handoff.
 
 If the agent runtime has a goal, plan, review, reflection, or task-loop feature, use it. If it does not, emulate the loop with a visible checklist in the conversation or working notes.
 

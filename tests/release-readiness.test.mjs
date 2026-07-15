@@ -181,7 +181,14 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.notEqual(path, 'skills-lock.json');
     assert.doesNotMatch(path, /\.tgz$/);
   }
-  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs', 'bin/lifecycle.mjs']) {
+  for (const path of [
+    'bin/reconcile.mjs',
+    'bin/verify.mjs',
+    'bin/verify-packet.mjs',
+    'bin/verify-assembly.mjs',
+    'bin/verify-reproduction.mjs',
+    'bin/lifecycle.mjs'
+  ]) {
     assert.equal(files.has(path), true, `${path} missing from npm package`);
     assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
   }
