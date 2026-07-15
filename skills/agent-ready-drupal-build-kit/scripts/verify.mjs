@@ -8,7 +8,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePacket } from './verify-packet.mjs';
+import { perGateResults, validatePacket } from './verify-packet.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
   captureBeforeConsentNetwork,
@@ -6535,6 +6535,7 @@ export async function verifyLive({
   assertVerificationPacketInputs(absolutePacketDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
   const packetReport = await validatePacket({ packetDir: absolutePacketDir });
+  const gates = JSON.parse(readFileSync(join(KIT_ROOT, 'gates.json'), 'utf8'));
   const briefMode = packetReport.buildMode === 'brief';
   const claimScope = briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild';
   let routeMatrixText = '';
@@ -7457,15 +7458,22 @@ export async function verifyLive({
   if (sharedConsentReconciliation.authoritativeBeforeConsentCapture === true) {
     sharedConsentReconciliation.beforeConsentCaptureFingerprint = sharedBeforeConsentCapture.captureFingerprint;
   }
+  const liveGateFindings = [
+    ...sharedPacketReport.errors,
+    ...(sharedPacketReport.completionEvidence?.packetCompletionBlockedReasons ?? []),
+    ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
+    ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
+  ];
 
   return {
-    schemaVersion: 'public-kit.live-verification.1',
+    schemaVersion: 'public-kit.live-verification.2',
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope,
     productionReadinessEvaluated: false,
     launchReady: false,
     verificationMode: 'live-target-and-packet',
+    gateResults: perGateResults(gates, liveGateFindings, { mode: 'live' }),
     packetDir: sharedPacketDirName(absolutePacketDir),
     target: target
       ? {
