@@ -14,15 +14,29 @@ If a maintainer or agent verifies that current Drupal CMS docs conflict with the
 
 Do not assume a Drupal core minor version or an auxiliary CLI from documentation alone. Record the actual Drupal CMS package, Drupal core, Drush, PHP, and available Recipe runner from the installed target. Composer and `drush status` are the authority for that run.
 
-A clean Drupal CMS 2.1.3 target validated on 2026-07-10 resolved Drupal core 11.3.11 and did not provide a `dr` executable. Its supported core Recipe runner was `php core/scripts/drupal recipe PATH`. This is why the kit uses version-evidenced commands instead of treating a separate `dr` CLI or a specific core minor as universal.
+A clean Drupal CMS 2.1.3 target validated on 2026-07-10 resolved Drupal core 11.3.11 and did not provide a `dr` executable. Its supported core Recipe runner was `php core/scripts/drupal recipe PATH`. Newer targets can expose `vendor/bin/dr` instead. This is why the kit discovers the installed runner instead of treating either CLI or a specific core minor as universal.
 
 Use Drush for status/readback, extension lists, cache rebuilds, config export/status, and `php:script`. Discover Recipes from Composer and `recipe.yml` files. From the host, apply a verified bounded Recipe with:
 
 ```bash
-ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+if ddev exec test -x vendor/bin/dr; then
+  ddev exec vendor/bin/dr recipe:apply recipes/drupal_cms_media -v
+else
+  ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+fi
 ```
 
-Inside the DDEV agent shell, run the equivalent from the webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Verify the path and inspect its `recipe.yml` before applying it.
+Inside the DDEV agent shell, use `vendor/bin/dr recipe:apply recipes/drupal_cms_media -v` when present; otherwise run the legacy equivalent from the webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Verify the path and inspect its `recipe.yml` before applying it.
+
+Before applying any candidate, run the installed non-authoring doctor while the packet can still be incomplete:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs \
+  --recipe recipes/drupal_cms_media \
+  --package drupal/drupal_cms_media
+```
+
+The command checks the Drupal/DDEV substrate, core Recipe runner, first public route, pinned browser runtime, Recipe manifest/config touch points, active-config overlap, and explicit upstream Composer candidates. It retains command exit codes and SHA-256 evidence plus bounded parsed metadata—not raw command output. A diagnostic failure exits `2`; a usage/tool failure exits `1`. The report always has `completionAuthority: false`, never applies or rolls back a Recipe, and never turns package availability into a compatibility claim. It does not intentionally change Drupal content or configuration, but bootstrap, HTTP, and browser checks can still warm caches or write ordinary runtime logs. `--skip-browser` records an explicit skipped stage rather than silently omitting it.
 
 ## Local Runtime
 

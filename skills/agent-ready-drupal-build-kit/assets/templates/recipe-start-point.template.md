@@ -51,10 +51,14 @@ ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
 Apply a recipe only after recording why it fits the pattern map:
 
 ```bash
-ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+if ddev exec test -x vendor/bin/dr; then
+  ddev exec vendor/bin/dr recipe:apply recipes/drupal_cms_media -v
+else
+  ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+fi
 ```
 
-Inside a DDEV agent shell, use `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. Do not assume a separate `dr` executable exists. If the core runner or Recipe path is unavailable, record the candidate as blocked or not applicable.
+Inside a DDEV agent shell, use `vendor/bin/dr recipe:apply recipes/drupal_cms_media -v` when that executable is present; otherwise use `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. If the discovered runner or Recipe path is unavailable, record the candidate as blocked or not applicable.
 
 Do not select or apply a different full site template here. Record the template only when it was already selected before site installation; normal post-audit assembly uses bounded Recipes and overlays on the installed substrate.
 
