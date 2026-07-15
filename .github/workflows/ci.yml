@@ -32,9 +32,11 @@ jobs:
     env:
       DDEV_NO_INSTRUMENTATION: "true"
       DDEV_NO_TUI: "true"
-      DDEV_XDG_CONFIG_HOME: ${{ runner.temp }}/ddev-xdg
-      REPRODUCTION_FIXTURE: ${{ runner.temp }}/agent-ready-disposable-drupal
     steps:
+      - name: Configure isolated runtime paths
+        run: |
+          echo "DDEV_XDG_CONFIG_HOME=$RUNNER_TEMP/ddev-xdg" >> "$GITHUB_ENV"
+          echo "REPRODUCTION_FIXTURE=$RUNNER_TEMP/agent-ready-disposable-drupal" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
