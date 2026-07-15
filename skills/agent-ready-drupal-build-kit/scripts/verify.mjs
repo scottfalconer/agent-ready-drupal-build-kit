@@ -5072,7 +5072,11 @@ function customSourceFileEligible(extensionRelativePath) {
   const normalized = extensionRelativePath.split(sep).join('/');
   const segments = normalized.toLowerCase().split('/');
   const filename = basename(normalized).toLowerCase();
-  if (segments.some((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment)) || filename.startsWith('.')) {
+  const kind = customSourceKind(normalized);
+  const excludedSegments = segments.filter((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment));
+  const testScript = ['javascript', 'typescript_source'].includes(kind) &&
+    excludedSegments.length > 0 && excludedSegments.every((segment) => ['test', 'tests'].includes(segment));
+  if ((excludedSegments.length > 0 && !testScript) || filename.startsWith('.')) {
     return false;
   }
   if (/\.map$/.test(filename) || /^(?:readme|changelog|license)(?:\.|$)/.test(filename)) {
@@ -5111,14 +5115,402 @@ function sourceLineLocator(text) {
   };
 }
 
-function customSourceSurface(extension, path, kind, name, locateLine, index = 0) {
-  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}`;
+function customSourceSurface(extension, path, kind, name, locateLine, index = 0, details = {}) {
+  const { identitySuffix = '', ...surfaceDetails } = details;
+  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}\u0000${identitySuffix}`;
   return {
     id: `SURFACE-${sha256(identity).slice(0, 16)}`,
     kind,
     name,
-    line: locateLine(index)
+    line: locateLine(index),
+    ...surfaceDetails
   };
+}
+
+const DRUPAL_HOOK_ATTRIBUTE_CLASS = 'Drupal\\Core\\Hook\\Attribute\\Hook';
+const CUSTOM_OUTPUT_PROCEDURAL_HOOK_NAMES = Object.freeze([
+  'theme_suggestions_node_alter',
+  'theme_suggestions_node',
+  'theme_suggestions_alter',
+  'entity_view_alter',
+  'node_view_alter',
+  'preprocess_node',
+  'entity_view',
+  'node_view'
+]);
+
+function phpMatchingAttributeEnd(masked, start, limit = masked.length) {
+  if (masked.slice(start, start + 2) !== '#[') return -1;
+  let depth = 1;
+  for (let index = start + 2; index < limit; index += 1) {
+    if (masked[index] === '[') {
+      depth += 1;
+    } else if (masked[index] === ']') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function phpTopLevelParts(text, masked = phpCodeMask(text)) {
+  const parts = [];
+  let start = 0;
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < masked.length; index += 1) {
+    if (masked[index] === '(') parentheses += 1;
+    else if (masked[index] === ')') parentheses = Math.max(0, parentheses - 1);
+    else if (masked[index] === '[') brackets += 1;
+    else if (masked[index] === ']') brackets = Math.max(0, brackets - 1);
+    else if (masked[index] === '{') braces += 1;
+    else if (masked[index] === '}') braces = Math.max(0, braces - 1);
+    else if (masked[index] === ',' && parentheses === 0 && brackets === 0 && braces === 0) {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+function phpNamespaceImports(masked) {
+  const imports = new Map();
+  const errors = [];
+  const firstClass = masked.search(/(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+[A-Za-z_]/);
+  const header = firstClass === -1 ? masked : masked.slice(0, firstClass);
+  const addImport = (target, alias, index) => {
+    const normalizedTarget = String(target).replace(/^\\/, '');
+    const normalizedAlias = String(alias).toLowerCase();
+    const previous = imports.get(normalizedAlias);
+    if (previous && previous.toLowerCase() !== normalizedTarget.toLowerCase()) {
+      errors.push({ index, message: `PHP import alias ${alias} resolves to multiple classes or namespaces.` });
+      return;
+    }
+    imports.set(normalizedAlias, normalizedTarget);
+  };
+  const addClause = (clause, prefix, index) => {
+    const imported = clause.match(/^\s*(?:(?:function|const)\s+)?([\\A-Za-z_][\\A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$/i);
+    if (!imported || /^\s*(?:function|const)\s+/i.test(clause)) {
+      if (/\bHook\b/i.test(clause)) {
+        errors.push({ index, message: 'Hook-like PHP import could not be resolved.' });
+      }
+      return;
+    }
+    const target = `${prefix ? `${prefix.replace(/\\$/, '')}\\` : ''}${imported[1].replace(/^\\/, '')}`;
+    const alias = imported[2] || target.split('\\').at(-1);
+    addImport(target, alias, index);
+  };
+  const importPattern = /^[ \t]*use\s+(?!function\b|const\b)([\s\S]*?);/gmi;
+  for (const match of header.matchAll(importPattern)) {
+    const index = match.index ?? 0;
+    for (const declaration of phpTopLevelParts(match[1])) {
+      const openBrace = declaration.indexOf('{');
+      if (openBrace === -1) {
+        addClause(declaration, '', index);
+        continue;
+      }
+      const beforeBrace = declaration.slice(0, openBrace).trim();
+      const closeBrace = declaration.lastIndexOf('}');
+      if (!beforeBrace.endsWith('\\') || closeBrace < openBrace || declaration.slice(closeBrace + 1).trim()) {
+        if (/\bHook\b/i.test(declaration)) {
+          errors.push({ index, message: 'Hook-like PHP group import could not be resolved.' });
+        }
+        continue;
+      }
+      const prefix = beforeBrace.slice(0, -1);
+      for (const member of phpTopLevelParts(declaration.slice(openBrace + 1, closeBrace))) {
+        addClause(member, prefix, index);
+      }
+    }
+  }
+  return { errors, imports };
+}
+
+function phpResolvedAttributeClass(attributeName, namespace, imports) {
+  const absolute = attributeName.startsWith('\\');
+  const normalized = attributeName.replace(/^\\/, '');
+  if (absolute) return normalized;
+  const parts = normalized.split('\\');
+  const imported = imports.get(parts[0].toLowerCase());
+  if (imported) return [imported, ...parts.slice(1)].join('\\');
+  return namespace ? `${namespace}\\${normalized}` : normalized;
+}
+
+function phpAttributeArgument(argumentsList, name, positionalIndex) {
+  let positional = 0;
+  for (const argument of argumentsList) {
+    const named = argument.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)\s*([\s\S]*)$/);
+    if (named) {
+      if (named[1].toLowerCase() === name.toLowerCase()) {
+        return { present: true, raw: named[2] };
+      }
+      continue;
+    }
+    if (positional === positionalIndex) return { present: true, raw: argument };
+    positional += 1;
+  }
+  return { present: false, raw: '' };
+}
+
+function phpLiteralIdentifier(value, pattern) {
+  const literal = String(value ?? '').match(/^\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*$/);
+  return literal && pattern.test(literal[2]) ? literal[2] : '';
+}
+
+function phpLiteralEmptyString(value) {
+  return /^\s*(['"])\1\s*$/.test(String(value ?? ''));
+}
+
+function phpDrupalHooksFromAttributeGroup(text, masked, start, end, namespace, imports) {
+  const rawBody = text.slice(start + 2, end);
+  const maskedBody = masked.slice(start + 2, end);
+  const expressions = phpTopLevelParts(rawBody, maskedBody);
+  const hooks = [];
+  const errors = [];
+  for (const expression of expressions) {
+    const attributeName = expression.match(/^\s*([\\A-Za-z_][\\A-Za-z0-9_]*)/)?.[1] ?? '';
+    if (!attributeName) continue;
+    const resolvedName = phpResolvedAttributeClass(attributeName, namespace, imports);
+    if (resolvedName.toLowerCase() !== DRUPAL_HOOK_ATTRIBUTE_CLASS.toLowerCase()) {
+      const parts = attributeName.replace(/^\\/, '').split('\\');
+      const explicitlyResolved = attributeName.startsWith('\\') || imports.has(parts[0].toLowerCase());
+      if (parts.length === 1 && parts[0].toLowerCase() === 'hook' && !explicitlyResolved) {
+        errors.push({ index: start, message: `Hook-like attribute ${attributeName} could not be resolved to an exact imported class.` });
+      }
+      continue;
+    }
+    const attribute = expression.match(/^\s*[\\A-Za-z_][\\A-Za-z0-9_]*\s*\(([\s\S]*)\)\s*$/);
+    if (!attribute) {
+      errors.push({ index: start, message: 'Drupal Hook attribute arguments could not be resolved.' });
+      continue;
+    }
+    const argumentsList = phpTopLevelParts(attribute[1]);
+    const hookArgument = phpAttributeArgument(argumentsList, 'hook', 0);
+    const hookName = hookArgument.present
+      ? phpLiteralIdentifier(hookArgument.raw, /^[a-z][a-z0-9_]*$/i)
+      : '';
+    if (!hookName) {
+      errors.push({ index: start, message: 'Drupal Hook attribute must declare a literal hook name.' });
+      continue;
+    }
+    const methodArgument = phpAttributeArgument(argumentsList, 'method', 1);
+    const methodName = methodArgument.present
+      ? phpLiteralIdentifier(methodArgument.raw, /^[A-Za-z_][A-Za-z0-9_]*$/)
+      : '';
+    if (methodArgument.present && !methodName && !phpLiteralEmptyString(methodArgument.raw)) {
+      errors.push({ index: start, message: `Drupal Hook attribute for ${hookName} must declare a literal method name.` });
+      continue;
+    }
+    const moduleArgument = phpAttributeArgument(argumentsList, 'module', 2);
+    const moduleName = moduleArgument.present
+      ? phpLiteralIdentifier(moduleArgument.raw, /^[a-z][a-z0-9_]*$/)
+      : '';
+    const defaultModule = /^\s*null\s*$/i.test(moduleArgument.raw);
+    if (moduleArgument.present && !moduleName && !defaultModule) {
+      errors.push({ index: start, message: `Drupal Hook attribute for ${hookName} must declare a literal module override or NULL.` });
+      continue;
+    }
+    hooks.push({ hookName, methodName, moduleName });
+  }
+  return { errors, hooks };
+}
+
+function phpAttributeGroupsBefore(masked, declarationStart) {
+  const groups = [];
+  let cursor = declarationStart;
+  while (/\s/.test(masked[cursor - 1] ?? '')) cursor -= 1;
+  while (masked[cursor - 1] === ']') {
+    const end = cursor - 1;
+    let depth = 1;
+    let start = -1;
+    for (let index = end - 1; index >= 1; index -= 1) {
+      if (masked[index] === ']') depth += 1;
+      else if (masked[index] === '[') {
+        depth -= 1;
+        if (depth === 0 && masked[index - 1] === '#') {
+          start = index - 1;
+          break;
+        }
+      }
+    }
+    if (start === -1) break;
+    groups.push({ start, end });
+    cursor = start;
+    while (/\s/.test(masked[cursor - 1] ?? '')) cursor -= 1;
+  }
+  return groups.reverse();
+}
+
+function phpClassEnd(masked, openingBrace) {
+  let depth = 1;
+  for (let index = openingBrace + 1; index < masked.length; index += 1) {
+    if (masked[index] === '{') depth += 1;
+    else if (masked[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return masked.length;
+}
+
+function phpPublicClassMethods(masked, openingBrace, closingBrace) {
+  const methods = new Set();
+  let depth = 1;
+  for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+    if (masked[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (masked[index] === '}') {
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 1) continue;
+    const method = masked.slice(index, closingBrace).match(/^((?:(?:public|protected|private|static|final|abstract)\s+)*)function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (!method) continue;
+    if (!/\b(?:protected|private)\b/.test(method[1])) methods.add(method[2]);
+    index += method[0].length - 1;
+  }
+  return methods;
+}
+
+function phpClassTraitUseIndices(masked, openingBrace, closingBrace) {
+  const uses = [];
+  let depth = 1;
+  for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+    if (masked[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (masked[index] === '}') {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 1 && /^use\s+[\\A-Za-z_]/.test(masked.slice(index, closingBrace))) {
+      uses.push(index);
+      index += 2;
+    }
+  }
+  return uses;
+}
+
+function phpAttributedHookMethods(text) {
+  const masked = phpCodeMask(text);
+  const namespace = masked.match(/^[ \t]*namespace\s+([A-Za-z_][A-Za-z0-9_\\]*)\s*[;{]/m)?.[1] ?? '';
+  const namespaceImports = phpNamespaceImports(masked);
+  const hooks = [];
+  const errors = [...namespaceImports.errors];
+  const classPattern = /(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const classMatch of masked.matchAll(classPattern)) {
+    const openingBrace = masked.indexOf('{', (classMatch.index ?? 0) + classMatch[0].length);
+    if (openingBrace === -1) continue;
+    const closingBrace = phpClassEnd(masked, openingBrace);
+    const className = namespace ? `${namespace}\\${classMatch[1]}` : classMatch[1];
+    const publicMethods = phpPublicClassMethods(masked, openingBrace, closingBrace);
+    const declarationEnd = (classMatch.index ?? 0) + classMatch[0].length;
+    const inheritance = masked.slice(declarationEnd, openingBrace).match(/\bextends\s+[\\A-Za-z_][\\A-Za-z0-9_]*/);
+    if (inheritance) {
+      errors.push({
+        index: declarationEnd + (inheritance.index ?? 0),
+        message: `Drupal Hook class ${className} uses parent-class inheritance that source inventory cannot bind exactly.`
+      });
+    }
+    for (const index of phpClassTraitUseIndices(masked, openingBrace, closingBrace)) {
+      errors.push({
+        index,
+        message: `Drupal Hook class ${className} uses trait composition that source inventory cannot bind exactly.`
+      });
+    }
+    const declarationStart = (classMatch.index ?? 0) + (/^\n/.test(classMatch[0]) ? 1 : 0);
+    for (const group of phpAttributeGroupsBefore(masked, declarationStart)) {
+      const parsed = phpDrupalHooksFromAttributeGroup(
+        text, masked, group.start, group.end, namespace, namespaceImports.imports
+      );
+      errors.push(...parsed.errors);
+      for (const hook of parsed.hooks) {
+        const methodName = hook.methodName || '__invoke';
+        if (!publicMethods.has(methodName)) {
+          errors.push({
+            index: group.start,
+            message: `Drupal Hook attribute for ${hook.hookName} targets missing or non-public method ${className}::${methodName}.`
+          });
+          continue;
+        }
+        hooks.push({
+          callable: `${className}::${methodName}`,
+          className,
+          hookName: hook.hookName,
+          index: group.start,
+          methodName,
+          moduleName: hook.moduleName
+        });
+      }
+    }
+    let depth = 1;
+    for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+      if (masked[index] === '{') {
+        depth += 1;
+        continue;
+      }
+      if (masked[index] === '}') {
+        depth -= 1;
+        continue;
+      }
+      if (depth !== 1 || masked.slice(index, index + 2) !== '#[') continue;
+
+      const attributeGroups = [];
+      let cursor = index;
+      while (masked.slice(cursor, cursor + 2) === '#[') {
+        const end = phpMatchingAttributeEnd(masked, cursor);
+        if (end === -1) break;
+        attributeGroups.push({ start: cursor, end });
+        cursor = end + 1;
+        while (/\s/.test(masked[cursor] ?? '')) cursor += 1;
+      }
+      if (attributeGroups.length === 0) continue;
+      const declaration = masked.slice(cursor, closingBrace);
+      const method = declaration.match(/^((?:(?:public|protected|private|static|final|abstract)\s+)*)function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      if (!method) {
+        index = attributeGroups.at(-1).end;
+        continue;
+      }
+      for (const group of attributeGroups) {
+        const parsed = phpDrupalHooksFromAttributeGroup(
+          text, masked, group.start, group.end, namespace, namespaceImports.imports
+        );
+        errors.push(...parsed.errors);
+        for (const hook of parsed.hooks) {
+          if (/\b(?:protected|private)\b/.test(method[1])) {
+            errors.push({
+              index: group.start,
+              message: `Drupal Hook attribute for ${hook.hookName} is attached to non-public method ${className}::${method[2]}.`
+            });
+            continue;
+          }
+          const methodName = hook.methodName || method[2];
+          if (!publicMethods.has(methodName)) {
+            errors.push({
+              index: group.start,
+              message: `Drupal Hook attribute for ${hook.hookName} targets missing or non-public method ${className}::${methodName}.`
+            });
+            continue;
+          }
+          hooks.push({
+            callable: `${className}::${methodName}`,
+            className,
+            hookName: hook.hookName,
+            index: group.start,
+            methodName,
+            moduleName: hook.moduleName
+          });
+        }
+      }
+      index = attributeGroups.at(-1).end;
+    }
+  }
+  return { errors, hooks };
 }
 
 function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FILE_LIMIT + 1) {
@@ -5162,30 +5554,60 @@ function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FIL
 
 function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind, text) {
   const surfaces = [];
+  const errors = [];
   const locateLine = sourceLineLocator(text);
   let truncated = false;
-  const add = (surfaceKind, name, index = 0) => {
+  const add = (surfaceKind, name, index = 0, details = {}) => {
     if (surfaces.length >= CUSTOM_CODE_SURFACES_PER_FILE_LIMIT) {
       truncated = true;
       return false;
     }
-    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index));
+    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index, details));
     return true;
   };
   const normalized = extensionRelativePath.split(sep).join('/');
   if (kind === 'procedural_php') {
     for (const match of text.matchAll(/^[ \t]*function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm)) {
-      const surfaceKind = match[1].startsWith(`${extension}_`) ? 'hook_or_callback' : 'function';
-      if (!add(surfaceKind, match[1], match.index)) break;
+      const functionName = match[1];
+      let hookName = functionName.startsWith(`${extension}_`) ? functionName.slice(extension.length + 1) : '';
+      let moduleName = hookName ? extension : '';
+      if (!hookName) {
+        for (const candidateHook of CUSTOM_OUTPUT_PROCEDURAL_HOOK_NAMES) {
+          const suffix = `_${candidateHook}`;
+          if (!functionName.endsWith(suffix) || functionName.length <= suffix.length) continue;
+          hookName = candidateHook;
+          moduleName = functionName.slice(0, -suffix.length);
+          break;
+        }
+      }
+      const surfaceKind = hookName ? 'hook_or_callback' : 'function';
+      const details = hookName
+        ? { hookName, identitySuffix: `${hookName}\u0000${moduleName}`, moduleName }
+        : {};
+      if (!add(surfaceKind, functionName, match.index, details)) break;
     }
   } else if (kind === 'php_class') {
-    for (const match of text.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
+    const masked = phpCodeMask(text);
+    for (const match of masked.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
       const surfaceKind = /(?:^|\/)src\/Controller\//i.test(normalized)
         ? 'controller_class'
         : /(?:^|\/)src\/Plugin\//i.test(normalized)
           ? 'plugin_class'
           : match[1];
       if (!add(surfaceKind, match[2], match.index)) break;
+    }
+    if (/(?:^|\/)src\/Hook\//i.test(normalized)) {
+      const attributedHooks = phpAttributedHookMethods(text);
+      errors.push(...attributedHooks.errors.map((error) => `${sharedPath}:${locateLine(error.index)} ${error.message}`));
+      for (const hook of attributedHooks.hooks) {
+        if (!add('hook_or_callback', hook.callable, hook.index, {
+          className: hook.className,
+          hookName: hook.hookName,
+          identitySuffix: `${hook.hookName}\u0000${hook.moduleName}`,
+          methodName: hook.methodName,
+          moduleName: hook.moduleName
+        })) break;
+      }
     }
   } else if (kind === 'javascript') {
     for (const match of text.matchAll(/^[ \t]*Drupal\.behaviors\.([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
@@ -5207,9 +5629,11 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
         }
       }
       if (/\.libraries\.ya?ml$/i.test(sharedPath)) {
-        for (const match of text.matchAll(/^[ \t]+(['"]?)([^'"#\n]+\.ts(?:\?[^'"#\n]*)?)\1\s*:\s*/gmi)) {
+        for (const match of text.matchAll(/^[ \t]+(['"]?)([^'"#\n]+\.(?:m?js|ts)(?:\?[^'"#\n]*)?)\1\s*:\s*/gmi)) {
           const asset = match[2].trim().replace(/\?.*$/, '');
-          if (!add('runtime_typescript_asset', asset, match.index)) break;
+          if (asset.startsWith('/') || asset.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(asset)) continue;
+          const assetKind = /\.ts$/i.test(asset) ? 'runtime_typescript_asset' : 'runtime_javascript_asset';
+          if (!add(assetKind, asset, match.index)) break;
         }
       }
     }
@@ -5226,6 +5650,7 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
     add(`${kind}_file`, basename(sharedPath));
   }
   return {
+    errors,
     surfaces: [...new Map(surfaces.map((surface) => [surface.id, surface])).values()]
       .sort((left, right) => comparePortable(left.id, right.id)),
     truncated
@@ -5245,7 +5670,7 @@ function routingRecords(text, file, extension) {
 }
 
 function phpCodeMask(text) {
-  const characters = [...text];
+  const characters = text.split('');
   let state = 'code';
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index];
@@ -5516,6 +5941,7 @@ export function inspectCustomCodeFilesystem(projectRoot, options = {}) {
             const text = bytes.toString('utf8');
             const kind = customSourceKind(extensionRelativePath);
             const surfaceInventory = customSourceSurfaces(machineName, sharedPath, extensionRelativePath, kind, text);
+            errors.push(...surfaceInventory.errors);
             if (surfaceInventory.truncated) {
               errors.push(`${sharedPath} exceeded ${CUSTOM_CODE_SURFACES_PER_FILE_LIMIT} lexical/registration custom-code surfaces.`);
               break extensionRoots;
@@ -5557,6 +5983,87 @@ export function inspectCustomCodeFilesystem(projectRoot, options = {}) {
           }
         } catch (error) {
           errors.push(`Custom code inventory could not read ${sharedPath}: ${error.message}`);
+        }
+      }
+      const knownSourcePaths = new Set(sourceFiles
+        .filter((source) => source.extension === machineName)
+        .map((source) => source.path));
+      let registeredAssetBytes = 0;
+      let registeredAssetFiles = 0;
+      const runtimeAssetSurfaces = sourceFiles
+        .filter((source) => source.extension === machineName && source.kind === 'drupal_registration')
+        .flatMap((source) => source.surfaces)
+        .filter((surface) => ['runtime_javascript_asset', 'runtime_typescript_asset'].includes(surface.kind));
+      for (const surface of runtimeAssetSurfaces) {
+        const asset = String(surface.name ?? '').replaceAll('\\', '/');
+        const segments = asset.split('/');
+        if (!asset || asset.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(asset) ||
+          segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+          errors.push(`${extensionPath} contains an unsafe local runtime script registration.`);
+          continue;
+        }
+        const logicalAssetPath = resolve(extensionRoot, ...segments);
+        let realAssetPath = '';
+        let assetStats;
+        try {
+          realAssetPath = realpathSync(logicalAssetPath);
+          assetStats = statSync(realAssetPath);
+        } catch {
+          errors.push(`${extensionPath} runtime script ${asset} could not be resolved to an inventoried local file.`);
+          continue;
+        }
+        if (!pathIsInside(extensionRealPath, realAssetPath) || !assetStats.isFile()) {
+          errors.push(`${extensionPath} runtime script ${asset} is not a regular file owned by the custom extension.`);
+          continue;
+        }
+        const sharedAssetPath = relative(projectRoot, logicalAssetPath).split(sep).join('/');
+        if (knownSourcePaths.has(sharedAssetPath)) continue;
+        const kind = customSourceKind(asset);
+        const expectedKind = surface.kind === 'runtime_typescript_asset' ? 'typescript_source' : 'javascript';
+        if (kind !== expectedKind || assetStats.size > CUSTOM_EXTENSION_FILE_BYTES_LIMIT) {
+          errors.push(`${extensionPath} runtime script ${asset} is unsupported or exceeds ${CUSTOM_EXTENSION_FILE_BYTES_LIMIT} bytes.`);
+          continue;
+        }
+        const assetWasWalked = walked.files.includes(logicalAssetPath);
+        if (!assetWasWalked) registeredAssetFiles += 1;
+        registeredAssetBytes += assetStats.size;
+        if (!assetWasWalked) aggregateBudget.filesVisited += 1;
+        aggregateBudget.bytesScanned += assetStats.size;
+        if (walked.files.length + registeredAssetFiles > CUSTOM_EXTENSION_FILE_LIMIT ||
+          walked.bytesScanned + registeredAssetBytes > CUSTOM_EXTENSION_TOTAL_BYTES_LIMIT ||
+          aggregateBudget.filesVisited > aggregateBudget.fileLimit ||
+          aggregateBudget.bytesScanned > aggregateBudget.totalBytesLimit ||
+          now() - aggregateBudget.startedAt > aggregateBudget.deadlineMs) {
+          errors.push(`Custom code inventory exceeded its bounded runtime script registration budget under ${extensionPath}.`);
+          break;
+        }
+        try {
+          const bytes = readFileSync(realAssetPath);
+          const text = bytes.toString('utf8');
+          const surfaceInventory = customSourceSurfaces(machineName, sharedAssetPath, asset, kind, text);
+          errors.push(...surfaceInventory.errors);
+          if (surfaceInventory.truncated) {
+            errors.push(`${sharedAssetPath} exceeded ${CUSTOM_CODE_SURFACES_PER_FILE_LIMIT} lexical custom-code surfaces.`);
+            continue;
+          }
+          surfaceCount += surfaceInventory.surfaces.length;
+          if (surfaceCount > CUSTOM_CODE_SURFACE_LIMIT) {
+            errors.push(`Custom code inventory aggregate exceeded ${CUSTOM_CODE_SURFACE_LIMIT} lexical/registration surfaces.`);
+            break;
+          }
+          const source = {
+            id: `SOURCE-${sha256(`${machineName}\u0000${sharedAssetPath}`).slice(0, 16)}`,
+            extension: machineName,
+            path: sharedAssetPath,
+            kind,
+            sha256: `sha256:${sha256(bytes)}`,
+            surfaces: surfaceInventory.surfaces
+          };
+          sourceFiles.push(source);
+          extensionSourceIds.push(source.id);
+          knownSourcePaths.add(sharedAssetPath);
+        } catch (error) {
+          errors.push(`Custom code inventory could not read registered runtime script ${sharedAssetPath}: ${error.message}`);
         }
       }
       extensions.push({
@@ -5639,13 +6146,11 @@ $url_generator = \Drupal::service('url_generator');
 $access_manager = \Drupal::service('access_manager');
 $router = \Drupal::service('router.no_access_checks');
 $request_stack = \Drupal::service('request_stack');
-$container = \Drupal::getContainer();
 $anonymous = new \Drupal\Core\Session\AnonymousUserSession();
 $route_inputs = is_array($audit_input['routes'] ?? NULL) ? $audit_input['routes'] : [];
 $route_bindings = is_array($audit_input['bindings'] ?? NULL) ? $audit_input['bindings'] : [];
 $custom_extensions = is_array($audit_input['extensions'] ?? NULL) ? $audit_input['extensions'] : [];
 $base_url = rtrim((string) ($audit_input['baseUrl'] ?? 'http://localhost'), '/');
-$route_scan_limit = 5000;
 $core_extensions = \Drupal::service('config.storage')->read('core.extension') ?: [];
 $active_custom_extensions = [];
 foreach ($custom_extensions as $extension) {
@@ -5705,108 +6210,6 @@ foreach ($route_inputs as $input) {
     continue;
   }
   $inputs_by_name[$name] = $input;
-}
-
-$custom_route_callback_class = static function (string $definition, string $kind, $container): string {
-  $definition = ltrim(trim($definition), '\\');
-  if ($definition === '') {
-    return '';
-  }
-  if (str_contains($definition, '::')) {
-    return ltrim(explode('::', $definition, 2)[0], '\\');
-  }
-  if ($kind === '_form' && class_exists($definition)) {
-    return $definition;
-  }
-  if (str_contains($definition, ':')) {
-    [$service_id] = explode(':', $definition, 2);
-    if ($container->has($service_id)) {
-      return get_class($container->get($service_id));
-    }
-  }
-  if ($container->has($definition)) {
-    return get_class($container->get($definition));
-  }
-  return class_exists($definition) ? $definition : '';
-};
-
-$custom_route_extension_for_class = static function (string $class, array $extensions): string {
-  $normalized = ltrim($class, '\\');
-  $class_file = '';
-  try {
-    $class_file = (new \ReflectionClass($normalized))->getFileName() ?: '';
-    $class_file = $class_file ? str_replace('\\', '/', realpath($class_file) ?: $class_file) : '';
-  }
-  catch (\Throwable) {
-    // Namespace ownership can still identify an unreflectable class.
-  }
-  foreach ($extensions as $extension) {
-    $machine_name = (string) ($extension['machineName'] ?? '');
-    $type = (string) ($extension['type'] ?? '');
-    if ($machine_name === '' || !in_array($type, ['module', 'theme'], TRUE)) {
-      continue;
-    }
-    if (str_starts_with($normalized, 'Drupal\\' . $machine_name . '\\')) {
-      return $machine_name;
-    }
-    try {
-      $list = \Drupal::service($type === 'module' ? 'extension.list.module' : 'extension.list.theme');
-      $extension_root = str_replace('\\', '/', realpath(DRUPAL_ROOT . '/' . $list->getPath($machine_name)) ?: '');
-      if ($class_file && $extension_root && ($class_file === $extension_root || str_starts_with($class_file, $extension_root . '/'))) {
-        return $machine_name;
-      }
-    }
-    catch (\Throwable) {
-      // Try the remaining custom extensions.
-    }
-  }
-  return '';
-};
-
-// Include attribute/callback routes whose executable callback resolves to a
-// custom extension even when no routing YAML record exists.
-$routes_scanned = 0;
-foreach ($route_provider->getAllRoutes() as $live_name => $live_route) {
-  $routes_scanned++;
-  if ($routes_scanned > $route_scan_limit) {
-    $output['violations'][] = ['name' => '', 'reason' => 'live_route_scan_limit_exceeded'];
-    break;
-  }
-  if (isset($inputs_by_name[$live_name])) {
-    continue;
-  }
-  $definitions = [];
-  foreach (['_controller', '_form', '_title_callback'] as $key) {
-    $value = $live_route->getDefault($key);
-    if (is_string($value) && $value !== '') {
-      $definitions[$key] = $value;
-    }
-  }
-  foreach ($live_route->getRequirements() as $key => $value) {
-    if (is_string($value) && str_starts_with((string) $key, '_') && str_contains((string) $key, 'access')) {
-      $definitions[(string) $key] = $value;
-    }
-  }
-  foreach ($definitions as $kind => $definition) {
-    $class = $custom_route_callback_class($definition, $kind, $container);
-    $extension = $class ? $custom_route_extension_for_class($class, $active_custom_extensions) : '';
-    if ($extension === '') {
-      continue;
-    }
-    $binding = $bindings_by_name[(string) $live_name] ?? [];
-    $inputs_by_name[(string) $live_name] = [
-      'name' => (string) $live_name,
-      'extension' => $extension,
-      'file' => 'live-router:' . $extension,
-      'path' => (string) $live_route->getPath(),
-      'controller' => (string) $live_route->getDefault('_controller'),
-      'routeParameters' => is_array($binding['routeParameters'] ?? NULL) ? $binding['routeParameters'] : [],
-      'requestMethod' => (string) ($binding['requestMethod'] ?? ''),
-      'requestContentType' => (string) ($binding['requestContentType'] ?? ''),
-      'discovery' => 'live_callback',
-    ];
-    break;
-  }
 }
 
 ksort($inputs_by_name);
@@ -9492,16 +9895,16 @@ export function customEntityOutputAuditErrors(runtimeInventory) {
   }
   if (audit.completed !== true || !['pass', 'not_applicable'].includes(audit.status) ||
     audit.applies !== (audit.status === 'pass') ||
-    audit.noExplicitVerifierMutation !== true || audit.allowOwnedCacheInvalidation !== false ||
+    audit.noExplicitVerifierMutation !== false || audit.allowOwnedCacheInvalidation !== true ||
     !Array.isArray(audit.failures) || audit.failures.length > 0) {
-    errors.push('Verifier-owned custom entity-output audit must complete without explicit verifier mutation, with pass or exact N/A and no failures.');
+    errors.push('Verifier-owned custom entity-output audit must complete in target-bound owned-cache invalidation mode, with pass or exact N/A and no failures.');
   }
   const runtime = audit.runtime;
   if (audit.status === 'pass') {
     if (!runtime || runtime.schemaVersion !== CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA ||
       runtime.resultFingerprint !== customEntityOutputAuditResultFingerprint(runtime) ||
       runtime.inputFingerprint !== audit.inputFingerprint || runtime.status !== 'pass' || runtime.completed !== true ||
-      runtime.noExplicitVerifierMutation !== true || runtime.allowOwnedCacheInvalidation !== false ||
+      runtime.noExplicitVerifierMutation !== false || runtime.allowOwnedCacheInvalidation !== true ||
       !Number.isSafeInteger(runtime.applicableRouteCount) || runtime.applicableRouteCount < 1 ||
       runtime.matchedNodeRouteCount !== runtime.applicableRouteCount ||
       runtime.renderedRouteCount !== runtime.applicableRouteCount || runtime.dependencyCount < 3 ||
@@ -9517,10 +9920,15 @@ export function customEntityOutputAuditErrors(runtimeInventory) {
           errors.push(`Passing custom entity-output evidence lacks allowed ${entityType} access and bubbled invalidation tags.`);
         }
       }
-      if (runtime?.invalidation?.status !== 'not_run' || runtime?.invalidation?.attempted !== false ||
-        runtime?.invalidation?.seededCount !== 0 || runtime?.invalidation?.invalidatedCount !== 0 ||
-        runtime?.invalidation?.cleanupCompleted !== true) {
-        errors.push('Working-target custom entity-output evidence performed or misstated explicit cache invalidation.');
+      if (runtime?.invalidation?.status !== 'pass' || runtime?.invalidation?.attempted !== true ||
+        runtime?.invalidation?.preCaptureAttempted !== true ||
+        !Number.isSafeInteger(runtime?.invalidation?.preCaptureTagCount) || runtime.invalidation.preCaptureTagCount < 1 ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.preCaptureEvidenceSha256 ?? '')) ||
+        runtime?.invalidation?.cleanupRequired !== true || runtime?.invalidation?.cleanupCompleted !== true ||
+        !Number.isSafeInteger(runtime?.invalidation?.seededCount) || runtime.invalidation.seededCount < 1 ||
+        runtime?.invalidation?.invalidatedCount !== runtime.invalidation.seededCount ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.evidenceSha256 ?? ''))) {
+        errors.push('Passing custom entity-output evidence lacks completed target-bound owned-cache invalidation and cleanup proof.');
       }
     }
   } else if (runtime !== null && (
@@ -9531,7 +9939,16 @@ export function customEntityOutputAuditErrors(runtimeInventory) {
     runtime?.coveredCandidateSourceFileCount !== 0 || runtime?.coveredCandidateSourceFileSetSha256 !== '' ||
     runtime?.coveredCandidateSurfaceCount !== 0 || runtime?.coveredCandidateSurfaceSetSha256 !== '' ||
     !Array.isArray(runtime?.routes) || runtime.routes.some((route) => route?.applies !== false || route?.matched !== false || route?.rendered !== false) ||
-    !Array.isArray(runtime?.violations) || runtime.violations.length > 0
+    !Array.isArray(runtime?.violations) || runtime.violations.length > 0 ||
+    runtime?.noExplicitVerifierMutation !== false || runtime?.allowOwnedCacheInvalidation !== true ||
+    runtime?.invalidation?.status !== 'pre_capture_performed_not_applicable' ||
+    runtime?.invalidation?.preCaptureAttempted !== true ||
+    !Number.isSafeInteger(runtime?.invalidation?.preCaptureTagCount) || runtime.invalidation.preCaptureTagCount < 1 ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.preCaptureEvidenceSha256 ?? '')) ||
+    runtime?.invalidation?.attempted !== false ||
+    runtime?.invalidation?.seededCount !== 0 || runtime?.invalidation?.invalidatedCount !== 0 ||
+    runtime?.invalidation?.cleanupRequired !== false || runtime?.invalidation?.cleanupCompleted !== true ||
+    runtime?.invalidation?.evidenceSha256 !== ''
   )) {
     errors.push('Custom entity-output N/A evidence contradicts its live extension applicability.');
   }
@@ -10490,7 +10907,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     projectRoot,
     environment,
     drupalReadback?.implementationQuality?.customCodeInventory ?? {},
-    { baseUrl, fieldOutputMatrix, routeMatrix }
+    { baseUrl, fieldOutputMatrix, routeMatrix, allowOwnedCacheInvalidation: true }
   );
   const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);

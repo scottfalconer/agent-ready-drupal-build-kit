@@ -55,7 +55,8 @@ const SEMANTIC_BLOCKERS = new Set([
   'indirect_identity_flow',
   'indirect_identity_operand',
   'unsupported_dynamic_call',
-  'unsupported_dynamic_identity'
+  'unsupported_dynamic_identity',
+  'unsupported_inline_script'
 ]);
 const BLOCKER_CODES = new Set([
   ...SEMANTIC_BLOCKERS,
@@ -752,10 +753,13 @@ try {
     $blockers[] = ['code' => $code, 'fileId' => $file_id, 'language' => $language, 'ruleId' => 'mutable_identity.' . $code, 'evidence' => $event_evidence];
     if ($structural) $incomplete = TRUE;
   };
-  $record_finding = static function (string $file_id, string $language, string $identity_kind, string $sink_kind, object $source, object $sink) use (&$findings, &$finding_keys, &$blockers, &$entity_output_candidates, $limits, $evidence, $strict_json, $digest, $record_blocker): void {
+  $record_finding = static function (string $file_id, string $language, string $identity_kind, string $sink_kind, object $source, object $sink) use (&$findings, &$finding_keys, &$blockers, &$entity_output_candidates, $limits, $evidence, $synthetic_evidence, $strict_json, $digest, $record_blocker): void {
     $event_evidence = $evidence($source, $sink, $language);
     if ($event_evidence['sourceStartLine'] < 1 || $event_evidence['sinkStartLine'] < 1 || ($language === 'php' && ($event_evidence['sourceStartFilePos'] === NULL || $event_evidence['sourceEndFilePos'] === NULL || $event_evidence['sinkStartFilePos'] === NULL || $event_evidence['sinkEndFilePos'] === NULL))) {
-      $record_blocker('missing_ast_span', $file_id, $language, $event_evidence, TRUE);
+      $record_blocker('missing_ast_span', $file_id, $language, $synthetic_evidence(
+        $event_evidence['sourceNodeType'],
+        max(0, $event_evidence['sourceStartLine']),
+      ), TRUE);
       return;
     }
     $rule_id = 'mutable_identity.' . $identity_kind . '.' . $sink_kind;
@@ -773,7 +777,7 @@ try {
       'evidence' => $event_evidence,
     ];
   };
-  $record_entity_output = static function (string $file_id, string $language, array $entity_kinds, string $sink_kind, array $source_surface_ids, object $source, ?object $sink = NULL) use (&$entity_output_candidates, &$entity_output_keys, &$findings, &$blockers, $limits, $evidence, $strict_json, $digest, $record_blocker): void {
+  $record_entity_output = static function (string $file_id, string $language, array $entity_kinds, string $sink_kind, array $source_surface_ids, object $source, ?object $sink = NULL) use (&$entity_output_candidates, &$entity_output_keys, &$findings, &$blockers, $limits, $evidence, $synthetic_evidence, $strict_json, $digest, $record_blocker): void {
     $entity_kinds = array_values(array_unique($entity_kinds));
     sort($entity_kinds, SORT_STRING);
     if (count($entity_kinds) === 0 || count(array_diff($entity_kinds, ['file', 'media', 'node'])) > 0 || !in_array($sink_kind, ['entity_render_call', 'entity_view_builder', 'render_array', 'twig_print'], TRUE)) {
@@ -784,7 +788,10 @@ try {
     $source_span_missing = $event_evidence['sourceStartLine'] < 1 || ($language === 'php' && ($event_evidence['sourceStartFilePos'] === NULL || $event_evidence['sourceEndFilePos'] === NULL));
     $sink_span_missing = $sink !== NULL && ($event_evidence['sinkStartLine'] < 1 || ($language === 'php' && ($event_evidence['sinkStartFilePos'] === NULL || $event_evidence['sinkEndFilePos'] === NULL)));
     if ($source_span_missing || $sink_span_missing) {
-      $record_blocker('missing_ast_span', $file_id, $language, $event_evidence, TRUE);
+      $record_blocker('missing_ast_span', $file_id, $language, $synthetic_evidence(
+        $event_evidence['sourceNodeType'],
+        max(0, $event_evidence['sourceStartLine']),
+      ), TRUE);
       return;
     }
     $rule_id = 'entity_output.' . $sink_kind;
@@ -1074,6 +1081,9 @@ try {
   $twig_chain = NULL;
   $twig_chain = static function (mixed $node) use (&$twig_chain): array {
     if ($node instanceof \Twig\Node\Expression\NameExpression) return [strtolower((string) $node->getAttribute('name'))];
+    if ($node instanceof \Twig\Node\Node && str_ends_with(get_class($node), '\\FunctionExpression') && $node->hasAttribute('name')) {
+      return ['call:' . strtolower((string) $node->getAttribute('name'))];
+    }
     if ($node instanceof \Twig\Node\Expression\GetAttrExpression && $node->hasNode('node') && $node->hasNode('attribute')) {
       $attribute = $node->getNode('attribute');
       if (!$attribute instanceof \Twig\Node\Expression\ConstantExpression) return [];
@@ -1082,6 +1092,10 @@ try {
     return [];
   };
   $twig_source = static function (\Twig\Node\Node $node) use ($twig_chain): array {
+    if (str_ends_with(get_class($node), '\\FunctionExpression') && $node->hasAttribute('name')) {
+      $function = strtolower((string) $node->getAttribute('name'));
+      if (in_array($function, ['path', 'url'], TRUE)) return ['alias_or_path', ''];
+    }
     if (!$node instanceof \Twig\Node\Expression\GetAttrExpression) return ['', ''];
     $chain = $twig_chain($node);
     if (count($chain) < 2) return ['', ''];
@@ -1252,6 +1266,12 @@ try {
           $max_depth = max($max_depth, $depth);
           if ($file_nodes > $limits['astNodesPerFile'] || $ast_nodes > $limits['astNodesTotal']) throw new RuntimeException('ast_node_limit');
           if ($depth > $limits['astDepth']) throw new RuntimeException('ast_depth_limit');
+          if ($node instanceof \PhpParser\Node\Scalar\String_ && preg_match(
+            '/<script\b|<[a-z][^>]*\bon[a-z0-9_-]+\s*=|<[a-z][^>]*\b(?:href|src|action|formaction|xlink:href)\s*=\s*["\']?\s*javascript\s*:/is',
+            (string) $node->value,
+          ) === 1) {
+            $record_blocker('unsupported_inline_script', $file_id, 'php', $evidence($node, NULL, 'php'));
+          }
           if ($node instanceof \PhpParser\Node\Expr\Error) $record_blocker('unsupported_ast_node', $file_id, 'php', $evidence($node, NULL, 'php'), TRUE);
           if ($node instanceof \PhpParser\Node\Expr\Eval_) $record_blocker('unsupported_dynamic_call', $file_id, 'php', $evidence($node, NULL, 'php'));
           [$entity_kinds, $entity_sink_kind] = $php_entity_output($node);
@@ -1293,7 +1313,7 @@ try {
         $template_name = strtolower(basename($path));
         $template_entity_kind = str_starts_with($template_name, 'node') ? 'node' : (str_starts_with($template_name, 'media') ? 'media' : (str_starts_with($template_name, 'file') ? 'file' : ''));
         $walk_twig = NULL;
-        $walk_twig = static function (mixed $node, int $depth, array $contexts, string $mode = '') use (&$walk_twig, &$file_nodes, &$ast_nodes, &$max_depth, $limits, $check_deadline, $twig_source, $twig_entity_output, $twig_call_name, $twig_print_contexts, $suspicious_name, $record_blocker, $record_finding, $record_entity_output, $evidence, $synthetic_evidence, $file_id, $source_surface_ids, $template_entity_kind): void {
+        $walk_twig = static function (mixed $node, int $depth, array $contexts, string $mode = '', ?object $mode_sink = NULL) use (&$walk_twig, &$file_nodes, &$ast_nodes, &$max_depth, $limits, $check_deadline, $twig_source, $twig_entity_output, $twig_call_name, $twig_print_contexts, $suspicious_name, $record_blocker, $record_finding, $record_entity_output, $evidence, $synthetic_evidence, $file_id, $source_surface_ids, $template_entity_kind): void {
           if (!$node instanceof \Twig\Node\Node) {
             if (is_object($node)) $record_blocker('unsupported_ast_child', $file_id, 'twig', $synthetic_evidence('Twig\\Node\\Unknown'), TRUE);
             return;
@@ -1304,6 +1324,12 @@ try {
           $max_depth = max($max_depth, $depth);
           if ($file_nodes > $limits['astNodesPerFile'] || $ast_nodes > $limits['astNodesTotal']) throw new RuntimeException('ast_node_limit');
           if ($depth > $limits['astDepth']) throw new RuntimeException('ast_depth_limit');
+          if (str_ends_with(get_class($node), '\\TextNode') && $node->hasAttribute('data') && preg_match(
+            '/<script\b|<[a-z][^>]*\bon[a-z0-9_-]+\s*=|<[a-z][^>]*\b(?:href|src|action|formaction|xlink:href)\s*=\s*["\']?\s*javascript\s*:/is',
+            (string) $node->getAttribute('data'),
+          ) === 1) {
+            $record_blocker('unsupported_inline_script', $file_id, 'twig', $evidence($node, NULL, 'twig'));
+          }
           [$entity_kinds, $entity_source] = $twig_entity_output($node, $template_entity_kind);
           if ($entity_source instanceof \Twig\Node\Node) $record_entity_output($file_id, 'twig', $entity_kinds, 'twig_print', $source_surface_ids, $entity_source, $node);
           [$identity_kind, $ambiguity] = $twig_source($node);
@@ -1329,8 +1355,12 @@ try {
           foreach ($node as $name => $child) {
             $child_contexts = $contexts;
             $child_mode = '';
-            if ($mode === 'if_tests' && $position % 2 === 0) $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'behavior_branch', 'sink' => $node];
-            if (str_ends_with($class, '\\IfNode') && (string) $name === 'tests') $child_mode = 'if_tests';
+            $child_mode_sink = NULL;
+            if ($mode === 'if_tests' && $position % 2 === 0) $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'behavior_branch', 'sink' => $mode_sink ?? $node];
+            if (str_ends_with($class, '\\IfNode') && (string) $name === 'tests') {
+              $child_mode = 'if_tests';
+              $child_mode_sink = $node;
+            }
             if ((str_ends_with($class, '\\ConditionalTernary') || str_ends_with($class, '\\ConditionalExpression')) && in_array((string) $name, ['test', 'expr1'], TRUE)) $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'behavior_branch', 'sink' => $node];
             if ($node instanceof \Twig\Node\Expression\GetAttrExpression && (string) $name === 'attribute' && !($child instanceof \Twig\Node\Expression\ConstantExpression)) $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'computed_lookup', 'sink' => $node];
             if ($node_call_name === 'attribute' && (string) $name === 'arguments') $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'computed_lookup', 'sink' => $node];
@@ -1345,7 +1375,7 @@ try {
                 : ['type' => 'sink', 'sinkKind' => 'presentation_selector', 'sink' => $node];
             }
             if ((str_ends_with($class, '\\IncludeNode') || str_ends_with($class, '\\EmbedNode') || str_ends_with($class, '\\ExtendsNode') || str_ends_with($class, '\\ImportNode') || str_ends_with($class, '\\FromNode')) && (string) $name === 'expr') $child_contexts[] = ['type' => 'sink', 'sinkKind' => 'presentation_selector', 'sink' => $node];
-            $walk_twig($child, $depth + 1, $child_contexts, $child_mode);
+            $walk_twig($child, $depth + 1, $child_contexts, $child_mode, $child_mode_sink);
             $position++;
           }
         };

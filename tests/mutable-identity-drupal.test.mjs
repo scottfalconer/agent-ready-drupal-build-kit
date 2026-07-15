@@ -78,9 +78,11 @@ namespace Twig\Node {
   class ModuleNode extends Node {}
   class PrintNode extends Node {}
   class SetNode extends Node {}
+  class TextNode extends Node {}
 }
 namespace Twig\Node\Expression {
   class ConstantExpression extends \Twig\Node\Node {}
+  class FunctionExpression extends \Twig\Node\Node {}
   class GetAttrExpression extends \Twig\Node\Node {}
   class NameExpression extends \Twig\Node\Node {}
 }
@@ -93,11 +95,11 @@ namespace {
     }
   }
   final class FixtureAst {
-    private static function titleExpression(): \Twig\Node\Expression\GetAttrExpression {
+    private static function titleExpression(int $line = 1): \Twig\Node\Expression\GetAttrExpression {
       return new \Twig\Node\Expression\GetAttrExpression([
-        'node' => new \Twig\Node\Expression\NameExpression([], ['name' => 'node']),
-        'attribute' => new \Twig\Node\Expression\ConstantExpression([], ['value' => 'title']),
-      ]);
+        'node' => new \Twig\Node\Expression\NameExpression([], ['name' => 'node'], $line),
+        'attribute' => new \Twig\Node\Expression\ConstantExpression([], ['value' => 'title'], $line),
+      ], [], $line);
     }
     private static function printedTitle(): \Twig\Node\PrintNode {
       return new \Twig\Node\PrintNode(['expr' => self::titleExpression()]);
@@ -115,8 +117,43 @@ namespace {
         'arguments' => new \Twig\Node\Node([self::titleExpression()]),
       ])]);
     }
+    private static function functionIdentityExpression(string $attribute): \Twig\Node\Expression\GetAttrExpression {
+      return new \Twig\Node\Expression\GetAttrExpression([
+        'node' => new \Twig\Node\Expression\FunctionExpression([
+          'arguments' => new \Twig\Node\Node([
+            new \Twig\Node\Expression\ConstantExpression([], ['value' => $attribute === 'name' ? 'media' : 'node']),
+            new \Twig\Node\Expression\ConstantExpression([], ['value' => 1]),
+          ]),
+        ], ['name' => 'drupal_entity']),
+        'attribute' => new \Twig\Node\Expression\ConstantExpression([], ['value' => $attribute]),
+      ]);
+    }
     public static function forSource(string $source): \Twig\Node\ModuleNode {
       $print = self::printedTitle();
+      if (str_contains($source, '<script') || str_contains($source, 'onclick=') || str_contains($source, 'javascript:')) {
+        return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([
+          new \Twig\Node\TextNode([], ['data' => $source]),
+        ])]);
+      }
+      if (str_contains($source, "path('entity.node.canonical'")) {
+        $expression = new \Twig\Node\Expression\FunctionExpression([
+          'arguments' => new \Twig\Node\Node(),
+        ], ['name' => 'path']);
+        if (str_contains($source, '{% if')) {
+          $if = new \Twig\Node\IfNode(['tests' => new \Twig\Node\Node([$expression, new \Twig\Node\BodyNode()])]);
+          return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([$if])]);
+        }
+        return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([new \Twig\Node\PrintNode(['expr' => $expression])])]);
+      }
+      if (str_contains($source, 'drupal_entity')) {
+        $attribute = str_contains($source, ').name') ? 'name' : 'label';
+        $expression = self::functionIdentityExpression($attribute);
+        if (str_contains($source, '{% if')) {
+          $if = new \Twig\Node\IfNode(['tests' => new \Twig\Node\Node([$expression, new \Twig\Node\BodyNode()])]);
+          return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([$if])]);
+        }
+        return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([new \Twig\Node\PrintNode(['expr' => $expression])])]);
+      }
       if (str_contains($source, 'node[field]')) return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([self::printedDynamicAttribute()])]);
       if (str_contains($source, 'attributes.addClass')) return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([self::printedAddClass()])]);
       if (str_contains($source, 'node.getTitle()')) {
@@ -125,7 +162,12 @@ namespace {
           'attribute' => new \Twig\Node\Expression\ConstantExpression([], ['value' => 'getTitle']),
           'arguments' => new \Twig\Node\Node(),
         ]);
-        $if = new \Twig\Node\IfNode(['tests' => new \Twig\Node\Node([$getter, new \Twig\Node\BodyNode()])]);
+        $if_line = str_contains($source, 'missing-sink-span') ? 0 : 1;
+        $if = new \Twig\Node\IfNode(
+          ['tests' => new \Twig\Node\Node([$getter, new \Twig\Node\BodyNode()], [], 0)],
+          [],
+          $if_line,
+        );
         return new \Twig\Node\ModuleNode(['body' => new \Twig\Node\Node([$if])]);
       }
       if (str_contains($source, 'node.toUrl()')) {
@@ -641,6 +683,87 @@ test('Twig computed attributes, presentation output, calls, and getter branches 
   assert.ok(url.findings.some(({ identityKind, sinkKind }) =>
     identityKind === 'alias_or_path' && sinkKind === 'behavior_branch'
   ), JSON.stringify(url.findings));
+
+  const missingSinkSpan = runEmbeddedTwigWalker(
+    t,
+    "{# missing-sink-span #}{% if node.getTitle() == 'Hero' %}chosen{% endif %}\n"
+  );
+  assert.equal(missingSinkSpan.status, 'blocked');
+  assert.equal(missingSinkSpan.completed, false);
+  const structural = missingSinkSpan.blockers.find(({ code }) => code === 'missing_ast_span');
+  assert.ok(structural, JSON.stringify(missingSinkSpan));
+  assert.equal(structural.evidence.sourceNodeType, 'Twig\\Node\\Expression\\GetAttrExpression');
+  assert.equal(structural.evidence.sourceStartLine, 1);
+  assert.equal(structural.evidence.sinkNodeType, '');
+});
+
+test('Twig function-rooted entity identities fail closed in selectors but remain valid display output', (t) => {
+  const available = spawnSync('php', ['-v'], { encoding: 'utf8' });
+  if (available.error?.code === 'ENOENT') {
+    t.skip('PHP is not installed in this test environment.');
+    return;
+  }
+
+  for (const source of [
+    "{% if drupal_entity('node', 1).label == 'Hero' %}chosen{% endif %}\n",
+    "{% if drupal_entity('media', 1).name == 'Hero' %}chosen{% endif %}\n"
+  ]) {
+    const result = runEmbeddedTwigWalker(t, source);
+    assert.equal(result.status, 'blocked');
+    assert.equal(result.completed, true);
+    assert.ok(result.blockers.some(({ code }) => code.startsWith('ambiguous_')), JSON.stringify(result.blockers));
+  }
+
+  for (const source of [
+    "{{ drupal_entity('node', 1).label }}\n",
+    "{{ drupal_entity('media', 1).name }}\n"
+  ]) {
+    const result = runEmbeddedTwigWalker(t, source);
+    assert.equal(result.status, 'pass');
+    assert.deepEqual(result.blockers, []);
+  }
+});
+
+test('Twig route URL functions cannot control behavior but remain valid display output', (t) => {
+  const available = spawnSync('php', ['-v'], { encoding: 'utf8' });
+  if (available.error?.code === 'ENOENT') {
+    t.skip('PHP is not installed in this test environment.');
+    return;
+  }
+
+  const branch = runEmbeddedTwigWalker(
+    t,
+    "{% if path('entity.node.canonical', {'node': node.id}) == '/hero' %}chosen{% endif %}\n"
+  );
+  assert.equal(branch.status, 'fail');
+  assert.ok(branch.findings.some(({ identityKind, sinkKind }) =>
+    identityKind === 'alias_or_path' && sinkKind === 'behavior_branch'
+  ), JSON.stringify(branch));
+
+  const display = runEmbeddedTwigWalker(
+    t,
+    "{{ path('entity.node.canonical', {'node': node.id}) }}\n"
+  );
+  assert.equal(display.status, 'pass');
+  assert.deepEqual(display.blockers, []);
+});
+
+test('custom Twig inline executable HTML is fail-closed for separate JavaScript analysis', (t) => {
+  const available = spawnSync('php', ['-v'], { encoding: 'utf8' });
+  if (available.error?.code === 'ENOENT') {
+    t.skip('PHP is not installed in this test environment.');
+    return;
+  }
+
+  for (const source of [
+    "<script>if (window.location.pathname === '/hero') chooseTheme()</script>\n",
+    '<button onclick="if(window.location.pathname === \'/hero\') chooseTheme()">Choose</button>\n',
+    '<a href="javascript:if(document.title) chooseTheme()">Choose</a>\n'
+  ]) {
+    const result = runEmbeddedTwigWalker(t, source);
+    assert.equal(result.status, 'blocked');
+    assert.ok(result.blockers.some(({ code }) => code === 'unsupported_inline_script'), JSON.stringify(result));
+  }
 });
 
 test('embedded Drupal program is syntax-valid when PHP is available and names both real AST parsers', (t) => {

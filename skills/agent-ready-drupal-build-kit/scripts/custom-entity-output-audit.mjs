@@ -37,7 +37,20 @@ const OUTPUT_SURFACE_KINDS = new Set([
   'twig_template',
   'sdc_component'
 ]);
-const OUTPUT_HOOK_RE = /(?:^|_)(?:entity_view|node_view|media_view|file_view|preprocess|process|theme_suggestions|views_pre_render|views_post_render|page_attachments|block_view|field_formatter|template_preprocess)(?:_|$)/i;
+const OUTPUT_HOOK_RE = /(?:^|_)(?:entity_view|node_view|media_view|file_view|view_mode|view_display|prepare_view|display_build|build_defaults|preprocess|process|theme_suggestions|views_pre_render|views_post_render|page_attachments|block_view|field_formatter|template_preprocess)(?:_|$)/i;
+const NODE_RENDER_HOOK_NAMES = new Set([
+  'node_view_mode_alter',
+  'entity_view_mode_alter',
+  'node_build_defaults_alter',
+  'entity_build_defaults_alter',
+  'entity_view_display_alter',
+  'entity_prepare_view',
+  'entity_display_build_alter',
+  'node_view',
+  'entity_view',
+  'node_view_alter',
+  'entity_view_alter'
+]);
 
 function comparePortable(left, right) {
   return String(left) < String(right) ? -1 : String(left) > String(right) ? 1 : 0;
@@ -50,8 +63,16 @@ function uniqueSorted(values) {
 const CANDIDATE_COVERAGE_ROLES = new Set([
   'custom_route',
   'custom_controller',
+  'field_formatter',
   'render_hook',
   'render_template'
+]);
+
+const RENDER_HOOK_SELECTOR_KINDS = new Set([
+  'preprocess_node',
+  'template_preprocess_hook',
+  'node_render_hook',
+  'theme_suggestion_hook'
 ]);
 
 function candidateCoverageKey(row) {
@@ -67,10 +88,12 @@ function expectedRouteCandidateCoverage({
   route,
   candidateRouteByNameSha256,
   candidateRenderBindings,
-  activeExtensionSha256,
-  defaultThemeExtensionSha256
+  activeExtensionSha256
 }) {
   const activeExtensions = new Set(activeExtensionSha256);
+  const activeThemeExtensions = new Set(route.activeThemeExtensionSha256);
+  const selectedThemeTemplates = new Set(route.selectedThemeTemplateSha256);
+  const selectedRenderHooks = new Set(route.selectedRenderHookSha256);
   const coverage = [];
   const candidateRouteBinding = candidateRouteByNameSha256.get(String(route?.routeNameSha256 ?? ''));
   const routeBinding = candidateRouteBinding && activeExtensions.has(candidateRouteBinding.extensionSha256)
@@ -95,17 +118,16 @@ function expectedRouteCandidateCoverage({
         });
       }
     }
+  }
+  if (!['candidate_controller', 'entity_view'].includes(route.outputHandlerKind)) {
     return uniqueSortedCandidateCoverage(coverage);
   }
-  if (route.outputHandlerKind !== 'entity_view') return uniqueSortedCandidateCoverage(coverage);
-  let selectedTemplate = null;
-  let selectedTemplatePriority = -1;
   for (const binding of candidateRenderBindings) {
-    const active = binding.extensionType === 'module'
+    const hookActive = binding.extensionType === 'module'
       ? activeExtensions.has(binding.extensionSha256)
-      : binding.extensionType === 'theme' && binding.extensionSha256 === defaultThemeExtensionSha256;
-    if (!active) continue;
-    if (['preprocess_node', 'node_render_hook'].includes(binding.selectorKind)) {
+      : binding.extensionType === 'theme' && activeThemeExtensions.has(binding.extensionSha256);
+    if (RENDER_HOOK_SELECTOR_KINDS.has(binding.selectorKind)) {
+      if (!hookActive || !selectedRenderHooks.has(binding.runtimeIdentitySha256)) continue;
       coverage.push({
         role: 'render_hook',
         extensionSha256: binding.extensionSha256,
@@ -114,30 +136,29 @@ function expectedRouteCandidateCoverage({
       });
       continue;
     }
-    const [selectorBundle, selectorViewMode] = binding.selectorKind === 'node_bundle_view_mode_template'
-      ? String(binding.selectorValue).split('\u0000')
-      : ['', ''];
-    const priority = binding.selectorKind === 'node_bundle_view_mode_template'
-      ? (sha256(selectorBundle) === route.nodeBundleSha256 && sha256(selectorViewMode) === route.entityViewModeSha256 ? 4 : -1)
-      : binding.selectorKind === 'node_bundle_template'
-      ? (sha256(binding.selectorValue) === route.nodeBundleSha256 ? 3 : -1)
-      : binding.selectorKind === 'node_view_mode_template'
-        ? (sha256(binding.selectorValue) === route.entityViewModeSha256 ? 2 : -1)
-        : binding.selectorKind === 'node_template'
-          ? 1
-          : -1;
-    if (priority > selectedTemplatePriority) {
-      selectedTemplate = binding;
-      selectedTemplatePriority = priority;
+    if (binding.selectorKind === 'field_formatter_plugin' &&
+      activeExtensions.has(binding.extensionSha256) &&
+      route.selectedFieldFormatterSha256.includes(binding.runtimeIdentitySha256)) {
+      coverage.push({
+        role: 'field_formatter',
+        extensionSha256: binding.extensionSha256,
+        sourceFileSha256: binding.outputSourceFileSha256,
+        surfaceSha256: binding.outputSurfaceSha256
+      });
+      continue;
     }
-  }
-  if (selectedTemplate && selectedTemplatePriority >= 0) {
-    coverage.push({
-      role: 'render_template',
-      extensionSha256: selectedTemplate.extensionSha256,
-      sourceFileSha256: selectedTemplate.outputSourceFileSha256,
-      surfaceSha256: selectedTemplate.outputSurfaceSha256
-    });
+    if (binding.selectorKind === 'theme_template' &&
+      (binding.extensionType === 'module'
+        ? activeExtensions.has(binding.extensionSha256)
+        : activeThemeExtensions.has(binding.extensionSha256)) &&
+      selectedThemeTemplates.has(binding.sourceDrupalPathSha256)) {
+      coverage.push({
+        role: 'render_template',
+        extensionSha256: binding.extensionSha256,
+        sourceFileSha256: binding.outputSourceFileSha256,
+        surfaceSha256: binding.outputSurfaceSha256
+      });
+    }
   }
   return uniqueSortedCandidateCoverage(coverage);
 }
@@ -223,7 +244,9 @@ function targetOrigin(projectRoot, environment) {
 function outputCapableSurface(surface) {
   if (!surface || typeof surface !== 'object') return false;
   if (OUTPUT_SURFACE_KINDS.has(String(surface.kind ?? ''))) return true;
-  return surface.kind === 'hook_or_callback' && OUTPUT_HOOK_RE.test(String(surface.name ?? ''));
+  return surface.kind === 'hook_or_callback' && (
+    OUTPUT_HOOK_RE.test(String(surface.name ?? '')) || OUTPUT_HOOK_RE.test(String(surface.hookName ?? ''))
+  );
 }
 
 function collectExplicitStaticCandidates(value, sourceFileIds, surfaceIds, candidateContext = false, depth = 0) {
@@ -490,7 +513,6 @@ export function deriveCustomEntityOutputAuditInput({
   const normalizedDeclarations = [...new Map(declarations.map((row) => [row.id, row])).values()]
     .sort((left, right) => comparePortable(left.id, right.id));
 
-  const declaredBundles = new Set(normalizedDeclarations.map(({ bundle }) => bundle));
   const candidateRenderBindings = [];
   for (const extension of extensions) {
     for (const source of inventoryFiles.values()) {
@@ -503,33 +525,67 @@ export function deriveCustomEntityOutputAuditInput({
         const sourceDrupalPath = extensionPathOffset >= 0 ? normalizedSourcePath.slice(extensionPathOffset) : '';
         let selectorKind = '';
         let selectorValue = '';
-        if (surface?.kind === 'hook_or_callback' && (name === `${extension.machineName}_preprocess_node` || name.startsWith(`${extension.machineName}_preprocess_node__`))) {
-          selectorKind = 'preprocess_node';
-          selectorValue = '*';
-        } else if (extension.type === 'module' && surface?.kind === 'hook_or_callback' && [
-          `${extension.machineName}_entity_view`,
-          `${extension.machineName}_entity_view_alter`,
-          `${extension.machineName}_node_view`,
-          `${extension.machineName}_node_view_alter`
-        ].includes(name)) {
-          selectorKind = 'node_render_hook';
-          selectorValue = '*';
-        } else if (extension.type === 'theme' && surface?.kind === 'twig_template') {
-          if (name === 'node.html.twig') {
-            selectorKind = 'node_template';
-            selectorValue = '*';
-          } else {
-            const compositeMatch = name.match(/^node--([a-z0-9-]+)--([a-z0-9-]+)\.html\.twig$/);
-            const match = name.match(/^node--([a-z0-9-]+)\.html\.twig$/);
-            if (compositeMatch) {
-              selectorKind = 'node_bundle_view_mode_template';
-              selectorValue = `${compositeMatch[1].replaceAll('-', '_')}\u0000${compositeMatch[2].replaceAll('-', '_')}`;
-            } else if (match) {
-              const normalizedName = match[1].replaceAll('-', '_');
-              selectorKind = declaredBundles.has(normalizedName) ? 'node_bundle_template' : 'node_view_mode_template';
-              selectorValue = normalizedName;
+        let runtimeClass = '';
+        let runtimeMethod = '';
+        let runtimeFunction = '';
+        let hookName = String(surface?.hookName ?? '');
+        let hookProviderMachineName = '';
+        if (extension.type === 'module' && surface?.kind === 'plugin_class') {
+          const sourceClassMatch = sourceDrupalPath.match(/\/src\/(.+)\.php$/);
+          if (sourceClassMatch && sourceClassMatch[1].split('/').at(-1) === name) {
+            selectorKind = 'field_formatter_plugin';
+            selectorValue = name;
+            runtimeClass = `Drupal\\${extension.machineName}\\${sourceClassMatch[1].replaceAll('/', '\\')}`;
+          }
+        } else if (surface?.kind === 'hook_or_callback') {
+          if (!hookName && name.startsWith(`${extension.machineName}_`)) {
+            hookName = name.slice(extension.machineName.length + 1);
+          }
+          hookProviderMachineName = String(surface?.moduleName ?? '') || extension.machineName;
+          if (!hookName && !surface?.className) {
+            const proceduralOverride = name.match(/^([a-z][a-z0-9_]*)_((?:preprocess|theme_suggestions)_.+)$/) ??
+              [...NODE_RENDER_HOOK_NAMES]
+                .sort((left, right) => right.length - left.length)
+                .map((candidateHook) => {
+                  const suffix = `_${candidateHook}`;
+                  return name.endsWith(suffix)
+                    ? [name, name.slice(0, -suffix.length), candidateHook]
+                    : null;
+                })
+                .find(Boolean);
+            if (proceduralOverride && MACHINE_RE.test(proceduralOverride[1])) {
+              hookProviderMachineName = proceduralOverride[1];
+              hookName = proceduralOverride[2];
             }
           }
+          if (surface?.className && surface?.methodName) {
+            runtimeClass = String(surface.className);
+            runtimeMethod = String(surface.methodName);
+          } else {
+            runtimeFunction = name;
+          }
+          if (['theme_suggestions_node', 'theme_suggestions_node_alter', 'theme_suggestions_alter'].includes(hookName)) {
+            // Themes only participate in alter hooks; module suggestion
+            // providers and both module/theme alters participate in the chain.
+            if (extension.type === 'module' || hookName.endsWith('_alter')) {
+              selectorKind = 'theme_suggestion_hook';
+              selectorValue = hookName;
+            }
+          } else if (hookName.startsWith('preprocess_')) {
+            selectorKind = hookName === 'preprocess_node' || hookName.startsWith('preprocess_node__')
+              ? 'preprocess_node'
+              : 'template_preprocess_hook';
+            selectorValue = hookName;
+          } else if (extension.type === 'module' && NODE_RENDER_HOOK_NAMES.has(hookName)) {
+            selectorKind = 'node_render_hook';
+            selectorValue = hookName;
+          }
+        } else if (surface?.kind === 'twig_template') {
+          // Broadly inventory module- and theme-owned templates here. Drupal's runtime theme
+          // registry and suggestion APIs determine the exact selected file for
+          // each route; filename heuristics cannot cover entity IDs or alters.
+          selectorKind = 'theme_template';
+          selectorValue = '*';
         }
         if (!selectorKind) continue;
         if (!sourceDrupalPath) {
@@ -544,6 +600,18 @@ export function deriveCustomEntityOutputAuditInput({
           sourceFileId: source.id,
           surfaceId: surface.id,
           surfaceName: name,
+          hookName,
+          hookProviderMachineName,
+          runtimeClass,
+          runtimeMethod,
+          runtimeFunction,
+          runtimeIdentity: selectorKind === 'field_formatter_plugin'
+            ? `${runtimeClass}\u0000${sourceDrupalPath}`
+            : runtimeClass && runtimeMethod
+              ? `${runtimeClass}::${runtimeMethod}\u0000${hookName}\u0000${hookProviderMachineName}\u0000${sourceDrupalPath}`
+              : runtimeFunction
+                ? `${runtimeFunction}\u0000${hookName}\u0000${hookProviderMachineName}\u0000${sourceDrupalPath}`
+                : '',
           selectorKind,
           selectorValue
         });
@@ -603,6 +671,30 @@ function isolatedBoundaryAccepted(isolation) {
     /^DISPOSABLE-[A-Za-z0-9_-]{1,128}$/.test(String(isolation?.workspaceId ?? '')) &&
     isolation?.exactHead === true &&
     isolation?.freshDatabase === true;
+}
+
+function currentDdevTargetBoundaryAccepted(projectRoot, environment, expectedOrigin) {
+  const normalizedExpectedOrigin = safeTargetOrigin(expectedOrigin);
+  if (!normalizedExpectedOrigin) return false;
+  const inContainer = /^(?:1|true|yes)$/i.test(String(environment?.IS_DDEV_PROJECT ?? '')) &&
+    String(environment?.DDEV_APPROOT ?? '') === String(projectRoot);
+  if (inContainer) {
+    return safeTargetOrigin(environment?.DDEV_PRIMARY_URL) === normalizedExpectedOrigin;
+  }
+  const result = spawnSync('ddev', ['describe', '-j'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+    shell: false,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 15_000
+  });
+  if (result.error || result.status !== 0) return false;
+  try {
+    return safeTargetOrigin(JSON.parse(String(result.stdout ?? ''))?.raw?.primary_url) === normalizedExpectedOrigin;
+  } catch {
+    return false;
+  }
 }
 
 function evidenceBase(derived, allowOwnedCacheInvalidation) {
@@ -715,6 +807,9 @@ $result = [
   'routes' => [],
   'invalidation' => [
     'status' => $allow_invalidation ? 'pending' : 'not_run',
+    'preCaptureAttempted' => FALSE,
+    'preCaptureTagCount' => 0,
+    'preCaptureEvidenceSha256' => '',
     'attempted' => FALSE,
     'seededCount' => 0,
     'invalidatedCount' => 0,
@@ -856,10 +951,10 @@ foreach (is_array($input['candidateRenderBindings'] ?? NULL) ? $input['candidate
   $extension_machine = (string) ($binding['extensionMachineName'] ?? '');
   $extension_type = (string) ($binding['extensionType'] ?? '');
   $extension = $active_extensions_by_machine[$extension_machine] ?? NULL;
-  $render_extension_active = $extension_type === 'module' || ($extension_type === 'theme' && $extension_machine === $default_theme_machine);
+  $selector_kind = (string) ($binding['selectorKind'] ?? '');
+  $render_extension_active = in_array($extension_type, ['module', 'theme'], TRUE);
   if (!$render_extension_active || !is_array($extension) ||
     (string) ($extension['id'] ?? '') !== (string) ($binding['extensionId'] ?? '')) continue;
-  $selector_kind = (string) ($binding['selectorKind'] ?? '');
   $source_drupal_path = trim(str_replace('\\', '/', (string) ($binding['sourceDrupalPath'] ?? '')), '/');
   $source_realpath = $source_drupal_path !== ''
     ? str_replace('\\', '/', (string) (realpath(DRUPAL_ROOT . '/' . $source_drupal_path) ?: ''))
@@ -870,29 +965,117 @@ foreach (is_array($input['candidateRenderBindings'] ?? NULL) ? $input['candidate
     $violate('candidate_render_source_path_mismatch', '', $source_subject_hash);
     continue;
   }
-  if ($extension_type === 'module' && in_array($selector_kind, ['preprocess_node', 'node_render_hook'], TRUE)) {
-    $surface_name = (string) ($binding['surfaceName'] ?? '');
-    try {
-      if ($surface_name === '' || !function_exists($surface_name)) {
-        $violate('candidate_render_hook_not_callable', '', $source_subject_hash);
-        continue;
-      }
-      $reflection = new \ReflectionFunction($surface_name);
-      $hook_realpath = str_replace('\\', '/', (string) (realpath((string) ($reflection->getFileName() ?: '')) ?: ''));
-      if ($hook_realpath !== $source_realpath) {
-        $violate('candidate_render_hook_source_mismatch', '', $source_subject_hash);
-        continue;
-      }
-    }
-    catch (\Throwable $error) {
-      $violate('candidate_render_hook_resolution_failed', '', $hash_value(get_class($error) . "\0" . $error->getMessage()));
-      continue;
-    }
-  }
   $candidate_active_render_bindings[] = $binding + [
     'extensionSubjectSha256' => (string) ($extension['subjectSha256'] ?? ''),
+    'sourceRealpath' => $source_realpath,
   ];
 }
+$callable_details = static function (callable $callable): array {
+  $class = '';
+  $method = '';
+  $function = '';
+  if (is_array($callable) && count($callable) === 2) {
+    $class = is_object($callable[0]) ? get_class($callable[0]) : ltrim((string) $callable[0], '\\');
+    $method = (string) $callable[1];
+    $reflection = new \ReflectionMethod($class, $method);
+  }
+  else {
+    $reflection = new \ReflectionFunction($callable);
+    $scope = $reflection->getClosureScopeClass();
+    if ($scope instanceof \ReflectionClass && $reflection->getName() !== '{closure}') {
+      $class = $scope->getName();
+      $method = $reflection->getName();
+    }
+    else {
+      $function = $reflection->getName();
+    }
+  }
+  $file = str_replace('\\', '/', (string) (realpath((string) ($reflection->getFileName() ?: '')) ?: ''));
+  return [ltrim($class, '\\'), $method, $function, $file];
+};
+$active_module_render_bindings = [];
+$module_handler = \Drupal::moduleHandler();
+foreach ([
+  'node_view_mode_alter', 'entity_view_mode_alter',
+  'node_build_defaults_alter', 'entity_build_defaults_alter',
+  'entity_view_display_alter', 'entity_prepare_view', 'entity_display_build_alter',
+  'entity_view', 'entity_view_alter', 'node_view', 'node_view_alter',
+  'theme_suggestions_node', 'theme_suggestions_node_alter', 'theme_suggestions_alter',
+] as $hook_name) {
+  try {
+    $module_handler->invokeAllWith($hook_name, static function (callable $listener, string $module) use (
+      &$active_module_render_bindings,
+      $callable_details,
+      $candidate_active_render_bindings,
+      $hash_value,
+      $violate,
+      $hook_name,
+    ): void {
+      try {
+        [$class, $method, $function, $file] = $callable_details($listener);
+      }
+      catch (\Throwable $error) {
+        $violate('candidate_render_hook_resolution_failed', '', $hash_value(get_class($error) . "\0" . $error->getMessage()));
+        return;
+      }
+      $matches = [];
+      foreach ($candidate_active_render_bindings as $binding) {
+        if ((string) ($binding['extensionType'] ?? '') !== 'module' ||
+          (string) ($binding['hookProviderMachineName'] ?? '') !== $module ||
+          (string) ($binding['hookName'] ?? '') !== $hook_name ||
+          (string) ($binding['sourceRealpath'] ?? '') !== $file) continue;
+        $binding_class = ltrim((string) ($binding['runtimeClass'] ?? ''), '\\');
+        $binding_method = (string) ($binding['runtimeMethod'] ?? '');
+        $binding_function = (string) ($binding['runtimeFunction'] ?? '');
+        if (($class !== '' && $binding_class === $class && $binding_method === $method) ||
+          ($function !== '' && $binding_function === $function)) {
+          $matches[] = $binding;
+        }
+      }
+      if (count($matches) === 0) return;
+      if (count($matches) !== 1) {
+        $violate('active_render_hook_not_uniquely_inventoried', '', $hash_value($module . "\0" . $hook_name . "\0" . $class . "\0" . $method . "\0" . $function . "\0" . $file));
+        return;
+      }
+      $binding = reset($matches);
+      $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+      $active_module_render_bindings[$key] = $binding;
+    });
+  }
+  catch (\Throwable $error) {
+    $violate('candidate_render_hook_enumeration_failed', '', $hash_value($hook_name . "\0" . get_class($error) . "\0" . $error->getMessage()));
+  }
+}
+ksort($active_module_render_bindings, SORT_STRING);
+$active_module_render_bindings = array_values($active_module_render_bindings);
+$match_candidate_callable = static function (
+  callable $listener,
+  string $extension_type,
+  string $extension_machine,
+  string $hook_name,
+  array $selector_kinds,
+) use ($callable_details, $candidate_active_render_bindings): array {
+  [$class, $method, $function, $file] = $callable_details($listener);
+  $matches = [];
+  foreach ($candidate_active_render_bindings as $binding) {
+    $binding_provider = $extension_type === 'module'
+      ? (string) ($binding['hookProviderMachineName'] ?? '')
+      : (string) ($binding['extensionMachineName'] ?? '');
+    if ((string) ($binding['extensionType'] ?? '') !== $extension_type ||
+      $binding_provider !== $extension_machine ||
+      (string) ($binding['hookName'] ?? '') !== $hook_name ||
+      !in_array((string) ($binding['selectorKind'] ?? ''), $selector_kinds, TRUE) ||
+      (string) ($binding['sourceRealpath'] ?? '') !== $file) continue;
+    $binding_class = ltrim((string) ($binding['runtimeClass'] ?? ''), '\\');
+    $binding_method = (string) ($binding['runtimeMethod'] ?? '');
+    $binding_function = (string) ($binding['runtimeFunction'] ?? '');
+    if (($class !== '' && $binding_class === $class && $binding_method === $method) ||
+      ($function !== '' && $binding_function === $function)) {
+      $matches[] = $binding;
+    }
+  }
+  return $matches;
+};
 $router = \Drupal::service('router.no_access_checks');
 $request_stack = \Drupal::service('request_stack');
 $account_switcher = \Drupal::service('account_switcher');
@@ -902,11 +1085,362 @@ $argument_resolver = \Drupal::service('http_kernel.controller.argument_resolver'
 $renderer = \Drupal::service('renderer');
 $anonymous = new \Drupal\Core\Session\AnonymousUserSession();
 $invalidation_tag_sets = [];
+$pre_capture_invalidation_tag_sets = [];
 $total_dependencies = 0;
 $candidate_coverage_total = 0;
 $covered_declaration_set = [];
 $covered_candidate_source_file_set = [];
 $covered_candidate_surface_set = [];
+$invalidate_route_render_cache = static function (
+  \Drupal\node\NodeInterface $node,
+  array $declarations,
+  string $route_hash,
+) use (&$pre_capture_invalidation_tag_sets, &$result, $allow_invalidation, $anonymous, $bounded_metadata, $hash_json, $limits): void {
+  if (!$allow_invalidation) return;
+  $entities = [
+    'node:' . (string) $node->id() => $node,
+  ];
+  foreach ($declarations as $declaration) {
+    $field_name = (string) ($declaration['fieldName'] ?? '');
+    if ($field_name === '' || !$node->hasField($field_name)) continue;
+    $field_dependency_count = 0;
+    foreach ($node->get($field_name) as $item) {
+      $media = $item->entity;
+      if (!$media instanceof \Drupal\media\MediaInterface) continue;
+      $field_dependency_count++;
+      if ($field_dependency_count > (int) ($limits['dependenciesPerRoute'] ?? 0) ||
+        count($entities) + 1 > (int) ($limits['dependenciesTotal'] ?? 0)) {
+        throw new \RuntimeException('pre_capture_invalidation_entity_limit_exceeded');
+      }
+      $pre_capture_media_access = $media->access('view', $anonymous, TRUE);
+      if (!$pre_capture_media_access->isAllowed()) {
+        throw new \RuntimeException('pre_capture_dependency_access_not_allowed');
+      }
+      $entities['media:' . (string) $media->id()] = $media;
+      $source_field = (string) ($media->getSource()->getConfiguration()['source_field'] ?? '');
+      if ($source_field === '' || !$media->hasField($source_field)) continue;
+      foreach ($media->get($source_field) as $source_item) {
+        $file = $source_item->entity;
+        if (!$file instanceof \Drupal\file\FileInterface) continue;
+        $field_dependency_count++;
+        if ($field_dependency_count > (int) ($limits['dependenciesPerRoute'] ?? 0) ||
+          count($entities) + 1 > (int) ($limits['dependenciesTotal'] ?? 0)) {
+          throw new \RuntimeException('pre_capture_invalidation_entity_limit_exceeded');
+        }
+        $pre_capture_file_access = $file->access('view', $anonymous, TRUE);
+        if (!$pre_capture_file_access->isAllowed()) {
+          throw new \RuntimeException('pre_capture_dependency_access_not_allowed');
+        }
+        $entities['file:' . (string) $file->id()] = $file;
+      }
+    }
+  }
+  $tags = [];
+  foreach ($entities as $entity) {
+    if (!method_exists($entity, 'getCacheTagsToInvalidate')) continue;
+    foreach ($entity->getCacheTagsToInvalidate() as $tag) {
+      $tags[] = $tag;
+    }
+  }
+  $tags = $bounded_metadata($tags, 'pre_capture_invalidation_tags', $route_hash);
+  if ($tags === NULL) throw new \RuntimeException('pre_capture_invalidation_tags_outside_budget');
+  if (!$tags) throw new \RuntimeException('pre_capture_invalidation_tags_unavailable');
+  \Drupal::service('cache_tags.invalidator')->invalidateTags($tags);
+  $evidence = $hash_json($tags);
+  $pre_capture_invalidation_tag_sets[$evidence] = $tags;
+  $result['invalidation']['preCaptureAttempted'] = TRUE;
+  $result['invalidation']['preCaptureTagCount'] += count($tags);
+  $evidence_set = array_keys($pre_capture_invalidation_tag_sets);
+  sort($evidence_set, SORT_STRING);
+  $result['invalidation']['preCaptureEvidenceSha256'] = $hash_json($evidence_set);
+};
+$capture_render = static function (callable $build_factory) use ($renderer): array {
+  /** @var \Twig\Environment $twig */
+  $twig = \Drupal::service('twig');
+  $original_loader = $twig->getLoader();
+  $recording_loader = new class($original_loader) implements \Twig\Loader\LoaderInterface {
+    private array $realpaths = [];
+
+    public function __construct(private \Twig\Loader\LoaderInterface $inner) {}
+
+    private function record(string $value): void {
+      if ($value === '') return;
+      $candidates = [$value];
+      if (!str_starts_with($value, '/')) $candidates[] = DRUPAL_ROOT . '/' . ltrim($value, '/\\');
+      foreach ($candidates as $candidate) {
+        $realpath = realpath($candidate);
+        if ($realpath === FALSE || !is_file($realpath)) continue;
+        $normalized = str_replace('\\', '/', $realpath);
+        $this->realpaths[$normalized] = TRUE;
+      }
+    }
+
+    public function getSourceContext(string $name): \Twig\Source {
+      $this->record($name);
+      $source = $this->inner->getSourceContext($name);
+      $this->record($source->getPath());
+      return $source;
+    }
+
+    public function getCacheKey(string $name): string {
+      $this->record($name);
+      $key = $this->inner->getCacheKey($name);
+      $this->record($key);
+      return $key;
+    }
+
+    public function isFresh(string $name, int $time): bool {
+      $this->record($name);
+      return $this->inner->isFresh($name, $time);
+    }
+
+    public function exists(string $name) {
+      $this->record($name);
+      return $this->inner->exists($name);
+    }
+
+    public function recordedRealpaths(): array {
+      $realpaths = array_keys($this->realpaths);
+      sort($realpaths, SORT_STRING);
+      return $realpaths;
+    }
+  };
+  $render_context = new \Drupal\Core\Render\RenderContext();
+  $build = NULL;
+  $twig->setLoader($recording_loader);
+  try {
+    $renderer->executeInRenderContext($render_context, static function () use ($build_factory, $renderer, &$build): void {
+      $build = $build_factory();
+      if (is_array($build)) {
+        $build['#cache']['max-age'] = 0;
+        $renderer->render($build);
+      }
+    });
+  }
+  finally {
+    $twig->setLoader($original_loader);
+  }
+  return [$build, $render_context, $recording_loader->recordedRealpaths()];
+};
+$resolve_recorded_render = static function (array $recorded_realpaths, bool $entity_view_handler) use (
+  $active_extensions_by_machine,
+  $active_module_render_bindings,
+  $candidate_active_render_bindings,
+  $callable_details,
+  $match_candidate_callable,
+): array {
+  $theme_manager = \Drupal::service('theme.manager');
+  $active_theme = $theme_manager->getActiveTheme();
+  $active_theme_machines = array_values(array_unique(array_merge(
+    array_keys($active_theme->getBaseThemeExtensions()),
+    [(string) $active_theme->getName()],
+  )));
+  sort($active_theme_machines, SORT_STRING);
+  $active_theme_machine_set = array_fill_keys($active_theme_machines, TRUE);
+  $theme_registry = \Drupal::service('theme.registry')->getRuntime();
+  $complete_theme_registry = \Drupal::service('theme.registry')->get();
+  $module_handler = \Drupal::moduleHandler();
+  $recorded_realpath_set = array_fill_keys(array_map(
+    static fn (string $path): string => str_replace('\\', '/', $path),
+    $recorded_realpaths,
+  ), TRUE);
+  $drupal_root_realpath = str_replace('\\', '/', (string) (realpath(DRUPAL_ROOT) ?: DRUPAL_ROOT));
+  $selected_template_paths = [];
+  foreach (array_keys($recorded_realpath_set) as $recorded_realpath) {
+    if (!str_ends_with($recorded_realpath, '.twig') || !str_starts_with($recorded_realpath, $drupal_root_realpath . '/')) continue;
+    $selected_template_paths[substr($recorded_realpath, strlen($drupal_root_realpath) + 1)] = TRUE;
+  }
+  $selected_template_bindings = [];
+  foreach ($candidate_active_render_bindings as $binding) {
+    if ((string) ($binding['selectorKind'] ?? '') !== 'theme_template') continue;
+    if ((string) ($binding['extensionType'] ?? '') === 'theme' &&
+      !isset($active_theme_machine_set[(string) ($binding['extensionMachineName'] ?? '')])) continue;
+    if (!isset($recorded_realpath_set[(string) ($binding['sourceRealpath'] ?? '')])) continue;
+    $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+    $selected_template_bindings[$key] = $binding;
+  }
+  ksort($selected_template_bindings, SORT_STRING);
+  $selected_template_paths = array_values(array_filter(array_keys($selected_template_paths), 'strlen'));
+  sort($selected_template_paths, SORT_STRING);
+
+  $selected_registry_entries = [];
+  foreach ($complete_theme_registry as $hook => $info) {
+    if (!is_array($info)) continue;
+    $template_candidates = [];
+    if (isset($info['template_file']) && is_string($info['template_file'])) $template_candidates[] = $info['template_file'];
+    if (isset($info['template']) && is_string($info['template'])) {
+      $path = isset($info['path']) && is_string($info['path']) ? rtrim($info['path'], '/\\') . '/' : '';
+      $template_candidates[] = $path . $info['template'];
+      $template_candidates[] = $path . $info['template'] . '.html.twig';
+    }
+    foreach ($template_candidates as $template_candidate) {
+      $absolute_candidate = str_starts_with($template_candidate, '/')
+        ? $template_candidate
+        : DRUPAL_ROOT . '/' . ltrim($template_candidate, '/\\');
+      $resolved_candidate = realpath($absolute_candidate);
+      if ($resolved_candidate === FALSE || !isset($recorded_realpath_set[str_replace('\\', '/', $resolved_candidate)])) continue;
+      $selected_registry_entries[(string) $hook] = $info;
+      break;
+    }
+  }
+
+  $selected_preprocess_bindings = [];
+  $preprocess_invoke_map = $theme_registry->getPreprocessInvokes();
+  $preprocess_callbacks = $theme_registry->getGlobalPreprocess();
+  foreach ($selected_registry_entries as $info) {
+    if (is_array($info['preprocess functions'] ?? NULL)) {
+      $preprocess_callbacks = array_merge($preprocess_callbacks, $info['preprocess functions']);
+    }
+  }
+  foreach ($preprocess_callbacks as $preprocess_callback) {
+    if (is_string($preprocess_callback) && isset($preprocess_invoke_map[$preprocess_callback])) {
+      $invoke = $preprocess_invoke_map[$preprocess_callback];
+      $extension_type = isset($invoke['module']) ? 'module' : 'theme';
+      $extension_machine = (string) ($invoke[$extension_type] ?? '');
+      $hook_name = (string) ($invoke['hook'] ?? '');
+      $handler = $extension_type === 'module' ? $module_handler : $theme_manager;
+      $handler->invokeAllWith($hook_name, static function (callable $listener, string $provider) use (
+        &$selected_preprocess_bindings,
+        $extension_machine,
+        $extension_type,
+        $hook_name,
+        $match_candidate_callable,
+      ): void {
+        if ($provider !== $extension_machine) return;
+        $matches = $match_candidate_callable($listener, $extension_type, $provider, $hook_name, ['preprocess_node', 'template_preprocess_hook']);
+        if (count($matches) === 0) return;
+        if (count($matches) !== 1) throw new \RuntimeException('selected_preprocess_hook_not_uniquely_inventoried');
+        $binding = reset($matches);
+        $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+        $selected_preprocess_bindings[$key] = $binding;
+      });
+      continue;
+    }
+    if (!is_callable($preprocess_callback)) continue;
+    [$class, $method, $function, $file] = $callable_details($preprocess_callback);
+    foreach ($candidate_active_render_bindings as $binding) {
+      if (!in_array((string) ($binding['selectorKind'] ?? ''), ['preprocess_node', 'template_preprocess_hook'], TRUE) ||
+        (string) ($binding['sourceRealpath'] ?? '') !== $file) continue;
+      $binding_class = ltrim((string) ($binding['runtimeClass'] ?? ''), '\\');
+      $binding_method = (string) ($binding['runtimeMethod'] ?? '');
+      $binding_function = (string) ($binding['runtimeFunction'] ?? '');
+      if (!(($class !== '' && $binding_class === $class && $binding_method === $method) ||
+        ($function !== '' && $binding_function === $function))) continue;
+      $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+      $selected_preprocess_bindings[$key] = $binding;
+    }
+  }
+  ksort($selected_preprocess_bindings, SORT_STRING);
+
+  $base_hooks = [];
+  foreach ($selected_registry_entries as $hook => $info) {
+    $base_hook = (string) ($info['base hook'] ?? $hook);
+    if ($base_hook !== '') $base_hooks[$base_hook] = TRUE;
+  }
+  $active_theme_suggestion_bindings = [];
+  $theme_suggestion_alter_hooks = ['theme_suggestions_alter' => TRUE];
+  foreach (array_keys($base_hooks) as $base_hook) {
+    $theme_suggestion_alter_hooks['theme_suggestions_' . $base_hook . '_alter'] = TRUE;
+  }
+  foreach (array_keys($theme_suggestion_alter_hooks) as $suggestion_alter_hook) {
+    $theme_manager->invokeAllWith($suggestion_alter_hook, static function (callable $listener, string $theme) use (
+      &$active_theme_suggestion_bindings,
+      $active_extensions_by_machine,
+      $match_candidate_callable,
+      $suggestion_alter_hook,
+    ): void {
+      if (!isset($active_extensions_by_machine[$theme])) return;
+      $matches = $match_candidate_callable($listener, 'theme', $theme, $suggestion_alter_hook, ['theme_suggestion_hook']);
+      if (count($matches) !== 1) throw new \RuntimeException('active_theme_suggestion_hook_not_uniquely_inventoried');
+      $binding = reset($matches);
+      $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+      $active_theme_suggestion_bindings[$key] = $binding;
+    });
+  }
+  ksort($active_theme_suggestion_bindings, SORT_STRING);
+
+  $active_module_selected_bindings = [];
+  $module_suggestion_hooks = ['theme_suggestions_alter' => TRUE];
+  foreach (array_keys($base_hooks) as $base_hook) {
+    $module_suggestion_hooks['theme_suggestions_' . $base_hook] = TRUE;
+    $module_suggestion_hooks['theme_suggestions_' . $base_hook . '_alter'] = TRUE;
+  }
+  foreach ($active_module_render_bindings as $binding) {
+    $selector_kind = (string) ($binding['selectorKind'] ?? '');
+    $hook_name = (string) ($binding['hookName'] ?? '');
+    if (!(($entity_view_handler && $selector_kind === 'node_render_hook') ||
+      ($selector_kind === 'theme_suggestion_hook' && isset($module_suggestion_hooks[$hook_name])))) continue;
+    $key = implode("\0", [(string) ($binding['extensionId'] ?? ''), (string) ($binding['sourceFileId'] ?? ''), (string) ($binding['surfaceId'] ?? '')]);
+    $active_module_selected_bindings[$key] = $binding;
+  }
+  ksort($active_module_selected_bindings, SORT_STRING);
+
+  $active_theme_extension_ids = [];
+  foreach ($active_theme_machines as $machine) {
+    $extension = $active_extensions_by_machine[$machine] ?? NULL;
+    if (is_array($extension) && (string) ($extension['type'] ?? '') === 'theme') {
+      $active_theme_extension_ids[] = (string) ($extension['id'] ?? '');
+    }
+  }
+  sort($active_theme_extension_ids, SORT_STRING);
+  $render_hook_bindings = array_merge(
+    array_values($active_module_selected_bindings),
+    array_values($selected_preprocess_bindings),
+    array_values($active_theme_suggestion_bindings),
+  );
+  return [$selected_template_paths, array_values($selected_template_bindings), $render_hook_bindings, $active_theme_extension_ids];
+};
+$resolve_field_formatters = static function (array $rendered_build) use ($candidate_active_render_bindings, $limits): array {
+  $plugin_manager = \Drupal::service('plugin.manager.field.formatter');
+  $plugin_ids = [];
+  $visited = 0;
+  $collect_plugin_ids = static function (array $element, int $depth = 0) use (&$collect_plugin_ids, &$plugin_ids, &$visited, $limits): void {
+    $visited++;
+    if ($depth > 64 || $visited > (int) ($limits['metadataItemsTotal'] ?? 0)) {
+      throw new \RuntimeException('rendered_formatter_scan_limit_exceeded');
+    }
+    if (isset($element['#formatter']) && is_string($element['#formatter']) && $element['#formatter'] !== '') {
+      $plugin_ids[$element['#formatter']] = TRUE;
+    }
+    foreach ($element as $key => $value) {
+      // Render-array children cannot use property keys beginning with '#'.
+      // Skipping property payloads avoids walking arbitrary cache/attribute data.
+      if (is_array($value) && !(is_string($key) && str_starts_with($key, '#'))) {
+        $collect_plugin_ids($value, $depth + 1);
+      }
+    }
+  };
+  $collect_plugin_ids($rendered_build);
+  ksort($plugin_ids, SORT_STRING);
+  $runtime_identities = [];
+  $selected_bindings = [];
+  foreach (array_keys($plugin_ids) as $plugin_id) {
+    $definition = $plugin_manager->getDefinition($plugin_id, FALSE);
+    $class = is_array($definition)
+      ? (string) ($definition['class'] ?? '')
+      : (is_object($definition) && method_exists($definition, 'getClass') ? (string) $definition->getClass() : '');
+    if ($class === '' || !class_exists($class)) continue;
+    $reflection = new \ReflectionClass($class);
+    $formatter_realpath = str_replace('\\', '/', (string) (realpath((string) ($reflection->getFileName() ?: '')) ?: ''));
+    if ($formatter_realpath === '') continue;
+    foreach ($candidate_active_render_bindings as $binding) {
+      if ((string) ($binding['selectorKind'] ?? '') !== 'field_formatter_plugin' ||
+        (string) ($binding['runtimeClass'] ?? '') !== $class ||
+        (string) ($binding['sourceRealpath'] ?? '') !== $formatter_realpath) continue;
+      $binding_key = implode("\0", [
+        (string) ($binding['extensionId'] ?? ''),
+        (string) ($binding['sourceFileId'] ?? ''),
+        (string) ($binding['surfaceId'] ?? ''),
+      ]);
+      $selected_bindings[$binding_key] = $binding;
+      $binding_identity = (string) ($binding['runtimeIdentity'] ?? '');
+      if ($binding_identity !== '') $runtime_identities[$binding_identity] = TRUE;
+    }
+  }
+  ksort($runtime_identities, SORT_STRING);
+  ksort($selected_bindings, SORT_STRING);
+  return [array_keys($runtime_identities), array_values($selected_bindings)];
+};
 $controller_owner = static function (callable $controller, array $candidate_route) use ($hash_value): array {
   $class = '';
   $method = '';
@@ -951,6 +1485,44 @@ $controller_owner = static function (callable $controller, array $candidate_rout
   }
   return ['', $hash_value($normalized_class . "\0" . $method . "\0" . $normalized_file)];
 };
+$custom_controller_owner = static function (callable $controller) use ($active_extensions_by_machine, $hash_value): array {
+  $class = '';
+  $method = '';
+  $file = '';
+  try {
+    if (is_array($controller) && count($controller) === 2) {
+      $class = is_object($controller[0]) ? get_class($controller[0]) : ltrim((string) $controller[0], '\\');
+      $method = (string) $controller[1];
+      $reflection = new \ReflectionMethod($class, $method);
+      $file = (string) ($reflection->getFileName() ?: '');
+    }
+    elseif ($controller instanceof \Closure || is_string($controller)) {
+      $reflection = new \ReflectionFunction($controller);
+      $method = $reflection->getName();
+      $file = (string) ($reflection->getFileName() ?: '');
+    }
+    elseif (is_object($controller) && is_callable($controller)) {
+      $class = get_class($controller);
+      $method = '__invoke';
+      $reflection = new \ReflectionMethod($class, $method);
+      $file = (string) ($reflection->getFileName() ?: '');
+    }
+  }
+  catch (\Throwable) {
+    return ['', ''];
+  }
+  $normalized_file = $file !== '' ? str_replace('\\', '/', (string) (realpath($file) ?: '')) : '';
+  $identity_hash = $hash_value(ltrim($class, '\\') . "\0" . $method . "\0" . $normalized_file);
+  if ($normalized_file === '') return ['', $identity_hash];
+  foreach ($active_extensions_by_machine as $extension) {
+    if ((string) ($extension['type'] ?? '') !== 'module') continue;
+    $extension_root = str_replace('\\', '/', (string) (realpath(DRUPAL_ROOT . '/' . ($extension['drupalPath'] ?? '')) ?: ''));
+    if ($extension_root !== '' && str_starts_with($normalized_file, $extension_root . '/')) {
+      return [(string) ($extension['id'] ?? ''), $identity_hash];
+    }
+  }
+  return ['', $identity_hash];
+};
 
 foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_input) {
   if (count($result['routes']) >= (int) ($limits['routes'] ?? 0)) {
@@ -970,7 +1542,12 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
     'applies' => FALSE,
     'matched' => FALSE,
     'nodeBundleSha256' => '',
+    'requestedEntityViewModeSha256' => '',
     'entityViewModeSha256' => '',
+    'activeThemeExtensionSha256' => [],
+    'selectedThemeTemplateSha256' => [],
+    'selectedRenderHookSha256' => [],
+    'selectedFieldFormatterSha256' => [],
     'outputHandlerKind' => '',
     'outputHandlerSha256' => '',
     'controllerExtensionSha256' => '',
@@ -1020,9 +1597,18 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
     $bundle = (string) $node->bundle();
     $record['nodeBundleSha256'] = $hash_value($bundle);
     $record['nodeSha256'] = $hash_value('node' . "\0" . ($node->uuid() ?: (string) $node->id()));
+    $selection_declarations = array_values(array_filter(
+      $declarations_by_bundle[$bundle] ?? [],
+      static fn (array $declaration): bool => isset($route_declaration_set[(string) ($declaration['id'] ?? '')]),
+    ));
+    $route_cache_invalidated = FALSE;
     $controller = NULL;
     $arguments = [];
     $entity_view_mode = '';
+    $entity_view_build = NULL;
+    $build = NULL;
+    $render_context = NULL;
+    $recorded_twig_realpaths = [];
     $route_candidate_coverage = [];
     $route_render_bindings = [];
     $route_object = $matched[\Drupal\Core\Routing\RouteObjectInterface::ROUTE_OBJECT] ?? NULL;
@@ -1035,46 +1621,97 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
         $result['routes'][] = $record;
         continue;
       }
-      $entity_view_mode = (string) $entity_view_match[1];
-      $record['entityViewModeSha256'] = $hash_value($entity_view_mode);
+      $requested_entity_view_mode = (string) $entity_view_match[1];
+      $entity_view_mode = $requested_entity_view_mode;
+      $record['requestedEntityViewModeSha256'] = $hash_value($requested_entity_view_mode);
       $record['outputHandlerKind'] = 'entity_view';
-      $record['outputHandlerSha256'] = $hash_value('entity_view' . "\0" . 'node' . "\0" . $entity_view_mode . "\0" . $route_name);
+      // Do not instantiate view builders, formatters, or suggestion callbacks
+      // until both the route and resolved Node are viewable anonymously.
+      $preflight_route_access = $access_manager->checkRequest($request, $anonymous, TRUE);
+      if (!$preflight_route_access->isAllowed()) {
+        $record['routeAccess'] = $preflight_route_access->isForbidden() ? 'denied' : 'neutral';
+        $preflight_tags = $bounded_metadata($preflight_route_access->getCacheTags(), 'route_access_tags', $route_hash);
+        $preflight_contexts = $bounded_metadata($preflight_route_access->getCacheContexts(), 'route_access_contexts', $route_hash);
+        if (is_array($preflight_tags) && is_array($preflight_contexts)) {
+          $record['routeAccessMetadataSha256'] = $metadata_hash($preflight_tags, $preflight_contexts, (int) $preflight_route_access->getCacheMaxAge());
+        }
+        $violate('anonymous_route_access_not_allowed', $route_hash, $record['routeAccessMetadataSha256']);
+        $result['routes'][] = $record;
+        continue;
+      }
+      $preflight_node_access = $node->access('view', $anonymous, TRUE);
+      if (!$preflight_node_access->isAllowed()) {
+        $violate('anonymous_node_access_not_allowed', $route_hash, $record['nodeSha256']);
+        $result['routes'][] = $record;
+        continue;
+      }
+      $invalidate_route_render_cache($node, $selection_declarations, $route_hash);
+      $route_cache_invalidated = $allow_invalidation;
+      $entity_view_build = \Drupal::entityTypeManager()->getViewBuilder('node')->view($node, $entity_view_mode);
+      if (!is_array($entity_view_build)) {
+        $violate('entity_view_build_unavailable', $route_hash, $record['nodeSha256']);
+        $result['routes'][] = $record;
+        continue;
+      }
+      $effective_entity_view_mode = (string) ($entity_view_build['#view_mode'] ?? '');
+      if (!preg_match('/^[a-z][a-z0-9_]*$/', $effective_entity_view_mode)) {
+        $violate('effective_entity_view_mode_invalid', $route_hash, $hash_value($effective_entity_view_mode));
+        $result['routes'][] = $record;
+        continue;
+      }
+      $entity_view_mode = $effective_entity_view_mode;
+      $record['entityViewModeSha256'] = $hash_value($effective_entity_view_mode);
+      $record['outputHandlerSha256'] = $hash_value('entity_view' . "\0" . 'node' . "\0" . $requested_entity_view_mode . "\0" . $effective_entity_view_mode . "\0" . $route_name);
+
+      // Force this local audit build through the actual pre-render, formatter,
+      // suggestion, preprocess, and Twig pipeline even when render cache is
+      // warm. This does not alter the entity or stored display configuration.
+      $entity_view_build['#cache']['max-age'] = 0;
+      [$build, $render_context, $recorded_twig_realpaths] = $capture_render(
+        static fn (): array => $entity_view_build,
+      );
+      if (!is_array($build)) {
+        $violate('route_output_not_render_array', $route_hash, $hash_value(get_debug_type($build)));
+        $result['routes'][] = $record;
+        continue;
+      }
+      [$selected_theme_paths, $selected_template_bindings, $active_render_hook_bindings, $active_theme_extension_ids] = $resolve_recorded_render($recorded_twig_realpaths, TRUE);
+      $record['selectedThemeTemplateSha256'] = array_values(array_map($hash_value, $selected_theme_paths));
+      sort($record['selectedThemeTemplateSha256'], SORT_STRING);
+      $record['activeThemeExtensionSha256'] = array_values(array_map($hash_value, $active_theme_extension_ids));
+      sort($record['activeThemeExtensionSha256'], SORT_STRING);
+      $selected_render_hook_identities = array_values(array_unique(array_filter(array_map(
+        static fn (array $binding): string => (string) ($binding['runtimeIdentity'] ?? ''),
+        $active_render_hook_bindings,
+      ))));
+      sort($selected_render_hook_identities, SORT_STRING);
+      $record['selectedRenderHookSha256'] = array_values(array_map($hash_value, $selected_render_hook_identities));
+      sort($record['selectedRenderHookSha256'], SORT_STRING);
+      [$field_formatter_identities, $field_formatter_bindings] = $resolve_field_formatters($build);
+      $record['selectedFieldFormatterSha256'] = array_values(array_map($hash_value, $field_formatter_identities));
+      sort($record['selectedFieldFormatterSha256'], SORT_STRING);
       $primary_render_binding = NULL;
       $primary_render_priority = -1;
-      $selected_template_binding = NULL;
-      $selected_template_priority = -1;
-      foreach ($candidate_active_render_bindings as $binding) {
+      foreach (array_merge($active_render_hook_bindings, $field_formatter_bindings) as $binding) {
         $selector_kind = (string) ($binding['selectorKind'] ?? '');
-        $selector_value = (string) ($binding['selectorValue'] ?? '');
-        if (in_array($selector_kind, ['preprocess_node', 'node_render_hook'], TRUE)) {
-          $route_render_bindings[] = $binding;
-          $priority = (string) ($binding['extensionType'] ?? '') === 'module' ? 5 : 4;
-          if ($priority > $primary_render_priority) {
-            $primary_render_binding = $binding;
-            $primary_render_priority = $priority;
-          }
-          continue;
-        }
-        $selector_parts = $selector_kind === 'node_bundle_view_mode_template'
-          ? explode("\0", $selector_value, 2)
-          : [];
+        $route_render_bindings[] = $binding;
         $priority = match ($selector_kind) {
-          'node_bundle_view_mode_template' => count($selector_parts) === 2 && $selector_parts[0] === $bundle && $selector_parts[1] === $entity_view_mode ? 4 : -1,
-          'node_bundle_template' => $selector_value === $bundle ? 3 : -1,
-          'node_view_mode_template' => $selector_value === $entity_view_mode ? 2 : -1,
-          'node_template' => 1,
+          'node_render_hook' => 6,
+          'preprocess_node', 'template_preprocess_hook' => 5,
+          'theme_suggestion_hook' => 4,
+          'field_formatter_plugin' => 3,
           default => -1,
         };
-        if ($priority > $selected_template_priority) {
-          $selected_template_binding = $binding;
-          $selected_template_priority = $priority;
+        if ($priority > $primary_render_priority) {
+          $primary_render_binding = $binding;
+          $primary_render_priority = $priority;
         }
       }
-      if (is_array($selected_template_binding) && $selected_template_priority >= 0) {
+      foreach ($selected_template_bindings as $selected_template_binding) {
         $route_render_bindings[] = $selected_template_binding;
-        if ($selected_template_priority > $primary_render_priority) {
+        if (2 > $primary_render_priority) {
           $primary_render_binding = $selected_template_binding;
-          $primary_render_priority = $selected_template_priority;
+          $primary_render_priority = 2;
         }
       }
       if (is_array($candidate_route)) {
@@ -1098,9 +1735,10 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
           continue;
         }
         $record['applies'] = TRUE;
-        $record['candidateProvenanceKind'] = in_array((string) ($primary_render_binding['selectorKind'] ?? ''), ['preprocess_node', 'node_render_hook'], TRUE)
+        $primary_selector_kind = (string) ($primary_render_binding['selectorKind'] ?? '');
+        $record['candidateProvenanceKind'] = in_array($primary_selector_kind, ['preprocess_node', 'template_preprocess_hook', 'node_render_hook', 'theme_suggestion_hook'], TRUE)
           ? 'render_hook'
-          : 'default_theme_template';
+          : ($primary_selector_kind === 'field_formatter_plugin' ? 'field_formatter' : 'default_theme_template');
         $record['candidateExtensionSha256'] = $hash_value((string) ($primary_render_binding['extensionId'] ?? ''));
         $record['candidateOutputSourceFileSha256'] = $hash_value((string) ($primary_render_binding['sourceFileId'] ?? ''));
         $record['candidateOutputSurfaceSha256'] = $hash_value((string) ($primary_render_binding['surfaceId'] ?? ''));
@@ -1111,8 +1749,31 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
         ? (string) ($route_object->getDefault('_controller') ?? '')
         : (string) ($matched['_controller'] ?? '');
       if (!is_array($candidate_route)) {
+        $preflight_route_access = $access_manager->checkRequest($request, $anonymous, TRUE);
+        if (!$preflight_route_access->isAllowed()) {
+          $record['routeAccess'] = $preflight_route_access->isForbidden() ? 'denied' : 'neutral';
+          $violate('anonymous_route_access_not_allowed', $route_hash);
+          $result['routes'][] = $record;
+          continue;
+        }
+        $preflight_node_access = $node->access('view', $anonymous, TRUE);
+        if (!$preflight_node_access->isAllowed()) {
+          $violate('anonymous_node_access_not_allowed', $route_hash, $record['nodeSha256']);
+          $result['routes'][] = $record;
+          continue;
+        }
+        $resolved_controller = $controller_resolver->getController($request);
+        if (!is_callable($resolved_controller)) {
+          $violate('route_controller_not_resolvable', $route_hash, $hash_value($controller_definition));
+          $result['routes'][] = $record;
+          continue;
+        }
+        [$custom_controller_extension_id, $resolved_controller_hash] = $custom_controller_owner($resolved_controller);
         $record['outputHandlerKind'] = 'core_controller';
-        $record['outputHandlerSha256'] = $hash_value('core_controller' . "\0" . $route_name . "\0" . $controller_definition);
+        $record['outputHandlerSha256'] = $resolved_controller_hash;
+        if ($custom_controller_extension_id !== '') {
+          $violate('route_altered_custom_controller_lacks_candidate_route_provenance', $route_hash, $hash_value($custom_controller_extension_id));
+        }
         $result['routes'][] = $record;
         continue;
       }
@@ -1124,6 +1785,28 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
         $result['routes'][] = $record;
         continue;
       }
+      // Resolve neither the custom controller nor its arguments until the
+      // anonymous route and resolved Node have passed their access preflight.
+      $preflight_route_access = $access_manager->checkRequest($request, $anonymous, TRUE);
+      if (!$preflight_route_access->isAllowed()) {
+        $record['routeAccess'] = $preflight_route_access->isForbidden() ? 'denied' : 'neutral';
+        $preflight_tags = $bounded_metadata($preflight_route_access->getCacheTags(), 'route_access_tags', $route_hash);
+        $preflight_contexts = $bounded_metadata($preflight_route_access->getCacheContexts(), 'route_access_contexts', $route_hash);
+        if (is_array($preflight_tags) && is_array($preflight_contexts)) {
+          $record['routeAccessMetadataSha256'] = $metadata_hash($preflight_tags, $preflight_contexts, (int) $preflight_route_access->getCacheMaxAge());
+        }
+        $violate('anonymous_route_access_not_allowed', $route_hash, $record['routeAccessMetadataSha256']);
+        $result['routes'][] = $record;
+        continue;
+      }
+      $preflight_node_access = $node->access('view', $anonymous, TRUE);
+      if (!$preflight_node_access->isAllowed()) {
+        $violate('anonymous_node_access_not_allowed', $route_hash, $record['nodeSha256']);
+        $result['routes'][] = $record;
+        continue;
+      }
+      $invalidate_route_render_cache($node, $selection_declarations, $route_hash);
+      $route_cache_invalidated = $allow_invalidation;
       $controller = $controller_resolver->getController($request);
       if (!is_callable($controller)) {
         $violate('route_controller_not_resolvable', $route_hash, $record['nodeSha256']);
@@ -1198,7 +1881,7 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
       continue;
     }
 
-    $entities = [['entity' => $node, 'type' => 'node', 'fieldPath' => 'node-root']];
+    $entities = [['entity' => $node, 'type' => 'node', 'fieldPath' => 'node-root', 'access' => $node_access]];
     $chain_count = 0;
     $declaration_chain_counts = array_fill_keys($resolved_declaration_ids, 0);
     $declaration_dependency_owners = [];
@@ -1234,7 +1917,12 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
           $violate('declared_node_reference_is_not_media', $route_hash, $field_path_hash);
           continue;
         }
+        $media_access = $media->access('view', $anonymous, TRUE);
         $media_hash = $hash_value('media' . "\0" . ($media->uuid() ?: (string) $media->id()));
+        if (!$media_access->isAllowed()) {
+          $violate('anonymous_dependency_access_not_allowed', $route_hash, $media_hash);
+          continue;
+        }
         if (isset($declaration_dependency_owners[$media_hash])) {
           if ($declaration_dependency_owners[$media_hash] !== $declaration_id) {
             $violate('ambiguous_declaration_dependency_provenance', $route_hash, $media_hash);
@@ -1242,7 +1930,7 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
           continue;
         }
         $declaration_dependency_owners[$media_hash] = $declaration_id;
-        $entities[] = ['entity' => $media, 'type' => 'media', 'fieldPath' => $field_name];
+        $entities[] = ['entity' => $media, 'type' => 'media', 'fieldPath' => $field_name, 'access' => $media_access];
         $configuration = $media->getSource()->getConfiguration();
         $source_field = (string) ($configuration['source_field'] ?? '');
         if ($source_field === '' || !$media->hasField($source_field)) {
@@ -1277,7 +1965,12 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
             $violate('media_source_reference_is_not_file', $route_hash, $media_hash);
             continue;
           }
+          $file_access = $file->access('view', $anonymous, TRUE);
           $file_hash = $hash_value('file' . "\0" . ($file->uuid() ?: (string) $file->id()));
+          if (!$file_access->isAllowed()) {
+            $violate('anonymous_dependency_access_not_allowed', $route_hash, $file_hash);
+            continue;
+          }
           if (isset($declaration_dependency_owners[$file_hash])) {
             if ($declaration_dependency_owners[$file_hash] !== $declaration_id) {
               $violate('ambiguous_declaration_dependency_provenance', $route_hash, $file_hash);
@@ -1285,7 +1978,12 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
             continue;
           }
           $declaration_dependency_owners[$file_hash] = $declaration_id;
-          $entities[] = ['entity' => $file, 'type' => 'file', 'fieldPath' => $field_name . "\0" . $source_field];
+          $entities[] = [
+            'entity' => $file,
+            'type' => 'file',
+            'fieldPath' => $field_name . "\0" . $source_field,
+            'access' => $file_access,
+          ];
           $chain_count++;
           $declaration_chain_counts[$declaration_id]++;
         }
@@ -1316,15 +2014,34 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
     }
     $record['matched'] = TRUE;
 
-    $build = NULL;
-    $render_context = new \Drupal\Core\Render\RenderContext();
-    $renderer->executeInRenderContext($render_context, static function () use ($controller, $arguments, $entity_view_mode, $node, $renderer, &$build): void {
-      $build = $entity_view_mode !== ''
-        ? \Drupal::entityTypeManager()->getViewBuilder('node')->view($node, $entity_view_mode)
-        : call_user_func_array($controller, $arguments);
-      if (!is_array($build)) return;
-      $renderer->render($build);
-    });
+    if (!$render_context instanceof \Drupal\Core\Render\RenderContext) {
+      [$build, $render_context, $recorded_twig_realpaths] = $capture_render(
+        static fn () => call_user_func_array($controller, $arguments),
+      );
+      if (is_array($build)) {
+        [$selected_theme_paths, $selected_template_bindings, $active_render_hook_bindings, $active_theme_extension_ids] = $resolve_recorded_render($recorded_twig_realpaths, FALSE);
+        $record['selectedThemeTemplateSha256'] = array_values(array_map($hash_value, $selected_theme_paths));
+        sort($record['selectedThemeTemplateSha256'], SORT_STRING);
+        $record['activeThemeExtensionSha256'] = array_values(array_map($hash_value, $active_theme_extension_ids));
+        sort($record['activeThemeExtensionSha256'], SORT_STRING);
+        $selected_render_hook_identities = array_values(array_unique(array_filter(array_map(
+          static fn (array $binding): string => (string) ($binding['runtimeIdentity'] ?? ''),
+          $active_render_hook_bindings,
+        ))));
+        sort($selected_render_hook_identities, SORT_STRING);
+        $record['selectedRenderHookSha256'] = array_values(array_map($hash_value, $selected_render_hook_identities));
+        sort($record['selectedRenderHookSha256'], SORT_STRING);
+        [$field_formatter_identities, $field_formatter_bindings] = $resolve_field_formatters($build);
+        $record['selectedFieldFormatterSha256'] = array_values(array_map($hash_value, $field_formatter_identities));
+        sort($record['selectedFieldFormatterSha256'], SORT_STRING);
+        $route_render_bindings = array_merge(
+          $route_render_bindings,
+          $active_render_hook_bindings,
+          $field_formatter_bindings,
+          $selected_template_bindings,
+        );
+      }
+    }
     if (!is_array($build)) {
       $unsupported_hash = is_object($build) ? $hash_value(get_class($build)) : $hash_value(get_debug_type($build));
       $violate('route_output_not_render_array', $route_hash, $unsupported_hash);
@@ -1353,9 +2070,9 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
       $selector_kind = (string) ($coverage['selectorKind'] ?? '');
       $role = (string) ($coverage['role'] ?? '');
       if ($role === '') {
-        $role = in_array($selector_kind, ['preprocess_node', 'node_render_hook'], TRUE)
+        $role = in_array($selector_kind, ['preprocess_node', 'template_preprocess_hook', 'node_render_hook', 'theme_suggestion_hook'], TRUE)
           ? 'render_hook'
-          : 'render_template';
+          : ($selector_kind === 'field_formatter_plugin' ? 'field_formatter' : 'render_template');
       }
       $extension_id = (string) ($coverage['extensionId'] ?? '');
       $source_file_id = (string) ($coverage['sourceFileId'] ?? '');
@@ -1399,7 +2116,7 @@ foreach (is_array($input['routes'] ?? NULL) ? $input['routes'] : [] as $route_in
         $violate('dependency_total_limit_exceeded', $route_hash);
         break;
       }
-      $access = $entity_type === 'node' ? $node_access : $entity->access('view', $anonymous, TRUE);
+      $access = $dependency['access'];
       $entity_tags = $bounded_metadata($entity->getCacheTags(), 'entity_cache_tags', $route_hash, $entity_hash);
       if ($entity_tags === NULL) break;
       $invalidation_tags = method_exists($entity, 'getCacheTagsToInvalidate')
@@ -1478,14 +2195,18 @@ foreach ($result['routes'] as $route) {
 
 if ($allow_invalidation) {
   if ($result['applicableRouteCount'] === 0) {
-    $result['invalidation']['status'] = 'not_run_due_to_not_applicable';
+    $result['invalidation']['status'] = $result['invalidation']['preCaptureAttempted']
+      ? 'pre_capture_performed_not_applicable'
+      : 'not_run_due_to_not_applicable';
   }
   else {
     if (!$result['violations'] && !$invalidation_tag_sets) {
       $violate('no_entity_invalidation_tag_sets');
     }
     if ($result['violations']) {
-      $result['invalidation']['status'] = 'not_run_due_to_violations';
+      $result['invalidation']['status'] = $result['invalidation']['preCaptureAttempted']
+        ? 'pre_capture_performed_proof_not_run_due_to_violations'
+        : 'not_run_due_to_violations';
     }
     else {
     $result['invalidation']['status'] = 'running';
@@ -1619,16 +2340,28 @@ export function parseCustomEntityOutputAudit(value, {
     }
   ]));
   const expectedCandidateRenderProvenance = expectedCandidateRenderBindings.map((binding) => ({
-    provenanceKind: ['preprocess_node', 'node_render_hook'].includes(binding.selectorKind)
+    provenanceKind: RENDER_HOOK_SELECTOR_KINDS.has(binding.selectorKind)
       ? 'render_hook'
+      : binding.selectorKind === 'field_formatter_plugin'
+        ? 'field_formatter'
       : 'default_theme_template',
     extensionSha256: sha256(binding.extensionId),
     extensionType: String(binding.extensionType ?? ''),
     outputSourceFileSha256: sha256(binding.sourceFileId),
     outputSurfaceSha256: sha256(binding.surfaceId),
+    sourceDrupalPathSha256: sha256(binding.sourceDrupalPath),
+    runtimeIdentitySha256: binding.runtimeIdentity
+      ? sha256(binding.runtimeIdentity)
+      : '',
     selectorKind: String(binding.selectorKind ?? ''),
     selectorValue: String(binding.selectorValue ?? '')
   }));
+  const expectedRenderHookIdentitySha256 = new Set(expectedCandidateRenderProvenance
+    .filter(({ selectorKind }) => RENDER_HOOK_SELECTOR_KINDS.has(selectorKind))
+    .map(({ runtimeIdentitySha256 }) => runtimeIdentitySha256));
+  const expectedFieldFormatterIdentitySha256 = new Set(expectedCandidateRenderProvenance
+    .filter(({ selectorKind }) => selectorKind === 'field_formatter_plugin')
+    .map(({ runtimeIdentitySha256 }) => runtimeIdentitySha256));
   const normalizedExpectedDeclarationIds = uniqueSorted(expectedDeclarationIds);
   const normalizedExpectedCandidateSourceFileIds = uniqueSorted(expectedCandidateSourceFileIds);
   const normalizedExpectedCandidateSurfaceIds = uniqueSorted(expectedCandidateSurfaceIds);
@@ -1742,7 +2475,10 @@ export function parseCustomEntityOutputAudit(value, {
   for (const [index, route] of audit.routes.entries()) {
     exactKeys(route, [
       'routeSha256', 'routeNameSha256', 'declarationBindingSha256', 'candidateExtensionSetSha256',
-      'applies', 'matched', 'nodeBundleSha256', 'entityViewModeSha256', 'outputHandlerKind', 'outputHandlerSha256',
+      'applies', 'matched', 'nodeBundleSha256', 'requestedEntityViewModeSha256', 'entityViewModeSha256',
+      'activeThemeExtensionSha256', 'selectedThemeTemplateSha256', 'selectedRenderHookSha256',
+      'selectedFieldFormatterSha256',
+      'outputHandlerKind', 'outputHandlerSha256',
       'controllerExtensionSha256', 'candidateProvenanceKind', 'candidateExtensionSha256',
       'candidateRouteSourceFileSha256', 'candidateRouteSurfaceSha256',
       'candidateOutputSourceFileSha256', 'candidateOutputSurfaceSha256', 'candidateCoverage',
@@ -1753,7 +2489,8 @@ export function parseCustomEntityOutputAudit(value, {
     ], `Custom entity-output audit route ${index}`);
     for (const key of ['routeSha256']) assertHash(route[key], `Custom entity-output audit route ${index} ${key}`);
     for (const key of [
-      'routeNameSha256', 'declarationBindingSha256', 'candidateExtensionSetSha256', 'nodeBundleSha256', 'entityViewModeSha256',
+      'routeNameSha256', 'declarationBindingSha256', 'candidateExtensionSetSha256', 'nodeBundleSha256',
+      'requestedEntityViewModeSha256', 'entityViewModeSha256',
       'outputHandlerSha256', 'controllerExtensionSha256', 'candidateExtensionSha256',
       'candidateRouteSourceFileSha256', 'candidateRouteSurfaceSha256',
       'candidateOutputSourceFileSha256', 'candidateOutputSurfaceSha256',
@@ -1765,10 +2502,51 @@ export function parseCustomEntityOutputAudit(value, {
     if (!['', 'candidate_controller', 'entity_view', 'core_controller'].includes(route.outputHandlerKind)) {
       throw new Error('Custom entity-output audit emitted an invalid output handler kind.');
     }
+    if (!Array.isArray(route.selectedThemeTemplateSha256) ||
+      route.selectedThemeTemplateSha256.length > CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.candidateSurfaces ||
+      JSON.stringify(route.selectedThemeTemplateSha256) !== JSON.stringify(uniqueSorted(route.selectedThemeTemplateSha256))) {
+      throw new Error('Custom entity-output audit selected theme-template set is inconsistent.');
+    }
+    for (const hash of route.selectedThemeTemplateSha256) {
+      assertHash(hash, `Custom entity-output audit route ${index} selected theme template`);
+    }
+    if (!Array.isArray(route.activeThemeExtensionSha256) ||
+      route.activeThemeExtensionSha256.length > CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.extensions ||
+      JSON.stringify(route.activeThemeExtensionSha256) !== JSON.stringify(uniqueSorted(route.activeThemeExtensionSha256))) {
+      throw new Error('Custom entity-output audit active route theme set is inconsistent.');
+    }
+    for (const hash of route.activeThemeExtensionSha256) {
+      assertHash(hash, `Custom entity-output audit route ${index} active theme extension`);
+      if (!audit.activeCandidateExtensionSha256.includes(hash) || expectedExtensionBySha256.get(hash)?.type !== 'theme') {
+        throw new Error('Custom entity-output audit route names an inactive or uninventoried custom theme.');
+      }
+    }
+    if (!Array.isArray(route.selectedRenderHookSha256) ||
+      route.selectedRenderHookSha256.length > CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.candidateSurfaces ||
+      JSON.stringify(route.selectedRenderHookSha256) !== JSON.stringify(uniqueSorted(route.selectedRenderHookSha256))) {
+      throw new Error('Custom entity-output audit selected render-hook set is inconsistent.');
+    }
+    for (const hash of route.selectedRenderHookSha256) {
+      assertHash(hash, `Custom entity-output audit route ${index} selected render hook`);
+      if (!expectedRenderHookIdentitySha256.has(hash)) {
+        throw new Error('Custom entity-output audit selected render hook is not exactly inventoried.');
+      }
+    }
+    if (!Array.isArray(route.selectedFieldFormatterSha256) ||
+      route.selectedFieldFormatterSha256.length > CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.candidateSurfaces ||
+      JSON.stringify(route.selectedFieldFormatterSha256) !== JSON.stringify(uniqueSorted(route.selectedFieldFormatterSha256))) {
+      throw new Error('Custom entity-output audit selected field-formatter set is inconsistent.');
+    }
+    for (const hash of route.selectedFieldFormatterSha256) {
+      assertHash(hash, `Custom entity-output audit route ${index} selected field formatter`);
+      if (!expectedFieldFormatterIdentitySha256.has(hash)) {
+        throw new Error('Custom entity-output audit selected field formatter is not exactly inventoried.');
+      }
+    }
     if (route.candidateExtensionSetSha256 !== activeCandidateExtensionSetSha256) {
       throw new Error('Custom entity-output audit route is not bound to the exact active candidate extension set.');
     }
-    if (!['', 'custom_route', 'custom_controller', 'render_hook', 'default_theme_template'].includes(route.candidateProvenanceKind)) {
+    if (!['', 'custom_route', 'custom_controller', 'field_formatter', 'render_hook', 'default_theme_template'].includes(route.candidateProvenanceKind)) {
       throw new Error('Custom entity-output audit emitted an invalid candidate provenance kind.');
     }
     if (!['', 'allowed', 'denied', 'neutral'].includes(route.routeAccess)) throw new Error('Custom entity-output audit emitted an invalid route access result.');
@@ -1778,8 +2556,19 @@ export function parseCustomEntityOutputAudit(value, {
     if (route.matched) matchedRouteCount += 1;
     if (route.rendered) renderedRouteCount += 1;
     if (route.rendered && !route.matched) throw new Error('Custom entity-output audit rendered an unmatched route.');
-    if ((route.outputHandlerKind === 'entity_view') !== (route.entityViewModeSha256 !== '')) {
+    if ((route.outputHandlerKind === 'entity_view') !==
+      (route.requestedEntityViewModeSha256 !== '' && route.entityViewModeSha256 !== '')) {
       throw new Error('Custom entity-output audit entity-view mode evidence is inconsistent.');
+    }
+    if (!['entity_view', 'candidate_controller'].includes(route.outputHandlerKind) && (
+      route.activeThemeExtensionSha256.length !== 0 || route.selectedThemeTemplateSha256.length !== 0 ||
+      route.selectedRenderHookSha256.length !== 0 || route.selectedFieldFormatterSha256.length !== 0
+    )) {
+      throw new Error('Custom entity-output audit non-entity handler contains theme or formatter selection evidence.');
+    }
+    if (audit.status !== 'fail' && route.outputHandlerKind === 'entity_view' &&
+      route.applies && route.selectedThemeTemplateSha256.length === 0) {
+      throw new Error('Custom entity-output audit applicable entity-view route lacks exact selected template evidence.');
     }
     const expectedRoute = expectedRouteBySha256.get(route.routeSha256);
     const expectedRouteDeclarationIds = uniqueSorted(expectedRoute?.declarationIds ?? []);
@@ -1795,11 +2584,10 @@ export function parseCustomEntityOutputAudit(value, {
       route,
       candidateRouteByNameSha256: expectedCandidateRouteByNameSha256,
       candidateRenderBindings: expectedCandidateRenderProvenance,
-      activeExtensionSha256: audit.activeCandidateExtensionSha256,
-      defaultThemeExtensionSha256: audit.defaultThemeExtensionSha256
+      activeExtensionSha256: audit.activeCandidateExtensionSha256
     });
     const expectedApplies = expectedRouteCoverage.length > 0;
-    if (validateExpectedApplicability && route.applies !== expectedApplies) {
+    if (validateExpectedApplicability && audit.status !== 'fail' && route.applies !== expectedApplies) {
       throw new Error('Custom entity-output audit route applicability is not bound to active exact candidate provenance.');
     }
     if (route.applies) {
@@ -1916,10 +2704,14 @@ export function parseCustomEntityOutputAudit(value, {
         route.candidateOutputSourceFileSha256 === expectedCandidateRoute.controllerSourceFileSha256 &&
         route.candidateOutputSurfaceSha256 === expectedCandidateRoute.controllerSurfaceSha256;
       const exactRenderProvenance = route.outputHandlerKind === 'entity_view' &&
-        ['render_hook', 'default_theme_template'].includes(route.candidateProvenanceKind) &&
+        ['field_formatter', 'render_hook', 'default_theme_template'].includes(route.candidateProvenanceKind) &&
         route.candidateRouteSourceFileSha256 === '' && route.candidateRouteSurfaceSha256 === '' &&
         expectedRouteCoverage.some((coverage) =>
-          (route.candidateProvenanceKind === 'render_hook' ? coverage.role === 'render_hook' : coverage.role === 'render_template') &&
+          (route.candidateProvenanceKind === 'render_hook'
+            ? coverage.role === 'render_hook'
+            : route.candidateProvenanceKind === 'field_formatter'
+              ? coverage.role === 'field_formatter'
+              : coverage.role === 'render_template') &&
           route.candidateExtensionSha256 === coverage.extensionSha256 &&
           route.candidateOutputSourceFileSha256 === coverage.sourceFileSha256 &&
           route.candidateOutputSurfaceSha256 === coverage.surfaceSha256
@@ -1958,24 +2750,37 @@ export function parseCustomEntityOutputAudit(value, {
     assertHash(violation.subjectSha256, 'Custom entity-output violation subject hash', true);
   }
   exactKeys(audit.invalidation, [
-    'status', 'attempted', 'seededCount', 'invalidatedCount', 'cleanupRequired', 'cleanupCompleted', 'evidenceSha256'
+    'status', 'preCaptureAttempted', 'preCaptureTagCount', 'preCaptureEvidenceSha256',
+    'attempted', 'seededCount', 'invalidatedCount', 'cleanupRequired', 'cleanupCompleted', 'evidenceSha256'
   ], 'Custom entity-output invalidation audit');
+  assertBoolean(audit.invalidation.preCaptureAttempted, 'Custom entity-output pre-capture invalidation attempted');
   assertBoolean(audit.invalidation.attempted, 'Custom entity-output invalidation attempted');
   assertBoolean(audit.invalidation.cleanupRequired, 'Custom entity-output invalidation cleanupRequired');
   assertBoolean(audit.invalidation.cleanupCompleted, 'Custom entity-output invalidation cleanupCompleted');
   assertCount(audit.invalidation.seededCount, CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.dependenciesTotal, 'Custom entity-output invalidation seededCount');
   assertCount(audit.invalidation.invalidatedCount, CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.dependenciesTotal, 'Custom entity-output invalidation invalidatedCount');
+  assertCount(audit.invalidation.preCaptureTagCount, CUSTOM_ENTITY_OUTPUT_AUDIT_LIMITS.metadataItemsTotal, 'Custom entity-output pre-capture invalidation tag count');
+  assertHash(audit.invalidation.preCaptureEvidenceSha256, 'Custom entity-output pre-capture invalidation evidence', true);
   assertHash(audit.invalidation.evidenceSha256, 'Custom entity-output invalidation evidence', true);
   if (!allowOwnedCacheInvalidation) {
-    if (audit.invalidation.status !== 'not_run' || audit.invalidation.attempted || audit.invalidation.seededCount !== 0 || audit.invalidation.invalidatedCount !== 0 || audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.evidenceSha256 !== '') {
+    if (audit.invalidation.status !== 'not_run' || audit.invalidation.preCaptureAttempted || audit.invalidation.preCaptureTagCount !== 0 || audit.invalidation.preCaptureEvidenceSha256 !== '' || audit.invalidation.attempted || audit.invalidation.seededCount !== 0 || audit.invalidation.invalidatedCount !== 0 || audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.evidenceSha256 !== '') {
       throw new Error('Default custom entity-output audit reported explicit verifier mutation.');
     }
-  } else if (!['pass', 'fail', 'not_run_due_to_violations', 'not_run_due_to_not_applicable'].includes(audit.invalidation.status)) {
+  } else if (![
+    'pass', 'fail', 'not_run_due_to_violations', 'not_run_due_to_not_applicable',
+    'pre_capture_performed_proof_not_run_due_to_violations', 'pre_capture_performed_not_applicable'
+  ].includes(audit.invalidation.status)) {
     throw new Error('Isolated custom entity-output audit has an invalid invalidation status.');
-  } else if (audit.invalidation.status === 'pass' && (!audit.invalidation.attempted || !audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.seededCount === 0 || audit.invalidation.seededCount !== audit.invalidation.invalidatedCount || !audit.invalidation.evidenceSha256)) {
+  } else if (audit.invalidation.status === 'pass' && (!audit.invalidation.preCaptureAttempted || audit.invalidation.preCaptureTagCount === 0 || !audit.invalidation.preCaptureEvidenceSha256 || !audit.invalidation.attempted || !audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.seededCount === 0 || audit.invalidation.seededCount !== audit.invalidation.invalidatedCount || !audit.invalidation.evidenceSha256)) {
     throw new Error('Isolated custom entity-output audit lacks a complete owned-cache proof.');
   } else if (audit.invalidation.status.startsWith('not_run_') && (audit.invalidation.attempted || audit.invalidation.seededCount !== 0 || audit.invalidation.invalidatedCount !== 0 || audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.evidenceSha256 !== '')) {
     throw new Error('Unattempted isolated custom entity-output audit reported cache mutation.');
+  } else if (audit.invalidation.status.startsWith('pre_capture_performed_') &&
+    (!audit.invalidation.preCaptureAttempted || audit.invalidation.preCaptureTagCount === 0 ||
+      !audit.invalidation.preCaptureEvidenceSha256 || audit.invalidation.attempted ||
+      audit.invalidation.seededCount !== 0 || audit.invalidation.invalidatedCount !== 0 ||
+      audit.invalidation.cleanupRequired || !audit.invalidation.cleanupCompleted || audit.invalidation.evidenceSha256 !== '')) {
+    throw new Error('Pre-capture-only custom entity-output invalidation evidence is inconsistent.');
   }
   if (audit.status === 'pass' && audit.violations.length > 0) throw new Error('Passing custom entity-output audit contains violations.');
   if (audit.status === 'fail' && audit.violations.length === 0) throw new Error('Failing custom entity-output audit lacks violations.');
@@ -2044,7 +2849,8 @@ export function inspectCustomEntityOutputAudit({
     return localResult(derived, allowOwnedCacheInvalidation, 'not_applicable', true, '');
   }
   if (derived.routes.length === 0) return localResult(derived, allowOwnedCacheInvalidation, 'fail', true, 'missing_public_route_targets');
-  if (allowOwnedCacheInvalidation && !isolatedBoundaryAccepted(isolation)) {
+  if (allowOwnedCacheInvalidation && !isolatedBoundaryAccepted(isolation) &&
+    !currentDdevTargetBoundaryAccepted(projectRoot, environment, derived.targetOrigin)) {
     return localResult(derived, allowOwnedCacheInvalidation, 'blocked', false, 'disposable_boundary_not_proven');
   }
 

@@ -1,0 +1,15 @@
+<?php
+
+declare(strict_types=1);
+
+use Drupal\node\NodeInterface;
+
+/**
+ * Implements hook_theme_suggestions_HOOK_alter() for node templates.
+ */
+function quality_smoke_base_theme_suggestions_node_alter(array &$suggestions, array $variables): void {
+  $node = $variables['elements']['#node'] ?? NULL;
+  if ($node instanceof NodeInterface && $node->bundle() === 'phase_c_output') {
+    $suggestions[] = 'node__phase_c_selected';
+  }
+}

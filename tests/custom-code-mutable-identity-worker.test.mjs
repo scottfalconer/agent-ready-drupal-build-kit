@@ -132,6 +132,63 @@ if (settings.path.currentPath.startsWith('/catalog')) showCatalog();
   assert.ok(pathBranches.every((finding) => ['BinaryExpression', 'CallExpression'].includes(finding.node.type)));
 });
 
+test('direct truthiness cannot control statement branches', () => {
+  const code = `
+const mediaName = drupalSettings.media.name;
+if (window.location.pathname) choosePath();
+if (!document.title) chooseTitle();
+while (mediaName) { chooseMedia(); break; }
+for (; document.title;) { chooseFor(); break; }
+`;
+  const result = runWorker(workerRequest([fileRecord(code)]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output.status, 'fail');
+  const branches = result.output.findings.filter(({ sinkKind }) => sinkKind === 'branch');
+  assert.equal(branches.length, 4, JSON.stringify(result.output.findings));
+  assert.deepEqual(
+    [...new Set(branches.map(({ identityKind }) => identityKind))].sort(),
+    ['alias_or_path', 'media_name', 'title_or_label']
+  );
+});
+
+test('direct truthiness cannot control conditional or short-circuit behavior', () => {
+  const code = `
+document.title ? chooseTitle() : chooseFallback();
+document.title && chooseTheme();
+window.location.pathname || chooseRoute();
+`;
+  const result = runWorker(workerRequest([fileRecord(code)]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output.status, 'fail');
+  const branches = result.output.findings.filter(({ sinkKind }) => sinkKind === 'branch');
+  assert.equal(branches.length, 3, JSON.stringify(result.output.findings));
+  assert.deepEqual(
+    branches.map(({ identityKind }) => identityKind).sort(),
+    ['alias_or_path', 'title_or_label', 'title_or_label']
+  );
+});
+
+test('switch cases, logical assignments, and destructuring defaults cannot hide identity branches', () => {
+  const code = `
+switch (true) { case window.location.pathname === '/hero': chooseTheme(); break; }
+switch (kind) { case document.title: chooseTitle(); break; }
+window.location.pathname &&= chooseTheme();
+state.title ||= chooseTheme();
+drupalSettings.media.name ??= chooseTheme();
+const { title = chooseTheme() } = node;
+const [path = chooseTheme()] = [window.location.pathname];
+`;
+  const result = runWorker(workerRequest([fileRecord(code)]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output.status, 'fail');
+  const branches = result.output.findings.filter(({ sinkKind }) => sinkKind === 'branch');
+  assert.ok(branches.length >= 7, JSON.stringify(result.output));
+  assert.deepEqual(
+    [...new Set(branches.map(({ identityKind }) => identityKind))].sort(),
+    ['alias_or_path', 'media_name', 'title_or_label']
+  );
+});
+
 test('computed lookups catch injected aliases, titles, and Media names', () => {
   const code = `
 function choose(pathAlias, title) {
@@ -167,15 +224,52 @@ entities[title];
   assert.ok(pairs.has('media_name:entity_selection'), JSON.stringify(result.output.findings));
 });
 
-test('direct display and existence-only checks remain allowed', () => {
+test('call-rooted fields and getters preserve mutable identity at every sink', () => {
+  const code = `
+if (getEntity(1).title) chooseByTitle();
+card.className = loadMedia(2).name;
+templates[repository.getEntity(3).label];
+variants[loadMedia(4).getName()];
+if (repository.getEntity(5).getTitle()) chooseByGetter();
+`;
+  const result = runWorker(workerRequest([fileRecord(code)]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output.status, 'fail');
+  const pairs = findingPairs(result.output);
+  assert.ok(pairs.has('title_or_label:branch'), JSON.stringify(result.output.findings));
+  assert.ok(pairs.has('media_name:presentation_selection'), JSON.stringify(result.output.findings));
+  assert.ok(pairs.has('title_or_label:computed_lookup'), JSON.stringify(result.output.findings));
+  assert.ok(pairs.has('media_name:computed_lookup'), JSON.stringify(result.output.findings));
+});
+
+test('generic entity name members fail closed at behavior, presentation, and lookup sinks', () => {
+  const result = runWorker(workerRequest([fileRecord(`
+if (drupalSettings.getEntity(1).name) chooseByName();
+card.className = drupalSettings.getEntity(2).getName();
+templates[getEntity(3).name];
+`)]));
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.output.status, 'blocked');
+  const codes = new Set(result.output.blockers.map(({ code }) => code));
+  assert.ok(codes.has('unresolved_identity_branch'), JSON.stringify(result.output.blockers));
+  assert.ok(codes.has('unresolved_identity_presentation_selection'), JSON.stringify(result.output.blockers));
+  assert.ok(codes.has('unresolved_identity_computed_lookup'), JSON.stringify(result.output.blockers));
+});
+
+test('direct display and side-effect-free display fallbacks remain allowed', () => {
   const code = `
 heading.textContent = document.title;
 image.alt = drupalSettings.media.name;
 image.setAttribute('aria-label', drupalSettings.media.name);
-if (document.title) heading.hidden = false;
-if (!drupalSettings.media.name) image.hidden = true;
+heading.textContent = document.title || 'Untitled';
+image.alt = drupalSettings.media.name ? drupalSettings.media.name : 'Untitled';
+heading.textContent = getEntity(1).title;
+image.alt = repository.loadMedia(2).name;
+heading.textContent = drupalSettings.getEntity(3).name;
+image.setAttribute('aria-label', repository.loadMedia(4).getName());
 function show(value) { heading.textContent = value; }
 show(document.title);
+show(getEntity(5).title);
 `;
   const result = runWorker(workerRequest([fileRecord(code)]));
   assert.equal(result.status, 0, result.stderr);
@@ -464,6 +558,11 @@ image.src = drupalSettings.media.name;
 test('dynamic execution blocks and identity-bearing class fields cannot bypass analysis', () => {
   const result = runWorker(workerRequest([fileRecord(`
 eval('if (node.title === "Hero") pick()');
+setTimeout("if (window.location.pathname === '/hero') chooseTheme()", 0);
+window.setInterval('if (document.title) chooseTitle()', 100);
+setTimeout("if (window.location." + "pathname) chooseTheme()", 0);
+const timerCode = 'if (document.title) chooseTitle()';
+setInterval(timerCode, 100);
 class StaticSelector { static selector = node.title; }
 class PrivateSelector {
   #selector = node.title;
@@ -471,10 +570,55 @@ class PrivateSelector {
 }
 `)]));
   assert.equal(result.status, 2, result.stderr);
-  assert.ok(result.output.blockers.some(({ code }) => code === 'unsupported_dynamic_execution'),
+  assert.ok(result.output.blockers.filter(({ code }) => code === 'unsupported_dynamic_execution').length >= 5,
     JSON.stringify(result.output.blockers));
   assert.ok(findingPairs(result.output).has('title_or_label:presentation_selection'),
     JSON.stringify(result.output.findings));
+});
+
+test('timer callbacks remain valid only when locally proven callable', () => {
+  const result = runWorker(workerRequest([fileRecord(`
+function refresh() { heading.textContent = document.title; }
+const later = refresh;
+setTimeout(later, 0);
+window.setInterval(() => { image.alt = drupalSettings.media.name; }, 100);
+`)]));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.output.status, 'pass', JSON.stringify(result.output));
+  assert.deepEqual(result.output.blockers, []);
+});
+
+test('generic collection predicates cannot hide entity identity selection', () => {
+  const result = runWorker(workerRequest([fileRecord(`
+items.find((item) => item.title === 'Hero');
+assets.filter((x) => x.name === 'Hero');
+records.findIndex((record) => record.label === 'Hero');
+items.findLast((x) => x.label === 'Hero');
+items.findLastIndex((x) => x.name === 'Hero');
+`)]));
+  assert.notEqual(result.output.status, 'pass', JSON.stringify(result.output));
+  assert.ok(result.output.findings.some(({ identityKind, sinkKind }) =>
+    identityKind === 'title_or_label' && sinkKind === 'entity_selection'
+  ), JSON.stringify(result.output));
+  assert.ok(
+    result.output.findings.some(({ identityKind, sinkKind }) =>
+      identityKind === 'media_name' && sinkKind === 'entity_selection') ||
+    result.output.blockers.some(({ code }) => code === 'unresolved_identity_entity_selection'),
+    JSON.stringify(result.output)
+  );
+});
+
+test('generic name receivers fail closed only when they control behavior or presentation', () => {
+  const result = runWorker(workerRequest([fileRecord(`
+function choose(item) { if (item.name === 'Hero') chooseTheme(); }
+element.className = record.name;
+heading.textContent = item.name;
+`)]));
+  assert.equal(result.status, 2, result.stderr);
+  const ambiguous = result.output.blockers.filter(({ code }) =>
+    ['unresolved_identity_branch', 'unresolved_identity_presentation_selection'].includes(code)
+  );
+  assert.equal(ambiguous.length, 2, JSON.stringify(result.output));
 });
 
 test('shared shorthand import identifiers remain valid for unused or direct display data', () => {

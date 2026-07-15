@@ -45,10 +45,19 @@ const IMPORT_SPECIFIER_TYPES = new Set([
 ]);
 const BRANCH_TYPES = new Set([
   'IfStatement',
-  'ConditionalExpression',
   'WhileStatement',
   'DoWhileStatement',
   'ForStatement'
+]);
+const BEHAVIOR_OPERATION_TYPES = new Set([
+  'AssignmentExpression',
+  'AwaitExpression',
+  'CallExpression',
+  'ImportExpression',
+  'NewExpression',
+  'TaggedTemplateExpression',
+  'UpdateExpression',
+  'YieldExpression'
 ]);
 const PRESENTATION_PROPERTIES = new Set([
   '#theme',
@@ -94,7 +103,14 @@ const ENTITY_CALLS = new Set([
   'queryentity',
   'selectentity'
 ]);
-const ENTITY_COLLECTION_CALLS = new Set(['filter', 'find', 'findindex']);
+const ENTITY_RESULT_CALLS = new Set([
+  'findentity',
+  'getentity',
+  'loadentity',
+  'queryentity',
+  'selectentity'
+]);
+const ENTITY_COLLECTION_CALLS = new Set(['filter', 'find', 'findindex', 'findlast', 'findlastindex']);
 const PRESENTATION_CALLS = new Set([
   'closest',
   'getelementbyid',
@@ -685,6 +701,33 @@ function memberPath(node) {
   return parts;
 }
 
+function semanticMemberPath(node) {
+  const parts = [];
+  let current = unwrapExpression(node);
+  while (current) {
+    if (current.type === 'MemberExpression') {
+      const property = current.computed
+        ? staticComputedPropertyName(current.property)
+        : current.property?.type === 'Identifier'
+          ? current.property.name
+          : '';
+      if (!property) return [];
+      parts.unshift(property);
+      current = unwrapExpression(current.object);
+      continue;
+    }
+    if (['CallExpression', 'NewExpression'].includes(current.type)) {
+      current = unwrapExpression(current.callee);
+      continue;
+    }
+    if (current.type === 'Identifier') parts.unshift(current.name);
+    else if (current.type === 'ThisExpression') parts.unshift('this');
+    else return [];
+    return parts;
+  }
+  return [];
+}
+
 function thisBindingKey(node, context) {
   let owner = node;
   while ((owner = context.astIndex.parentByNode.get(owner))) {
@@ -771,9 +814,11 @@ function directIdentityKinds(node) {
   const current = unwrapExpression(node);
   if (!current) return kinds;
   if (current.type === 'MemberExpression') {
-    const path = memberPath(current).map(normalizedName);
-    const last = path.at(-1) ?? '';
-    const context = path.slice(0, -1);
+    const path = semanticMemberPath(current).map(normalizedName);
+    const last = normalizedName(current.computed
+      ? staticComputedPropertyName(current.property)
+      : current.property?.name);
+    const context = path.length > 0 ? path.slice(0, -1) : [];
     const mediaContext = context.some((part) => /(?:media|asset)/.test(part));
     if (mediaContext && ['label', 'name'].includes(last)) {
       kinds.add('media_name');
@@ -797,14 +842,31 @@ function directIdentityKinds(node) {
       const path = memberPath(unwrapExpression(current.callee)?.object).map(normalizedName);
       if (path.includes('location')) kinds.add('alias_or_path');
     }
-    if (['getname', 'label'].includes(name)) {
-      const path = memberPath(unwrapExpression(current.callee)?.object).map(normalizedName);
+    if (name === 'getname') {
+      const path = semanticMemberPath(unwrapExpression(current.callee)?.object).map(normalizedName);
       if (path.some((part) => /(?:media|asset)/.test(part))) kinds.add('media_name');
-      else kinds.add('title_or_label');
+      else if (!path.some((part) => ENTITY_RESULT_CALLS.has(part))) kinds.add('title_or_label');
     }
+    if (name === 'label') kinds.add('title_or_label');
     if (['gettitle'].includes(name)) kinds.add('title_or_label');
   }
   return kinds;
+}
+
+function directIdentityIsAmbiguous(node) {
+  const current = unwrapExpression(node);
+  if (!current) return false;
+  if (current.type === 'MemberExpression') {
+    const property = normalizedName(current.computed
+      ? staticComputedPropertyName(current.property)
+      : current.property?.name);
+    if (property !== 'name') return false;
+    const context = semanticMemberPath(current.object).map(normalizedName);
+    return !context.some((part) => /(?:media|asset)/.test(part));
+  }
+  if (current.type !== 'CallExpression' || callName(current.callee) !== 'getname') return false;
+  const context = semanticMemberPath(unwrapExpression(current.callee)?.object).map(normalizedName);
+  return !context.some((part) => /(?:media|asset)/.test(part));
 }
 
 function expressionChildren(node, descendFunctions = false) {
@@ -1008,6 +1070,7 @@ function expressionIsUnresolved(node, context, { descendFunctions = false } = {}
     const current = unwrapExpression(stack.pop());
     if (!isAstNode(current) || seen.has(current)) continue;
     seen.add(current);
+    if (directIdentityIsAmbiguous(current)) return true;
     if (current.type === 'Identifier') {
       const scope = context.scopes.scopeByNode.get(current) ?? context.scopes.programScope;
       if (context.unresolvedValues.has(bindingKey(scope, current.name))) return true;
@@ -1382,6 +1445,21 @@ function containsSelectingOperation(node) {
   return false;
 }
 
+function containsBehaviorOperation(node) {
+  const stack = [node];
+  const seen = new WeakSet();
+  while (stack.length > 0) {
+    const current = unwrapExpression(stack.pop());
+    if (!isAstNode(current) || seen.has(current)) continue;
+    seen.add(current);
+    if (FUNCTION_TYPES.has(current.type)) continue;
+    if (BEHAVIOR_OPERATION_TYPES.has(current.type)) return true;
+    if (current.type === 'UnaryExpression' && current.operator === 'delete') return true;
+    for (const child of expressionChildren(current)) stack.push(child);
+  }
+  return false;
+}
+
 function objectHasEntitySemantics(node) {
   return memberPath(node).map(normalizedName).some((part) =>
     /^(?:entities|entity|media|node|nodes)$/.test(part)
@@ -1448,11 +1526,22 @@ function analyzeSinks(node, context, addFinding, addUnresolved) {
 
   if (BRANCH_TYPES.has(node.type)) {
     const test = node.test;
-    if (test && containsSelectingOperation(test)) {
-      inspect(test, 'branch');
+    if (test) inspect(test, 'branch');
+  } else if (node.type === 'ConditionalExpression') {
+    if (containsSelectingOperation(node.test) ||
+      containsBehaviorOperation(node.consequent) || containsBehaviorOperation(node.alternate)) {
+      inspect(node.test, 'branch');
     }
+  } else if (node.type === 'LogicalExpression') {
+    if (containsBehaviorOperation(node.right)) inspect(node.left, 'branch');
   } else if (node.type === 'SwitchStatement') {
     inspect(node.discriminant, 'branch');
+  } else if (node.type === 'SwitchCase' && node.test) {
+    inspect(node.test, 'branch');
+  } else if (node.type === 'AssignmentPattern') {
+    if (containsBehaviorOperation(node.right)) inspect(node.left, 'branch');
+  } else if (node.type === 'AssignmentExpression' && ['&&=', '||=', '??='].includes(node.operator)) {
+    if (containsBehaviorOperation(node.right)) inspect(node.left, 'branch');
   }
 
   if (node.type === 'MemberExpression' && node.computed) {
@@ -1521,7 +1610,7 @@ function analyzeSinks(node, context, addFinding, addUnresolved) {
       for (const kind of identityKinds(argument, context, { descendFunctions: true })) kinds.add(kind);
     }
     for (const kind of kinds) addFinding(kind, 'entity_selection', node);
-  } else if (ENTITY_COLLECTION_CALLS.has(name) && objectHasEntitySemantics(callObject)) {
+  } else if (ENTITY_COLLECTION_CALLS.has(name)) {
     for (const argument of node.arguments) {
       inspect(argument, 'entity_selection', node, { descendFunctions: true });
     }
@@ -1537,7 +1626,7 @@ function callTargetIsModeled(node) {
     SELECTING_CALLS.has(name) || ENTITY_CALLS.has(name)) {
     return true;
   }
-  if (ENTITY_COLLECTION_CALLS.has(name) && objectHasEntitySemantics(callObject)) return true;
+  if (ENTITY_COLLECTION_CALLS.has(name)) return true;
   if (CLASS_LIST_CALLS.has(name) && objectHasClassList(callObject)) return true;
   if (name !== 'setattribute') return false;
   const attribute = staticLiteralValue(node.arguments[0]);
@@ -1704,6 +1793,12 @@ function analyzeAst(file, source, ast, sourceType, limits, aggregate) {
     if (['CallExpression', 'NewExpression'].includes(node.type)) {
       if (['eval', 'function'].includes(callName(node.callee))) {
         addFlowBlocker('unsupported_dynamic_execution', node);
+      }
+      if (node.type === 'CallExpression' && ['settimeout', 'setinterval'].includes(callName(node.callee))) {
+        const callbackResolution = resolveLocalFunctionTargets(node.arguments[0], context);
+        if (callbackResolution.targets.size === 0 || callbackResolution.unresolved || callbackResolution.pending) {
+          addFlowBlocker('unsupported_dynamic_execution', node);
+        }
       }
       const resolution = resolveLocalFunctionTargets(node.callee, context);
       if ((resolution.unresolved || resolution.pending) && !callTargetIsModeled(node) &&

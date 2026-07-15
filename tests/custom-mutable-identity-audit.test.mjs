@@ -48,6 +48,8 @@ test('inventories TypeScript source without pretending Acorn analyzed non-execut
   assert.deepEqual(audit.excludedTestFileIds, []);
   assert.deepEqual(audit.runtimeTypeScriptSurfaceIds, []);
   assert.deepEqual(audit.unboundRuntimeTypeScriptSurfaceIds, []);
+  assert.deepEqual(audit.runtimeJavascriptSurfaceIds, []);
+  assert.deepEqual(audit.unboundRuntimeJavascriptSurfaceIds, []);
 });
 
 test('a Drupal library cannot load TypeScript bytes as an unaudited runtime asset', () => {
@@ -72,6 +74,59 @@ test('a Drupal library cannot load TypeScript bytes as an unaudited runtime asse
   assert.deepEqual(audit.runtimeTypeScriptSurfaceIds, [runtimeSurface.id]);
   assert.deepEqual(audit.unboundRuntimeTypeScriptSurfaceIds, []);
   assert.ok(audit.javascript.blockers.some(({ code }) => code === 'unsupported_typescript'));
+});
+
+test('a Drupal library runtime registration overrides the test-path JavaScript exclusion', () => {
+  const { inventory, root } = javascriptFixture(
+    "if (window.location.pathname === '/hero') chooseTheme();\n",
+    {
+      path: 'web/modules/custom/catalog/tests/runtime.js',
+      extraFiles: {
+        'web/modules/custom/catalog/catalog.libraries.yml': 'runtime:\n  js:\n    tests/runtime.js: {}\n'
+      }
+    }
+  );
+  const source = inventory.sourceFiles.find((candidate) => candidate.path.endsWith('/tests/runtime.js'));
+  assert.ok(source, 'Runtime-registered test-path JavaScript must remain in the source inventory.');
+  const runtimeSurface = inventory.sourceFiles
+    .flatMap((candidate) => candidate.surfaces)
+    .find((surface) => surface.kind === 'runtime_javascript_asset');
+  assert.ok(runtimeSurface);
+
+  const audit = inspectCustomMutableIdentity(root, inventory, {});
+  assert.equal(audit.status, 'fail');
+  assert.deepEqual(audit.expectedFileIds, [source.id]);
+  assert.deepEqual(audit.excludedTestFileIds, []);
+  assert.ok(audit.javascript.findings.some(({ fileId, identityKind, sinkKind }) =>
+    fileId === source.id && identityKind === 'alias_or_path' && sinkKind === 'branch'
+  ), JSON.stringify(audit.javascript));
+
+  const unboundInventory = structuredClone(inventory);
+  unboundInventory.sourceFiles = unboundInventory.sourceFiles.filter((candidate) => candidate.id !== source.id);
+  const unboundAudit = inspectCustomMutableIdentity(root, unboundInventory, {});
+  assert.equal(unboundAudit.status, 'blocked');
+  assert.deepEqual(unboundAudit.unboundRuntimeJavascriptSurfaceIds, [runtimeSurface.id]);
+  assert.ok(unboundAudit.javascript.blockers.some(({ code }) => code === 'runtime_script_asset_unbound'));
+});
+
+test('a local runtime JavaScript registration binds an exact source even under an excluded vendor directory', () => {
+  const { inventory, root } = javascriptFixture(
+    "if (window.location.pathname === '/hero') chooseTheme();\n",
+    {
+      path: 'web/modules/custom/catalog/vendor/runtime.js',
+      extraFiles: {
+        'web/modules/custom/catalog/catalog.libraries.yml': 'runtime:\n  js:\n    vendor/runtime.js: {}\n'
+      }
+    }
+  );
+  const source = inventory.sourceFiles.find((candidate) => candidate.path.endsWith('/vendor/runtime.js'));
+  assert.ok(source, 'Every local registered JavaScript asset must bind an inventoried source.');
+  const audit = inspectCustomMutableIdentity(root, inventory, {});
+  assert.equal(audit.status, 'fail');
+  assert.deepEqual(audit.expectedFileIds, [source.id]);
+  assert.ok(audit.javascript.findings.some(({ fileId, identityKind, sinkKind }) =>
+    fileId === source.id && identityKind === 'alias_or_path' && sinkKind === 'branch'
+  ), JSON.stringify(audit.javascript));
 });
 
 test('legacy procedural test files remain inventoried but are excluded from production identity analysis', () => {

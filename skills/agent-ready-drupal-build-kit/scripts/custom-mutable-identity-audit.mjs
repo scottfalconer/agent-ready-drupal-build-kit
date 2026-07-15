@@ -49,31 +49,51 @@ function runtimeTypeScriptBoundary(sourceInventory) {
   const typescriptByPath = new Map(sourceFiles
     .filter((source) => source?.kind === 'typescript_source')
     .map((source) => [String(source.path ?? '').replaceAll('\\', '/'), source]));
+  const javascriptByPath = new Map(sourceFiles
+    .filter((source) => source?.kind === 'javascript')
+    .map((source) => [String(source.path ?? '').replaceAll('\\', '/'), source]));
   const runtimeSources = new Map();
+  const runtimeJavascriptSources = new Map();
   const surfaceIds = [];
   const unboundSurfaceIds = [];
+  const javascriptSurfaceIds = [];
+  const unboundJavascriptSurfaceIds = [];
   for (const registration of sourceFiles.filter((source) => source?.kind === 'drupal_registration')) {
     for (const surface of Array.isArray(registration?.surfaces) ? registration.surfaces : []) {
-      if (surface?.kind !== 'runtime_typescript_asset') continue;
+      if (!['runtime_typescript_asset', 'runtime_javascript_asset'].includes(surface?.kind)) continue;
       const surfaceId = String(surface.id ?? '');
-      surfaceIds.push(surfaceId);
+      if (surface.kind === 'runtime_typescript_asset') surfaceIds.push(surfaceId);
+      else javascriptSurfaceIds.push(surfaceId);
       const asset = String(surface.name ?? '').replaceAll('\\', '/');
       const root = extensions.get(String(registration.extension ?? '')) ?? '';
       const segments = asset.split('/');
       if (!root || !asset || asset.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(asset) ||
         segments.some((segment) => !segment || segment === '..')) {
-        unboundSurfaceIds.push(surfaceId);
+        if (surface.kind === 'runtime_typescript_asset') unboundSurfaceIds.push(surfaceId);
+        else unboundJavascriptSurfaceIds.push(surfaceId);
         continue;
       }
-      const source = typescriptByPath.get(`${root.replace(/\/$/, '')}/${asset}`);
-      if (!source) unboundSurfaceIds.push(surfaceId);
-      else runtimeSources.set(source.id, source);
+      const sourcePath = `${root.replace(/\/$/, '')}/${asset}`;
+      const source = surface.kind === 'runtime_typescript_asset'
+        ? typescriptByPath.get(sourcePath)
+        : javascriptByPath.get(sourcePath);
+      if (!source) {
+        if (surface.kind === 'runtime_typescript_asset') unboundSurfaceIds.push(surfaceId);
+        else unboundJavascriptSurfaceIds.push(surfaceId);
+      } else if (surface.kind === 'runtime_typescript_asset') {
+        runtimeSources.set(source.id, source);
+      } else {
+        runtimeJavascriptSources.set(source.id, source);
+      }
     }
   }
   return {
     runtimeSources: [...runtimeSources.values()].sort((left, right) => comparePortable(left.id, right.id)),
+    runtimeJavascriptSources: [...runtimeJavascriptSources.values()].sort((left, right) => comparePortable(left.id, right.id)),
     surfaceIds: [...new Set(surfaceIds)].sort(comparePortable),
-    unboundSurfaceIds: [...new Set(unboundSurfaceIds)].sort(comparePortable)
+    unboundSurfaceIds: [...new Set(unboundSurfaceIds)].sort(comparePortable),
+    javascriptSurfaceIds: [...new Set(javascriptSurfaceIds)].sort(comparePortable),
+    unboundJavascriptSurfaceIds: [...new Set(unboundJavascriptSurfaceIds)].sort(comparePortable)
   };
 }
 
@@ -366,18 +386,26 @@ export function inspectCustomMutableIdentity(projectRoot, sourceInventory, envir
     ...sourceFiles.filter((source) => JS_SOURCE_KINDS.has(source?.kind) || DRUPAL_SOURCE_KINDS.has(source?.kind)),
     ...typescriptBoundary.runtimeSources
   ].map((source) => [source.id, source])).values()];
-  const excludedTestFileIds = auditable.filter(testOnlySource).map((source) => source.id).sort(comparePortable);
-  const relevant = auditable.filter((source) => !testOnlySource(source));
+  const runtimeAssetFileIds = new Set([
+    ...typescriptBoundary.runtimeSources,
+    ...typescriptBoundary.runtimeJavascriptSources
+  ].map((source) => source.id));
+  const excludedFromRuntime = (source) => testOnlySource(source) && !runtimeAssetFileIds.has(source.id);
+  const excludedTestFileIds = auditable.filter(excludedFromRuntime).map((source) => source.id).sort(comparePortable);
+  const relevant = auditable.filter((source) => !excludedFromRuntime(source));
   if (sourceInventory?.completed !== true || !HASH_RE.test(inventoryFingerprint)) {
     return finalizedResult({
       schemaVersion: CUSTOM_MUTABLE_IDENTITY_AUDIT_SCHEMA,
       inputInventoryFingerprint: inventoryFingerprint,
-      applies: relevant.length > 0 || typescriptBoundary.unboundSurfaceIds.length > 0,
+      applies: relevant.length > 0 || typescriptBoundary.unboundSurfaceIds.length > 0 ||
+        typescriptBoundary.unboundJavascriptSurfaceIds.length > 0,
       completed: false,
       status: 'blocked',
       excludedTestFileIds,
       runtimeTypeScriptSurfaceIds: typescriptBoundary.surfaceIds,
       unboundRuntimeTypeScriptSurfaceIds: typescriptBoundary.unboundSurfaceIds,
+      runtimeJavascriptSurfaceIds: typescriptBoundary.javascriptSurfaceIds,
+      unboundRuntimeJavascriptSurfaceIds: typescriptBoundary.unboundJavascriptSurfaceIds,
       expectedFileIds: relevant.map((source) => source.id).sort(comparePortable),
       completedFileIds: [],
       findingCount: 0,
@@ -391,8 +419,10 @@ export function inspectCustomMutableIdentity(projectRoot, sourceInventory, envir
     JS_SOURCE_KINDS.has(source.kind) || source.kind === 'typescript_source'
   );
   const drupalSources = relevant.filter((source) => DRUPAL_SOURCE_KINDS.has(source.kind));
-  const javascript = typescriptBoundary.unboundSurfaceIds.length > 0
-    ? blockedJavascriptResult(javascriptSources, 'runtime_typescript_asset_unbound')
+  const unboundRuntimeScript = typescriptBoundary.unboundSurfaceIds.length > 0 ||
+    typescriptBoundary.unboundJavascriptSurfaceIds.length > 0;
+  const javascript = unboundRuntimeScript
+    ? blockedJavascriptResult(javascriptSources, 'runtime_script_asset_unbound')
     : inspectJavascript(projectRoot, javascriptSources, options);
   let drupal;
   try {
@@ -415,7 +445,7 @@ export function inspectCustomMutableIdentity(projectRoot, sourceInventory, envir
   const completeCoverage = JSON.stringify(completedFileIds) === JSON.stringify(expectedFileIds);
   const completed = blockerCount === 0 && completeCoverage && javascript.completed === true &&
     drupal?.completed === true;
-  const status = typescriptBoundary.unboundSurfaceIds.length > 0
+  const status = unboundRuntimeScript
     ? 'blocked'
     : relevant.length === 0
     ? 'not_applicable'
@@ -423,12 +453,14 @@ export function inspectCustomMutableIdentity(projectRoot, sourceInventory, envir
   return finalizedResult({
     schemaVersion: CUSTOM_MUTABLE_IDENTITY_AUDIT_SCHEMA,
     inputInventoryFingerprint: inventoryFingerprint,
-    applies: relevant.length > 0 || typescriptBoundary.unboundSurfaceIds.length > 0,
+    applies: relevant.length > 0 || unboundRuntimeScript,
     completed,
     status,
     excludedTestFileIds,
     runtimeTypeScriptSurfaceIds: typescriptBoundary.surfaceIds,
     unboundRuntimeTypeScriptSurfaceIds: typescriptBoundary.unboundSurfaceIds,
+    runtimeJavascriptSurfaceIds: typescriptBoundary.javascriptSurfaceIds,
+    unboundRuntimeJavascriptSurfaceIds: typescriptBoundary.unboundJavascriptSurfaceIds,
     expectedFileIds,
     completedFileIds,
     findingCount,
@@ -447,9 +479,14 @@ export function customMutableIdentityAuditErrors(sourceInventory, audit = source
     ...sourceFiles.filter((source) => JS_SOURCE_KINDS.has(source?.kind) || DRUPAL_SOURCE_KINDS.has(source?.kind)),
     ...typescriptBoundary.runtimeSources
   ].map((source) => [source.id, source])).values()];
-  const excludedTestFileIds = auditable.filter(testOnlySource).map((source) => source.id).sort(comparePortable);
+  const runtimeAssetFileIds = new Set([
+    ...typescriptBoundary.runtimeSources,
+    ...typescriptBoundary.runtimeJavascriptSources
+  ].map((source) => source.id));
+  const excludedFromRuntime = (source) => testOnlySource(source) && !runtimeAssetFileIds.has(source.id);
+  const excludedTestFileIds = auditable.filter(excludedFromRuntime).map((source) => source.id).sort(comparePortable);
   const relevantIds = auditable
-    .filter((source) => !testOnlySource(source))
+    .filter((source) => !excludedFromRuntime(source))
     .map((source) => source.id)
     .sort(comparePortable);
   if (!audit || audit.schemaVersion !== CUSTOM_MUTABLE_IDENTITY_AUDIT_SCHEMA) {
@@ -470,14 +507,22 @@ export function customMutableIdentityAuditErrors(sourceInventory, audit = source
   if (JSON.stringify(audit.unboundRuntimeTypeScriptSurfaceIds) !== JSON.stringify(typescriptBoundary.unboundSurfaceIds)) {
     errors.push('Verifier-owned mutable-identity audit did not bind unresolvable runtime TypeScript asset surfaces.');
   }
+  if (JSON.stringify(audit.runtimeJavascriptSurfaceIds) !== JSON.stringify(typescriptBoundary.javascriptSurfaceIds)) {
+    errors.push('Verifier-owned mutable-identity audit did not bind exact runtime JavaScript asset surfaces.');
+  }
+  if (JSON.stringify(audit.unboundRuntimeJavascriptSurfaceIds) !== JSON.stringify(typescriptBoundary.unboundJavascriptSurfaceIds)) {
+    errors.push('Verifier-owned mutable-identity audit did not bind unresolvable runtime JavaScript asset surfaces.');
+  }
   if (JSON.stringify(audit.expectedFileIds) !== JSON.stringify(relevantIds) ||
     !Array.isArray(audit.completedFileIds) || audit.completedFileIds.some((id) => !relevantIds.includes(id))) {
     errors.push('Verifier-owned mutable-identity audit did not bind exact PHP, Twig, and JavaScript source identities.');
   }
-  const expectedStatus = relevantIds.length === 0 && typescriptBoundary.unboundSurfaceIds.length === 0
+  const expectedStatus = relevantIds.length === 0 && typescriptBoundary.unboundSurfaceIds.length === 0 &&
+    typescriptBoundary.unboundJavascriptSurfaceIds.length === 0
     ? 'not_applicable'
     : 'pass';
-  if (audit.applies !== (relevantIds.length > 0 || typescriptBoundary.unboundSurfaceIds.length > 0) ||
+  if (audit.applies !== (relevantIds.length > 0 || typescriptBoundary.unboundSurfaceIds.length > 0 ||
+    typescriptBoundary.unboundJavascriptSurfaceIds.length > 0) ||
     audit.completed !== true || audit.status !== expectedStatus) {
     errors.push(`Verifier-owned mutable-identity audit must complete with status ${expectedStatus}.`);
   }

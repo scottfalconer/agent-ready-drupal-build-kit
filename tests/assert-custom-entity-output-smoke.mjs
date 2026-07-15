@@ -61,11 +61,13 @@ function quality_smoke_dynamic_field_regression(\Drupal\node\NodeInterface $node
   return $node->get($field)->value === 'Hero' ? 'hero' : 'default';
 }
 function quality_smoke_url_regression(\Drupal\node\NodeInterface $node): string {
-  $url = $node->toUrl();
-  return $url->toString() === '/hero' ? 'hero' : 'default';
+  return $node->toUrl()->toString() === '/hero' ? 'hero' : 'default';
 }
 function quality_smoke_eval_regression(): void {
   eval('return;');
+}
+function quality_smoke_inline_script_regression(): array {
+  return ['#markup' => '<button onclick="if(document.title) chooseTheme()">Choose</button>'];
 }
 `);
     writeFileSync(regressionPaths[1], String.raw`{% macro read(n) %}{{ n.title }}{% endmacro %}
@@ -77,6 +79,7 @@ function quality_smoke_eval_regression(): void {
 {% if node.getTitle() == 'Hero' %}hero{% endif %}
 {% set url = node.toUrl() %}
 {% if url.toString() == '/hero' %}hero{% endif %}
+<a href="javascript:if(document.title) chooseTheme()">Choose</a>
 `);
     const regressionInventory = inspectCustomCodeFilesystem(projectRoot);
     assert.equal(regressionInventory.completed, true, JSON.stringify(regressionInventory.errors));
@@ -104,6 +107,11 @@ function quality_smoke_eval_regression(): void {
     assert.ok(regressionAudit.drupal.blockers.some((blocker) =>
       blocker.fileId === twigSource.id && blocker.code === 'unsupported_dynamic_identity'
     ), JSON.stringify(regressionAudit.drupal.blockers));
+    for (const source of [phpSource, twigSource]) {
+      assert.ok(regressionAudit.drupal.blockers.some((blocker) =>
+        blocker.fileId === source.id && blocker.code === 'unsupported_inline_script'
+      ), JSON.stringify(regressionAudit.drupal.blockers));
+    }
     assert.ok(regressionAudit.drupal.findings.some((finding) =>
       finding.fileId === phpSource.id && finding.identityKind === 'alias_or_path' &&
       finding.sinkKind === 'behavior_branch'

@@ -252,6 +252,69 @@ function inventoryWithDefaultThemePreprocess() {
   return value;
 }
 
+function inventoryWithThemeSelection({
+  templateNames = ['node--phase-c-selected.html.twig', 'node.html.twig'],
+  hook = null
+} = {}) {
+  const value = inventoryWithDefaultThemeTemplate();
+  value.extensions[0].sourceFileIds = [];
+  value.sourceFiles = [];
+  templateNames.forEach((name, index) => {
+    const suffix = String(index).padStart(2, '0');
+    const sourceId = `SOURCE-themeselect${suffix}`;
+    const surfaceId = `SURFACE-themeselect${suffix}`;
+    value.extensions[0].sourceFileIds.push(sourceId);
+    value.sourceFiles.push({
+      id: sourceId,
+      extension: 'output_theme',
+      path: `web/themes/custom/output_theme/templates/content/${name}`,
+      kind: 'twig_template',
+      surfaces: [{ id: surfaceId, kind: 'twig_template', name, line: 1 }]
+    });
+  });
+  if (hook) {
+    const sourceId = 'SOURCE-themehook123456';
+    value.extensions[0].sourceFileIds.push(sourceId);
+    value.sourceFiles.push({
+      id: sourceId,
+      extension: 'output_theme',
+      path: hook.path ?? 'web/themes/custom/output_theme/src/Hook/OutputThemeHooks.php',
+      kind: hook.kind ?? 'php_class',
+      surfaces: [{
+        id: 'SURFACE-themehook123456',
+        kind: 'hook_or_callback',
+        name: hook.name,
+        hookName: hook.hookName,
+        ...(hook.className ? { className: hook.className } : {}),
+        ...(hook.methodName ? { methodName: hook.methodName } : {}),
+        line: 7
+      }]
+    });
+  }
+  return value;
+}
+
+function inventoryWithFieldFormatter() {
+  const value = inventory();
+  value.extensions[0].sourceFileIds = ['SOURCE-formatter123456'];
+  value.extensions[0].routeNames = [];
+  value.sourceFiles = [{
+    id: 'SOURCE-formatter123456',
+    extension: 'output_probe',
+    path: 'web/modules/custom/output_probe/src/Plugin/Field/FieldFormatter/OutputProbeFormatter.php',
+    kind: 'php_class',
+    surfaces: [{
+      id: 'SURFACE-formatter123456',
+      kind: 'plugin_class',
+      name: 'OutputProbeFormatter',
+      line: 9
+    }]
+  }];
+  value.controllers = [];
+  value.routes = [];
+  return value;
+}
+
 function inventoryWithMultipleRenderLayers() {
   const moduleInventory = inventoryWithCoreRenderHook();
   const themeInventory = inventoryWithDefaultThemeTemplate({ includeBase: true });
@@ -340,9 +403,10 @@ function routeCandidateCoverage(input, {
   handlerKind,
   runtimeRouteName,
   activeCandidateExtensionSha256,
-  defaultThemeExtensionSha256,
-  nodeBundle = 'landing_page',
-  entityViewMode = 'full'
+  activeThemeExtensionSha256,
+  selectedThemeTemplateSha256,
+  selectedRenderHookSha256,
+  selectedFieldFormatterSha256
 }) {
   if (!input) {
     return handlerKind === 'candidate_controller'
@@ -385,18 +449,19 @@ function routeCandidateCoverage(input, {
         surfaceSha256: sha256(routeBinding.controllerSurfaceId)
       });
     }
-    return sortedCoverage(coverage);
   }
-  if (handlerKind !== 'entity_view') return sortedCoverage(coverage);
-  let selectedTemplate = null;
-  let selectedPriority = -1;
+  if (!['candidate_controller', 'entity_view'].includes(handlerKind)) return sortedCoverage(coverage);
+  const activeTheme = new Set(activeThemeExtensionSha256);
+  const selectedTemplates = new Set(selectedThemeTemplateSha256);
+  const selectedHooks = new Set(selectedRenderHookSha256);
+  const selectedFormatter = new Set(selectedFieldFormatterSha256);
   for (const binding of input.candidateRenderBindings) {
     const extensionSha256 = sha256(binding.extensionId);
-    const bindingActive = binding.extensionType === 'module'
+    const hookActive = binding.extensionType === 'module'
       ? active.has(extensionSha256)
-      : binding.extensionType === 'theme' && extensionSha256 === defaultThemeExtensionSha256;
-    if (!bindingActive) continue;
-    if (['preprocess_node', 'node_render_hook'].includes(binding.selectorKind)) {
+      : binding.extensionType === 'theme' && activeTheme.has(extensionSha256);
+    if (['preprocess_node', 'template_preprocess_hook', 'node_render_hook', 'theme_suggestion_hook'].includes(binding.selectorKind)) {
+      if (!hookActive || !binding.runtimeIdentity || !selectedHooks.has(sha256(binding.runtimeIdentity))) continue;
       coverage.push({
         role: 'render_hook',
         extensionSha256,
@@ -405,32 +470,43 @@ function routeCandidateCoverage(input, {
       });
       continue;
     }
-    const [selectorBundle, selectorViewMode] = binding.selectorKind === 'node_bundle_view_mode_template'
-      ? String(binding.selectorValue).split('\u0000')
-      : ['', ''];
-    const priority = binding.selectorKind === 'node_bundle_view_mode_template'
-      ? (selectorBundle === nodeBundle && selectorViewMode === entityViewMode ? 4 : -1)
-      : binding.selectorKind === 'node_bundle_template'
-      ? (binding.selectorValue === nodeBundle ? 3 : -1)
-      : binding.selectorKind === 'node_view_mode_template'
-        ? (binding.selectorValue === entityViewMode ? 2 : -1)
-        : binding.selectorKind === 'node_template'
-          ? 1
-          : -1;
-    if (priority > selectedPriority) {
-      selectedTemplate = binding;
-      selectedPriority = priority;
+    if (binding.selectorKind === 'field_formatter_plugin' && binding.runtimeClass &&
+      selectedFormatter.has(sha256(`${binding.runtimeClass}\u0000${binding.sourceDrupalPath}`))) {
+      coverage.push({
+        role: 'field_formatter',
+        extensionSha256,
+        sourceFileSha256: sha256(binding.sourceFileId),
+        surfaceSha256: sha256(binding.surfaceId)
+      });
+      continue;
+    }
+    if (binding.selectorKind === 'theme_template' &&
+      (binding.extensionType === 'module' ? active.has(extensionSha256) : activeTheme.has(extensionSha256)) &&
+      selectedTemplates.has(sha256(binding.sourceDrupalPath))) {
+      coverage.push({
+        role: 'render_template',
+        extensionSha256,
+        sourceFileSha256: sha256(binding.sourceFileId),
+        surfaceSha256: sha256(binding.surfaceId)
+      });
     }
   }
-  if (selectedTemplate && selectedPriority >= 0) {
-    coverage.push({
-      role: 'render_template',
-      extensionSha256: sha256(selectedTemplate.extensionId),
-      sourceFileSha256: sha256(selectedTemplate.sourceFileId),
-      surfaceSha256: sha256(selectedTemplate.surfaceId)
-    });
-  }
   return sortedCoverage(coverage);
+}
+
+function selectedThemeTemplatePath(input, nodeBundle, entityViewMode) {
+  const templates = (input?.candidateRenderBindings ?? []).filter(({ selectorKind }) => selectorKind === 'theme_template');
+  const names = [
+    `node--${nodeBundle.replaceAll('_', '-')}--${entityViewMode.replaceAll('_', '-')}.html.twig`,
+    `node--${nodeBundle.replaceAll('_', '-')}.html.twig`,
+    `node--${entityViewMode.replaceAll('_', '-')}.html.twig`,
+    'node.html.twig'
+  ];
+  for (const name of names) {
+    const binding = templates.find((candidate) => candidate.sourceDrupalPath.endsWith(`/${name}`));
+    if (binding) return binding.sourceDrupalPath;
+  }
+  return 'core/modules/node/templates/node.html.twig';
 }
 
 function validRuntime(inputOrFingerprint, options = {}) {
@@ -468,6 +544,36 @@ function validRuntime(inputOrFingerprint, options = {}) {
     const runtimeRouteName = optionAt('runtimeRouteNames', 'runtimeRouteName', index, defaultRuntimeRouteName);
     const entityViewMode = optionAt('entityViewModes', 'entityViewMode', index, 'full');
     const nodeBundle = optionAt('nodeBundles', 'nodeBundle', index, 'landing_page');
+    const activeThemeExtensionSha256 = handlerKind === 'entity_view'
+      ? optionAt('activeThemeExtensionSets', 'activeThemeExtensionSha256', index,
+          input?.extensions.filter(({ type }) => type === 'theme').map(({ id }) => sha256(id)).sort() ?? [])
+      : [];
+    const selectedTemplatePaths = handlerKind === 'entity_view'
+      ? optionAt('selectedThemeTemplatePathSets', 'selectedThemeTemplatePath', index,
+          [selectedThemeTemplatePath(input, nodeBundle, entityViewMode)])
+      : optionAt('selectedThemeTemplatePathSets', 'selectedThemeTemplatePath', index, []);
+    const selectedThemeTemplateSha256 = [...(Array.isArray(selectedTemplatePaths)
+      ? selectedTemplatePaths
+      : [selectedTemplatePaths])].filter(Boolean).map(sha256).sort();
+    const defaultSelectedRenderHookSha256 = (input?.candidateRenderBindings ?? [])
+      .filter((binding) => ['preprocess_node', 'template_preprocess_hook', 'node_render_hook', 'theme_suggestion_hook'].includes(binding.selectorKind))
+      .filter((binding) => binding.extensionType === 'module'
+        ? activeCandidateExtensionSha256.includes(sha256(binding.extensionId))
+        : activeThemeExtensionSha256.includes(sha256(binding.extensionId)))
+      .map(({ runtimeIdentity }) => sha256(runtimeIdentity))
+      .sort();
+    const selectedRenderHookSha256 = [...optionAt(
+      'selectedRenderHookSets',
+      'selectedRenderHookSha256',
+      index,
+      handlerKind === 'entity_view' ? defaultSelectedRenderHookSha256 : []
+    )].sort();
+    const selectedFieldFormatterSha256 = [...optionAt(
+      'selectedFieldFormatterSets',
+      'selectedFieldFormatterSha256',
+      index,
+      []
+    )].sort();
     const matched = applies && Boolean(optionAt('routeMatched', 'matched', index, true));
     const rendered = matched && Boolean(optionAt('routeRendered', 'rendered', index, true));
     const candidateRouteBinding = Object.hasOwn(options, 'candidateRouteBinding')
@@ -481,9 +587,10 @@ function validRuntime(inputOrFingerprint, options = {}) {
       handlerKind,
       runtimeRouteName,
       activeCandidateExtensionSha256,
-      defaultThemeExtensionSha256,
-      nodeBundle,
-      entityViewMode
+      activeThemeExtensionSha256,
+      selectedThemeTemplateSha256,
+      selectedRenderHookSha256,
+      selectedFieldFormatterSha256
     });
     const suppliedCoverage = Array.isArray(options.candidateCoverages)
       ? options.candidateCoverages[index] ?? expectedCoverage
@@ -492,6 +599,7 @@ function validRuntime(inputOrFingerprint, options = {}) {
         : expectedCoverage;
     const candidateCoverage = rendered ? suppliedCoverage : [];
     const primaryRenderCoverage = candidateCoverage.find(({ role }) => role === 'render_hook') ??
+      candidateCoverage.find(({ role }) => role === 'field_formatter') ??
       candidateCoverage.find(({ role }) => role === 'render_template') ?? null;
     const candidateProvenanceKind = !applies
       ? ''
@@ -502,7 +610,9 @@ function validRuntime(inputOrFingerprint, options = {}) {
               ? 'custom_route'
               : primaryRenderCoverage?.role === 'render_hook'
                 ? 'render_hook'
-                : 'default_theme_template');
+                : primaryRenderCoverage?.role === 'field_formatter'
+                  ? 'field_formatter'
+                  : 'default_theme_template');
     const candidateExtensionSha256 = !applies
       ? ''
       : activeRouteBinding
@@ -520,7 +630,12 @@ function validRuntime(inputOrFingerprint, options = {}) {
       applies,
       matched,
       nodeBundleSha256: sha256(nodeBundle),
+      requestedEntityViewModeSha256: handlerKind === 'entity_view' ? sha256(entityViewMode) : '',
       entityViewModeSha256: handlerKind === 'entity_view' ? sha256(entityViewMode) : '',
+      activeThemeExtensionSha256,
+      selectedThemeTemplateSha256,
+      selectedRenderHookSha256,
+      selectedFieldFormatterSha256,
       outputHandlerKind: handlerKind,
       outputHandlerSha256: H('8'),
       controllerExtensionSha256: applies && handlerKind === 'candidate_controller' ? H('a') : '',
@@ -591,20 +706,24 @@ function validRuntime(inputOrFingerprint, options = {}) {
     invalidation: allow
       ? status === 'not_applicable'
         ? {
-            status: 'not_run_due_to_not_applicable', attempted: false, seededCount: 0, invalidatedCount: 0,
+            status: 'not_run_due_to_not_applicable', preCaptureAttempted: false, preCaptureTagCount: 0,
+            preCaptureEvidenceSha256: '', attempted: false, seededCount: 0, invalidatedCount: 0,
             cleanupRequired: false, cleanupCompleted: true, evidenceSha256: ''
           }
         : status === 'pass'
         ? {
-          status: 'pass', attempted: true, seededCount: invalidationProofCount, invalidatedCount: invalidationProofCount,
+          status: 'pass', preCaptureAttempted: true, preCaptureTagCount: invalidationProofCount,
+          preCaptureEvidenceSha256: H('a'), attempted: true, seededCount: invalidationProofCount, invalidatedCount: invalidationProofCount,
           cleanupRequired: true, cleanupCompleted: true, evidenceSha256: H('b')
         }
         : {
-            status: 'not_run_due_to_violations', attempted: false, seededCount: 0, invalidatedCount: 0,
+            status: 'pre_capture_performed_proof_not_run_due_to_violations', preCaptureAttempted: true, preCaptureTagCount: invalidationProofCount,
+            preCaptureEvidenceSha256: H('a'), attempted: false, seededCount: 0, invalidatedCount: 0,
             cleanupRequired: false, cleanupCompleted: true, evidenceSha256: ''
           }
       : {
-          status: 'not_run', attempted: false, seededCount: 0, invalidatedCount: 0,
+          status: 'not_run', preCaptureAttempted: false, preCaptureTagCount: 0, preCaptureEvidenceSha256: '',
+          attempted: false, seededCount: 0, invalidatedCount: 0,
           cleanupRequired: false, cleanupCompleted: true, evidenceSha256: ''
         },
     violations: options.violations ?? []
@@ -1008,6 +1127,211 @@ test('covers only the selected bundle Twig layer when a default-theme base fallb
   }]);
 });
 
+test('binds NID-view-mode Twig provenance from the exact registry-selected path', () => {
+  const sourceInventory = inventoryWithThemeSelection({
+    templateNames: ['node--42--full.html.twig', 'node--landing-page--full.html.twig', 'node.html.twig']
+  });
+  const expected = derived({ sourceInventory });
+  const selected = 'themes/custom/output_theme/templates/content/node--42--full.html.twig';
+  const result = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture',
+    sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(),
+    routeMatrix: routeMatrix(),
+    runner: () => ({
+      ok: true,
+      output: JSON.stringify(validRuntime(expected, {
+        handlerKind: 'entity_view',
+        selectedThemeTemplatePath: selected
+      }))
+    })
+  });
+  assert.equal(result.status, 'pass');
+  assert.deepEqual(result.runtime.routes[0].selectedThemeTemplateSha256, [sha256(selected)]);
+  assert.equal(result.runtime.routes[0].candidateCoverage[0].sourceFileSha256, sha256('SOURCE-themeselect00'));
+});
+
+test('binds a Drupal 11 OOP suggestion alter and its arbitrary selected Twig path', () => {
+  const sourceInventory = inventoryWithThemeSelection({
+    hook: {
+      name: 'Drupal\\output_theme\\Hook\\OutputThemeHooks::suggestions',
+      hookName: 'theme_suggestions_node_alter',
+      className: 'Drupal\\output_theme\\Hook\\OutputThemeHooks',
+      methodName: 'suggestions'
+    }
+  });
+  const expected = derived({ sourceInventory });
+  const hookBinding = expected.candidateRenderBindings.find(({ selectorKind }) => selectorKind === 'theme_suggestion_hook');
+  assert.equal(hookBinding.runtimeIdentity,
+    'Drupal\\output_theme\\Hook\\OutputThemeHooks::suggestions\u0000theme_suggestions_node_alter\u0000output_theme\u0000themes/custom/output_theme/src/Hook/OutputThemeHooks.php');
+  const selected = 'themes/custom/output_theme/templates/content/node--phase-c-selected.html.twig';
+  const result = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture',
+    sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(),
+    routeMatrix: routeMatrix(),
+    runner: () => ({
+      ok: true,
+      output: JSON.stringify(validRuntime(expected, {
+        handlerKind: 'entity_view',
+        selectedThemeTemplatePath: selected
+      }))
+    })
+  });
+  assert.equal(result.status, 'pass');
+  assert.deepEqual(result.runtime.routes[0].candidateCoverage.map(({ role }) => role), ['render_hook', 'render_template']);
+  assert.deepEqual(result.runtime.routes[0].selectedRenderHookSha256, [sha256(hookBinding.runtimeIdentity)]);
+});
+
+test('binds module-owned Twig and its exact hook-specific preprocess callback', () => {
+  const sourceInventory = inventoryWithCoreRenderHook();
+  sourceInventory.extensions[0].sourceFileIds = ['SOURCE-moduletemplate12', 'SOURCE-modulepreprocess'];
+  sourceInventory.sourceFiles = [{
+    id: 'SOURCE-moduletemplate12', extension: 'output_probe',
+    path: 'web/modules/custom/output_probe/templates/quality-card.html.twig', kind: 'twig_template',
+    surfaces: [{ id: 'SURFACE-moduletemplate12', kind: 'twig_template', name: 'quality-card.html.twig', line: 1 }]
+  }, {
+    id: 'SOURCE-modulepreprocess', extension: 'output_probe',
+    path: 'web/modules/custom/output_probe/output_probe.module', kind: 'procedural_php',
+    surfaces: [{
+      id: 'SURFACE-modulepreprocess', kind: 'hook_or_callback',
+      name: 'output_probe_preprocess_quality_card', line: 3
+    }]
+  }];
+  const expected = derived({ sourceInventory });
+  const template = expected.candidateRenderBindings.find(({ selectorKind }) => selectorKind === 'theme_template');
+  const preprocess = expected.candidateRenderBindings.find(({ selectorKind }) => selectorKind === 'template_preprocess_hook');
+  assert.equal(template.extensionType, 'module');
+  assert.equal(preprocess.hookName, 'preprocess_quality_card');
+  const result = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture', sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(), routeMatrix: routeMatrix(),
+    runner: () => ({ ok: true, output: JSON.stringify(validRuntime(expected, {
+      handlerKind: 'entity_view',
+      selectedThemeTemplatePath: template.sourceDrupalPath,
+      selectedRenderHookSha256: [sha256(preprocess.runtimeIdentity)]
+    })) })
+  });
+  assert.equal(result.status, 'pass');
+  assert.deepEqual(result.runtime.routes[0].candidateCoverage.map(({ role }) => role), ['render_hook', 'render_template']);
+});
+
+test('separates OOP and procedural hook providers from custom callable ownership', () => {
+  const sourceInventory = inventoryWithCoreRenderHook();
+  sourceInventory.sourceFiles[0].surfaces = [{
+    id: 'SURFACE-overrideoop1234', kind: 'hook_or_callback',
+    name: 'Drupal\\output_probe\\Hook\\OutputHooks::view',
+    hookName: 'node_view', moduleName: 'node',
+    className: 'Drupal\\output_probe\\Hook\\OutputHooks', methodName: 'view', line: 5
+  }, {
+    id: 'SURFACE-overrideproc12', kind: 'hook_or_callback',
+    name: 'node_node_view', line: 9
+  }];
+  const expected = derived({ sourceInventory });
+  assert.equal(expected.candidateRenderBindings.length, 2);
+  for (const binding of expected.candidateRenderBindings) {
+    assert.equal(binding.extensionMachineName, 'output_probe');
+    assert.equal(binding.hookProviderMachineName, 'node');
+    assert.equal(binding.hookName, 'node_view');
+    assert.match(binding.runtimeIdentity, /\u0000node_view\u0000node\u0000/);
+  }
+});
+
+test('covers only registry-selected specialized preprocess callables', () => {
+  const sourceInventory = inventoryWithThemeSelection({
+    hook: {
+      name: 'Drupal\\output_theme\\Hook\\OutputThemeHooks::preprocessArticle',
+      hookName: 'preprocess_node__article',
+      className: 'Drupal\\output_theme\\Hook\\OutputThemeHooks',
+      methodName: 'preprocessArticle'
+    }
+  });
+  const expected = derived({ sourceInventory });
+  const hookBinding = expected.candidateRenderBindings.find(({ selectorKind }) => selectorKind === 'preprocess_node');
+  const selected = 'themes/custom/output_theme/templates/content/node--phase-c-selected.html.twig';
+  const selectedHook = sha256(hookBinding.runtimeIdentity);
+  const positive = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture',
+    sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(),
+    routeMatrix: routeMatrix(),
+    runner: () => ({ ok: true, output: JSON.stringify(validRuntime(expected, {
+      handlerKind: 'entity_view', selectedThemeTemplatePath: selected,
+      selectedRenderHookSha256: [selectedHook]
+    })) })
+  });
+  assert.equal(positive.status, 'pass');
+  assert.ok(positive.runtime.routes[0].candidateCoverage.some(({ role }) => role === 'render_hook'));
+
+  const unrelated = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture',
+    sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(),
+    routeMatrix: routeMatrix(),
+    runner: () => ({ ok: true, output: JSON.stringify(validRuntime(expected, {
+      handlerKind: 'entity_view', selectedThemeTemplatePath: selected,
+      selectedRenderHookSha256: []
+    })) })
+  });
+  assert.equal(unrelated.status, 'pass');
+  assert.deepEqual(unrelated.runtime.routes[0].candidateCoverage.map(({ role }) => role), ['render_template']);
+});
+
+test('binds an exact configured custom field formatter to route coverage', () => {
+  const sourceInventory = inventoryWithFieldFormatter();
+  const expected = derived({ sourceInventory });
+  const formatter = expected.candidateRenderBindings.find(({ selectorKind }) => selectorKind === 'field_formatter_plugin');
+  assert.equal(formatter.runtimeClass, 'Drupal\\output_probe\\Plugin\\Field\\FieldFormatter\\OutputProbeFormatter');
+  const formatterIdentity = sha256(formatter.runtimeIdentity);
+  const result = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture',
+    sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(),
+    routeMatrix: routeMatrix(),
+    runner: () => ({ ok: true, output: JSON.stringify(validRuntime(expected, {
+      handlerKind: 'entity_view', selectedFieldFormatterSha256: [formatterIdentity]
+    })) })
+  });
+  assert.equal(result.status, 'pass');
+  assert.equal(result.runtime.routes[0].candidateProvenanceKind, 'field_formatter');
+  assert.deepEqual(result.runtime.routes[0].candidateCoverage.map(({ role }) => role), ['field_formatter']);
+});
+
+test('reconstructs active custom base-theme hook plus child-theme selected template', () => {
+  const sourceInventory = inventoryWithThemeSelection();
+  sourceInventory.extensions.push({
+    id: 'EXTENSION-base1234567890', machineName: 'output_base', type: 'theme',
+    path: 'web/themes/custom/output_base', drupalPath: 'themes/custom/output_base',
+    sourceFileIds: ['SOURCE-basehook123456'], routeNames: []
+  });
+  sourceInventory.sourceFiles.push({
+    id: 'SOURCE-basehook123456', extension: 'output_base',
+    path: 'web/themes/custom/output_base/src/Hook/OutputBaseHooks.php', kind: 'php_class',
+    surfaces: [{
+      id: 'SURFACE-basehook123456', kind: 'hook_or_callback',
+      name: 'Drupal\\output_base\\Hook\\OutputBaseHooks::suggestions',
+      hookName: 'theme_suggestions_node_alter',
+      className: 'Drupal\\output_base\\Hook\\OutputBaseHooks', methodName: 'suggestions', line: 7
+    }]
+  });
+  const expected = derived({ sourceInventory });
+  const baseHook = expected.candidateRenderBindings.find(({ extensionMachineName }) => extensionMachineName === 'output_base');
+  const selected = 'themes/custom/output_theme/templates/content/node--phase-c-selected.html.twig';
+  const activeThemes = sourceInventory.extensions.map(({ id }) => sha256(id)).sort();
+  const result = inspectCustomEntityOutputAudit({
+    projectRoot: '/fixture', sourceInventory,
+    fieldOutputMatrix: fieldOutputMatrix(), routeMatrix: routeMatrix(),
+    runner: () => ({ ok: true, output: JSON.stringify(validRuntime(expected, {
+      handlerKind: 'entity_view', selectedThemeTemplatePath: selected,
+      activeThemeExtensionSha256: activeThemes,
+      selectedRenderHookSha256: [sha256(baseHook.runtimeIdentity)]
+    })) })
+  });
+  assert.equal(result.status, 'pass');
+  assert.deepEqual(result.runtime.routes[0].activeThemeExtensionSha256, activeThemes);
+  assert.deepEqual(result.runtime.routes[0].candidateCoverage.map(({ role }) => role), ['render_hook', 'render_template']);
+});
+
 test('accepts exact active default custom-theme preprocess provenance on a core entity-view route', () => {
   const sourceInventory = inventoryWithDefaultThemePreprocess();
   const expected = derived({ sourceInventory });
@@ -1135,7 +1459,7 @@ test('completes N/A with exact core-only route records when active candidates ar
   ambiguous.routes[0].entityViewModeSha256 = '';
   assert.throws(
     () => parseCustomEntityOutputAudit(ambiguous, parserOptions(expected)),
-    /host-reconstructable core-only output evidence/i
+    /non-entity handler|host-reconstructable core-only output evidence/i
   );
 });
 
@@ -1231,11 +1555,11 @@ test('audits only exact custom-provenance routes in mixed custom and core route 
   assert.deepEqual(failing.runtime.violations, [violation]);
 });
 
-test('selects composite bundle-view-mode Twig before bundle and base fallbacks', () => {
+test('binds the registry-selected composite Twig path before bundle and base fallbacks', () => {
   const sourceInventory = inventoryWithDefaultThemeTemplate({ includeBase: true, includeComposite: true });
   const expected = derived({ sourceInventory });
-  assert.ok(expected.candidateRenderBindings.some(({ selectorKind, selectorValue }) =>
-    selectorKind === 'node_bundle_view_mode_template' && selectorValue === 'landing_page\u0000full'
+  assert.ok(expected.candidateRenderBindings.some(({ selectorKind, sourceDrupalPath }) =>
+    selectorKind === 'theme_template' && sourceDrupalPath.endsWith('/node--landing-page--full.html.twig')
   ));
   const composite = inspectCustomEntityOutputAudit({
     projectRoot: '/fixture',
@@ -1461,7 +1785,8 @@ test('metadata budget violations fail closed without owned-cache invalidation', 
   };
   const runtime = validRuntime(expected, { allow: true, status: 'fail', violations: [violation] });
   runtime.invalidation = {
-    status: 'not_run_due_to_violations', attempted: false, seededCount: 0, invalidatedCount: 0,
+    status: 'pre_capture_performed_proof_not_run_due_to_violations', preCaptureAttempted: true, preCaptureTagCount: 3,
+    preCaptureEvidenceSha256: H('a'), attempted: false, seededCount: 0, invalidatedCount: 0,
     cleanupRequired: false, cleanupCompleted: true, evidenceSha256: ''
   };
   const result = inspectCustomEntityOutputAudit({
@@ -1522,10 +1847,16 @@ test('PHP program performs anonymous route-bound render and exact Node-Media-Fil
     /\$normalized_class === \$expected_class && \$method === \$expected_method && \$normalized_file === \$expected_file/,
     /getDefault\('_entity_view'\)/,
     /system\.theme/,
-    /\$extension_machine === \$default_theme_machine/,
+    /getBaseThemeExtensions/,
+    /theme\.registry/,
+    /getPreprocessInvokes/,
+    /plugin\.manager\.field\.formatter/,
+    /selectedThemeTemplateSha256/,
+    /selectedRenderHookSha256/,
+    /selectedFieldFormatterSha256/,
     /\$record\['applies'\] = TRUE/,
     /applicable_route_runtime_incomplete/,
-    /node_bundle_view_mode_template/,
+    /theme_suggestions_/,
     /not_run_due_to_not_applicable/,
     /\$record\['outputHandlerKind'\] = 'entity_view'/,
     /getViewBuilder\('node'\)->view\(\$node, \$entity_view_mode\)/,
@@ -1547,12 +1878,18 @@ test('PHP program performs anonymous route-bound render and exact Node-Media-Fil
     /candidateCoverage/,
     /RenderContext/,
     /executeInRenderContext/,
+    /getLoader\(\)/,
+    /setLoader\(\$recording_loader\)/,
+    /setLoader\(\$original_loader\)/,
+    /recordedRealpaths/,
     /getCacheTagsToInvalidate/,
     /\$bounded_metadata/,
     /cache_metadata_item_limit_exceeded/,
     /cache_metadata_byte_limit_exceeded/,
     /cache_metadata_total_item_limit_exceeded/,
     /cache_metadata_total_byte_limit_exceeded/,
+    /pre_capture_performed_proof_not_run_due_to_violations/,
+    /route_altered_custom_controller_lacks_candidate_route_provenance/,
     /render_missing_entity_cache_tags/,
     /render_missing_invalidation_cache_tags/,
     /render_missing_access_cache_metadata/,
@@ -1562,6 +1899,59 @@ test('PHP program performs anonymous route-bound render and exact Node-Media-Fil
     source.indexOf('$access_manager->checkRequest($request, $anonymous, TRUE)') < source.indexOf('call_user_func_array($controller, $arguments)'),
     'anonymous route access must be allowed before the controller is invoked'
   );
+  assert.ok(
+    source.indexOf('$preflight_route_access = $access_manager->checkRequest') < source.indexOf('$controller_resolver->getController($request)'),
+    'anonymous route access must be allowed before any declared-route controller is resolved'
+  );
+  assert.ok(
+    source.indexOf('$tags = $bounded_metadata($tags, \'pre_capture_invalidation_tags\'') < source.indexOf("invalidateTags($tags)"),
+    'pre-capture invalidation tags must be item, byte, and aggregate bounded before invalidation'
+  );
+  assert.ok(
+    source.indexOf('$invalidate_route_render_cache($node, $selection_declarations, $route_hash)') < source.indexOf('$capture_render('),
+    'target entity tags must be invalidated before the actual recorded render'
+  );
+  assert.ok(
+    source.indexOf('$twig->setLoader($recording_loader)') < source.indexOf('$twig->setLoader($original_loader)'),
+    'the recording loader must be installed before it is restored'
+  );
+  assert.ok(
+    source.indexOf('$preflight_route_access = $access_manager->checkRequest') < source.indexOf("getViewBuilder('node')->view"),
+    'anonymous route access must be allowed before the Node view builder is created'
+  );
+  assert.ok(
+    source.indexOf("$preflight_node_access = $node->access('view', $anonymous, TRUE)") < source.indexOf("getViewBuilder('node')->view"),
+    'anonymous Node access must be allowed before the Node view builder is created'
+  );
+  const preCaptureTraversal = source.slice(
+    source.indexOf('$invalidate_route_render_cache = static function'),
+    source.indexOf('$capture_render = static function')
+  );
+  assert.ok(
+    preCaptureTraversal.indexOf('$media = $item->entity') < preCaptureTraversal.indexOf("$pre_capture_media_access = $media->access('view', $anonymous, TRUE)") &&
+      preCaptureTraversal.indexOf("$pre_capture_media_access = $media->access('view', $anonymous, TRUE)") < preCaptureTraversal.indexOf('$media->getSource()->getConfiguration()'),
+    'pre-capture Media access must be checked immediately after load and before source-plugin traversal'
+  );
+  assert.ok(
+    preCaptureTraversal.indexOf('$file = $source_item->entity') < preCaptureTraversal.indexOf("$pre_capture_file_access = $file->access('view', $anonymous, TRUE)") &&
+      preCaptureTraversal.indexOf("$pre_capture_file_access = $file->access('view', $anonymous, TRUE)") < preCaptureTraversal.indexOf("$entities['file:'"),
+    'pre-capture File access must be checked immediately after load and before invalidation traversal'
+  );
+  const dependencyTraversal = source.slice(
+    source.indexOf("$entities = [['entity' => $node"),
+    source.indexOf('$covered_route_declaration_ids = []')
+  );
+  assert.ok(
+    dependencyTraversal.indexOf('$media = $media_item->entity') < dependencyTraversal.indexOf("$media_access = $media->access('view', $anonymous, TRUE)") &&
+      dependencyTraversal.indexOf("$media_access = $media->access('view', $anonymous, TRUE)") < dependencyTraversal.indexOf('$media->getSource()->getConfiguration()'),
+    'dependency Media access must be checked immediately after load and before source-plugin traversal'
+  );
+  assert.ok(
+    dependencyTraversal.indexOf('$file = $file_item->entity') < dependencyTraversal.indexOf("$file_access = $file->access('view', $anonymous, TRUE)") &&
+      dependencyTraversal.indexOf("$file_access = $file->access('view', $anonymous, TRUE)") < dependencyTraversal.indexOf("'entity' => $file"),
+    'dependency File access must be checked immediately after load and before cache/invalidation traversal'
+  );
+  assert.match(source, /\$access = \$dependency\['access'\]/);
   assert.ok(
     source.indexOf('count($media_items)') < source.indexOf('$media = $media_item->entity'),
     'raw media reference counts must be bounded before referenced entities load'
@@ -1588,7 +1978,7 @@ test('PHP program performs anonymous route-bound render and exact Node-Media-Fil
   assert.doesNotMatch(source, /entityTypeManager\(\)->getStorage\([^)]*\)->delete/);
 });
 
-test('default PHP path performs no explicit verifier mutation and isolated path only mutates verifier-owned cache CIDs', () => {
+test('default path performs no explicit verifier mutation while isolated path invalidates bounded target tags and uses verifier-owned proof CIDs', () => {
   const input = derived();
   const defaultProbe = buildCustomEntityOutputAuditPhp(input);
   const isolated = buildCustomEntityOutputAuditPhp(input, { allowOwnedCacheInvalidation: true, ownedCacheToken: 'owned-token' });
@@ -1596,6 +1986,8 @@ test('default PHP path performs no explicit verifier mutation and isolated path 
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /custom-entity-output-audit:/);
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /\$cache->set\(/);
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /cache_tags\.invalidator/);
+  assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /\$invalidate_route_render_cache/);
+  assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /preCaptureAttempted/);
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /invalidateTags\(\$tags\)/);
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /finally/);
   assert.match(CUSTOM_ENTITY_OUTPUT_AUDIT_PHP, /\$cache->delete\(\$cid\)/);
