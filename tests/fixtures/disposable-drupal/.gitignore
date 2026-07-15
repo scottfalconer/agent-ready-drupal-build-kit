@@ -14,6 +14,12 @@
 /.gitattributes
 /recipes/
 /web/*
+!/web/modules/
+/web/modules/*
+!/web/modules/custom/
+/web/modules/custom/*
+!/web/modules/custom/quality_smoke/
+!/web/modules/custom/quality_smoke/**
 !/web/sites/
 /web/sites/*
 !/web/sites/default/

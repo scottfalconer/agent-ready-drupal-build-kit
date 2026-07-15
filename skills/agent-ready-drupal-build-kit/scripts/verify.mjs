@@ -1,14 +1,31 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { perGateResults, validatePacket } from './verify-packet.mjs';
+import {
+  parseBoundedJsonText,
+  perGateResults,
+  readBoundedJsonFile,
+  validatePacket
+} from './verify-packet.mjs';
 import { reviewHandoffStateErrors } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
@@ -66,6 +83,24 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
 class UsageError extends Error {}
+
+function boundedReportMessages(initial = [], limit = 500) {
+  const values = [];
+  Object.defineProperty(values, 'push', {
+    value(...messages) {
+      for (const message of messages) {
+        if (values.length < limit - 1) {
+          Array.prototype.push.call(values, String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1_000));
+        } else if (values.length === limit - 1) {
+          Array.prototype.push.call(values, `Live verification reached its ${limit}-message reporting cap; remaining messages were bounded.`);
+        }
+      }
+      return values.length;
+    }
+  });
+  values.push(...initial);
+  return values;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -4773,8 +4808,17 @@ function ddevDocroot(projectRoot) {
   }
 }
 
-const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.1';
-const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.1';
+const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.2';
+const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
+const CUSTOM_CODE_QUALITY_SCHEMA = 'public-kit.custom-code-quality.1';
+const CUSTOM_CODE_TEST_EXECUTION_SCHEMA = 'public-kit.custom-code-test-execution.1';
+const EXECUTABLE_CUSTOM_SURFACE_KINDS = new Set([
+  'controller_class',
+  'hook_or_callback',
+  'plugin_class',
+  'route',
+  'service_registration'
+]);
 const CUSTOM_EXTENSION_DIRECTORY_LIMIT = 10_000;
 const CUSTOM_EXTENSION_FILE_LIMIT = 10_000;
 const CUSTOM_EXTENSION_SCAN_DEADLINE_MS = 5_000;
@@ -4790,6 +4834,43 @@ const CUSTOM_CODE_SURFACE_LIMIT = 50_000;
 const CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT = 5_000;
 const CUSTOM_CODE_TEST_METHOD_LIMIT = 50_000;
 const CUSTOM_CODE_PHP_INPUT_BYTES_LIMIT = 48 * 1024;
+export const CUSTOM_CODE_EXECUTION_LIMITS = Object.freeze({
+  aggregateDeadlineMs: 900_000,
+  aggregateOutputBytes: 64 * 1024 * 1024,
+  cleanupReserveMs: 30_000,
+  commands: 384,
+  composerMetadataBytes: 8 * 1024 * 1024,
+  coverageRows: 128,
+  dataCasesPerMethod: 256,
+  dataCasesTotal: 2_048,
+  discoveryOutputBytes: 2 * 1024 * 1024,
+  discoveryTimeoutMs: 30_000,
+  findingsPerCheck: 200,
+  findingMessageCharacters: 500,
+  junitBytesPerRun: 2 * 1024 * 1024,
+  junitBytesTotal: 32 * 1024 * 1024,
+  lintOutputBytes: 64 * 1024,
+  lintTimeoutMs: 10_000,
+  pathArgvBytes: 24 * 1024,
+  phpcsChunkFiles: 32,
+  phpcsOutputBytes: 8 * 1024 * 1024,
+  phpcsTimeoutMs: 120_000,
+  phpFiles: 256,
+  phpstanOutputBytes: 8 * 1024 * 1024,
+  phpstanTimeoutMs: 180_000,
+  packageBytes: 256 * 1024 * 1024,
+  packageFiles: 50_000,
+  composerPackageBytesTotal: 512 * 1024 * 1024,
+  composerPackageFilesTotal: 100_000,
+  composerPackages: 512,
+  testExecutionTimeoutMs: 90_000,
+  testFiles: 32,
+  testMethods: 32
+});
+const CUSTOM_CODE_DDEV_CONFIG_FILE_RE = /^config(?:\.[A-Za-z0-9_.-]+)?\.ya?ml$/i;
+const CUSTOM_CODE_DDEV_COMPOSE_FILE_RE = /^(?:docker-compose|router-compose|ssh-auth-compose)(?:\.[A-Za-z0-9_.-]+)?\.ya?ml$/i;
+const CUSTOM_CODE_DDEV_FILE_LIMIT = 10_000;
+const CUSTOM_CODE_DDEV_TOTAL_BYTES_LIMIT = 32 * 1024 * 1024;
 const CUSTOM_EXTENSION_WALK_EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor']);
 const CUSTOM_SOURCE_EXCLUDED_SEGMENTS = new Set([
   '.cache', '.ddev', '.git', '.github', '.idea', '.vscode', 'bower_components', 'coverage',
@@ -4948,7 +5029,7 @@ function customSourceKind(extensionRelativePath) {
   if (/\.info\.ya?ml$/.test(filename)) {
     return 'extension_metadata';
   }
-  if (/\.(?:module|theme|install|inc)$/.test(filename)) {
+  if (/\.(?:module|theme|install|inc|test|profile)$/.test(filename)) {
     return 'procedural_php';
   }
   if (/\.php$/.test(filename)) {
@@ -5139,6 +5220,103 @@ function routingRecords(text, file, extension) {
     .filter((route) => route.name && route.path);
 }
 
+function phpCodeMask(text) {
+  const characters = [...text];
+  let state = 'code';
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
+    const next = characters[index + 1] ?? '';
+    if (state === 'code') {
+      if (character === '/' && next === '/') {
+        characters[index] = characters[index + 1] = ' ';
+        index += 1;
+        state = 'line_comment';
+      } else if (character === '#' && next !== '[') {
+        characters[index] = ' ';
+        state = 'line_comment';
+      } else if (character === '/' && next === '*') {
+        characters[index] = characters[index + 1] = ' ';
+        index += 1;
+        state = 'block_comment';
+      } else if (character === "'") {
+        characters[index] = ' ';
+        state = 'single_quote';
+      } else if (character === '"') {
+        characters[index] = ' ';
+        state = 'double_quote';
+      }
+      continue;
+    }
+    if (character === '\n' || character === '\r') {
+      if (state === 'line_comment') {
+        state = 'code';
+      }
+      continue;
+    }
+    characters[index] = ' ';
+    if (state === 'block_comment' && character === '*' && next === '/') {
+      characters[index + 1] = ' ';
+      index += 1;
+      state = 'code';
+    } else if ((state === 'single_quote' || state === 'double_quote') && character === '\\') {
+      if (index + 1 < characters.length) {
+        characters[index + 1] = ' ';
+        index += 1;
+      }
+    } else if (state === 'single_quote' && character === "'") {
+      state = 'code';
+    } else if (state === 'double_quote' && character === '"') {
+      state = 'code';
+    }
+  }
+  return characters.join('');
+}
+
+export function customTestMethodId(extension, path, className, methodName) {
+  return `TESTMETHOD-${sha256(`${extension}\u0000${path}\u0000${className}\u0000${methodName}`).slice(0, 16)}`;
+}
+
+function phpTestMethods(extension, path, text) {
+  const masked = phpCodeMask(text);
+  const namespace = masked.match(/^[ \t]*namespace\s+([A-Za-z_][A-Za-z0-9_\\]*)\s*[;{]/m)?.[1] ?? '';
+  const methods = [];
+  const classPattern = /(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const classMatch of masked.matchAll(classPattern)) {
+    const className = namespace ? `${namespace}\\${classMatch[1]}` : classMatch[1];
+    const openingBrace = masked.indexOf('{', (classMatch.index ?? 0) + classMatch[0].length);
+    if (openingBrace === -1) {
+      continue;
+    }
+    const tokenPattern = /[{}]|(?:(?:public|protected|private|static|final|abstract)\s+)*function\s+&?\s*(test[A-Za-z0-9_]+)\s*\(/g;
+    tokenPattern.lastIndex = openingBrace;
+    let depth = 0;
+    for (let token = tokenPattern.exec(masked); token; token = tokenPattern.exec(masked)) {
+      if (token[0] === '{') {
+        depth += 1;
+      } else if (token[0] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          break;
+        }
+      } else if (depth === 1 && token[1]) {
+        const methodName = token[1];
+        methods.push({
+          id: customTestMethodId(extension, path, className, methodName),
+          className,
+          methodName
+        });
+        if (methods.length > CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT) {
+          break;
+        }
+      }
+    }
+    if (methods.length > CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT) {
+      break;
+    }
+  }
+  return methods;
+}
+
 function inspectCustomTestFile(extension, projectRoot, file) {
   const sharedPath = relative(projectRoot, file).split(sep).join('/');
   if (!/(?:^|\/)tests?(?:\/|$)/i.test(sharedPath) || !/\.(?:php|js|mjs|ts)$/i.test(sharedPath)) {
@@ -5146,30 +5324,15 @@ function inspectCustomTestFile(extension, projectRoot, file) {
   }
   const bytes = readFileSync(file);
   const text = bytes.toString('utf8');
-  const testMethods = [];
-  let truncated = false;
-  const add = (name) => {
-    if (testMethods.length >= CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT) {
-      truncated = true;
-      return false;
-    }
-    testMethods.push(name);
-    return true;
-  };
-  for (const match of text.matchAll(/^[ \t]*(?:(?:public|protected|private|static|final|abstract)\s+)*function\s+(test[A-Za-z0-9_]+)\s*\(/gm)) {
-    if (!add(match[1])) break;
-  }
-  if (!truncated) {
-    for (const match of text.matchAll(/^[ \t]*(?:test|it)\s*\(\s*['"]([^'"]{1,200})['"]/gm)) {
-      if (!add(match[1])) break;
-    }
-  }
+  const testMethods = /\.php$/i.test(sharedPath) ? phpTestMethods(extension, sharedPath, text) : [];
+  const truncated = testMethods.length > CUSTOM_CODE_TEST_METHODS_PER_FILE_LIMIT;
   return {
     id: `TEST-${sha256(`${extension}\u0000${sharedPath}`).slice(0, 16)}`,
     extension,
     path: sharedPath,
     sha256: `sha256:${sha256(bytes)}`,
-    testMethods: [...new Set(testMethods)].sort(comparePortable),
+    testMethods: [...new Map(testMethods.map((method) => [method.id, method])).values()]
+      .sort((left, right) => comparePortable(left.id, right.id)),
     truncated
   };
 }
@@ -6143,8 +6306,2922 @@ export function inspectCustomConfigSchema(projectRoot, environment, extensions) 
   }
 }
 
-export function inspectCustomCode(projectRoot, environment, routeBindings = []) {
+const CUSTOM_CODE_FAILURE_CODES = new Set([
+  'input_limit_exceeded',
+  'aggregate_deadline_exceeded',
+  'tool_missing',
+  'required_standard_missing',
+  'config_missing',
+  'spawn_failed',
+  'timed_out',
+  'invalid_output',
+  'violations_found',
+  'no_tests_executed',
+  'unexpected_test_executed',
+  'no_assertions_executed',
+  'test_failed',
+  'test_skipped',
+  'stale_test_binding',
+  'unknown_test_method',
+  'uncovered_acceptance_criterion',
+  'unsupported_runner'
+]);
+
+function boundedFindingMessage(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, CUSTOM_CODE_EXECUTION_LIMITS.findingMessageCharacters);
+}
+
+function customCodeFailure(code, check, subjectId = '', message = '') {
+  return {
+    code: CUSTOM_CODE_FAILURE_CODES.has(code) ? code : 'invalid_output',
+    check,
+    subjectId: String(subjectId ?? '').slice(0, 200),
+    message: boundedFindingMessage(message)
+  };
+}
+
+function boundedCustomCodeFailures(failures) {
+  if (!Array.isArray(failures) || failures.length <= CUSTOM_CODE_EXECUTION_LIMITS.findingsPerCheck) {
+    return Array.isArray(failures) ? failures : [];
+  }
+  return [
+    ...failures.slice(0, CUSTOM_CODE_EXECUTION_LIMITS.findingsPerCheck - 1),
+    customCodeFailure('input_limit_exceeded', 'report', '', 'Additional custom-code failures were bounded from the verifier report.')
+  ];
+}
+
+function appendBounded(list, value, limit = CUSTOM_CODE_EXECUTION_LIMITS.findingsPerCheck) {
+  if (list.length < limit) {
+    list.push(value);
+  }
+}
+
+export function customCodeResultFingerprint(record) {
+  const fingerprintInput = { ...record };
+  delete fingerprintInput.resultFingerprint;
+  return `sha256:${sha256(JSON.stringify(fingerprintInput))}`;
+}
+
+function finalizedCustomCodeRecord(record) {
+  const normalized = {
+    ...record,
+    ...(Array.isArray(record?.failures) ? { failures: boundedCustomCodeFailures(record.failures) } : {})
+  };
+  return { ...normalized, resultFingerprint: customCodeResultFingerprint(normalized) };
+}
+
+function safeCommandArg(value) {
+  const text = String(value ?? '');
+  if (/[/\\]agent-ready-custom-code-[^/\\]+/.test(text)) {
+    return text.replace(/^.*[/\\]agent-ready-custom-code-[^/\\]+(?:[/\\]project)?/, '<disposable-workspace>');
+  }
+  return /(?:^|\/)\.ddev\/\.agent-ready-custom-code-[^/]+\//.test(text)
+    ? text.replace(/^.*(?:^|\/)\.ddev\/\.agent-ready-custom-code-[^/]+\//, '.ddev/<custom-code-audit>/')
+    : text;
+}
+
+function sanitizedDdevHostEnvironment(environment = process.env) {
+  return Object.fromEntries(Object.entries(environment).filter(([key, value]) =>
+    !/^(?:DDEV(?:_|$)|IS_DDEV_PROJECT$|COMPOSE_(?:FILE|PATH_SEPARATOR|PROJECT_NAME)$)/.test(key) &&
+    !String(value ?? '').includes('\u0000')
+  ));
+}
+
+function activeDdevConfigText(value) {
+  return String(value ?? '')
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n')
+    .replace(/\\u([a-f0-9]{4})/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\\U([a-f0-9]{8})/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/\\x([a-f0-9]{2})/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+function collectCustomCodeDdevTree(projectRoot) {
+  const root = realpathSync(projectRoot);
+  const ddevRoot = join(root, '.ddev');
+  const ddevMetadata = lstatSync(ddevRoot);
+  if (ddevMetadata.isSymbolicLink() || !ddevMetadata.isDirectory()) {
+    throw new Error('Disposable custom-code verification requires a regular .ddev directory.');
+  }
+  const pending = [ddevRoot];
+  const records = [];
+  let totalBytes = 0;
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePortable(left.name, right.name))) {
+      const absolute = join(directory, entry.name);
+      const metadata = lstatSync(absolute);
+      const relativePath = relative(ddevRoot, absolute).split(sep).join('/');
+      if (entry.isSymbolicLink() || metadata.isSymbolicLink()) {
+        throw new Error(`Disposable custom-code verification rejects .ddev symlinks: .ddev/${relativePath}.`);
+      }
+      if (metadata.isDirectory()) {
+        records.push({
+          absolute,
+          kind: 'directory',
+          mode: metadata.mode & 0o777,
+          relativePath: `${relativePath}/`,
+          size: 0,
+          sha256: ''
+        });
+        pending.push(absolute);
+      } else if (metadata.isFile()) {
+        const bytes = readFileSync(absolute);
+        totalBytes += bytes.length;
+        records.push({
+          absolute,
+          kind: 'file',
+          mode: metadata.mode & 0o777,
+          relativePath,
+          size: bytes.length,
+          sha256: `sha256:${sha256(bytes)}`
+        });
+      } else {
+        throw new Error(`Disposable custom-code verification rejects unsupported .ddev entries: .ddev/${relativePath}.`);
+      }
+      if (records.length > CUSTOM_CODE_DDEV_FILE_LIMIT || totalBytes > CUSTOM_CODE_DDEV_TOTAL_BYTES_LIMIT) {
+        throw new Error('Disposable custom-code verification rejects an oversized .ddev configuration tree.');
+      }
+    }
+  }
+  records.sort((left, right) => comparePortable(left.relativePath, right.relativePath));
+  const fingerprintRecords = records.map(({ kind, mode, relativePath, sha256: recordSha256, size }) => ({
+    kind,
+    mode,
+    path: relativePath,
+    sha256: recordSha256,
+    size
+  }));
+  return {
+    ddevRoot,
+    records,
+    snapshot: {
+      checkedDirectoryCount: records.filter((record) => record.kind === 'directory').length,
+      checkedFileCount: records.filter((record) => record.kind === 'file').length,
+      totalBytes,
+      fingerprint: `sha256:${sha256(JSON.stringify(fingerprintRecords))}`
+    }
+  };
+}
+
+export function customCodeDdevTreeSnapshot(projectRoot) {
+  return collectCustomCodeDdevTree(projectRoot).snapshot;
+}
+
+/** Refuse every project-controlled DDEV surface that can execute or mount host capabilities. */
+export function assertSafeCustomCodeDdevConfig(projectRoot) {
+  const { records, snapshot } = collectCustomCodeDdevTree(projectRoot);
+  for (const record of records) {
+    if (record.kind !== 'file') continue;
+    if (['web-build/', 'db-build/', 'web-entrypoint.d/', 'db-entrypoint.d/'].some((prefix) => record.relativePath.startsWith(prefix))) {
+      throw new Error(`Disposable custom-code verification rejects project image/entrypoint customization: .ddev/${record.relativePath}.`);
+    }
+    if (record.relativePath === 'commands' || record.relativePath.startsWith('commands/')) {
+      throw new Error(`Disposable custom-code verification rejects project custom commands: .ddev/${record.relativePath}.`);
+    }
+    const name = record.relativePath.split('/').at(-1) ?? '';
+    if (CUSTOM_CODE_DDEV_COMPOSE_FILE_RE.test(name)) {
+      throw new Error(`Disposable custom-code verification rejects project compose overrides: .ddev/${record.relativePath}.`);
+    }
+    if (!CUSTOM_CODE_DDEV_CONFIG_FILE_RE.test(name)) continue;
+    const raw = readFileSync(record.absolute, 'utf8');
+    if (/\\(?:u[0-9a-f]{4}|U[0-9a-f]{8}|x[0-9a-f]{2})/i.test(raw)) {
+      throw new Error(`Disposable custom-code verification rejects escaped YAML key material: .ddev/${record.relativePath}.`);
+    }
+    const text = activeDdevConfigText(raw);
+    if (/(?:^|[\s,{])["']?hooks["']?\s*:/im.test(text)) {
+      throw new Error(`Disposable custom-code verification rejects project hooks: .ddev/${record.relativePath}.`);
+    }
+    if (/(?:^|[\s,{])["']?remote_config["']?\s*:/im.test(text)) {
+      throw new Error(`Disposable custom-code verification rejects remote_config: .ddev/${record.relativePath}.`);
+    }
+    if (/(?:^|[\s,[{])(?:&|\*)[A-Za-z0-9_.-]+/m.test(text)) {
+      throw new Error(`Disposable custom-code verification rejects YAML anchors or aliases: .ddev/${record.relativePath}.`);
+    }
+  }
+  return snapshot;
+}
+
+function verifierDdevRuntimeSpec(projectRoot) {
+  const configPath = join(projectRoot, '.ddev', 'config.yaml');
+  const metadata = lstatSync(configPath);
+  if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > 1024 * 1024) {
+    throw new Error('Disposable custom-code verification requires a bounded regular .ddev/config.yaml.');
+  }
+  const text = readFileSync(configPath, 'utf8');
+  const scalar = (key) => {
+    const match = text.match(new RegExp(`^${key}:\\s*(?:["']([^"']*)["']|([^#\\r\\n]*?))\\s*(?:#.*)?$`, 'mi'));
+    return String(match?.[1] ?? match?.[2] ?? '').trim();
+  };
+  const type = scalar('type');
+  const docroot = scalar('docroot').replace(/^\.\//, '').replace(/\/+$/, '');
+  const phpVersion = scalar('php_version');
+  const webserverType = scalar('webserver_type');
+  if (!/^drupal(?:9|10|11)?$/.test(type)) throw new Error('Disposable custom-code verification requires a Drupal DDEV project type.');
+  if (!docroot || isAbsolute(docroot) || docroot.split('/').some((part) => !part || part === '.' || part === '..')) {
+    throw new Error('Disposable custom-code verification requires a safe project-relative DDEV docroot.');
+  }
+  const docrootPath = join(projectRoot, docroot);
+  const docrootMetadata = lstatSync(docrootPath);
+  if (docrootMetadata.isSymbolicLink() || !docrootMetadata.isDirectory() || !pathIsInside(realpathSync(projectRoot), realpathSync(docrootPath))) {
+    throw new Error('Disposable custom-code verification requires a regular in-project DDEV docroot.');
+  }
+  if (phpVersion && !/^8\.[1-5]$/.test(phpVersion)) throw new Error('Disposable custom-code verification rejects an unsupported PHP runtime selection.');
+  if (webserverType && !['nginx-fpm', 'apache-fpm'].includes(webserverType)) {
+    throw new Error('Disposable custom-code verification rejects a custom DDEV webserver runtime.');
+  }
+  const databaseBlock = text.match(/^database:\s*(?:#.*)?\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*)/mi)?.[1] ?? '';
+  const databaseScalar = (key) => {
+    const match = databaseBlock.match(new RegExp(`^[ \\t]+${key}:\\s*(?:["']([^"']*)["']|([^#\\r\\n]*?))\\s*(?:#.*)?$`, 'mi'));
+    return String(match?.[1] ?? match?.[2] ?? '').trim();
+  };
+  const databaseType = databaseScalar('type');
+  const databaseVersion = databaseScalar('version');
+  if (databaseType && !['mariadb', 'mysql', 'postgres'].includes(databaseType)) {
+    throw new Error('Disposable custom-code verification rejects a custom DDEV database runtime.');
+  }
+  if (databaseVersion && !/^\d+(?:\.\d+){0,2}$/.test(databaseVersion)) {
+    throw new Error('Disposable custom-code verification rejects an unsupported DDEV database version.');
+  }
+  return { databaseType, databaseVersion, docroot, phpVersion, type, webserverType };
+}
+
+function establishVerifierOwnedDdevRuntime(projectRoot, projectName) {
+  const spec = verifierDdevRuntimeSpec(projectRoot);
+  const ddevRoot = join(projectRoot, '.ddev');
+  rmSync(ddevRoot, { force: false, recursive: true });
+  mkdirSync(ddevRoot, { mode: 0o700 });
+  const lines = [
+    `name: ${JSON.stringify(projectName)}`,
+    `type: ${JSON.stringify(spec.type)}`,
+    `docroot: ${JSON.stringify(spec.docroot)}`,
+    'project_tld: "ddev.site"',
+    'xdebug_enabled: false'
+  ];
+  if (spec.phpVersion) lines.push(`php_version: ${JSON.stringify(spec.phpVersion)}`);
+  if (spec.webserverType) lines.push(`webserver_type: ${JSON.stringify(spec.webserverType)}`);
+  if (spec.databaseType || spec.databaseVersion) {
+    lines.push('database:');
+    if (spec.databaseType) lines.push(`  type: ${JSON.stringify(spec.databaseType)}`);
+    if (spec.databaseVersion) lines.push(`  version: ${JSON.stringify(spec.databaseVersion)}`);
+  }
+  const config = `${lines.join('\n')}\n`;
+  writeFileSync(join(ddevRoot, 'config.yaml'), config, { flag: 'wx', mode: 0o600 });
+  assertSafeCustomCodeDdevConfig(projectRoot);
+  return {
+    configSha256: `sha256:${sha256(config)}`,
+    databaseFamily: spec.databaseType === 'postgres' ? 'postgres' : 'mysql',
+    specSha256: `sha256:${sha256(JSON.stringify(spec))}`
+  };
+}
+
+export function createCustomCodeDdevExecutor(projectRoot, environment = process.env, options = {}) {
+  const spawn = options.spawnSync ?? spawnSync;
+  let realProjectRoot = '';
+  try {
+    realProjectRoot = realpathSync(projectRoot);
+  } catch {
+    return () => ({ ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
+  }
+  if (findDrupalDdevRoot(realProjectRoot) !== realProjectRoot) {
+    return () => ({ ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
+  }
+  const containerMarker = options.containerMarker === undefined
+    ? existsSync('/.dockerenv')
+    : typeof options.containerMarker === 'function'
+      ? options.containerMarker()
+      : options.containerMarker === true;
+  const inContainer = containerMarker && ddevContainerContext(realProjectRoot, environment);
+  return ({ argv, env = {}, timeoutMs, outputLimitBytes }) => {
+    if (
+      !Array.isArray(argv) || argv.length === 0 ||
+      argv.some((argument) => typeof argument !== 'string' || argument.includes('\u0000')) ||
+      Object.entries(env).some(([key, value]) => !/^[A-Z][A-Z0-9_]*$/.test(key) || String(value).includes('\u0000'))
+    ) {
+      return { ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false };
+    }
+    const envArgv = Object.keys(env).sort(comparePortable).map((key) => `${key}=${String(env[key])}`);
+    let command;
+    let args;
+    if (inContainer) {
+      if (envArgv.length > 0) {
+        command = 'env';
+        args = [...envArgv, ...argv];
+      } else {
+        [command, ...args] = argv;
+      }
+    } else {
+      command = 'ddev';
+      args = ['exec', '--raw', '--dir', '/var/www/html', '--'];
+      if (envArgv.length > 0) {
+        args.push('env', ...envArgv);
+      }
+      args.push(...argv);
+    }
+    const result = spawn(command, args, {
+      cwd: realProjectRoot,
+      encoding: 'utf8',
+      env: inContainer ? environment : sanitizedDdevHostEnvironment(environment),
+      maxBuffer: outputLimitBytes + 1,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs
+    });
+    const stdout = String(result?.stdout ?? '');
+    const stderr = String(result?.stderr ?? '');
+    const timedOut = result?.error?.code === 'ETIMEDOUT' || result?.signal === 'SIGTERM';
+    return {
+      ok: !result?.error && result?.status === 0,
+      exitCode: Number.isInteger(result?.status) ? result.status : null,
+      stdout,
+      stderr,
+      spawnError: Boolean(result?.error) && !timedOut,
+      timedOut
+    };
+  };
+}
+
+function directHostExecutor(cwd, environment = process.env, options = {}) {
+  const spawn = options.hostSpawnSync ?? spawnSync;
+  const hostEnvironment = sanitizedDdevHostEnvironment(environment);
+  return ({ argv, env = {}, timeoutMs, outputLimitBytes }) => {
+    if (!Array.isArray(argv) || argv.length < 1 || argv.some((value) => typeof value !== 'string' || value.includes('\u0000'))) {
+      return { ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false };
+    }
+    const [command, ...args] = argv;
+    const result = spawn(command, args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...hostEnvironment, ...env },
+      maxBuffer: outputLimitBytes + 1,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs
+    });
+    const timedOut = result?.error?.code === 'ETIMEDOUT' || result?.signal === 'SIGTERM';
+    return {
+      ok: !result?.error && result?.status === 0,
+      exitCode: Number.isInteger(result?.status) ? result.status : null,
+      stdout: String(result?.stdout ?? ''),
+      stderr: String(result?.stderr ?? ''),
+      spawnError: Boolean(result?.error) && !timedOut,
+      timedOut
+    };
+  };
+}
+
+function disposableDescriptionOrigin(description, workspace) {
+  const raw = plainJsonObject(description?.raw) ? description.raw : description;
+  const name = String(raw?.name ?? '');
+  const appRoot = String(raw?.approot ?? raw?.appRoot ?? '');
+  const primaryUrl = String(raw?.primary_url ?? raw?.primaryUrl ?? '');
+  try {
+    const parsed = parseHttpUrl(primaryUrl, 'Disposable DDEV primary URL');
+    const expectedHostname = `${workspace.identity.projectName}.ddev.site`;
+    if (
+      name !== workspace.identity.projectName ||
+      realpathSync(appRoot) !== realpathSync(workspace.projectRoot) ||
+      parsed.hostname !== expectedHostname ||
+      parsed.pathname !== '/' ||
+      parsed.search
+    ) {
+      return '';
+    }
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+function disposableDescriptionIdentity(description, workspace) {
+  return Boolean(disposableDescriptionOrigin(description, workspace));
+}
+
+function disposableMarkerMatches(workspace) {
+  try {
+    const ownerReal = realpathSync(workspace.ownerRoot);
+    const parentReal = realpathSync(workspace.tempParent);
+    const markerMetadata = lstatSync(workspace.markerPath);
+    const projectReal = realpathSync(workspace.projectRoot);
+    return dirname(ownerReal) === parentReal && basename(ownerReal).startsWith('agent-ready-custom-code-') &&
+      pathIsInside(ownerReal, projectReal) && markerMetadata.isFile() && !markerMetadata.isSymbolicLink() &&
+      JSON.stringify(JSON.parse(readFileSync(workspace.markerPath, 'utf8'))) === JSON.stringify(workspace.identity);
+  } catch {
+    return false;
+  }
+}
+
+function disposableVerifierConfigMatches(workspace) {
+  try {
+    const expectedHash = String(workspace?.runtimeProvenance?.configSha256 ?? '');
+    const expectedName = `name: ${JSON.stringify(workspace.identity.projectName)}`;
+    const ddevRoot = join(workspace.projectRoot, '.ddev');
+    const configPath = join(ddevRoot, 'config.yaml');
+    const metadata = lstatSync(configPath);
+    const config = readFileSync(configPath, 'utf8');
+    const hasAdditionalConfig = readdirSync(ddevRoot, { withFileTypes: true }).some((entry) =>
+      entry.name !== 'config.yaml' && CUSTOM_CODE_DDEV_CONFIG_FILE_RE.test(entry.name)
+    );
+    return /^sha256:[a-f0-9]{64}$/.test(expectedHash) && !metadata.isSymbolicLink() && metadata.isFile() &&
+      !hasAdditionalConfig && config.split(/\r?\n/).includes(expectedName) &&
+      `sha256:${sha256(config)}` === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
+function captureDisposableRuntimeDdevTree(workspace) {
+  const snapshot = customCodeDdevTreeSnapshot(workspace.projectRoot);
+  workspace.runtimeProvenance = {
+    ...workspace.runtimeProvenance,
+    ddevTreeDirectoryCount: snapshot.checkedDirectoryCount,
+    ddevTreeFileCount: snapshot.checkedFileCount,
+    ddevTreeFingerprint: snapshot.fingerprint,
+    ddevTreeTotalBytes: snapshot.totalBytes
+  };
+  return snapshot;
+}
+
+function disposableRuntimeDdevTreeMatches(workspace) {
+  const expected = String(workspace?.runtimeProvenance?.ddevTreeFingerprint ?? '');
+  if (!/^sha256:[a-f0-9]{64}$/.test(expected)) return false;
+  try {
+    return customCodeDdevTreeSnapshot(workspace.projectRoot).fingerprint === expected;
+  } catch {
+    return false;
+  }
+}
+
+export function cleanupDisposableCustomCodeWorkspace(workspace, runner) {
+  const failures = [];
+  const commandResultHashes = [];
+  if (!disposableMarkerMatches(workspace)) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace?.identity?.workspaceId ?? '', 'Disposable workspace ownership changed before cleanup; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  if (!disposableVerifierConfigMatches(workspace)) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Verifier-owned DDEV configuration changed before cleanup; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  if (workspace?.runtimeProvenance?.ddevTreeFingerprint) {
+    if (!disposableRuntimeDdevTreeMatches(workspace)) {
+      failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Verifier-owned DDEV runtime tree changed before cleanup; no delete was attempted.'));
+      return { completed: false, commandResultHashes, failures };
+    }
+  } else {
+    try {
+      assertSafeCustomCodeDdevConfig(workspace.projectRoot);
+      captureDisposableRuntimeDdevTree(workspace);
+    } catch {
+      failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Disposable DDEV configuration became unsafe before cleanup; no delete was attempted.'));
+      return { completed: false, commandResultHashes, failures };
+    }
+  }
+  const describe = runner.run({
+    argv: ['ddev', 'describe', '-j', '--skip-hooks'],
+    cleanup: true,
+    executorOverride: workspace.hostExecutor,
+    timeoutMs: 10_000,
+    outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes
+  });
+  if (describe.record) commandResultHashes.push(describe.record.resultSha256);
+  let description = null;
+  try {
+    description = describe.ok ? JSON.parse(describe.stdout) : null;
+  } catch {
+    description = null;
+  }
+  if (describe.ok && (!description || !disposableDescriptionIdentity(description, workspace))) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Disposable DDEV identity did not match immediately before cleanup; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  if (!describe.ok && !disposableVerifierConfigMatches(workspace)) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Disposable DDEV identity was unavailable and the verifier-owned configuration no longer matched; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  if (!disposableVerifierConfigMatches(workspace) || !disposableRuntimeDdevTreeMatches(workspace)) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Verifier-owned DDEV configuration or runtime tree changed immediately before deletion; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  if (!disposableMarkerMatches(workspace) || (!describe.ok && !disposableVerifierConfigMatches(workspace))) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Disposable workspace ownership changed immediately before deletion; no delete was attempted.'));
+    return { completed: false, commandResultHashes, failures };
+  }
+  const deletion = runner.run({
+    argv: ['ddev', 'delete', '-Oy', '--skip-hooks'],
+    cleanup: true,
+    executorOverride: workspace.hostExecutor,
+    timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.cleanupReserveMs,
+    outputLimitBytes: 2 * 1024 * 1024
+  });
+  if (deletion.record) commandResultHashes.push(deletion.record.resultSha256);
+  if (!deletion.ok || !disposableMarkerMatches(workspace)) {
+    failures.push(commandFailure(deletion, 'phpunit-isolation-cleanup', workspace.identity.workspaceId));
+    return { completed: false, commandResultHashes, failures };
+  }
+  try {
+    rmSync(workspace.ownerRoot, { force: false, recursive: true });
+  } catch {
+    failures.push(customCodeFailure('spawn_failed', 'phpunit-isolation-cleanup', workspace.identity.workspaceId, 'Owned disposable workspace files could not be removed after DDEV deletion.'));
+  }
+  return { completed: failures.length === 0, commandResultHashes, failures };
+}
+
+function auditComposerProject(requirements) {
+  return {
+    name: 'agent-ready/verifier-audit',
+    description: 'Ephemeral verifier-owned analyzer and test toolchain.',
+    type: 'project',
+    require: Object.fromEntries([...requirements.closure]
+      .sort((left, right) => comparePortable(left.name, right.name))
+      .map((record) => [record.name, record.version])),
+    config: {
+      'allow-plugins': false,
+      'sort-packages': true
+    },
+    'minimum-stability': 'stable',
+    'prefer-stable': true
+  };
+}
+
+function exactToolRequirementsMatch(projectRoot, needs, expected) {
+  const current = customCodeToolRequirements(projectRoot, needs);
+  return current.failures.length === 0 &&
+    current.snapshot.composerJsonSha256 === expected.snapshot.composerJsonSha256 &&
+    current.snapshot.composerLockSha256 === expected.snapshot.composerLockSha256 &&
+    sameLockedToolPackages(current, expected);
+}
+
+export function createDisposableCustomCodeWorkspace(projectRoot, inventory, runner, environment = process.env, options = {}) {
+  const failures = [];
+  const setupCommandResultHashes = [];
+  const needs = options.toolNeeds ?? { phpcs: true, phpstan: true, phpunit: true };
+  let sourceRoot = '';
+  try {
+    sourceRoot = realpathSync(projectRoot);
+  } catch {
+    failures.push(customCodeFailure('spawn_failed', 'phpunit-isolation', '', 'The working project root could not be resolved for disposable verification.'));
+    return { failures, workspace: null };
+  }
+  const requirements = options.toolRequirements ?? customCodeToolRequirements(sourceRoot, needs);
+  if (requirements.failures.length > 0 || !requirements.snapshot) {
+    return { failures: [...requirements.failures], workspace: null };
+  }
+  const containerMarker = options.containerMarker === undefined ? existsSync('/.dockerenv') : options.containerMarker === true;
+  if (containerMarker && ddevContainerContext(sourceRoot, environment)) {
+    failures.push(customCodeFailure('spawn_failed', 'phpunit-isolation', '', 'Focused tests require host-side DDEV orchestration for a distinct disposable project and database.'));
+    return { failures, workspace: null };
+  }
+  const tempParent = realpathSync(options.tempParent ?? tmpdir());
+  const ownerRoot = mkdtempSync(join(tempParent, 'agent-ready-custom-code-'));
+  const cloneRoot = join(ownerRoot, 'project');
+  const markerPath = join(ownerRoot, 'identity.json');
+  let workspace = null;
+  let startAttempted = false;
+  const runHost = (cwd, argv, timeoutMs, outputLimitBytes = 2 * 1024 * 1024) => {
+    const result = runner.run({
+      argv,
+      executorOverride: directHostExecutor(cwd, environment, options),
+      timeoutMs,
+      outputLimitBytes
+    });
+    if (result.record) setupCommandResultHashes.push(result.record.resultSha256);
+    return result;
+  };
+  try {
+    const root = sourceRoot;
+    const topLevel = runHost(root, ['git', 'rev-parse', '--show-toplevel'], 10_000);
+    const headResult = runHost(root, ['git', 'rev-parse', 'HEAD'], 10_000);
+    const head = headResult.stdout.trim();
+    if (!topLevel.ok || realpathSync(topLevel.stdout.trim()) !== root || !headResult.ok || !/^[a-f0-9]{40,64}$/i.test(head)) {
+      throw new Error('source is not an exact Git worktree');
+    }
+    const clone = runHost(root, [
+      'git', '-c', 'core.hooksPath=/dev/null', 'clone', '--local', '--no-hardlinks', '--no-checkout',
+      '--no-recurse-submodules', '--quiet', '.', cloneRoot
+    ], 120_000, 8 * 1024 * 1024);
+    if (!clone.ok) throw new Error('exact-HEAD clone failed');
+    const checkout = runHost(cloneRoot, ['git', '-c', 'core.hooksPath=/dev/null', 'checkout', '--detach', '--quiet', head], 120_000, 8 * 1024 * 1024);
+    const clonedHead = runHost(cloneRoot, ['git', 'rev-parse', 'HEAD'], 10_000);
+    if (!checkout.ok || !clonedHead.ok || clonedHead.stdout.trim().toLowerCase() !== head.toLowerCase()) throw new Error('clone HEAD mismatch');
+    if (!exactToolRequirementsMatch(cloneRoot, needs, requirements)) throw new Error('clone tool lock mismatch');
+    const cloneInventory = exactInventoryPhpFiles(cloneRoot, inventory);
+    if (cloneInventory.failures.length > 0) throw new Error('inventoried PHP is not exact HEAD');
+    // A committed or otherwise present vendor directory is target-controlled. Remove it
+    // before provisioning the disposable project from the exact lock.
+    rmSync(join(cloneRoot, 'vendor'), { force: true, recursive: true });
+    const token = randomBytes(16).toString('hex');
+    const projectName = `agent-ready-${sha256(`${head}\u0000${token}`).slice(0, 16)}`;
+    const identity = {
+      head,
+      projectName,
+      schemaVersion: 'public-kit.disposable-custom-code-workspace.1',
+      tokenSha256: `sha256:${sha256(token)}`,
+      workspaceId: `DISPOSABLE-${sha256(`${head}\u0000${projectName}`).slice(0, 16)}`
+    };
+    assertSafeCustomCodeDdevConfig(cloneRoot);
+    const runtimeProvenance = establishVerifierOwnedDdevRuntime(cloneRoot, projectName);
+    writeFileSync(markerPath, `${JSON.stringify(identity)}\n`, { flag: 'wx', mode: 0o600 });
+    workspace = {
+      baseUrl: '',
+      exactHead: true,
+      freshDatabase: true,
+      hostExecutor: directHostExecutor(cloneRoot, environment, options),
+      identity,
+      markerPath,
+      ownerRoot,
+      projectRoot: cloneRoot,
+      runtimeProvenance,
+      setupCommandResultHashes,
+      tempParent
+    };
+    startAttempted = true;
+    const start = runHost(cloneRoot, ['ddev', 'start', '--skip-hooks'], 180_000, 8 * 1024 * 1024);
+    if (!start.ok) throw new Error('disposable DDEV start failed');
+    const describe = runHost(cloneRoot, ['ddev', 'describe', '-j', '--skip-hooks'], 10_000, CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes);
+    let description;
+    try {
+      description = describe.ok ? JSON.parse(describe.stdout) : null;
+    } catch {
+      description = null;
+    }
+    const disposableOrigin = description ? disposableDescriptionOrigin(description, workspace) : '';
+    if (!disposableOrigin) throw new Error('disposable DDEV identity mismatch');
+    workspace.baseUrl = disposableOrigin;
+    captureDisposableRuntimeDdevTree(workspace);
+    workspace.executor = createCustomCodeDdevExecutor(cloneRoot, environment, {
+      ...options,
+      containerMarker: false,
+      spawnSync: options.spawnSync ?? options.hostSpawnSync
+    });
+    const runDisposable = (argv, timeoutMs = 600_000, env = {}) => {
+      const result = runner.run({
+        argv,
+        env,
+        executorOverride: workspace.executor,
+        timeoutMs,
+        outputLimitBytes: 8 * 1024 * 1024
+      });
+      if (result.record) setupCommandResultHashes.push(result.record.resultSha256);
+      return result;
+    };
+    const projectLockValidation = runDisposable([
+      'composer', 'validate', '--check-lock', '--no-check-publish', '--no-interaction',
+      '--no-plugins', '--no-scripts'
+    ]);
+    if (!projectLockValidation.ok || !exactToolRequirementsMatch(cloneRoot, needs, requirements)) {
+      throw new Error('project Composer lock is stale or changed during validation');
+    }
+    // Drupal Composer plugins and scripts are needed to materialize the committed
+    // project lock correctly. They run only inside this exact-HEAD disposable DDEV
+    // clone; the verifier-owned audit install below remains plugin- and script-free.
+    const projectInstall = runDisposable([
+      'composer', 'install', '--no-interaction', '--no-progress', '--prefer-dist'
+    ]);
+    if (!projectInstall.ok || !exactToolRequirementsMatch(cloneRoot, needs, requirements)) {
+      throw new Error('fresh project Composer install failed or changed its lock');
+    }
+    if (exactInventoryPhpFiles(cloneRoot, inventory).failures.length > 0) {
+      throw new Error('project dependency installation mutated inventoried PHP');
+    }
+
+    const auditRelative = `.agent-ready-audit-${token.slice(0, 16)}`;
+    const auditRoot = join(cloneRoot, auditRelative);
+    mkdirSync(auditRoot, { recursive: false, mode: 0o700 });
+    writeFileSync(join(auditRoot, 'composer.json'), `${JSON.stringify(auditComposerProject(requirements), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    const auditUpdate = runDisposable([
+      'composer', `--working-dir=${auditRelative}`, 'update', '--no-install', '--no-interaction',
+      '--no-plugins', '--no-scripts', '--prefer-dist', '--no-progress'
+    ]);
+    const auditRequirements = auditUpdate.ok ? customCodeToolRequirements(auditRoot, needs) : { failures: [true], packages: {} };
+    let auditLockExact = false;
+    try {
+      auditLockExact = auditUpdate.ok && composerLockIsExactClosure(boundedLocalJson(auditRoot, 'composer.lock').value, requirements.closure);
+    } catch {
+      auditLockExact = false;
+    }
+    if (auditRequirements.failures.length > 0 || !sameLockedToolPackages(auditRequirements, requirements) || !auditLockExact) {
+      throw new Error('fresh audit lock did not match canonical project tool packages');
+    }
+    const auditInstall = runDisposable([
+      'composer', `--working-dir=${auditRelative}`, 'install', '--no-interaction', '--no-plugins',
+      '--no-scripts', '--prefer-dist', '--no-progress'
+    ]);
+    if (!auditInstall.ok) throw new Error('fresh verifier audit Composer install failed');
+    const auditProvenance = customCodeToolchainProvenance(auditRoot, needs, requirements);
+    if (auditProvenance.failures.length > 0) throw new Error('fresh verifier audit package provenance failed');
+    workspace.auditRoot = auditRoot;
+    workspace.provenance = auditProvenance;
+    workspace.requirements = requirements;
+    workspace.toolNeeds = needs;
+    return { failures, workspace };
+  } catch {
+    failures.push(customCodeFailure('spawn_failed', 'phpunit-isolation', '', 'An exact-HEAD disposable DDEV project and database could not be established.'));
+    if (startAttempted && workspace) {
+      if (!workspace?.runtimeProvenance?.ddevTreeFingerprint) {
+        try {
+          captureDisposableRuntimeDdevTree(workspace);
+        } catch {
+          // Cleanup retains strict pre-start safety when the generated tree cannot be bounded and captured.
+        }
+      }
+      const cleanup = cleanupDisposableCustomCodeWorkspace(workspace, runner);
+      failures.push(...cleanup.failures);
+    } else {
+      try {
+        if (workspace ? disposableMarkerMatches(workspace) : dirname(realpathSync(ownerRoot)) === tempParent) {
+          rmSync(ownerRoot, { force: false, recursive: true });
+        }
+      } catch {
+        // Fail closed and leave ambiguous residue rather than deleting an unconfirmed path.
+      }
+    }
+    return { failures, workspace: null };
+  }
+}
+
+export function createCustomCodeExecutionRunner(executor, options = {}) {
+  const now = options.now ?? Date.now;
+  const budget = {
+    startedAt: now(),
+    now,
+    commandCount: 0,
+    outputBytes: 0,
+    commandLimit: options.commandLimit ?? CUSTOM_CODE_EXECUTION_LIMITS.commands,
+    outputLimit: options.outputLimit ?? CUSTOM_CODE_EXECUTION_LIMITS.aggregateOutputBytes,
+    deadlineMs: options.deadlineMs ?? CUSTOM_CODE_EXECUTION_LIMITS.aggregateDeadlineMs
+  };
+  budget.cleanupReserveMs = Math.min(
+    options.cleanupReserveMs ?? CUSTOM_CODE_EXECUTION_LIMITS.cleanupReserveMs,
+    Math.floor(budget.deadlineMs / 2)
+  );
+  budget.cleanupCommandReserve = Math.min(2, Math.max(0, budget.commandLimit - 1));
+  const run = ({ argv, env = {}, timeoutMs, outputLimitBytes, executorOverride = null, cleanup = false }) => {
+    if (now() - budget.startedAt > budget.deadlineMs) {
+      return { ok: false, failureCode: 'aggregate_deadline_exceeded', record: null, stdout: '', stderr: '' };
+    }
+    if (budget.commandCount >= budget.commandLimit - (cleanup ? 0 : budget.cleanupCommandReserve)) {
+      return { ok: false, failureCode: 'input_limit_exceeded', record: null, stdout: '', stderr: '' };
+    }
+    const remainingMs = budget.deadlineMs - (now() - budget.startedAt) - (cleanup ? 0 : budget.cleanupReserveMs);
+    if (remainingMs <= 0) {
+      return { ok: false, failureCode: 'aggregate_deadline_exceeded', record: null, stdout: '', stderr: '' };
+    }
+    const boundedTimeoutMs = Math.max(1, Math.min(timeoutMs, remainingMs));
+    budget.commandCount += 1;
+    let raw;
+    try {
+      raw = (executorOverride ?? executor)({ argv, env, timeoutMs: boundedTimeoutMs, outputLimitBytes });
+    } catch {
+      raw = { ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false };
+    }
+    const stdout = String(raw?.stdout ?? '');
+    const stderr = String(raw?.stderr ?? '');
+    const outputBytes = Buffer.byteLength(stdout) + Buffer.byteLength(stderr);
+    budget.outputBytes += outputBytes;
+    let failureCode = '';
+    if (now() - budget.startedAt > budget.deadlineMs) {
+      failureCode = 'aggregate_deadline_exceeded';
+    } else if (budget.outputBytes > budget.outputLimit || outputBytes > outputLimitBytes) {
+      failureCode = 'invalid_output';
+    } else if (raw?.timedOut) {
+      failureCode = 'timed_out';
+    } else if (raw?.spawnError) {
+      failureCode = 'spawn_failed';
+    }
+    const envKeys = Object.keys(env).sort(comparePortable);
+    const publicArgv = argv.map(safeCommandArg);
+    const commandResult = {
+      argv: publicArgv,
+      envKeys,
+      exitCode: Number.isInteger(raw?.exitCode) ? raw.exitCode : null,
+      outputBytes,
+      stdoutSha256: `sha256:${sha256(stdout)}`,
+      stderrSha256: `sha256:${sha256(stderr)}`
+    };
+    const commandResultSha256 = sha256(JSON.stringify(commandResult));
+    const record = {
+      id: `COMMAND-${commandResultSha256.slice(0, 16)}`,
+      resultSha256: `sha256:${commandResultSha256}`,
+      ...commandResult
+    };
+    return {
+      ok: failureCode === '' && raw?.ok === true,
+      failureCode,
+      record,
+      stdout,
+      stderr
+    };
+  };
+  return { budget, run };
+}
+
+function reserveCustomCodeGeneratedOutput(runner, byteLength) {
+  if (runner.budget.now() - runner.budget.startedAt > runner.budget.deadlineMs) {
+    return 'aggregate_deadline_exceeded';
+  }
+  runner.budget.outputBytes += byteLength;
+  return runner.budget.outputBytes > runner.budget.outputLimit ? 'invalid_output' : '';
+}
+
+function exactInventoryPhpFiles(projectRoot, inventory) {
+  let realProjectRoot = projectRoot;
+  try {
+    realProjectRoot = realpathSync(projectRoot);
+  } catch {
+    // Individual file checks below fail closed.
+  }
+  const failures = [];
+  const files = [];
+  for (const source of Array.isArray(inventory?.sourceFiles) ? inventory.sourceFiles : []) {
+    if (!['procedural_php', 'php_class'].includes(source?.kind)) {
+      continue;
+    }
+    files.push({
+      extension: String(source.extension ?? ''),
+      id: String(source.id ?? ''),
+      isTest: false,
+      path: String(source.path ?? ''),
+      sha256: String(source.sha256 ?? '')
+    });
+  }
+  for (const test of Array.isArray(inventory?.tests) ? inventory.tests : []) {
+    if (!/\.php$/i.test(String(test?.path ?? ''))) {
+      continue;
+    }
+    files.push({
+      extension: String(test.extension ?? ''),
+      id: String(test.id ?? ''),
+      isTest: true,
+      path: String(test.path ?? ''),
+      sha256: String(test.sha256 ?? '')
+    });
+  }
+  const unique = [...new Map(files.map((file) => [file.path, file])).values()]
+    .sort((left, right) => comparePortable(left.path, right.path));
+  if (unique.length > CUSTOM_CODE_EXECUTION_LIMITS.phpFiles) {
+    failures.push(customCodeFailure(
+      'input_limit_exceeded', 'preflight', '',
+      `Custom PHP inventory exceeds ${CUSTOM_CODE_EXECUTION_LIMITS.phpFiles} files.`
+    ));
+  }
+  const argvBytes = unique.reduce((total, file) => total + Buffer.byteLength(file.path) + 1, 0);
+  if (argvBytes > CUSTOM_CODE_EXECUTION_LIMITS.pathArgvBytes) {
+    failures.push(customCodeFailure(
+      'input_limit_exceeded', 'preflight', '',
+      `Custom PHP paths exceed the ${CUSTOM_CODE_EXECUTION_LIMITS.pathArgvBytes}-byte aggregate argv limit.`
+    ));
+  }
+  for (const file of unique) {
+    if (!file.path || isAbsolute(file.path) || file.path.includes('\u0000')) {
+      failures.push(customCodeFailure('input_limit_exceeded', 'preflight', file.id, 'Inventoried PHP path is not a safe project-relative argv value.'));
+      continue;
+    }
+    const absolute = resolve(projectRoot, file.path);
+    try {
+      const metadata = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || !pathIsInside(realProjectRoot, real)) {
+        throw new Error('unsafe path');
+      }
+      const currentSha256 = `sha256:${sha256(readFileSync(real))}`;
+      if (currentSha256 !== file.sha256) {
+        failures.push(customCodeFailure('stale_test_binding', 'preflight', file.id, 'Inventoried PHP bytes changed before quality execution.'));
+      }
+    } catch {
+      failures.push(customCodeFailure('stale_test_binding', 'preflight', file.id, 'Inventoried PHP file is missing or unsafe at execution time.'));
+    }
+  }
+  return { argvBytes, failures, files: unique };
+}
+
+function executableCustomSurfaceIds(inventory) {
+  return new Set(
+    (Array.isArray(inventory?.sourceFiles) ? inventory.sourceFiles : [])
+      .flatMap((source) => Array.isArray(source?.surfaces) ? source.surfaces : [])
+      .filter((surface) => EXECUTABLE_CUSTOM_SURFACE_KINDS.has(surface?.kind))
+      .map((surface) => String(surface?.id ?? ''))
+      .filter(Boolean)
+  );
+}
+
+function capabilityRequiresFocusedTests(capability, executableSurfaceIds) {
+  return capability?.loadBearing === true ||
+    (Array.isArray(capability?.sourceSurfaceIds) ? capability.sourceSurfaceIds : [])
+      .some((surfaceId) => executableSurfaceIds.has(String(surfaceId)));
+}
+
+function coveragePreflight(inventory, review) {
+  const failures = [];
+  const rows = Array.isArray(review?.testCoverage) ? review.testCoverage : [];
+  const capabilities = Array.isArray(review?.capabilities) ? review.capabilities : [];
+  const executableSurfaceIds = executableCustomSurfaceIds(inventory);
+  const criterionExtensions = new Map();
+  const requiredCriteria = new Set();
+  for (const capability of capabilities) {
+    const extension = String(capability?.extension ?? '');
+    const requiresFocusedTests = capabilityRequiresFocusedTests(capability, executableSurfaceIds);
+    for (const criterion of Array.isArray(capability?.acceptanceCriteria) ? capability.acceptanceCriteria : []) {
+      const id = String(criterion?.id ?? '');
+      if (id) {
+        criterionExtensions.set(id, extension);
+        if (requiresFocusedTests) {
+          requiredCriteria.add(id);
+        }
+      }
+    }
+  }
+  if (rows.length > CUSTOM_CODE_EXECUTION_LIMITS.coverageRows) {
+    failures.push(customCodeFailure('input_limit_exceeded', 'coverage', '', `Focused coverage exceeds ${CUSTOM_CODE_EXECUTION_LIMITS.coverageRows} rows.`));
+  }
+  const tests = new Map((Array.isArray(inventory?.tests) ? inventory.tests : []).map((test) => [String(test?.id ?? ''), test]));
+  const methods = new Map();
+  for (const test of tests.values()) {
+    for (const method of Array.isArray(test?.testMethods) ? test.testMethods : []) {
+      methods.set(String(method?.id ?? ''), { ...method, extension: test.extension, path: test.path, testFileId: test.id });
+    }
+  }
+  const covered = new Set();
+  const coverageRowBindings = new Set();
+  const normalizedRows = [];
+  for (const [index, row] of rows.entries()) {
+    const acceptanceCriterionId = String(row?.acceptanceCriterionId ?? '').trim();
+    const testFileId = String(row?.testFileId ?? '').trim();
+    const className = String(row?.className ?? '').trim().replace(/^\\+/, '');
+    const methodName = String(row?.methodName ?? '').trim();
+    const testMethodId = String(row?.testMethodId ?? '').trim();
+    const subject = testMethodId || `coverage-row-${index}`;
+    if (row?.runner !== 'phpunit') {
+      failures.push(customCodeFailure('unsupported_runner', 'coverage', subject, 'Only the verifier-owned phpunit runner is supported.'));
+      continue;
+    }
+    if (className.length > 512 || methodName.length > 200) {
+      failures.push(customCodeFailure('input_limit_exceeded', 'coverage', subject, 'Coverage class or method identity exceeds the verifier argv limit.'));
+      continue;
+    }
+    const test = tests.get(testFileId);
+    const method = methods.get(testMethodId);
+    if (!test || !method) {
+      failures.push(customCodeFailure('unknown_test_method', 'coverage', subject, 'Coverage references a test file or method absent from the verifier inventory.'));
+      continue;
+    }
+    const expectedId = customTestMethodId(test.extension, test.path, className, methodName);
+    if (
+      expectedId !== testMethodId || method.testFileId !== testFileId ||
+      method.className !== className || method.methodName !== methodName
+    ) {
+      failures.push(customCodeFailure('stale_test_binding', 'coverage', subject, 'Coverage class, method, file, or stable ID does not match the verifier inventory.'));
+      continue;
+    }
+    const criterionExtension = criterionExtensions.get(acceptanceCriterionId);
+    if (!criterionExtension || criterionExtension !== test.extension) {
+      failures.push(customCodeFailure('stale_test_binding', 'coverage', subject, 'Coverage acceptance criterion is unknown or belongs to another extension.'));
+      continue;
+    }
+    const exactKey = `${acceptanceCriterionId}\u0000${testFileId}\u0000${className}\u0000${methodName}`;
+    if (coverageRowBindings.has(exactKey)) {
+      failures.push(customCodeFailure('stale_test_binding', 'coverage', subject, 'Coverage repeats the same acceptance criterion and exact test method binding.'));
+      continue;
+    }
+    coverageRowBindings.add(exactKey);
+    covered.add(acceptanceCriterionId);
+    normalizedRows.push({ acceptanceCriterionId, className, methodName, testFileId, testMethodId, path: test.path, extension: test.extension });
+  }
+  for (const criterionId of requiredCriteria) {
+    if (!covered.has(criterionId)) {
+      failures.push(customCodeFailure('uncovered_acceptance_criterion', 'coverage', criterionId, 'Required load-bearing or executable-surface acceptance criterion has no exact PHPUnit method binding.'));
+    }
+  }
+  const testFileCount = new Set(normalizedRows.map((row) => row.testFileId)).size;
+  const testMethodCount = new Set(normalizedRows.map((row) => row.testMethodId)).size;
+  if (testFileCount > CUSTOM_CODE_EXECUTION_LIMITS.testFiles || testMethodCount > CUSTOM_CODE_EXECUTION_LIMITS.testMethods) {
+    failures.push(customCodeFailure('input_limit_exceeded', 'coverage', '', 'Focused PHPUnit file or method count exceeds the verifier limit.'));
+  }
+  return {
+    applies: requiredCriteria.size > 0,
+    failures,
+    rows: normalizedRows.sort((left, right) => comparePortable(left.testMethodId, right.testMethodId)),
+    testFileCount,
+    testMethodCount
+  };
+}
+
+function commandFailure(result, check, subjectId, fallbackCode = 'spawn_failed') {
+  const code = result?.failureCode || (result?.record?.exitCode === 127 ? 'tool_missing' : fallbackCode);
+  return customCodeFailure(code, check, subjectId, `Verifier-owned ${check} command did not complete successfully.`);
+}
+
+function normalizedToolVersion(value, pattern) {
+  const line = String(value ?? '').split(/\r?\n/).find((candidate) => candidate.trim())?.trim() ?? '';
+  return line.match(pattern)?.[1] ?? '';
+}
+
+function recognizedProjectFile(projectRoot, candidates) {
+  let realProjectRoot = projectRoot;
+  try {
+    realProjectRoot = realpathSync(projectRoot);
+  } catch {
+    return '';
+  }
+  for (const candidate of candidates) {
+    const absolute = join(projectRoot, candidate);
+    if (!existsSync(absolute)) {
+      continue;
+    }
+    try {
+      const metadata = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      const target = statSync(real);
+      if ((metadata.isFile() || metadata.isSymbolicLink()) && target.isFile() && pathIsInside(realProjectRoot, real)) {
+        return candidate;
+      }
+    } catch {
+      return '';
+    }
+    return '';
+  }
+  return '';
+}
+
+function projectFileSha256(projectRoot, path) {
+  try {
+    const realProjectRoot = realpathSync(projectRoot);
+    const real = realpathSync(join(projectRoot, path));
+    if (!pathIsInside(realProjectRoot, real) || !statSync(real).isFile()) {
+      return '';
+    }
+    return `sha256:${sha256(readFileSync(real))}`;
+  } catch {
+    return '';
+  }
+}
+
+const CUSTOM_CODE_COMPOSER_PACKAGES = Object.freeze({
+  coder: {
+    binary: '', name: 'drupal/coder',
+    distPrefixes: ['https://api.github.com/repos/pfrenssen/coder/zipball/'],
+    sourceUrls: ['https://github.com/pfrenssen/coder.git']
+  },
+  slevomat: {
+    binary: '', name: 'slevomat/coding-standard',
+    distPrefixes: ['https://api.github.com/repos/slevomat/coding-standard/zipball/'],
+    sourceUrls: ['https://github.com/slevomat/coding-standard.git']
+  },
+  variableAnalysis: {
+    binary: '', name: 'sirbrillig/phpcs-variable-analysis',
+    distPrefixes: ['https://api.github.com/repos/sirbrillig/phpcs-variable-analysis/zipball/'],
+    sourceUrls: ['https://github.com/sirbrillig/phpcs-variable-analysis.git']
+  },
+  phpcs: {
+    binary: 'bin/phpcs', name: 'squizlabs/php_codesniffer',
+    distPrefixes: [
+      'https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/',
+      'https://api.github.com/repos/squizlabs/PHP_CodeSniffer/zipball/'
+    ],
+    sourceUrls: [
+      'https://github.com/PHPCSStandards/PHP_CodeSniffer.git',
+      'https://github.com/squizlabs/PHP_CodeSniffer.git'
+    ]
+  },
+  phpstan: {
+    binary: 'phpstan', name: 'phpstan/phpstan', sourceOptional: true,
+    distPrefixes: ['https://api.github.com/repos/phpstan/phpstan/zipball/'],
+    sourceUrls: ['https://github.com/phpstan/phpstan.git']
+  },
+  phpunit: {
+    binary: 'phpunit', name: 'phpunit/phpunit',
+    distPrefixes: ['https://api.github.com/repos/sebastianbergmann/phpunit/zipball/'],
+    sourceUrls: ['https://github.com/sebastianbergmann/phpunit.git']
+  }
+});
+
+function boundedLocalJson(projectRoot, relativePath) {
+  const absolute = join(projectRoot, relativePath);
+  const metadata = lstatSync(absolute);
+  const real = realpathSync(absolute);
+  const root = realpathSync(projectRoot);
+  if (metadata.isSymbolicLink() || !metadata.isFile() || !pathIsInside(root, real) || metadata.size > CUSTOM_CODE_EXECUTION_LIMITS.composerMetadataBytes) {
+    throw new Error('unsafe composer metadata');
+  }
+  const bytes = readFileSync(real);
+  return { sha256: `sha256:${sha256(bytes)}`, value: parseBoundedJsonText(bytes.toString('utf8'), relativePath) };
+}
+
+function verifiedHttpsUrl(value) {
+  try {
+    const url = new URL(String(value));
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function packageDirectoryFingerprint(projectRoot, packageName) {
+  const logicalRoot = join(projectRoot, 'vendor', ...packageName.split('/'));
+  const projectReal = realpathSync(projectRoot);
+  const rootReal = realpathSync(logicalRoot);
+  if (!pathIsInside(projectReal, rootReal) || !statSync(rootReal).isDirectory()) throw new Error('unsafe package directory');
+  const pending = [{ logical: '', real: rootReal }];
+  const visited = new Set();
+  const entries = [];
+  let bytes = 0;
+  let files = 0;
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (visited.has(directory.real)) throw new Error('package directory cycle');
+    visited.add(directory.real);
+    for (const entry of readdirSync(directory.real, { withFileTypes: true }).sort((left, right) => comparePortable(left.name, right.name))) {
+      const logical = directory.logical ? `${directory.logical}/${entry.name}` : entry.name;
+      const absolute = join(directory.real, entry.name);
+      const metadata = lstatSync(absolute);
+      if (entry.isSymbolicLink() || metadata.isSymbolicLink()) throw new Error('package symlink');
+      if (entry.isDirectory()) {
+        const real = realpathSync(absolute);
+        if (!pathIsInside(rootReal, real)) throw new Error('package escape');
+        entries.push(`d\u0000${logical}\u0000${metadata.mode & 0o777}`);
+        pending.push({ logical, real });
+      } else if (entry.isFile()) {
+        files += 1;
+        bytes += metadata.size;
+        if (files > CUSTOM_CODE_EXECUTION_LIMITS.packageFiles || bytes > CUSTOM_CODE_EXECUTION_LIMITS.packageBytes) throw new Error('package limit');
+        entries.push(`f\u0000${logical}\u0000${metadata.mode & 0o777}\u0000${metadata.size}\u0000${sha256(readFileSync(absolute))}`);
+      } else {
+        throw new Error('unsupported package entry');
+      }
+    }
+  }
+  entries.sort(comparePortable);
+  return { bytes, files, sha256: `sha256:${sha256(entries.join('\n'))}` };
+}
+
+function composerRootAutoloadFingerprint(projectRoot) {
+  const projectReal = realpathSync(projectRoot);
+  const vendorPath = join(projectReal, 'vendor');
+  const vendorMetadata = lstatSync(vendorPath);
+  const vendorReal = realpathSync(vendorPath);
+  const autoloadPath = join(vendorPath, 'autoload.php');
+  const metadata = lstatSync(autoloadPath);
+  const autoloadReal = realpathSync(autoloadPath);
+  if (
+    vendorMetadata.isSymbolicLink() || !vendorMetadata.isDirectory() || vendorReal !== vendorPath ||
+    metadata.isSymbolicLink() || !metadata.isFile() || autoloadReal !== join(vendorReal, 'autoload.php') ||
+    metadata.size < 1 || metadata.size > CUSTOM_CODE_EXECUTION_LIMITS.composerMetadataBytes
+  ) throw new Error('unsafe Composer root autoloader');
+  const bytes = readFileSync(autoloadReal);
+  if (bytes.length !== metadata.size || bytes.length > CUSTOM_CODE_EXECUTION_LIMITS.composerMetadataBytes) {
+    throw new Error('Composer root autoloader changed or exceeded its bound while reading');
+  }
+  return { bytes: bytes.length, sha256: `sha256:${sha256(bytes)}` };
+}
+
+function requiredComposerPackageKeys(needs) {
+  return [
+    ...(needs.phpcs ? ['phpcs', 'coder', 'slevomat', 'variableAnalysis'] : []),
+    ...(needs.phpstan ? ['phpstan'] : []),
+    ...(needs.phpunit ? ['phpunit'] : [])
+  ];
+}
+
+function canonicalComposerValue(value, depth = 0) {
+  if (depth > 16) throw new Error('composer package metadata is too deeply nested');
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (value.includes('\u0000') || Buffer.byteLength(value) > 16 * 1024) throw new Error('invalid composer metadata string');
+    return value;
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  if (Array.isArray(value)) {
+    if (value.length > 10_000) throw new Error('composer metadata array is too large');
+    return value.map((entry) => canonicalComposerValue(entry, depth + 1));
+  }
+  if (plainJsonObject(value)) {
+    const keys = Object.keys(value).sort(comparePortable);
+    if (keys.length > 10_000) throw new Error('composer metadata object is too large');
+    return Object.fromEntries(keys.map((key) => {
+      if (key.includes('\u0000') || Buffer.byteLength(key) > 1_024) throw new Error('invalid composer metadata key');
+      return [key, canonicalComposerValue(value[key], depth + 1)];
+    }));
+  }
+  throw new Error('unsupported composer metadata value');
+}
+
+function canonicalComposerStringMap(value) {
+  if (value === undefined) return {};
+  if (!plainJsonObject(value)) throw new Error('invalid composer dependency map');
+  const entries = Object.keys(value).sort(comparePortable).map((name) => {
+    const constraint = value[name];
+    if (
+      !/^[a-z0-9](?:[a-z0-9_.-]*\/[a-z0-9_.-]+|[a-z0-9_.-]*)$/i.test(name) ||
+      typeof constraint !== 'string' || !constraint || constraint.includes('\u0000') || Buffer.byteLength(constraint) > 1_024
+    ) throw new Error('invalid composer dependency');
+    return [name.toLowerCase(), constraint];
+  });
+  if (new Set(entries.map(([name]) => name)).size !== entries.length) throw new Error('duplicate composer dependency');
+  return Object.fromEntries(entries);
+}
+
+function canonicalComposerBin(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 100) throw new Error('invalid composer binary list');
+  const binaries = value.map((entry) => String(entry ?? '')).sort(comparePortable);
+  if (
+    new Set(binaries).size !== binaries.length ||
+    binaries.some((entry) => !entry || isAbsolute(entry) || entry.includes('\u0000') || entry.split('/').some((part) => !part || part === '.' || part === '..'))
+  ) throw new Error('unsafe composer binary path');
+  return binaries;
+}
+
+function exactComposerPackageIdentity(record) {
+  if (!plainJsonObject(record)) throw new Error('invalid composer package');
+  const name = String(record.name ?? '').toLowerCase();
+  const version = String(record.version ?? '');
+  const type = String(record.type ?? '');
+  const distUrl = verifiedHttpsUrl(record?.dist?.url);
+  const distReference = String(record?.dist?.reference ?? '');
+  const sourceUrl = verifiedHttpsUrl(record?.source?.url);
+  const sourceReference = String(record?.source?.reference ?? '');
+  if (
+    !/^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*$/.test(name) ||
+    !version || version.length > 200 || /\s|\u0000/.test(version) ||
+    !type || type.length > 200 || /[\r\n\u0000]/.test(type) ||
+    record?.dist?.type !== 'zip' || !distUrl || !/^[a-f0-9]{7,64}$/i.test(distReference) ||
+    (record.source !== undefined && (
+      !plainJsonObject(record.source) || record.source.type !== 'git' || !sourceUrl ||
+      !/^[a-f0-9]{7,64}$/i.test(sourceReference)
+    ))
+  ) throw new Error('untrusted composer package identity');
+  return {
+    autoload: canonicalComposerValue(record.autoload ?? {}),
+    bin: canonicalComposerBin(record.bin),
+    conflict: canonicalComposerStringMap(record.conflict),
+    distReference,
+    distUrlSha256: `sha256:${sha256(distUrl)}`,
+    name,
+    provide: canonicalComposerStringMap(record.provide),
+    replace: canonicalComposerStringMap(record.replace),
+    require: canonicalComposerStringMap(record.require),
+    sourceReference: sourceUrl ? sourceReference : '',
+    sourceUrlSha256: sourceUrl ? `sha256:${sha256(sourceUrl)}` : '',
+    type,
+    version
+  };
+}
+
+function composerPackageRecords(lock) {
+  const records = [...(Array.isArray(lock.packages) ? lock.packages : []), ...(Array.isArray(lock['packages-dev']) ? lock['packages-dev'] : [])];
+  if (records.length > CUSTOM_CODE_EXECUTION_LIMITS.composerPackages) throw new Error('composer package limit exceeded');
+  const byName = new Map();
+  for (const record of records) {
+    const name = String(record?.name ?? '').toLowerCase();
+    if (!plainJsonObject(record) || !/^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*$/.test(name)) {
+      throw new Error('invalid composer package name');
+    }
+    if (byName.has(name)) throw new Error('duplicate composer package');
+    byName.set(name, record);
+  }
+  return byName;
+}
+
+function composerPlatformDependency(name) {
+  return name === 'php' || name === 'php-64bit' || name === 'hhvm' ||
+    name === 'composer-plugin-api' || name === 'composer-runtime-api' ||
+    name.startsWith('ext-') || name.startsWith('lib-');
+}
+
+function lockedComposerClosure(lock, directNames) {
+  const byName = composerPackageRecords(lock);
+  const providers = new Map();
+  for (const record of byName.values()) {
+    const name = String(record.name).toLowerCase();
+    const provide = canonicalComposerStringMap(record.provide);
+    const replace = canonicalComposerStringMap(record.replace);
+    for (const virtualName of [...Object.keys(provide), ...Object.keys(replace)]) {
+      if (!providers.has(virtualName)) providers.set(virtualName, []);
+      providers.get(virtualName).push(name);
+    }
+  }
+  const pending = [...new Set(directNames.map((name) => String(name).toLowerCase()))];
+  const selected = new Map();
+  while (pending.length > 0) {
+    const name = pending.shift();
+    if (selected.has(name)) continue;
+    const current = byName.get(name);
+    if (!current) throw new Error('composer closure package is absent from lock');
+    const identity = exactComposerPackageIdentity(current);
+    selected.set(name, identity);
+    if (selected.size > CUSTOM_CODE_EXECUTION_LIMITS.composerPackages) throw new Error('composer closure limit exceeded');
+    for (const dependency of Object.keys(identity.require)) {
+      if (composerPlatformDependency(dependency)) continue;
+      if (byName.has(dependency)) {
+        pending.push(dependency);
+        continue;
+      }
+      const candidates = [...new Set(providers.get(dependency) ?? [])].sort(comparePortable);
+      if (candidates.length === 0) throw new Error('composer dependency has no locked provider');
+      pending.push(...candidates);
+    }
+  }
+  return [...selected.values()].sort((left, right) => comparePortable(left.name, right.name));
+}
+
+function composerLockIsExactClosure(lock, expectedClosure) {
+  try {
+    const actual = [...composerPackageRecords(lock).values()]
+      .map((record) => exactComposerPackageIdentity(record))
+      .sort((left, right) => comparePortable(left.name, right.name));
+    return JSON.stringify(actual) === JSON.stringify(expectedClosure);
+  } catch {
+    return false;
+  }
+}
+
+function exactLockedComposerPackage(lock, key) {
+  const specification = CUSTOM_CODE_COMPOSER_PACKAGES[key];
+  const lockedPackages = [...(Array.isArray(lock.packages) ? lock.packages : []), ...(Array.isArray(lock['packages-dev']) ? lock['packages-dev'] : [])]
+    .filter((candidate) => candidate?.name === specification.name);
+  if (lockedPackages.length !== 1) throw new Error('missing or duplicate composer package');
+  const locked = lockedPackages[0];
+  const identity = exactComposerPackageIdentity(locked);
+  const sourceUrl = verifiedHttpsUrl(locked?.source?.url);
+  const distUrl = verifiedHttpsUrl(locked?.dist?.url);
+  const reference = String(locked?.dist?.reference ?? '');
+  const canonicalDist = specification.distPrefixes.some((prefix) => distUrl.startsWith(prefix));
+  const canonicalSource = sourceUrl ? specification.sourceUrls.includes(sourceUrl) : specification.sourceOptional === true;
+  if (
+    !plainJsonObject(locked) || typeof locked.version !== 'string' ||
+    !/^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(locked.version) ||
+    typeof locked.type !== 'string' || !locked.type || !canonicalSource || !canonicalDist ||
+    locked?.dist?.type !== 'zip' || !/^[a-f0-9]{7,64}$/i.test(reference) ||
+    (sourceUrl && (locked?.source?.type !== 'git' || locked?.source?.reference !== reference))
+  ) throw new Error('untrusted composer package provenance');
+  if (specification.binary && !identity.bin.includes(specification.binary)) throw new Error('locked package binary missing');
+  return {
+    constraint: locked.version,
+    distUrlSha256: `sha256:${sha256(distUrl)}`,
+    name: specification.name,
+    reference,
+    sourceUrlSha256: sourceUrl ? `sha256:${sha256(sourceUrl)}` : '',
+    type: locked.type,
+    version: locked.version
+  };
+}
+
+function exactInstalledComposerPackage(lock, installed, key, projectRoot, packageTree = null) {
+  const specification = CUSTOM_CODE_COMPOSER_PACKAGES[key];
+  const lockedRecord = exactLockedComposerPackage(lock, key);
+  const installedPackages = (Array.isArray(installed?.packages) ? installed.packages : [])
+    .filter((candidate) => candidate?.name === specification.name);
+  if (installedPackages.length !== 1) throw new Error('missing or duplicate installed composer package');
+  const current = installedPackages[0];
+  const lockedIdentity = exactComposerPackageIdentity(composerPackageRecords(lock).get(specification.name));
+  const installedIdentity = exactComposerPackageIdentity(current);
+  const currentSourceUrl = verifiedHttpsUrl(current?.source?.url);
+  const currentDistUrl = verifiedHttpsUrl(current?.dist?.url);
+  if (
+    !plainJsonObject(current) || JSON.stringify(installedIdentity) !== JSON.stringify(lockedIdentity) ||
+    current.version !== lockedRecord.version || current.type !== lockedRecord.type ||
+    current['installation-source'] !== 'dist' || current['install-path'] !== `../${specification.name}` ||
+    current?.dist?.type !== 'zip' || current?.dist?.reference !== lockedRecord.reference ||
+    `sha256:${sha256(currentDistUrl)}` !== lockedRecord.distUrlSha256 ||
+    (lockedRecord.sourceUrlSha256
+      ? current?.source?.type !== 'git' || current?.source?.reference !== lockedRecord.reference ||
+        `sha256:${sha256(currentSourceUrl)}` !== lockedRecord.sourceUrlSha256
+      : currentSourceUrl !== '')
+  ) throw new Error('untrusted installed composer package provenance');
+  const packageRelative = `vendor/${specification.name}`;
+  const packageReal = realpathSync(join(projectRoot, packageRelative));
+  if (packageReal !== realpathSync(join(projectRoot, 'vendor', ...specification.name.split('/')))) throw new Error('noncanonical package path');
+  const binary = specification.binary ? `${packageRelative}/${specification.binary}` : '';
+  if (binary) {
+    const binaryMetadata = lstatSync(join(projectRoot, binary));
+    if (binaryMetadata.isSymbolicLink() || !binaryMetadata.isFile() || (binaryMetadata.mode & 0o111) === 0) throw new Error('unsafe direct package binary');
+  }
+  return {
+    binary,
+    distUrlSha256: lockedRecord.distUrlSha256,
+    name: specification.name,
+    packagePath: packageRelative,
+    packageTree: packageTree ?? packageDirectoryFingerprint(projectRoot, specification.name),
+    reference: lockedRecord.reference,
+    sourceUrlSha256: lockedRecord.sourceUrlSha256,
+    version: lockedRecord.version
+  };
+}
+
+function exactInstalledComposerClosure(installed, expectedClosure, projectRoot) {
+  if (!plainJsonObject(installed) || !Array.isArray(installed.packages)) throw new Error('invalid installed composer metadata');
+  const expectedNames = expectedClosure.map((entry) => entry.name).sort(comparePortable);
+  const installedByName = new Map();
+  for (const current of installed.packages) {
+    const identity = exactComposerPackageIdentity(current);
+    if (installedByName.has(identity.name)) throw new Error('duplicate installed composer package');
+    installedByName.set(identity.name, { current, identity });
+  }
+  if (JSON.stringify([...installedByName.keys()].sort(comparePortable)) !== JSON.stringify(expectedNames)) {
+    throw new Error('installed composer closure differs from locked closure');
+  }
+  const trees = {};
+  let bytes = 0;
+  let files = 0;
+  for (const expected of expectedClosure) {
+    const installedPackage = installedByName.get(expected.name);
+    const current = installedPackage?.current;
+    if (
+      !current || JSON.stringify(installedPackage.identity) !== JSON.stringify(expected) ||
+      current['installation-source'] !== 'dist' || current['install-path'] !== `../${expected.name}`
+    ) throw new Error('installed composer closure package differs from lock');
+    const packageRelative = `vendor/${expected.name}`;
+    const packageReal = realpathSync(join(projectRoot, packageRelative));
+    if (packageReal !== realpathSync(join(projectRoot, 'vendor', ...expected.name.split('/')))) {
+      throw new Error('noncanonical closure package path');
+    }
+    const tree = packageDirectoryFingerprint(projectRoot, expected.name);
+    bytes += tree.bytes;
+    files += tree.files;
+    if (
+      bytes > CUSTOM_CODE_EXECUTION_LIMITS.composerPackageBytesTotal ||
+      files > CUSTOM_CODE_EXECUTION_LIMITS.composerPackageFilesTotal
+    ) throw new Error('composer closure package tree limit exceeded');
+    trees[expected.name] = tree;
+  }
+  const autoloadTree = packageDirectoryFingerprint(projectRoot, 'composer');
+  return { autoloadTree, bytes, files, trees };
+}
+
+function customCodeToolRequirements(projectRoot, needs) {
+  const failures = [];
+  const packages = {};
+  let closure = [];
+  let composerRecord;
+  let lockRecord;
+  if (!needs.phpcs && !needs.phpstan && !needs.phpunit) return { closure, failures, packages, snapshot: null };
+  try {
+    composerRecord = boundedLocalJson(projectRoot, 'composer.json');
+    lockRecord = boundedLocalJson(projectRoot, 'composer.lock');
+    if (!plainJsonObject(composerRecord.value) || !plainJsonObject(lockRecord.value) || !/^[a-f0-9]{32}$/i.test(String(lockRecord.value['content-hash'] ?? ''))) {
+      throw new Error('invalid composer metadata');
+    }
+    for (const key of requiredComposerPackageKeys(needs)) packages[key] = exactLockedComposerPackage(lockRecord.value, key);
+    closure = lockedComposerClosure(lockRecord.value, Object.values(packages).map((entry) => entry.name));
+  } catch {
+    failures.push(customCodeFailure('tool_missing', 'tool-provenance', '', 'Required analyzer/test packages and their complete executable/autoload dependency closure must have bounded HTTPS dist/source metadata in the exact project lock.'));
+  }
+  const snapshot = failures.length === 0 ? {
+    composerJsonSha256: composerRecord.sha256,
+    composerLockSha256: lockRecord.sha256,
+    closureIdentitySha256: `sha256:${sha256(JSON.stringify(closure))}`,
+    closurePackageCount: closure.length,
+    lockedPackageIdentitySha256: Object.fromEntries(Object.entries(packages).map(([key, value]) => [key, `sha256:${sha256(JSON.stringify(value))}`]))
+  } : null;
+  return { closure, failures, packages, snapshot };
+}
+
+function sameLockedToolPackages(actual, expected) {
+  return Object.keys(expected.packages).length === Object.keys(actual.packages).length &&
+    Object.keys(expected.packages).every((key) => JSON.stringify(actual.packages[key]) === JSON.stringify(expected.packages[key])) &&
+    JSON.stringify(actual.closure) === JSON.stringify(expected.closure);
+}
+
+function customCodeToolchainProvenance(auditRoot, needs, requirements) {
+  const failures = [];
+  const packages = {};
+  let closureInstall = null;
+  let composerRecord;
+  let lockRecord;
+  let installedRecord;
+  let rootAutoload;
+  try {
+    composerRecord = boundedLocalJson(auditRoot, 'composer.json');
+    lockRecord = boundedLocalJson(auditRoot, 'composer.lock');
+    installedRecord = boundedLocalJson(auditRoot, 'vendor/composer/installed.json');
+    rootAutoload = composerRootAutoloadFingerprint(auditRoot);
+    if (!plainJsonObject(composerRecord.value) || !plainJsonObject(lockRecord.value) || !plainJsonObject(installedRecord.value)) throw new Error('invalid audit composer metadata');
+    if (!composerLockIsExactClosure(lockRecord.value, requirements.closure)) throw new Error('audit lock contains packages outside the exact closure');
+    const locked = { closure: [], failures: [], packages: {}, snapshot: null };
+    for (const key of requiredComposerPackageKeys(needs)) locked.packages[key] = exactLockedComposerPackage(lockRecord.value, key);
+    locked.closure = lockedComposerClosure(lockRecord.value, Object.values(locked.packages).map((entry) => entry.name));
+    if (!sameLockedToolPackages(locked, requirements)) throw new Error('audit lock differs from source lock');
+    closureInstall = exactInstalledComposerClosure(installedRecord.value, locked.closure, auditRoot);
+    for (const key of requiredComposerPackageKeys(needs)) {
+      const name = CUSTOM_CODE_COMPOSER_PACKAGES[key].name;
+      packages[key] = exactInstalledComposerPackage(lockRecord.value, installedRecord.value, key, auditRoot, closureInstall.trees[name]);
+    }
+  } catch {
+    failures.push(customCodeFailure('tool_missing', 'tool-provenance', '', 'Fresh verifier audit dependencies, autoload metadata, and complete package closure did not match the exact independently resolved project lock closure.'));
+  }
+  const snapshot = failures.length === 0 ? {
+    sourceComposerLockSha256: requirements.snapshot.composerLockSha256,
+    composerJsonSha256: composerRecord.sha256,
+    composerLockSha256: lockRecord.sha256,
+    installedMetadataSha256: installedRecord.sha256,
+    closureIdentitySha256: requirements.snapshot.closureIdentitySha256,
+    closurePackageCount: requirements.snapshot.closurePackageCount,
+    closurePackageTreeSha256: `sha256:${sha256(JSON.stringify(closureInstall.trees))}`,
+    closurePackageBytes: closureInstall.bytes,
+    closurePackageFiles: closureInstall.files,
+    autoloadTreeSha256: closureInstall.autoloadTree.sha256,
+    autoloadTreeBytes: closureInstall.autoloadTree.bytes,
+    autoloadTreeFiles: closureInstall.autoloadTree.files,
+    rootAutoloadSha256: rootAutoload.sha256,
+    rootAutoloadBytes: rootAutoload.bytes,
+    packageTreeSha256: Object.fromEntries(Object.entries(packages).map(([key, value]) => [key, value.packageTree.sha256]))
+  } : null;
+  return { failures, packages, snapshot };
+}
+
+function customCodeToolchainChanged(auditRoot, provenance, needs, requirements) {
+  if (!provenance?.snapshot) return true;
+  try {
+    const current = customCodeToolchainProvenance(auditRoot, needs, requirements);
+    return current.failures.length > 0 || JSON.stringify(current.snapshot) !== JSON.stringify(provenance.snapshot);
+  } catch {
+    return true;
+  }
+}
+
+function auditToolBinary(projectRoot, auditRoot, packageRecord) {
+  if (!packageRecord?.binary) return '';
+  const projectReal = realpathSync(projectRoot);
+  const auditReal = realpathSync(auditRoot);
+  const binaryReal = realpathSync(join(auditReal, packageRecord.binary));
+  if (!pathIsInside(projectReal, auditReal) || auditReal === projectReal || !pathIsInside(auditReal, binaryReal)) {
+    return '';
+  }
+  return relative(projectReal, binaryReal).split(sep).join('/');
+}
+
+function auditPhpcsStandardsPath(projectRoot, auditRoot, packages) {
+  try {
+    const projectReal = realpathSync(projectRoot);
+    const auditReal = realpathSync(auditRoot);
+    if (!pathIsInside(projectReal, auditReal) || auditReal === projectReal) return '';
+    const standards = [
+      [packages?.coder, 'coder_sniffer'],
+      [packages?.slevomat, ''],
+      [packages?.variableAnalysis, '']
+    ].map(([record, suffix]) => {
+      const expectedPackagePath = `vendor/${record?.name ?? ''}`;
+      if (!record || record.packagePath !== expectedPackagePath) throw new Error('noncanonical PHPCS standard package path');
+      const packageReal = realpathSync(join(auditReal, ...expectedPackagePath.split('/')));
+      const standardReal = suffix ? realpathSync(join(packageReal, suffix)) : packageReal;
+      if (
+        packageReal !== realpathSync(join(auditReal, 'vendor', ...record.name.split('/'))) ||
+        !pathIsInside(auditReal, packageReal) || !pathIsInside(packageReal, standardReal) ||
+        !statSync(standardReal).isDirectory()
+      ) throw new Error('unsafe PHPCS standard package path');
+      const projectRelative = relative(projectReal, standardReal).split(sep).join('/');
+      if (!projectRelative || projectRelative.startsWith('../') || projectRelative.includes('/../')) {
+        throw new Error('PHPCS standard path escaped the project');
+      }
+      return `/var/www/html/${projectRelative}`;
+    });
+    return standards.join(',');
+  } catch {
+    return '';
+  }
+}
+
+function parseJsonOutput(result) {
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function plainJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function finiteNonnegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function analyzerFileLookup(files) {
+  return new Map(files.map((file) => [file.path, file]));
+}
+
+function normalizedAnalyzerPath(value) {
+  const path = String(value ?? '').replace(/^\/var\/www\/html\//, '');
+  if (!path || path.includes('\u0000') || path.includes('\\') || path.startsWith('/') || path.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
+    return '';
+  }
+  return path;
+}
+
+function diagnosticDigest(value) {
+  return `sha256:${sha256(String(value ?? ''))}`;
+}
+
+function strictPhpcsReport(parsed, expectedFiles) {
+  if (!plainJsonObject(parsed) || !plainJsonObject(parsed.totals) || !plainJsonObject(parsed.files)) {
+    return null;
+  }
+  for (const key of ['errors', 'warnings']) {
+    if (!finiteNonnegativeInteger(parsed.totals[key])) return null;
+  }
+  if (parsed.totals.fixable !== undefined && !finiteNonnegativeInteger(parsed.totals.fixable)) return null;
+  const expected = analyzerFileLookup(expectedFiles);
+  const observed = new Map();
+  const findings = [];
+  let errors = 0;
+  let warnings = 0;
+  let fixable = 0;
+  let messageCount = 0;
+  for (const rawPath of Object.keys(parsed.files).sort(comparePortable)) {
+    const path = normalizedAnalyzerPath(rawPath);
+    const file = expected.get(path);
+    const report = parsed.files[rawPath];
+    if (!file || observed.has(path) || !plainJsonObject(report) || !Array.isArray(report.messages)) return null;
+    if (!finiteNonnegativeInteger(report.errors) || !finiteNonnegativeInteger(report.warnings)) return null;
+    observed.set(path, file);
+    let fileErrors = 0;
+    let fileWarnings = 0;
+    for (const message of report.messages) {
+      messageCount += 1;
+      if (messageCount > 20_000 || !plainJsonObject(message)) return null;
+      if (
+        !finiteNonnegativeInteger(message.line) || !finiteNonnegativeInteger(message.column) ||
+        !finiteNonnegativeInteger(message.severity) || !['ERROR', 'WARNING'].includes(message.type) ||
+        typeof message.source !== 'string' || !message.source || message.source.length > 200 ||
+        typeof message.message !== 'string' || Buffer.byteLength(message.message) > 16 * 1024 ||
+        (message.fixable !== undefined && typeof message.fixable !== 'boolean')
+      ) return null;
+      if (message.type === 'ERROR') fileErrors += 1;
+      else fileWarnings += 1;
+      if (message.fixable === true) fixable += 1;
+      appendBounded(findings, {
+        fileId: file.id,
+        line: message.line,
+        column: message.column,
+        severity: message.severity,
+        type: message.type.toLowerCase(),
+        ruleId: message.source,
+        messageSha256: diagnosticDigest(message.message)
+      });
+    }
+    if (report.errors !== fileErrors || report.warnings !== fileWarnings) return null;
+    errors += fileErrors;
+    warnings += fileWarnings;
+  }
+  if (parsed.totals.errors !== errors || parsed.totals.warnings !== warnings) return null;
+  if (parsed.totals.fixable !== undefined && parsed.totals.fixable !== fixable) return null;
+  return { findings, totals: { errors, warnings, fixable } };
+}
+
+function strictPhpstanReport(parsed, expectedFiles) {
+  if (!plainJsonObject(parsed) || !plainJsonObject(parsed.totals) || !plainJsonObject(parsed.files) || !Array.isArray(parsed.errors)) {
+    return null;
+  }
+  if (!finiteNonnegativeInteger(parsed.totals.errors) || !finiteNonnegativeInteger(parsed.totals.file_errors)) return null;
+  const expected = analyzerFileLookup(expectedFiles);
+  const observed = new Set();
+  const findings = [];
+  let fileErrors = 0;
+  let messageCount = 0;
+  for (const rawPath of Object.keys(parsed.files).sort(comparePortable)) {
+    const path = normalizedAnalyzerPath(rawPath);
+    const file = expected.get(path);
+    const report = parsed.files[rawPath];
+    if (!file || observed.has(path) || !plainJsonObject(report) || !Array.isArray(report.messages) || !finiteNonnegativeInteger(report.errors) || report.errors === 0) return null;
+    observed.add(path);
+    if (report.errors !== report.messages.length) return null;
+    fileErrors += report.errors;
+    for (const message of report.messages) {
+      messageCount += 1;
+      if (messageCount > 20_000 || !plainJsonObject(message)) return null;
+      if (
+        !(message.line === null || finiteNonnegativeInteger(message.line)) || typeof message.message !== 'string' ||
+        Buffer.byteLength(message.message) > 16 * 1024 ||
+        (message.identifier !== undefined && (typeof message.identifier !== 'string' || message.identifier.length > 200)) ||
+        (message.tip !== undefined && (typeof message.tip !== 'string' || Buffer.byteLength(message.tip) > 16 * 1024)) ||
+        (message.ignorable !== undefined && typeof message.ignorable !== 'boolean')
+      ) return null;
+      appendBounded(findings, {
+        fileId: file.id,
+        line: message.line ?? 0,
+        ruleId: String(message.identifier ?? ''),
+        messageSha256: diagnosticDigest(message.message)
+      });
+    }
+  }
+  if (parsed.errors.length > 20_000 || parsed.errors.some((message) => typeof message !== 'string' || Buffer.byteLength(message) > 16 * 1024)) return null;
+  for (const message of parsed.errors) {
+    appendBounded(findings, { fileId: '', line: 0, ruleId: 'phpstan.global', messageSha256: diagnosticDigest(message) });
+  }
+  if (parsed.totals.file_errors !== fileErrors || parsed.totals.errors !== parsed.errors.length) return null;
+  return { findings, reportedFileIds: [...observed].map((path) => expected.get(path).id).sort(comparePortable), totals: { errors: parsed.totals.errors, fileErrors } };
+}
+
+function reportedComposerProvenance(provenance, packageRecords) {
+  return {
+    ...provenance.snapshot,
+    rootAutoloadBytes: provenance.snapshot.rootAutoloadBytes,
+    rootAutoloadSha256: provenance.snapshot.rootAutoloadSha256,
+    packages: packageRecords
+  };
+}
+
+function blockedQualityAudit(inventory, failures, phpFiles = []) {
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_QUALITY_SCHEMA,
+    applies: phpFiles.length > 0,
+    completed: false,
+    status: 'blocked',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools: {
+      php: { status: 'blocked', version: '' },
+      phpcs: { status: 'blocked', version: '', requiredStandards: ['Drupal', 'DrupalPractice'], installedStandards: [] },
+      phpstan: { status: 'blocked', version: '', config: '', configSha256: '' }
+    },
+    checks: {
+      phpSyntax: { status: 'blocked', expectedFileIds: phpFiles.map((file) => file.id), completedFileIds: [], findings: [], commandResultHashes: [] },
+      phpcs: { status: 'blocked', expectedFileIds: phpFiles.map((file) => file.id), completedFileIds: [], findings: [], commandResultHashes: [] },
+      phpstan: { status: 'blocked', expectedFileIds: phpFiles.map((file) => file.id), requestedFileIds: [], reportedFileIds: [], findings: [], commandResultHashes: [] }
+    },
+    failures
+  });
+}
+
+function notApplicableQualityAudit(inventory) {
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_QUALITY_SCHEMA,
+    applies: false,
+    completed: true,
+    status: 'not_applicable',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools: {
+      php: { status: 'not_applicable', version: '' },
+      phpcs: { status: 'not_applicable', version: '', requiredStandards: ['Drupal', 'DrupalPractice'], installedStandards: [] },
+      phpstan: { status: 'not_applicable', version: '', config: '', configSha256: '' }
+    },
+    checks: {
+      phpSyntax: { status: 'not_applicable', expectedFileIds: [], completedFileIds: [], findings: [], commandResultHashes: [] },
+      phpcs: { status: 'not_applicable', expectedFileIds: [], completedFileIds: [], findings: [], commandResultHashes: [] },
+      phpstan: { status: 'not_applicable', expectedFileIds: [], requestedFileIds: [], reportedFileIds: [], findings: [], commandResultHashes: [] }
+    },
+    failures: []
+  });
+}
+
+function runCustomCodeQualityAudit(projectRoot, inventory, phpFiles, runner, provenance, auditRoot) {
+  if (phpFiles.length === 0) {
+    return notApplicableQualityAudit(inventory);
+  }
+  const failures = [];
+  const expectedFileIds = phpFiles.map((file) => file.id);
+  const commandHashes = (records) => records.filter(Boolean).map((record) => record.resultSha256);
+  const phpSyntax = {
+    status: 'pass', expectedFileIds, completedFileIds: [], findings: [], commandResultHashes: []
+  };
+  const phpcs = {
+    status: 'pass', expectedFileIds, completedFileIds: [], findings: [], commandResultHashes: []
+  };
+  const phpstan = {
+    status: 'not_supported', expectedFileIds, requestedFileIds: [], reportedFileIds: [], findings: [], commandResultHashes: []
+  };
+  const tools = {
+    php: { status: 'blocked', version: '' },
+    phpcs: { status: 'blocked', version: '', requiredStandards: ['Drupal', 'DrupalPractice'], installedStandards: [] },
+    phpstan: { status: 'not_supported', version: '', config: '', configSha256: '' }
+  };
+
+  const phpcsBinary = auditToolBinary(projectRoot, auditRoot, provenance?.packages?.phpcs);
+  const phpcsStandardsPath = auditPhpcsStandardsPath(projectRoot, auditRoot, provenance?.packages);
+  const phpstanConfigCandidates = ['phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon'];
+  const phpstanConfig = recognizedProjectFile(projectRoot, phpstanConfigCandidates);
+  const phpstanConfigDeclared = phpstanConfigCandidates.some((candidate) => existsSync(join(projectRoot, candidate)));
+  const phpstanBinary = auditToolBinary(projectRoot, auditRoot, provenance?.packages?.phpstan);
+  if (!phpcsBinary || !phpcsStandardsPath) {
+    failures.push(customCodeFailure('tool_missing', 'phpcs', CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name, 'Custom PHP requires provenance-bound PHPCS, Drupal Coder, Slevomat, and VariableAnalysis package paths.'));
+  }
+  if (phpstanConfig && !phpstanBinary) {
+    failures.push(customCodeFailure('tool_missing', 'phpstan', phpstanConfig, 'Recognized PHPStan config exists but its provenance-bound direct package binary is missing.'));
+  }
+  if (phpstanConfigDeclared && !phpstanConfig) {
+    failures.push(customCodeFailure('config_missing', 'phpstan', '', 'The recognized PHPStan config path is unsafe or unreadable.'));
+  }
+  if (failures.length > 0) {
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+
+  const phpVersion = runner.run({ argv: ['php', '--version'], timeoutMs: 10_000, outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes });
+  phpSyntax.commandResultHashes.push(...commandHashes([phpVersion.record]));
+  if (!phpVersion.ok) {
+    failures.push(commandFailure(phpVersion, 'php-syntax', 'php', 'tool_missing'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  const normalizedPhpVersion = normalizedToolVersion(phpVersion.stdout, /^PHP\s+(\d+\.\d+\.\d+)(?:\s|$)/);
+  if (!normalizedPhpVersion) {
+    failures.push(customCodeFailure('invalid_output', 'php-syntax', 'php', 'PHP returned an unrecognized version record.'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  tools.php = { status: 'pass', version: normalizedPhpVersion, commandResultHash: phpVersion.record.resultSha256 };
+
+  for (const file of phpFiles) {
+    const result = runner.run({
+      argv: ['php', '-l', file.path],
+      timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.lintTimeoutMs,
+      outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes
+    });
+    phpSyntax.commandResultHashes.push(...commandHashes([result.record]));
+    if (result.failureCode) {
+      failures.push(commandFailure(result, 'php-syntax', file.id));
+      phpSyntax.status = 'blocked';
+      break;
+    }
+    phpSyntax.completedFileIds.push(file.id);
+    if (!result.ok) {
+      phpSyntax.status = 'fail';
+      appendBounded(phpSyntax.findings, {
+        fileId: file.id,
+        line: 0,
+        ruleId: 'php.syntax'
+      });
+      failures.push(customCodeFailure('violations_found', 'php-syntax', file.id, 'PHP syntax validation reported a violation.'));
+    }
+  }
+  if (phpSyntax.status === 'blocked') {
+    return finalizedCustomCodeRecord({
+      ...blockedQualityAudit(inventory, failures, phpFiles),
+      checks: { ...blockedQualityAudit(inventory, failures, phpFiles).checks, phpSyntax },
+      tools
+    });
+  }
+
+  const phpcsVersion = runner.run({ argv: [phpcsBinary, '--version'], timeoutMs: 10_000, outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes });
+  phpcs.commandResultHashes.push(...commandHashes([phpcsVersion.record]));
+  if (!phpcsVersion.ok) {
+    failures.push(commandFailure(phpcsVersion, 'phpcs', phpcsBinary, 'tool_missing'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  const normalizedPhpcsVersion = normalizedToolVersion(phpcsVersion.stdout, /^PHP_CodeSniffer\s+version\s+(\d+\.\d+(?:\.\d+)?)(?:\s|$)/i);
+  if (!normalizedPhpcsVersion) {
+    failures.push(customCodeFailure('invalid_output', 'phpcs', phpcsBinary, 'PHPCS returned an unrecognized version record.'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  const phpcsStandards = runner.run({
+    argv: [phpcsBinary, '--runtime-set', 'installed_paths', phpcsStandardsPath, '-i'],
+    timeoutMs: 10_000,
+    outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes
+  });
+  phpcs.commandResultHashes.push(...commandHashes([phpcsStandards.record]));
+  if (!phpcsStandards.ok) {
+    failures.push(commandFailure(phpcsStandards, 'phpcs', phpcsBinary, 'invalid_output'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  const installedStandards = ['Drupal', 'DrupalPractice'].filter((standard) => new RegExp(`(?:^|[^A-Za-z])${standard}(?:$|[^A-Za-z])`).test(phpcsStandards.stdout));
+  tools.phpcs = {
+    status: installedStandards.length === 2 ? 'pass' : 'blocked',
+    version: normalizedPhpcsVersion,
+    requiredStandards: ['Drupal', 'DrupalPractice'],
+    installedStandards,
+    provenance: reportedComposerProvenance(provenance, [
+      provenance.packages.phpcs,
+      provenance.packages.coder,
+      provenance.packages.slevomat,
+      provenance.packages.variableAnalysis
+    ]),
+    versionCommandResultHash: phpcsVersion.record.resultSha256,
+    standardsCommandResultHash: phpcsStandards.record.resultSha256
+  };
+  if (installedStandards.length !== 2) {
+    failures.push(customCodeFailure('required_standard_missing', 'phpcs', phpcsBinary, 'PHPCS must expose both Drupal and DrupalPractice standards.'));
+    return blockedQualityAudit(inventory, failures, phpFiles);
+  }
+  for (let offset = 0; offset < phpFiles.length; offset += CUSTOM_CODE_EXECUTION_LIMITS.phpcsChunkFiles) {
+    const chunk = phpFiles.slice(offset, offset + CUSTOM_CODE_EXECUTION_LIMITS.phpcsChunkFiles);
+    const result = runner.run({
+      argv: [
+        phpcsBinary,
+        '--runtime-set', 'installed_paths', phpcsStandardsPath,
+        '--standard=Drupal,DrupalPractice',
+        '--extensions=php,module,inc,install,test,profile,theme',
+        '--no-cache',
+        '--report=json',
+        ...chunk.map((file) => file.path)
+      ],
+      timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.phpcsTimeoutMs,
+      outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.phpcsOutputBytes
+    });
+    phpcs.commandResultHashes.push(...commandHashes([result.record]));
+    if (result.failureCode) {
+      failures.push(commandFailure(result, 'phpcs', chunk[0]?.id ?? ''));
+      phpcs.status = 'blocked';
+      break;
+    }
+    const report = strictPhpcsReport(parseJsonOutput(result), chunk);
+    if (!report) {
+      failures.push(customCodeFailure('invalid_output', 'phpcs', chunk[0]?.id ?? '', 'PHPCS did not return a strict, file-reconciled bounded JSON report.'));
+      phpcs.status = 'blocked';
+      break;
+    }
+    phpcs.completedFileIds.push(...chunk.map((file) => file.id));
+    for (const finding of report.findings) appendBounded(phpcs.findings, finding);
+    if (report.totals.errors > 0 || report.totals.warnings > 0 || !result.ok) {
+      phpcs.status = 'fail';
+    }
+  }
+  if (phpcs.status === 'fail') {
+    failures.push(customCodeFailure('violations_found', 'phpcs', '', `PHPCS reported ${phpcs.findings.length} bounded finding(s).`));
+  }
+
+  if (!phpstanConfig) {
+    tools.phpstan = { status: 'not_supported', version: '', config: '', configSha256: '' };
+    phpstan.status = 'not_supported';
+  } else if (phpcs.status !== 'blocked') {
+    const phpstanConfigSha256 = projectFileSha256(projectRoot, phpstanConfig);
+    tools.phpstan = { status: 'blocked', version: '', config: phpstanConfig, configSha256: phpstanConfigSha256 };
+    const version = runner.run({ argv: [phpstanBinary, '--version'], timeoutMs: 10_000, outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes });
+    phpstan.commandResultHashes.push(...commandHashes([version.record]));
+    if (!version.ok) {
+      failures.push(commandFailure(version, 'phpstan', phpstanBinary, 'tool_missing'));
+      phpstan.status = 'blocked';
+    } else {
+      const normalizedPhpstanVersion = normalizedToolVersion(version.stdout, /^(?:PHPStan(?:\s+-\s+PHP Static Analysis Tool)?\s+)(\d+\.\d+(?:\.\d+)?)(?:\s|$)/i);
+      if (!normalizedPhpstanVersion) {
+        failures.push(customCodeFailure('invalid_output', 'phpstan', phpstanBinary, 'PHPStan returned an unrecognized version record.'));
+        phpstan.status = 'blocked';
+      }
+      if (phpstan.status === 'blocked') {
+        // Do not execute an analyzer whose bounded version record is unrecognized.
+      } else {
+      tools.phpstan = {
+        status: 'pass', version: normalizedPhpstanVersion, config: phpstanConfig, configSha256: phpstanConfigSha256,
+        provenance: reportedComposerProvenance(provenance, [provenance.packages.phpstan]),
+        versionCommandResultHash: version.record.resultSha256
+      };
+      phpstan.requestedFileIds = [...expectedFileIds];
+      const result = runner.run({
+        argv: [
+          phpstanBinary,
+          'analyse',
+          `--configuration=${phpstanConfig}`,
+          '--memory-limit=512M',
+          '--no-result-cache',
+          '--error-format=json',
+          '--no-progress',
+          ...phpFiles.map((file) => file.path)
+        ],
+        timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.phpstanTimeoutMs,
+        outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.phpstanOutputBytes
+      });
+      phpstan.commandResultHashes.push(...commandHashes([result.record]));
+      if (result.failureCode) {
+        failures.push(commandFailure(result, 'phpstan', phpstanConfig));
+        phpstan.status = 'blocked';
+      } else {
+        if (projectFileSha256(projectRoot, phpstanConfig) !== phpstanConfigSha256) {
+          failures.push(customCodeFailure('stale_test_binding', 'phpstan', phpstanConfig, 'PHPStan config changed during verifier execution.'));
+          phpstan.status = 'blocked';
+        }
+        const report = strictPhpstanReport(parseJsonOutput(result), phpFiles);
+        if (phpstan.status !== 'blocked' && !report) {
+          failures.push(customCodeFailure('invalid_output', 'phpstan', phpstanConfig, 'PHPStan did not return a strict, file-reconciled bounded JSON report.'));
+          phpstan.status = 'blocked';
+        } else if (phpstan.status !== 'blocked') {
+          phpstan.reportedFileIds = report.reportedFileIds;
+          phpstan.findings = report.findings;
+          if (report.totals.fileErrors > 0 || report.totals.errors > 0 || !result.ok) {
+            phpstan.status = 'fail';
+            failures.push(customCodeFailure('violations_found', 'phpstan', phpstanConfig, `PHPStan reported ${phpstan.findings.length} bounded finding(s).`));
+          } else {
+            phpstan.status = 'pass';
+          }
+        }
+      }
+      }
+    }
+  }
+
+  const blocked = [phpSyntax.status, phpcs.status, phpstan.status].includes('blocked');
+  const failed = [phpSyntax.status, phpcs.status, phpstan.status].includes('fail');
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_QUALITY_SCHEMA,
+    applies: true,
+    completed: !blocked,
+    status: blocked ? 'blocked' : failed ? 'fail' : 'pass',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools,
+    checks: { phpSyntax, phpcs, phpstan },
+    failures
+  });
+}
+
+function xmlDecodeStrict(value) {
+  const text = String(value ?? '');
+  let output = '';
+  let offset = 0;
+  for (const match of text.matchAll(/&([^;]*);/g)) {
+    if (match.index > offset && text.slice(offset, match.index).includes('&')) throw new Error('malformed XML entity');
+    output += text.slice(offset, match.index);
+    const entity = match[1];
+    if ({ amp: true, apos: true, gt: true, lt: true, quot: true }[entity]) {
+      output += { amp: '&', apos: "'", gt: '>', lt: '<', quot: '"' }[entity];
+    } else if (/^#(?:[1-9][0-9]*|0)$/.test(entity) || /^#x[0-9a-f]+$/i.test(entity)) {
+      const codePoint = entity[1].toLowerCase() === 'x' ? Number.parseInt(entity.slice(2), 16) : Number.parseInt(entity.slice(1), 10);
+      if (
+        !Number.isSafeInteger(codePoint) || codePoint <= 0 || codePoint > 0x10ffff ||
+        (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
+        (codePoint < 0x20 && ![0x09, 0x0a, 0x0d].includes(codePoint))
+      ) throw new Error('invalid XML character reference');
+      output += String.fromCodePoint(codePoint);
+    } else {
+      throw new Error('unsupported XML entity');
+    }
+    offset = match.index + match[0].length;
+  }
+  if (text.slice(offset).includes('&')) throw new Error('malformed XML entity');
+  return output + text.slice(offset);
+}
+
+function xmlAttributesStrict(value) {
+  const text = String(value ?? '');
+  const attributes = {};
+  let offset = 0;
+  while (offset < text.length) {
+    if (!/\s/.test(text[offset])) throw new Error('XML attributes must be whitespace separated');
+    while (offset < text.length && /\s/.test(text[offset])) offset += 1;
+    if (offset === text.length) break;
+    const nameMatch = text.slice(offset).match(/^([A-Za-z_:][A-Za-z0-9_.:-]*)/);
+    if (!nameMatch) throw new Error('invalid XML attribute name');
+    const name = nameMatch[1];
+    offset += name.length;
+    while (offset < text.length && /\s/.test(text[offset])) offset += 1;
+    if (text[offset] !== '=') throw new Error('XML attribute is missing equals');
+    offset += 1;
+    while (offset < text.length && /\s/.test(text[offset])) offset += 1;
+    const quote = text[offset];
+    if (quote !== '"' && quote !== "'") throw new Error('XML attribute must be quoted');
+    offset += 1;
+    const end = text.indexOf(quote, offset);
+    if (end < 0) throw new Error('unterminated XML attribute');
+    const raw = text.slice(offset, end);
+    if (raw.includes('<')) throw new Error('invalid XML attribute value');
+    if (Object.hasOwn(attributes, name)) throw new Error('duplicate XML attribute');
+    attributes[name] = xmlDecodeStrict(raw);
+    if (Object.keys(attributes).length > 200) throw new Error('too many XML attributes');
+    offset = end + 1;
+  }
+  return attributes;
+}
+
+function strictXmlDocument(value) {
+  let xml = String(value ?? '');
+  if (xml.charCodeAt(0) === 0xfeff) xml = xml.slice(1);
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(xml)) throw new Error('XML contains forbidden control characters');
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error('XML document types and entities are not accepted');
+  let offset = 0;
+  let declarationSeen = false;
+  let root = null;
+  let nodes = 0;
+  const stack = [];
+  const skipWhitespace = () => {
+    while (offset < xml.length && /\s/.test(xml[offset])) offset += 1;
+  };
+  skipWhitespace();
+  if (xml.startsWith('<?xml', offset)) {
+    const end = xml.indexOf('?>', offset + 5);
+    if (end < 0) throw new Error('unterminated XML declaration');
+    const attributes = xmlAttributesStrict(xml.slice(offset + 5, end));
+    if (!['1.0', '1.1'].includes(attributes.version) || Object.keys(attributes).some((name) => !['version', 'encoding', 'standalone'].includes(name))) {
+      throw new Error('invalid XML declaration');
+    }
+    if (attributes.encoding && !/^utf-8$/i.test(attributes.encoding)) throw new Error('unsupported XML encoding');
+    if (attributes.standalone && !['yes', 'no'].includes(attributes.standalone)) throw new Error('invalid XML standalone value');
+    declarationSeen = true;
+    offset = end + 2;
+  }
+  while (offset < xml.length) {
+    if (xml[offset] !== '<') {
+      const end = xml.indexOf('<', offset);
+      const text = xml.slice(offset, end < 0 ? xml.length : end);
+      if (text.includes(']]>')) throw new Error('invalid XML text terminator');
+      xmlDecodeStrict(text);
+      if (stack.length === 0 && text.trim()) throw new Error('XML text exists outside the root element');
+      offset = end < 0 ? xml.length : end;
+      continue;
+    }
+    if (xml.startsWith('<!--', offset)) {
+      const end = xml.indexOf('-->', offset + 4);
+      if (end < 0 || xml.slice(offset + 4, end).includes('--')) throw new Error('malformed XML comment');
+      offset = end + 3;
+      continue;
+    }
+    if (xml.startsWith('<![CDATA[', offset)) {
+      if (stack.length === 0) throw new Error('XML CDATA exists outside the root element');
+      const end = xml.indexOf(']]>', offset + 9);
+      if (end < 0) throw new Error('unterminated XML CDATA');
+      offset = end + 3;
+      continue;
+    }
+    if (xml.startsWith('<?', offset) || xml.startsWith('<!', offset)) {
+      throw new Error(declarationSeen ? 'XML processing instructions are not accepted' : 'unsupported XML markup');
+    }
+    let end = offset + 1;
+    let quote = '';
+    for (; end < xml.length; end += 1) {
+      const character = xml[end];
+      if (quote) {
+        if (character === quote) quote = '';
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === '>') {
+        break;
+      } else if (character === '<') {
+        throw new Error('nested XML tag opener');
+      }
+    }
+    if (end >= xml.length || quote) throw new Error('unterminated XML tag');
+    let content = xml.slice(offset + 1, end);
+    if (content.startsWith('/')) {
+      const name = content.slice(1).trim();
+      if (!/^[A-Za-z_:][A-Za-z0-9_.:-]*$/.test(name) || stack.length === 0 || stack.at(-1).name !== name) {
+        throw new Error('mismatched XML closing tag');
+      }
+      stack.pop();
+      offset = end + 1;
+      continue;
+    }
+    const selfClosing = /\/\s*$/.test(content);
+    if (selfClosing) content = content.replace(/\/\s*$/, '');
+    const nameMatch = content.match(/^([A-Za-z_:][A-Za-z0-9_.:-]*)/);
+    if (!nameMatch) throw new Error('invalid XML element name');
+    const name = nameMatch[1];
+    const node = { attributes: xmlAttributesStrict(content.slice(name.length)), children: [], name };
+    nodes += 1;
+    if (nodes > 50_000) throw new Error('XML node limit exceeded');
+    if (stack.length > 0) {
+      stack.at(-1).children.push(node);
+    } else if (root) {
+      throw new Error('multiple XML root elements');
+    } else {
+      root = node;
+    }
+    if (!selfClosing) {
+      stack.push(node);
+      if (stack.length > 64) throw new Error('XML depth limit exceeded');
+    }
+    offset = end + 1;
+  }
+  if (!root || stack.length > 0) throw new Error('incomplete XML document');
+  return root;
+}
+
+function xmlLocalName(node) {
+  return String(node?.name ?? '').split(':').at(-1).toLowerCase();
+}
+
+function walkXml(node, visit) {
+  visit(node);
+  for (const child of node.children) walkXml(child, visit);
+}
+
+function parsePhpunitListTestsXml(xml) {
+  const root = strictXmlDocument(xml);
+  if (!['tests', 'testsuites'].includes(xmlLocalName(root))) throw new Error('unexpected PHPUnit list-tests root');
+  const tests = [];
+  walkXml(root, (node) => {
+    const localName = xmlLocalName(node);
+    if (localName === 'testcaseclass') {
+      const className = String(node.attributes.name ?? '').replace(/^\\+/, '');
+      for (const child of node.children) {
+        if (xmlLocalName(child) !== 'testcasemethod') continue;
+        const methodName = String(child.attributes.name ?? '').replace(/\s+with data set[\s\S]*$/i, '');
+        if (className && methodName) tests.push({ className, methodName });
+      }
+    } else if (localName === 'testcase') {
+      const className = String(node.attributes.classname ?? node.attributes.class ?? '').replace(/^\\+/, '');
+      const methodName = String(node.attributes.name ?? '').replace(/\s+with data set[\s\S]*$/i, '');
+      if (className && methodName) tests.push({ className, methodName });
+    } else if (localName === 'test') {
+      const name = String(node.attributes.name ?? '');
+      const separator = name.lastIndexOf('::');
+      if (separator > 0) {
+        tests.push({
+          className: name.slice(0, separator).replace(/^\\+/, ''),
+          methodName: name.slice(separator + 2).replace(/\s+with data set[\s\S]*$/i, '')
+        });
+      }
+    }
+  });
+  return [...new Map(tests.map((entry) => [`${entry.className}\u0000${entry.methodName}`, entry])).values()]
+    .sort((left, right) => comparePortable(`${left.className}\u0000${left.methodName}`, `${right.className}\u0000${right.methodName}`));
+}
+
+function xmlNonnegativeInteger(attributes, name, required = true) {
+  if (!Object.hasOwn(attributes, name)) {
+    if (required) throw new Error(`JUnit suite is missing ${name}`);
+    return 0;
+  }
+  const value = String(attributes[name]);
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) throw new Error(`JUnit suite has invalid ${name}`);
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) throw new Error(`JUnit suite ${name} exceeds integer bounds`);
+  return number;
+}
+
+function parsePhpunitJunit(xml) {
+  const root = strictXmlDocument(xml);
+  if (!['testsuite', 'testsuites'].includes(xmlLocalName(root))) throw new Error('unexpected JUnit root');
+  const cases = [];
+  const metricKeys = ['tests', 'assertions', 'failures', 'errors', 'skipped', 'warnings', 'risky', 'incomplete'];
+  const testcaseMetrics = (node) => {
+    let className = String(node.attributes.classname ?? node.attributes.class ?? '').replace(/^\\+/, '');
+    let name = String(node.attributes.name ?? '');
+    const qualifiedSeparator = name.lastIndexOf('::');
+    if (qualifiedSeparator > 0) {
+      if (!className) className = name.slice(0, qualifiedSeparator).replace(/^\\+/, '');
+      name = name.slice(qualifiedSeparator + 2);
+    }
+    if (!name) throw new Error('JUnit testcase is missing a name');
+    const directNames = node.children.map(xmlLocalName);
+    const record = {
+      className,
+      name,
+      assertions: xmlNonnegativeInteger(node.attributes, 'assertions'),
+      errors: directNames.filter((entry) => entry === 'error').length,
+      failures: directNames.filter((entry) => entry === 'failure').length,
+      skipped: directNames.filter((entry) => entry === 'skipped').length,
+      warnings: directNames.filter((entry) => ['warning', 'risky', 'incomplete'].includes(entry)).length
+    };
+    cases.push(record);
+    return {
+      tests: 1,
+      assertions: record.assertions,
+      failures: record.failures,
+      errors: record.errors,
+      skipped: record.skipped,
+      warnings: directNames.filter((entry) => entry === 'warning').length,
+      risky: directNames.filter((entry) => entry === 'risky').length,
+      incomplete: directNames.filter((entry) => entry === 'incomplete').length
+    };
+  };
+  const addMetrics = (left, right) => Object.fromEntries(metricKeys.map((key) => [key, left[key] + right[key]]));
+  const suiteMetrics = (node) => {
+    let actual = Object.fromEntries(metricKeys.map((key) => [key, 0]));
+    for (const child of node.children) {
+      const localName = xmlLocalName(child);
+      if (localName === 'testcase') actual = addMetrics(actual, testcaseMetrics(child));
+      else if (localName === 'testsuite') actual = addMetrics(actual, suiteMetrics(child));
+      else {
+        let nestedTestNode = false;
+        walkXml(child, (descendant) => {
+          if (['testcase', 'testsuite'].includes(xmlLocalName(descendant))) nestedTestNode = true;
+        });
+        if (nestedTestNode) throw new Error('JUnit testcase or suite is nested under an unsupported element');
+      }
+    }
+    const declared = Object.fromEntries(metricKeys.map((key) => [key, xmlNonnegativeInteger(
+      node.attributes,
+      key,
+      ['tests', 'assertions', 'failures', 'errors', 'skipped'].includes(key)
+    )]));
+    for (const key of metricKeys) {
+      if (declared[key] !== actual[key]) throw new Error(`JUnit suite ${key} total is inconsistent`);
+    }
+    return actual;
+  };
+  let totals;
+  if (xmlLocalName(root) === 'testsuite') {
+    totals = suiteMetrics(root);
+  } else {
+    totals = Object.fromEntries(metricKeys.map((key) => [key, 0]));
+    for (const child of root.children) {
+      if (xmlLocalName(child) !== 'testsuite') throw new Error('JUnit testsuites root contains an unsupported child');
+      totals = addMetrics(totals, suiteMetrics(child));
+    }
+    const declaredKeys = metricKeys.filter((key) => Object.hasOwn(root.attributes, key));
+    if (declaredKeys.length > 0) {
+      if (['tests', 'assertions', 'failures', 'errors', 'skipped'].some((key) => !declaredKeys.includes(key))) {
+        throw new Error('JUnit testsuites root has partial totals');
+      }
+      for (const key of metricKeys) {
+        const declared = xmlNonnegativeInteger(root.attributes, key, false);
+        if (declared !== totals[key]) throw new Error(`JUnit testsuites ${key} total is inconsistent`);
+      }
+    }
+  }
+  return {
+    cases,
+    assertions: totals.assertions,
+    errors: totals.errors,
+    failures: totals.failures,
+    skipped: totals.skipped,
+    warnings: totals.warnings + totals.risky + totals.incomplete
+  };
+}
+
+function boundedGeneratedFile(projectRoot, path, limit) {
+  const absolute = resolve(projectRoot, path);
+  const metadata = lstatSync(absolute);
+  const real = realpathSync(absolute);
+  const realProjectRoot = realpathSync(projectRoot);
+  if (metadata.isSymbolicLink() || !metadata.isFile() || !pathIsInside(realProjectRoot, real) || metadata.size > limit) {
+    throw new Error('Generated verifier file is missing, unsafe, or oversized.');
+  }
+  return readFileSync(real);
+}
+
+function blockedFocusedTestExecution(inventory, applies, rows, failures) {
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_TEST_EXECUTION_SCHEMA,
+    applies,
+    completed: false,
+    status: 'blocked',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools: { phpunit: { status: 'blocked', version: '', config: '', configSha256: '' }, ddevDatabaseFamily: { status: 'blocked', family: '' } },
+    expectedTestMethodIds: [...new Set(rows.map((row) => row.testMethodId))].sort(comparePortable),
+    completedTestMethodIds: [],
+    discovery: [],
+    runs: [],
+    failures
+  });
+}
+
+function notApplicableFocusedTestExecution(inventory) {
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_TEST_EXECUTION_SCHEMA,
+    applies: false,
+    completed: true,
+    status: 'not_applicable',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools: { phpunit: { status: 'not_applicable', version: '', config: '', configSha256: '' }, ddevDatabaseFamily: { status: 'not_applicable', family: '' } },
+    expectedTestMethodIds: [],
+    completedTestMethodIds: [],
+    discovery: [],
+    runs: [],
+    failures: []
+  });
+}
+
+function pcreLiteral(value) {
+  return String(value).replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+}
+
+function runFocusedCustomCodeTests(projectRoot, inventory, coverage, runner, baseUrl, provenance, auditRoot, executorOverride = null, isolation = null) {
+  if (!coverage.applies) {
+    return notApplicableFocusedTestExecution(inventory);
+  }
+  if (coverage.failures.length > 0) {
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, coverage.failures);
+  }
+  const failures = [];
+  const phpunitConfig = recognizedProjectFile(projectRoot, [
+    'phpunit.xml',
+    'phpunit.xml.dist',
+    'phpunit.dist.xml',
+    `${ddevDocroot(projectRoot)}/core/phpunit.xml`,
+    `${ddevDocroot(projectRoot)}/core/phpunit.xml.dist`
+  ]);
+  const phpunitBinary = auditToolBinary(projectRoot, auditRoot, provenance?.packages?.phpunit);
+  if (!phpunitConfig) {
+    failures.push(customCodeFailure('config_missing', 'phpunit', '', 'Focused PHPUnit execution requires a recognized project or Drupal core PHPUnit config.'));
+  }
+  if (!phpunitBinary) {
+    failures.push(customCodeFailure('tool_missing', 'phpunit', CUSTOM_CODE_COMPOSER_PACKAGES.phpunit.name, 'Focused PHPUnit execution requires a provenance-bound direct PHPUnit package binary.'));
+  }
+  let simpletestBaseUrl = '';
+  try {
+    simpletestBaseUrl = baseUrl ? parseHttpUrl(baseUrl, 'Verified DDEV base URL').origin : '';
+  } catch {
+    simpletestBaseUrl = '';
+  }
+  if (!simpletestBaseUrl) {
+    failures.push(customCodeFailure('config_missing', 'phpunit', 'SIMPLETEST_BASE_URL', 'Verified DDEV base URL is unavailable.'));
+  }
+  if (failures.length > 0) {
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, failures);
+  }
+
+  const run = (specification) => runner.run({ ...specification, executorOverride });
+  const version = run({ argv: [phpunitBinary, '--version'], timeoutMs: 10_000, outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes });
+  if (!version.ok) {
+    failures.push(commandFailure(version, 'phpunit', phpunitBinary, 'tool_missing'));
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, failures);
+  }
+  const normalizedPhpunitVersion = normalizedToolVersion(version.stdout, /^PHPUnit\s+(\d+\.\d+(?:\.\d+)?)(?:\s|$)/i);
+  if (!normalizedPhpunitVersion) {
+    failures.push(customCodeFailure('invalid_output', 'phpunit', phpunitBinary, 'PHPUnit returned an unrecognized version record.'));
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, failures);
+  }
+  const databaseFamilyResult = run({
+    argv: ['printenv', 'DDEV_DATABASE_FAMILY'],
+    timeoutMs: 10_000,
+    outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes
+  });
+  if (!databaseFamilyResult.ok) {
+    failures.push(commandFailure(databaseFamilyResult, 'phpunit', 'DDEV_DATABASE_FAMILY', 'invalid_output'));
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, failures);
+  }
+  const databaseFamily = databaseFamilyResult.ok ? databaseFamilyResult.stdout.trim() : '';
+  if (!['mysql', 'postgres'].includes(databaseFamily)) {
+    failures.push(customCodeFailure('invalid_output', 'phpunit', 'DDEV_DATABASE_FAMILY', 'Verified DDEV database family must be mysql or postgres.'));
+    return blockedFocusedTestExecution(inventory, true, coverage.rows, failures);
+  }
+  const tools = {
+    phpunit: {
+      status: 'pass',
+      version: normalizedPhpunitVersion,
+      config: phpunitConfig,
+      configSha256: projectFileSha256(projectRoot, phpunitConfig),
+      provenance: reportedComposerProvenance(provenance, [provenance.packages.phpunit]),
+      versionCommandResultHash: version.record.resultSha256
+    },
+    ddevDatabaseFamily: { status: 'pass', family: databaseFamily, commandResultHash: databaseFamilyResult.record.resultSha256 }
+  };
+  const simpletestDb = databaseFamily === 'mysql' ? 'mysql://db:db@db/db' : 'pgsql://db:db@db/db';
+  const env = { SIMPLETEST_BASE_URL: simpletestBaseUrl, SIMPLETEST_DB: simpletestDb };
+  const discovery = [];
+  const runs = [];
+  const expectedTestMethodIds = [...new Set(coverage.rows.map((row) => row.testMethodId))].sort(comparePortable);
+  const completedTestMethodIds = [];
+  let junitBytes = 0;
+  let dataCases = 0;
+  let tempDirectory = '';
+  try {
+    const ddevDirectory = join(projectRoot, '.ddev');
+    const ddevMetadata = lstatSync(ddevDirectory);
+    if (ddevMetadata.isSymbolicLink() || !ddevMetadata.isDirectory()) {
+      throw new Error('Unsafe DDEV directory.');
+    }
+    tempDirectory = mkdtempSync(join(ddevDirectory, '.agent-ready-custom-code-'));
+    const tempRelative = relative(projectRoot, tempDirectory).split(sep).join('/');
+    const rowsByFile = new Map();
+    for (const row of coverage.rows) {
+      if (!rowsByFile.has(row.testFileId)) rowsByFile.set(row.testFileId, []);
+      rowsByFile.get(row.testFileId).push(row);
+    }
+    for (const [testFileId, rows] of [...rowsByFile].sort(([left], [right]) => comparePortable(left, right))) {
+      const outputPath = `${tempRelative}/list-${testFileId}.xml`;
+      const result = run({
+        argv: [
+          phpunitBinary,
+          '--configuration', phpunitConfig,
+          '--colors=never',
+          '--do-not-cache-result',
+          '--list-tests-xml', outputPath,
+          rows[0].path
+        ],
+        env,
+        timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.discoveryTimeoutMs,
+        outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.discoveryOutputBytes
+      });
+      if (!result.ok) {
+        failures.push(commandFailure(result, 'phpunit-discovery', testFileId, result.failureCode || 'invalid_output'));
+        break;
+      }
+      let bytes;
+      try {
+        bytes = boundedGeneratedFile(projectRoot, outputPath, CUSTOM_CODE_EXECUTION_LIMITS.discoveryOutputBytes);
+      } catch {
+        failures.push(customCodeFailure('invalid_output', 'phpunit-discovery', testFileId, 'PHPUnit list-tests XML is missing, unsafe, or oversized.'));
+        break;
+      }
+      const discoveryBudgetFailure = reserveCustomCodeGeneratedOutput(runner, bytes.length);
+      if (discoveryBudgetFailure) {
+        failures.push(customCodeFailure(discoveryBudgetFailure, 'phpunit-discovery', testFileId, 'Generated PHPUnit discovery evidence exceeded the shared execution budget.'));
+        break;
+      }
+      let discovered;
+      try {
+        discovered = parsePhpunitListTestsXml(bytes.toString('utf8'));
+      } catch {
+        failures.push(customCodeFailure('invalid_output', 'phpunit-discovery', testFileId, 'PHPUnit list-tests XML is not a strict well-formed bounded document.'));
+        break;
+      }
+      const discoveredKeys = new Set(discovered.map((test) => `${test.className}\u0000${test.methodName}`));
+      const missing = rows.filter((row) => !discoveredKeys.has(`${row.className}\u0000${row.methodName}`));
+      discovery.push({
+        testFileId,
+        path: rows[0].path,
+        expectedTestMethodIds: [...new Set(rows.map((row) => row.testMethodId))].sort(comparePortable),
+        discoveredMethodCount: discovered.length,
+        xmlSha256: `sha256:${sha256(bytes)}`,
+        commandResultHash: result.record.resultSha256,
+        status: missing.length === 0 ? 'pass' : 'blocked'
+      });
+      for (const row of missing) {
+        failures.push(customCodeFailure('unknown_test_method', 'phpunit-discovery', row.testMethodId, 'Inventoried test method was not present in PHPUnit list-tests XML.'));
+      }
+      if (missing.length > 0) break;
+    }
+    if (failures.length === 0) {
+      const executionRows = [...new Map(coverage.rows.map((row) => [row.testMethodId, row])).values()]
+        .sort((left, right) => comparePortable(left.testMethodId, right.testMethodId));
+      for (const row of executionRows) {
+        const junitPath = `${tempRelative}/junit-${row.testMethodId}.xml`;
+        const filter = `/^${pcreLiteral(row.className)}::${pcreLiteral(row.methodName)}(?: .*)?$/`;
+        const result = run({
+          argv: [
+            phpunitBinary,
+            '--configuration', phpunitConfig,
+            '--colors=never',
+            '--do-not-cache-result',
+            '--filter', filter,
+            '--log-junit', junitPath,
+            '--fail-on-warning',
+            '--fail-on-risky',
+            '--fail-on-incomplete',
+            '--fail-on-skipped',
+            row.path
+          ],
+          env,
+          timeoutMs: CUSTOM_CODE_EXECUTION_LIMITS.testExecutionTimeoutMs,
+          outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.junitBytesPerRun
+        });
+        if (result.failureCode) {
+          failures.push(commandFailure(result, 'phpunit-execution', row.testMethodId));
+          break;
+        }
+        let bytes;
+        try {
+          bytes = boundedGeneratedFile(projectRoot, junitPath, CUSTOM_CODE_EXECUTION_LIMITS.junitBytesPerRun);
+        } catch {
+          failures.push(customCodeFailure('invalid_output', 'phpunit-execution', row.testMethodId, 'PHPUnit JUnit XML is missing, unsafe, or oversized.'));
+          break;
+        }
+        const junitBudgetFailure = reserveCustomCodeGeneratedOutput(runner, bytes.length);
+        if (junitBudgetFailure) {
+          failures.push(customCodeFailure(junitBudgetFailure, 'phpunit-execution', row.testMethodId, 'Generated JUnit evidence exceeded the shared execution budget.'));
+          break;
+        }
+        junitBytes += bytes.length;
+        if (junitBytes > CUSTOM_CODE_EXECUTION_LIMITS.junitBytesTotal) {
+          failures.push(customCodeFailure('input_limit_exceeded', 'phpunit-execution', row.testMethodId, 'Aggregate JUnit XML exceeded its verifier limit.'));
+          break;
+        }
+        let parsed;
+        try {
+          parsed = parsePhpunitJunit(bytes.toString('utf8'));
+        } catch {
+          failures.push(customCodeFailure('invalid_output', 'phpunit-execution', row.testMethodId, 'PHPUnit JUnit XML is malformed or has missing, negative, or inconsistent suite totals.'));
+          break;
+        }
+        const exactCases = parsed.cases.filter((testcase) =>
+          testcase.className === row.className &&
+          (testcase.name === row.methodName || testcase.name.startsWith(`${row.methodName} with data set`))
+        );
+        const unexpectedCases = parsed.cases.length - exactCases.length;
+        const assertionCount = exactCases.reduce((total, testcase) => total + testcase.assertions, 0);
+        dataCases += exactCases.length;
+        let status = 'pass';
+        let failureCode = '';
+        if (exactCases.length === 0) {
+          status = 'blocked';
+          failureCode = 'no_tests_executed';
+        } else if (unexpectedCases > 0) {
+          status = 'blocked';
+          failureCode = 'unexpected_test_executed';
+        } else if (exactCases.length > CUSTOM_CODE_EXECUTION_LIMITS.dataCasesPerMethod || dataCases > CUSTOM_CODE_EXECUTION_LIMITS.dataCasesTotal) {
+          status = 'blocked';
+          failureCode = 'input_limit_exceeded';
+        } else if (parsed.skipped > 0 || exactCases.some((testcase) => testcase.skipped > 0)) {
+          status = 'fail';
+          failureCode = 'test_skipped';
+        } else if (assertionCount < 1 || parsed.assertions < 1) {
+          status = 'fail';
+          failureCode = 'no_assertions_executed';
+        } else if (
+          !result.ok || parsed.failures > 0 || parsed.errors > 0 || parsed.warnings > 0 ||
+          exactCases.some((testcase) => testcase.failures > 0 || testcase.errors > 0 || testcase.warnings > 0)
+        ) {
+          status = 'fail';
+          failureCode = 'test_failed';
+        }
+        runs.push({
+          testMethodId: row.testMethodId,
+          testFileId: row.testFileId,
+          className: row.className,
+          methodName: row.methodName,
+          status,
+          testcaseCount: exactCases.length,
+          assertionCount,
+          junitSha256: `sha256:${sha256(bytes)}`,
+          commandResultHash: result.record.resultSha256
+        });
+        if (failureCode) {
+          failures.push(customCodeFailure(failureCode, 'phpunit-execution', row.testMethodId, 'Focused PHPUnit method did not produce an exact clean passing JUnit result.'));
+          if (status === 'blocked') break;
+        } else {
+          completedTestMethodIds.push(row.testMethodId);
+        }
+      }
+    }
+  } catch {
+    failures.push(customCodeFailure('spawn_failed', 'phpunit', '', 'Verifier-owned temporary PHPUnit evidence directory could not be created or inspected.'));
+  } finally {
+    if (tempDirectory) {
+      rmSync(tempDirectory, { recursive: true, force: true });
+    }
+  }
+  if (projectFileSha256(projectRoot, phpunitConfig) !== tools.phpunit.configSha256) {
+    failures.push(customCodeFailure('stale_test_binding', 'phpunit', phpunitConfig, 'PHPUnit config changed during verifier execution.'));
+  }
+  const testFailureCodes = new Set(['no_assertions_executed', 'test_failed', 'test_skipped']);
+  const blocked = failures.some((failure) => !testFailureCodes.has(failure.code));
+  const failed = failures.some((failure) => testFailureCodes.has(failure.code));
+  return finalizedCustomCodeRecord({
+    schemaVersion: CUSTOM_CODE_TEST_EXECUTION_SCHEMA,
+    applies: true,
+    completed: !blocked,
+    status: blocked ? 'blocked' : failed ? 'fail' : 'pass',
+    inputInventoryFingerprint: String(inventory?.fingerprint ?? ''),
+    limits: CUSTOM_CODE_EXECUTION_LIMITS,
+    tools,
+    expectedTestMethodIds,
+    completedTestMethodIds: [...new Set(completedTestMethodIds)].sort(comparePortable),
+    discovery,
+    runs,
+    isolation,
+    failures
+  });
+}
+
+function workingCustomCodeSnapshot(projectRoot, inventory) {
+  const php = exactInventoryPhpFiles(projectRoot, inventory);
+  if (php.failures.length > 0) throw new Error('working custom PHP changed');
+  const runtime = collectRuntimeCodeManifest(projectRoot);
+  return stateSha256({
+    inventoriedPhp: php.files.map((file) => ({ id: file.id, path: file.path, sha256: file.sha256 })),
+    runtime
+  });
+}
+
+export function inspectCustomCodeQuality(projectRoot, environment, inventory, review, options = {}) {
+  const phpInventory = exactInventoryPhpFiles(projectRoot, inventory);
+  const coverage = coveragePreflight(inventory, review);
+  const phpstanConfig = recognizedProjectFile(projectRoot, ['phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon']);
+  const needs = {
+    phpcs: phpInventory.files.length > 0,
+    phpstan: phpInventory.files.length > 0 && Boolean(phpstanConfig),
+    phpunit: coverage.applies && coverage.failures.length === 0
+  };
+  const requirements = phpInventory.files.length > 0
+    ? customCodeToolRequirements(projectRoot, needs)
+    : { failures: [], packages: {}, snapshot: null };
+  const estimatedCommands = phpInventory.files.length === 0 ? 0 : (
+    12 + 2 + phpInventory.files.length + 2 + Math.ceil(phpInventory.files.length / CUSTOM_CODE_EXECUTION_LIMITS.phpcsChunkFiles) +
+    (phpstanConfig ? 2 : 0)
+  ) + (coverage.applies && coverage.failures.length === 0
+    ? 1 + coverage.testFileCount + coverage.testMethodCount
+    : 0);
+  const preflightFailures = [...phpInventory.failures, ...requirements.failures];
+  if (estimatedCommands > CUSTOM_CODE_EXECUTION_LIMITS.commands) {
+    preflightFailures.push(customCodeFailure('input_limit_exceeded', 'preflight', '', 'Planned custom-code quality commands exceed the shared command limit.'));
+  }
+  let workingSnapshotBefore = '';
+  if (phpInventory.files.length > 0 && preflightFailures.length === 0) {
+    try {
+      workingSnapshotBefore = workingCustomCodeSnapshot(projectRoot, inventory);
+    } catch {
+      preflightFailures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', '', 'The exact working source/runtime snapshot could not be established before custom-code execution.'));
+    }
+  }
+
+  let activeExecutor = () => ({ ok: false, exitCode: null, stdout: '', stderr: '', spawnError: true, timedOut: false });
+  const runner = createCustomCodeExecutionRunner((specification) => activeExecutor(specification), options);
+  let qualityAudit = phpInventory.files.length === 0
+    ? notApplicableQualityAudit(inventory)
+    : blockedQualityAudit(inventory, preflightFailures, phpInventory.files);
+  let focusedTestExecution = coverage.applies
+    ? blockedFocusedTestExecution(inventory, true, coverage.rows, [...preflightFailures, ...coverage.failures])
+    : notApplicableFocusedTestExecution(inventory);
+  let isolation = null;
+
+  if (phpInventory.files.length > 0 && preflightFailures.length === 0) {
+    const disposableWorkspaceFactory = options.disposableWorkspaceFactory ?? options.executor?.disposableWorkspaceFactory;
+    const workspaceResult = disposableWorkspaceFactory
+      ? disposableWorkspaceFactory({ environment, inventory, needs, options, projectRoot, requirements, runner })
+      : createDisposableCustomCodeWorkspace(projectRoot, inventory, runner, environment, {
+          ...options,
+          toolNeeds: needs,
+          toolRequirements: requirements
+        });
+    const workspace = workspaceResult?.workspace;
+    const workspaceFailures = Array.isArray(workspaceResult?.failures) ? workspaceResult.failures : [];
+    let isolationValid = false;
+    let provenance = null;
+    try {
+      try {
+        const projectReal = realpathSync(projectRoot);
+        const workspaceReal = realpathSync(workspace.projectRoot);
+        const auditReal = realpathSync(workspace.auditRoot);
+        const runtimeConfigSha256 = projectFileSha256(workspaceReal, '.ddev/config.yaml');
+        provenance = customCodeToolchainProvenance(auditReal, needs, requirements);
+        isolationValid = Boolean(
+          workspace && workspaceReal !== projectReal && pathIsInside(workspaceReal, auditReal) && auditReal !== workspaceReal &&
+          workspace.exactHead === true && workspace.freshDatabase === true &&
+          typeof workspace.executor === 'function' &&
+          /^sha256:[a-f0-9]{64}$/.test(String(workspace?.runtimeProvenance?.specSha256 ?? '')) &&
+          /^sha256:[a-f0-9]{64}$/.test(String(workspace?.runtimeProvenance?.ddevTreeFingerprint ?? '')) &&
+          runtimeConfigSha256 === workspace?.runtimeProvenance?.configSha256 &&
+          provenance.failures.length === 0 && exactInventoryPhpFiles(workspaceReal, inventory).failures.length === 0 &&
+          (!coverage.applies || parseHttpUrl(workspace.baseUrl, 'Disposable PHPUnit base URL').origin !== parseHttpUrl(options.baseUrl ?? '', 'Working target base URL').origin)
+        );
+      } catch {
+        isolationValid = false;
+      }
+      if (!isolationValid || workspaceFailures.length > 0) {
+        const failures = [
+          ...workspaceFailures,
+          ...(!isolationValid ? [customCodeFailure('stale_test_binding', 'custom-code-isolation', '', 'Custom-code commands require an exact-HEAD disposable DDEV project, fresh dependency installs, fresh database, and verifier audit vendor.')] : [])
+        ];
+        qualityAudit = blockedQualityAudit(inventory, failures, phpInventory.files);
+        if (coverage.applies) focusedTestExecution = blockedFocusedTestExecution(inventory, true, coverage.rows, [...failures, ...coverage.failures]);
+      } else {
+        activeExecutor = workspace.executor;
+        isolation = {
+          schemaVersion: 'public-kit.disposable-custom-code-workspace.1',
+          status: 'active',
+          workspaceId: String(workspace.identity?.workspaceId ?? ''),
+          head: String(workspace.identity?.head ?? ''),
+          projectNameSha256: `sha256:${sha256(String(workspace.identity?.projectName ?? ''))}`,
+          exactHead: true,
+          freshDatabase: true,
+          executionBoundary: 'exact-head-disposable-ddev',
+          auditVendor: 'fresh-composer-install',
+          runtimeOwner: 'verifier-generated-minimal-ddev-config',
+          runtimeConfigSha256: workspace.runtimeProvenance.configSha256,
+          runtimeDdevTreeSha256: workspace.runtimeProvenance.ddevTreeFingerprint,
+          runtimeSpecSha256: workspace.runtimeProvenance.specSha256,
+          workingTargetSnapshotBeforeSha256: workingSnapshotBefore,
+          workingTargetSnapshotAfterSha256: '',
+          setupCommandResultHashes: [...(workspace.setupCommandResultHashes ?? [])]
+        };
+        qualityAudit = runCustomCodeQualityAudit(
+          workspace.projectRoot, inventory, phpInventory.files, runner, provenance, workspace.auditRoot
+        );
+        focusedTestExecution = coverage.failures.length > 0
+          ? blockedFocusedTestExecution(inventory, true, coverage.rows, coverage.failures)
+          : coverage.applies
+            ? runFocusedCustomCodeTests(
+                workspace.projectRoot,
+                inventory,
+                coverage,
+                runner,
+                workspace.baseUrl,
+                provenance,
+                workspace.auditRoot,
+                workspace.executor,
+                isolation
+              )
+            : notApplicableFocusedTestExecution(inventory);
+        const disposablePostflightFailures = exactInventoryPhpFiles(workspace.projectRoot, inventory).failures;
+        if (!exactToolRequirementsMatch(workspace.projectRoot, needs, requirements)) {
+          disposablePostflightFailures.push(customCodeFailure('stale_test_binding', 'custom-code-isolation', isolation.workspaceId, 'Disposable project Composer inputs changed during custom-code execution.'));
+        }
+        if (projectFileSha256(workspace.projectRoot, '.ddev/config.yaml') !== isolation.runtimeConfigSha256) {
+          disposablePostflightFailures.push(customCodeFailure('stale_test_binding', 'custom-code-isolation', isolation.workspaceId, 'Verifier-owned disposable DDEV runtime configuration changed during custom-code execution.'));
+        }
+        if (customCodeToolchainChanged(workspace.auditRoot, provenance, needs, requirements)) {
+          disposablePostflightFailures.push(customCodeFailure('stale_test_binding', 'tool-provenance', isolation.workspaceId, 'Fresh verifier audit package metadata or package trees changed during custom-code execution.'));
+        }
+        if (disposablePostflightFailures.length > 0) {
+          qualityAudit = finalizedCustomCodeRecord({
+            ...qualityAudit,
+            completed: false,
+            status: 'blocked',
+            failures: [...(qualityAudit.failures ?? []), ...disposablePostflightFailures]
+          });
+          if (coverage.applies) {
+            focusedTestExecution = finalizedCustomCodeRecord({
+              ...focusedTestExecution,
+              completed: false,
+              status: 'blocked',
+              failures: [
+                ...(focusedTestExecution.failures ?? []),
+                ...disposablePostflightFailures
+              ]
+            });
+          }
+        }
+      }
+    } catch {
+      const executionFailure = customCodeFailure(
+        'spawn_failed',
+        'custom-code-isolation',
+        workspace?.identity?.workspaceId ?? '',
+        'Disposable custom-code verification failed safely.'
+      );
+      qualityAudit = finalizedCustomCodeRecord({
+        ...qualityAudit,
+        completed: false,
+        status: 'blocked',
+        failures: [...(qualityAudit.failures ?? []), executionFailure]
+      });
+      if (coverage.applies) focusedTestExecution = finalizedCustomCodeRecord({
+        ...focusedTestExecution,
+        completed: false,
+        status: 'blocked',
+        failures: [...(focusedTestExecution.failures ?? []), executionFailure]
+      });
+    } finally {
+      // A factory may return a workspace whose identity or provenance fails closed.
+      // It is still verifier-owned state and must be cleaned exactly once.
+      if (workspace !== null && workspace !== undefined) {
+        let cleanup;
+        try {
+          cleanup = typeof workspace.cleanup === 'function'
+            ? workspace.cleanup(runner)
+            : cleanupDisposableCustomCodeWorkspace(workspace, runner);
+        } catch {
+          cleanup = { completed: false, commandResultHashes: [], failures: [] };
+        }
+        const cleanupFailures = Array.isArray(cleanup?.failures) ? cleanup.failures : [];
+        const workspaceId = String(isolation?.workspaceId ?? workspace?.identity?.workspaceId ?? '');
+        if (isolation) {
+          isolation = {
+            ...isolation,
+            status: cleanup?.completed === true ? 'cleaned' : 'cleanup_blocked',
+            cleanupCommandResultHashes: [...(cleanup?.commandResultHashes ?? [])]
+          };
+        }
+        if (cleanupFailures.length > 0 || cleanup?.completed !== true) {
+          const failures = [
+            ...cleanupFailures,
+            ...(cleanupFailures.length === 0
+              ? [customCodeFailure('spawn_failed', 'phpunit-isolation-cleanup', workspaceId, 'Disposable DDEV cleanup did not complete.')]
+              : [])
+          ];
+          qualityAudit = finalizedCustomCodeRecord({
+            ...qualityAudit,
+            completed: false,
+            status: 'blocked',
+            failures: [...(qualityAudit.failures ?? []), ...failures]
+          });
+          if (coverage.applies) focusedTestExecution = finalizedCustomCodeRecord({
+            ...focusedTestExecution,
+            completed: false,
+            status: 'blocked',
+            failures: [...(focusedTestExecution.failures ?? []), ...failures]
+          });
+        }
+      }
+    }
+  }
+
+  if (phpInventory.files.length > 0 && workingSnapshotBefore) {
+    const postflightFailures = [];
+    let workingSnapshotAfter = '';
+    try {
+      workingSnapshotAfter = workingCustomCodeSnapshot(projectRoot, inventory);
+    } catch {
+      // The generic measured-snapshot failure below is sufficient and does not expose a changed path.
+    }
+    if (!workingSnapshotAfter || workingSnapshotAfter !== workingSnapshotBefore) {
+      postflightFailures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', '', 'The exact working source/runtime snapshot changed during disposable custom-code execution.'));
+    }
+    if (runner.budget.now() - runner.budget.startedAt > runner.budget.deadlineMs) {
+      postflightFailures.push(customCodeFailure('aggregate_deadline_exceeded', 'postflight', '', 'Custom-code execution exceeded the shared wall-clock deadline.'));
+    }
+    if (postflightFailures.length > 0) {
+      qualityAudit = finalizedCustomCodeRecord({
+        ...qualityAudit,
+        completed: false,
+        status: 'blocked',
+        failures: [...(qualityAudit.failures ?? []), ...postflightFailures]
+      });
+      if (coverage.applies) focusedTestExecution = finalizedCustomCodeRecord({
+        ...focusedTestExecution,
+        completed: false,
+        status: 'blocked',
+        failures: [...(focusedTestExecution.failures ?? []), ...postflightFailures]
+      });
+    }
+    if (isolation) isolation = {
+      ...isolation,
+      workingTargetSnapshotAfterSha256: workingSnapshotAfter
+    };
+  }
+  const executionBudget = {
+    commandsExecuted: runner.budget.commandCount,
+    outputBytes: runner.budget.outputBytes,
+    commandLimit: runner.budget.commandLimit,
+    outputLimit: runner.budget.outputLimit,
+    deadlineMs: runner.budget.deadlineMs,
+    cleanupReserveMs: runner.budget.cleanupReserveMs,
+    cleanupCommandReserve: runner.budget.cleanupCommandReserve
+  };
+  qualityAudit = finalizedCustomCodeRecord({ ...qualityAudit, ...(isolation ? { isolation } : {}), executionBudget });
+  focusedTestExecution = finalizedCustomCodeRecord({
+    ...focusedTestExecution,
+    ...(coverage.applies && isolation ? { isolation } : {}),
+    executionBudget
+  });
+  return { qualityAudit, focusedTestExecution, executionBudget };
+}
+
+export function inspectCustomCode(projectRoot, environment, review = {}, options = {}) {
   const filesystem = inspectCustomCodeFilesystem(projectRoot);
+  const reviewRecord = Array.isArray(review) ? { routeBindings: review, capabilities: [], testCoverage: [] } : (review ?? {});
+  const routeBindings = Array.isArray(reviewRecord?.routeBindings) ? reviewRecord.routeBindings : [];
   const routeAudit = filesystem.completed
     ? inspectCustomRouteRuntime(projectRoot, environment, filesystem.routes, filesystem.extensions, routeBindings)
     : { completed: false, error: 'Filesystem custom-code inventory did not complete.', routes: [], violations: [] };
@@ -6173,14 +9250,112 @@ export function inspectCustomCode(projectRoot, environment, routeBindings = []) 
     routeAudit,
     configSchema
   };
+  const phaseAFingerprint = `sha256:${sha256(JSON.stringify(fingerprintInput))}`;
+  const phaseAInventory = { ...filesystem, routeAudit, configSchema, fingerprint: phaseAFingerprint };
+  const { qualityAudit, focusedTestExecution, executionBudget } = filesystem.completed
+    ? inspectCustomCodeQuality(projectRoot, environment, phaseAInventory, reviewRecord, options)
+    : {
+        qualityAudit: blockedQualityAudit(phaseAInventory, [customCodeFailure('stale_test_binding', 'preflight', '', 'Filesystem custom-code inventory did not complete.')]),
+        focusedTestExecution: blockedFocusedTestExecution(phaseAInventory, false, [], [customCodeFailure('stale_test_binding', 'preflight', '', 'Filesystem custom-code inventory did not complete.')]),
+        executionBudget: {
+          commandsExecuted: 0,
+          outputBytes: 0,
+          commandLimit: CUSTOM_CODE_EXECUTION_LIMITS.commands,
+          outputLimit: CUSTOM_CODE_EXECUTION_LIMITS.aggregateOutputBytes,
+          deadlineMs: CUSTOM_CODE_EXECUTION_LIMITS.aggregateDeadlineMs,
+          cleanupReserveMs: CUSTOM_CODE_EXECUTION_LIMITS.cleanupReserveMs,
+          cleanupCommandReserve: 2
+        }
+      };
+  if (!['pass', 'not_applicable'].includes(qualityAudit.status)) {
+    errors.push(`Verifier-owned custom-code quality audit status is ${qualityAudit.status}.`);
+  }
+  if (!['pass', 'not_applicable'].includes(focusedTestExecution.status)) {
+    errors.push(`Verifier-owned focused custom-code test execution status is ${focusedTestExecution.status}.`);
+  }
   return {
     ...filesystem,
-    completed: filesystem.completed && routeAudit.completed && configSchema.completed && errors.length === 0,
+    completed: filesystem.completed && routeAudit.completed && configSchema.completed &&
+      ['pass', 'not_applicable'].includes(qualityAudit.status) &&
+      ['pass', 'not_applicable'].includes(focusedTestExecution.status) && errors.length === 0,
     errors,
     routeAudit,
     configSchema,
-    fingerprint: `sha256:${sha256(JSON.stringify(fingerprintInput))}`
+    qualityAudit,
+    focusedTestExecution,
+    executionBudget,
+    fingerprint: phaseAFingerprint
   };
+}
+
+function redactedCustomCodeFindings(findings, knownFileIds) {
+  if (!Array.isArray(findings) || findings.length > CUSTOM_CODE_EXECUTION_LIMITS.findingsPerCheck) return false;
+  return findings.every((finding) =>
+    plainJsonObject(finding) && !Object.hasOwn(finding, 'message') && !Object.hasOwn(finding, 'path') &&
+    (String(finding.fileId ?? '') === '' || knownFileIds.has(String(finding.fileId))) &&
+    finiteNonnegativeInteger(finding.line ?? 0) &&
+    (!Object.hasOwn(finding, 'column') || finiteNonnegativeInteger(finding.column)) &&
+    (!Object.hasOwn(finding, 'severity') || finiteNonnegativeInteger(finding.severity)) &&
+    typeof finding.ruleId === 'string' && finding.ruleId.length <= 200 &&
+    (!Object.hasOwn(finding, 'messageSha256') || /^sha256:[a-f0-9]{64}$/.test(String(finding.messageSha256)))
+  );
+}
+
+function trustedComposerProvenance(value, expectedPackages) {
+  if (
+    !plainJsonObject(value) || !/^sha256:[a-f0-9]{64}$/.test(String(value.composerJsonSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.composerLockSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.sourceComposerLockSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.installedMetadataSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.closureIdentitySha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.closurePackageTreeSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.autoloadTreeSha256 ?? '')) ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(value.rootAutoloadSha256 ?? '')) ||
+    !finiteNonnegativeInteger(value.closurePackageCount) || value.closurePackageCount < expectedPackages.length ||
+    value.closurePackageCount > CUSTOM_CODE_EXECUTION_LIMITS.composerPackages ||
+    !finiteNonnegativeInteger(value.closurePackageBytes) || value.closurePackageBytes > CUSTOM_CODE_EXECUTION_LIMITS.composerPackageBytesTotal ||
+    !finiteNonnegativeInteger(value.closurePackageFiles) || value.closurePackageFiles > CUSTOM_CODE_EXECUTION_LIMITS.composerPackageFilesTotal ||
+    !finiteNonnegativeInteger(value.autoloadTreeBytes) || value.autoloadTreeBytes > CUSTOM_CODE_EXECUTION_LIMITS.packageBytes ||
+    !finiteNonnegativeInteger(value.autoloadTreeFiles) || value.autoloadTreeFiles > CUSTOM_CODE_EXECUTION_LIMITS.packageFiles ||
+    !finiteNonnegativeInteger(value.rootAutoloadBytes) || value.rootAutoloadBytes < 1 ||
+    value.rootAutoloadBytes > CUSTOM_CODE_EXECUTION_LIMITS.composerMetadataBytes ||
+    !Array.isArray(value.packages) || value.packages.length !== expectedPackages.length
+  ) return false;
+  const byName = new Map(value.packages.map((entry) => [String(entry?.name ?? ''), entry]));
+  return expectedPackages.every((name) => {
+    const entry = byName.get(name);
+    const expectedPath = `vendor/${name}`;
+    return plainJsonObject(entry) && entry.packagePath === expectedPath &&
+      typeof entry.version === 'string' && entry.version.length > 0 && entry.version.length <= 200 &&
+      /^[a-f0-9]{7,64}$/i.test(String(entry.reference ?? '')) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(entry.distUrlSha256 ?? '')) &&
+      (name === CUSTOM_CODE_COMPOSER_PACKAGES.phpstan.name
+        ? String(entry.sourceUrlSha256 ?? '') === '' || /^sha256:[a-f0-9]{64}$/.test(String(entry.sourceUrlSha256))
+        : /^sha256:[a-f0-9]{64}$/.test(String(entry.sourceUrlSha256 ?? ''))) &&
+      /^sha256:[a-f0-9]{64}$/.test(String(entry?.packageTree?.sha256 ?? '')) &&
+      finiteNonnegativeInteger(entry?.packageTree?.files) && finiteNonnegativeInteger(entry?.packageTree?.bytes) &&
+      (!entry.binary || (entry.binary.startsWith(`${expectedPath}/`) && !entry.binary.includes('/vendor/bin/')));
+  });
+}
+
+function trustedCustomCodeIsolation(isolation) {
+  return plainJsonObject(isolation) &&
+    isolation.schemaVersion === 'public-kit.disposable-custom-code-workspace.1' && isolation.status === 'cleaned' &&
+    isolation.exactHead === true && isolation.freshDatabase === true &&
+    isolation.executionBoundary === 'exact-head-disposable-ddev' && isolation.auditVendor === 'fresh-composer-install' &&
+    isolation.runtimeOwner === 'verifier-generated-minimal-ddev-config' &&
+    /^sha256:[a-f0-9]{64}$/.test(String(isolation.runtimeConfigSha256 ?? '')) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(isolation.runtimeDdevTreeSha256 ?? '')) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(isolation.runtimeSpecSha256 ?? '')) &&
+    /^DISPOSABLE-[A-Za-z0-9._-]+$/.test(String(isolation.workspaceId ?? '')) &&
+    /^[a-f0-9]{40,64}$/i.test(String(isolation.head ?? '')) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(isolation.projectNameSha256 ?? '')) &&
+    /^sha256:[a-f0-9]{64}$/.test(String(isolation.workingTargetSnapshotBeforeSha256 ?? '')) &&
+    isolation.workingTargetSnapshotAfterSha256 === isolation.workingTargetSnapshotBeforeSha256 &&
+    Array.isArray(isolation.setupCommandResultHashes) && isolation.setupCommandResultHashes.length > 0 &&
+    isolation.setupCommandResultHashes.every((hash) => /^sha256:[a-f0-9]{64}$/.test(String(hash))) &&
+    Array.isArray(isolation.cleanupCommandResultHashes) && isolation.cleanupCommandResultHashes.length >= 2 &&
+    isolation.cleanupCommandResultHashes.every((hash) => /^sha256:[a-f0-9]{64}$/.test(String(hash)));
 }
 
 export function customCodeReconciliationErrors(runtimeInventory, review, packetDir = '') {
@@ -6196,6 +9371,9 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     push(runtimeInventory?.errors?.[0] || 'Verifier-owned custom-code inventory did not complete.');
     return errors;
   }
+  if (runtimeInventory.schemaVersion !== CUSTOM_CODE_SCHEMA) {
+    push(`Verifier-owned custom-code inventory must use schemaVersion ${CUSTOM_CODE_SCHEMA}.`);
+  }
   if (!review || typeof review !== 'object' || Array.isArray(review)) {
     push('drupal-readback.json implementationQuality.customCodeInventory must be an object.');
     return errors;
@@ -6205,6 +9383,9 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
   }
   if (review.inventoryComplete !== true || !Array.isArray(review.blockers) || review.blockers.length > 0) {
     push('Custom-code review must be complete with an explicit empty blockers array.');
+  }
+  if (!Array.isArray(review.capabilities) || !Array.isArray(review.routeBindings) || !Array.isArray(review.testCoverage)) {
+    push('Custom-code review capabilities, routeBindings, and testCoverage must be explicit arrays.');
   }
   if (review.applies !== (runtimeInventory.extensions.length > 0)) {
     push('Custom-code review applicability does not match the current custom extension inventory.');
@@ -6232,6 +9413,97 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     push(`Custom route ${violation?.name || '(unknown route)'} failed runtime audit: ${violation?.reason || 'unknown violation'}.`);
   }
 
+  const runtimePhpFileIds = [
+    ...runtimeInventory.sourceFiles
+      .filter((source) => ['procedural_php', 'php_class'].includes(source?.kind))
+      .map((source) => String(source?.id ?? '')),
+    ...(Array.isArray(runtimeInventory.tests) ? runtimeInventory.tests : [])
+      .filter((test) => /\.php$/i.test(String(test?.path ?? '')))
+      .map((test) => String(test?.id ?? ''))
+  ].filter(Boolean).sort(comparePortable);
+  const qualityAudit = runtimeInventory?.qualityAudit;
+  const runtimePhpFileIdSet = new Set(runtimePhpFileIds);
+  if (!qualityAudit || qualityAudit.schemaVersion !== CUSTOM_CODE_QUALITY_SCHEMA) {
+    push(`Verifier-owned custom-code quality audit must use schemaVersion ${CUSTOM_CODE_QUALITY_SCHEMA}.`);
+  } else {
+    if (qualityAudit.inputInventoryFingerprint !== runtimeInventory.fingerprint) {
+      push('Verifier-owned custom-code quality audit is not bound to the current phase-A inventory fingerprint.');
+    }
+    if (qualityAudit.resultFingerprint !== customCodeResultFingerprint(qualityAudit)) {
+      push('Verifier-owned custom-code quality audit result fingerprint is invalid.');
+    }
+    if (
+      Number(qualityAudit?.executionBudget?.commandsExecuted) > CUSTOM_CODE_EXECUTION_LIMITS.commands ||
+      Number(qualityAudit?.executionBudget?.outputBytes) > CUSTOM_CODE_EXECUTION_LIMITS.aggregateOutputBytes ||
+      Number(qualityAudit?.executionBudget?.deadlineMs) !== CUSTOM_CODE_EXECUTION_LIMITS.aggregateDeadlineMs ||
+      Number(qualityAudit?.executionBudget?.cleanupReserveMs) !== CUSTOM_CODE_EXECUTION_LIMITS.cleanupReserveMs ||
+      Number(qualityAudit?.executionBudget?.cleanupCommandReserve) !== 2
+    ) {
+      push('Verifier-owned custom-code quality audit exceeded or misstated the shared execution budget.');
+    }
+    const expectedStatus = runtimePhpFileIds.length > 0 ? 'pass' : 'not_applicable';
+    if (qualityAudit.applies !== (runtimePhpFileIds.length > 0) || qualityAudit.completed !== true || qualityAudit.status !== expectedStatus) {
+      push(`Verifier-owned custom-code quality audit must complete with status ${expectedStatus}.`);
+    }
+    for (const checkName of ['phpSyntax', 'phpcs']) {
+      const check = qualityAudit?.checks?.[checkName];
+      if (runtimePhpFileIds.length > 0 && (
+        check?.status !== 'pass' ||
+        JSON.stringify([...(check?.expectedFileIds ?? [])].sort(comparePortable)) !== JSON.stringify(runtimePhpFileIds) ||
+        JSON.stringify([...(check?.completedFileIds ?? [])].sort(comparePortable)) !== JSON.stringify(runtimePhpFileIds)
+      )) {
+        push(`Verifier-owned ${checkName} quality check did not pass every exact inventoried PHP file.`);
+      }
+      if (!redactedCustomCodeFindings(check?.findings, runtimePhpFileIdSet)) {
+        push(`Verifier-owned ${checkName} findings must contain only bounded redacted rule/location/digest data.`);
+      }
+    }
+    if (runtimePhpFileIds.length > 0 && !trustedComposerProvenance(
+      qualityAudit?.tools?.phpcs?.provenance,
+      [
+        CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.coder.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.slevomat.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.variableAnalysis.name
+      ]
+    )) {
+      push('Verifier-owned PHPCS result lacks exact canonical Composer package provenance.');
+    }
+    if (runtimePhpFileIds.length > 0) {
+      if (!trustedCustomCodeIsolation(qualityAudit?.isolation)) {
+        push('Verifier-owned custom-code analyzers lack measured working-target snapshots and cleaned exact-HEAD disposable DDEV/audit-vendor isolation evidence.');
+      }
+      const phpstanCheck = qualityAudit?.checks?.phpstan;
+      const phpstanTool = qualityAudit?.tools?.phpstan;
+      if (!['pass', 'not_supported'].includes(phpstanCheck?.status)) {
+        push('Verifier-owned PHPStan check must pass or explicitly report not_supported when no recognized config exists.');
+      } else if (phpstanCheck.status === 'pass' && (
+        phpstanTool?.status !== 'pass' ||
+        !trustedComposerProvenance(phpstanTool?.provenance, [CUSTOM_CODE_COMPOSER_PACKAGES.phpstan.name]) ||
+        !String(phpstanTool?.config ?? '') ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(phpstanTool?.configSha256 ?? '')) ||
+        JSON.stringify([...(phpstanCheck?.expectedFileIds ?? [])].sort(comparePortable)) !== JSON.stringify(runtimePhpFileIds) ||
+        JSON.stringify([...(phpstanCheck?.requestedFileIds ?? [])].sort(comparePortable)) !== JSON.stringify(runtimePhpFileIds) ||
+        !Array.isArray(phpstanCheck?.reportedFileIds) ||
+        new Set(phpstanCheck.reportedFileIds).size !== phpstanCheck.reportedFileIds.length ||
+        phpstanCheck.reportedFileIds.some((id) => !runtimePhpFileIdSet.has(String(id)))
+      )) {
+        push('Verifier-owned PHPStan pass did not bind its recognized config, exact requested PHP-file argv, and bounded error-bearing file report.');
+      } else if (phpstanCheck.status === 'not_supported' && (
+        phpstanTool?.status !== 'not_supported' ||
+        String(phpstanTool?.config ?? '') !== '' ||
+        String(phpstanTool?.configSha256 ?? '') !== '' ||
+        (phpstanCheck?.requestedFileIds ?? []).length !== 0 ||
+        (phpstanCheck?.reportedFileIds ?? []).length !== 0
+      )) {
+        push('Verifier-owned PHPStan not_supported status contradicts a recognized config/tool record.');
+      }
+      if (!redactedCustomCodeFindings(phpstanCheck?.findings, runtimePhpFileIdSet)) {
+        push('Verifier-owned PHPStan findings must contain only bounded redacted rule/location/digest data.');
+      }
+    }
+  }
+
   const runtimeExtensions = new Set(runtimeInventory.extensions.map((extension) => extension.machineName));
   const runtimeSurfaces = new Map(
     runtimeInventory.sourceFiles.flatMap((source) => source.surfaces.map((surface) => [surface.id, {
@@ -6241,20 +9513,23 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
       sourceFileId: source.id
     }]))
   );
-  const runtimeTests = new Map(
-    (Array.isArray(runtimeInventory.tests) ? runtimeInventory.tests : [])
-      .map((test) => [String(test?.id ?? ''), test])
-      .filter(([id]) => id)
+  const executableSurfaceIds = new Set(
+    [...runtimeSurfaces]
+      .filter(([, surface]) => EXECUTABLE_CUSTOM_SURFACE_KINDS.has(surface.kind))
+      .map(([surfaceId]) => surfaceId)
   );
   const capabilities = Array.isArray(review.capabilities) ? review.capabilities : [];
   const capabilityIds = new Set();
   const acceptanceCriterionIds = new Set();
+  const focusedTestAcceptanceCriterionIds = new Set();
   const boundSurfaces = new Map();
   const capabilityExtensions = new Set();
   for (const [index, capability] of capabilities.entries()) {
     const extension = String(capability?.extension ?? '').trim();
     const capabilityKey = String(capability?.capabilityKey ?? '').trim();
     const capabilityId = String(capability?.capabilityId ?? '').trim();
+    const surfaceIds = Array.isArray(capability?.sourceSurfaceIds) ? capability.sourceSurfaceIds : [];
+    const requiresFocusedTests = capabilityRequiresFocusedTests(capability, executableSurfaceIds);
     if (!runtimeExtensions.has(extension)) {
       push(`Custom capability ${capabilityId || `(row ${index})`} names unknown extension ${extension || '(missing)'}.`);
     } else {
@@ -6287,6 +9562,9 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     }
     for (const id of criterionIds) {
       acceptanceCriterionIds.add(id);
+      if (requiresFocusedTests) {
+        focusedTestAcceptanceCriterionIds.add(id);
+      }
     }
     const ladder = Array.isArray(capability?.solutionLadder) ? capability.solutionLadder : [];
     if (
@@ -6312,7 +9590,6 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
         }
       }
     }
-    const surfaceIds = Array.isArray(capability?.sourceSurfaceIds) ? capability.sourceSurfaceIds : [];
     if (surfaceIds.length === 0 || new Set(surfaceIds).size !== surfaceIds.length) {
       push(`Custom capability ${capabilityId || `(row ${index})`} must bind one or more unique sourceSurfaceIds.`);
     }
@@ -6330,18 +9607,6 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
       }
       boundSurfaces.set(surfaceId, capabilityId);
     }
-    const testFileIds = Array.isArray(capability?.testFileIds) ? capability.testFileIds.map(String) : [];
-    if (new Set(testFileIds).size !== testFileIds.length) {
-      push(`Custom capability ${capabilityId || `(row ${index})`} repeats a testFileId.`);
-    }
-    for (const testFileId of testFileIds) {
-      const runtimeTest = runtimeTests.get(testFileId);
-      if (!runtimeTest) {
-        push(`Custom capability ${capabilityId || `(row ${index})`} binds unknown test file ${testFileId}.`);
-      } else if (runtimeTest.extension !== extension) {
-        push(`Custom capability ${capabilityId || `(row ${index})`} binds test ${testFileId} from extension ${runtimeTest.extension}.`);
-      }
-    }
   }
   for (const [surfaceId, surface] of runtimeSurfaces) {
     if (!boundSurfaces.has(surfaceId)) {
@@ -6351,6 +9616,71 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
   for (const extension of runtimeExtensions) {
     if (!capabilityExtensions.has(extension)) {
       push(`Custom extension ${extension} has no capability record.`);
+    }
+  }
+
+  const coverage = coveragePreflight(runtimeInventory, review);
+  for (const failure of coverage.failures) {
+    push(`Custom-code focused test coverage ${failure.code}: ${failure.subjectId || '(unbound)'} ${failure.message}`.trim());
+  }
+  if (coverage.applies !== (focusedTestAcceptanceCriterionIds.size > 0)) {
+    push('Custom-code focused test coverage applicability does not match the load-bearing or executable-surface capability AC inventory.');
+  }
+  const focusedTestExecution = runtimeInventory?.focusedTestExecution;
+  if (!focusedTestExecution || focusedTestExecution.schemaVersion !== CUSTOM_CODE_TEST_EXECUTION_SCHEMA) {
+    push(`Verifier-owned focused test execution must use schemaVersion ${CUSTOM_CODE_TEST_EXECUTION_SCHEMA}.`);
+  } else {
+    if (focusedTestExecution.inputInventoryFingerprint !== runtimeInventory.fingerprint) {
+      push('Verifier-owned focused test execution is not bound to the current phase-A inventory fingerprint.');
+    }
+    if (focusedTestExecution.resultFingerprint !== customCodeResultFingerprint(focusedTestExecution)) {
+      push('Verifier-owned focused test execution result fingerprint is invalid.');
+    }
+    if (JSON.stringify(focusedTestExecution.executionBudget ?? null) !== JSON.stringify(qualityAudit?.executionBudget ?? null)) {
+      push('Verifier-owned quality and focused-test records do not share one execution-budget result.');
+    }
+    const expectedStatus = coverage.applies ? 'pass' : 'not_applicable';
+    if (focusedTestExecution.applies !== coverage.applies || focusedTestExecution.completed !== true || focusedTestExecution.status !== expectedStatus) {
+      push(`Verifier-owned focused test execution must complete with status ${expectedStatus}.`);
+    }
+    if (coverage.applies && (
+      focusedTestExecution?.tools?.phpunit?.status !== 'pass' ||
+      !trustedComposerProvenance(focusedTestExecution?.tools?.phpunit?.provenance, [CUSTOM_CODE_COMPOSER_PACKAGES.phpunit.name]) ||
+      !String(focusedTestExecution?.tools?.phpunit?.config ?? '') ||
+      !/^sha256:[a-f0-9]{64}$/.test(String(focusedTestExecution?.tools?.phpunit?.configSha256 ?? '')) ||
+      !['mysql', 'postgres'].includes(focusedTestExecution?.tools?.ddevDatabaseFamily?.family)
+    )) {
+      push('Verifier-owned focused test execution lacks a recognized PHPUnit config/tool or verified DDEV database family.');
+    }
+    const isolation = focusedTestExecution?.isolation;
+    if (coverage.applies && !trustedCustomCodeIsolation(isolation)) {
+      push('Verifier-owned focused tests lack cleaned exact-HEAD disposable DDEV project/database isolation evidence.');
+    }
+    const expectedMethodIds = [...new Set(coverage.rows.map((row) => row.testMethodId))].sort(comparePortable);
+    const recordedExpected = [...(Array.isArray(focusedTestExecution.expectedTestMethodIds) ? focusedTestExecution.expectedTestMethodIds : [])].sort(comparePortable);
+    const recordedCompleted = [...(Array.isArray(focusedTestExecution.completedTestMethodIds) ? focusedTestExecution.completedTestMethodIds : [])].sort(comparePortable);
+    if (
+      JSON.stringify(recordedExpected) !== JSON.stringify(expectedMethodIds) ||
+      (coverage.applies && JSON.stringify(recordedCompleted) !== JSON.stringify(expectedMethodIds))
+    ) {
+      push('Verifier-owned focused test execution did not bind and complete the exact expected TESTMETHOD IDs.');
+    }
+    if (coverage.applies) {
+      const passingRuns = (Array.isArray(focusedTestExecution.runs) ? focusedTestExecution.runs : [])
+        .filter((run) =>
+          run?.status === 'pass' &&
+          Number.isSafeInteger(run?.testcaseCount) && run.testcaseCount > 0 &&
+          Number.isSafeInteger(run?.assertionCount) && run.assertionCount > 0
+        )
+        .map((run) => String(run.testMethodId ?? ''))
+        .filter(Boolean)
+        .sort(comparePortable);
+      if (
+        new Set(passingRuns).size !== passingRuns.length ||
+        JSON.stringify(passingRuns) !== JSON.stringify(expectedMethodIds)
+      ) {
+        push('Verifier-owned focused test execution must record one exact passing JUnit run with a positive assertion count for every expected TESTMETHOD ID.');
+      }
     }
   }
 
@@ -6884,6 +10214,8 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
         extensions: [], sourceFiles: [], controllers: [], routes: [], tests: [],
         routeAudit: { completed: false, routes: [], violations: [] },
         configSchema: { completed: false, extensions: [], violations: [] },
+        qualityAudit: blockedQualityAudit({ fingerprint: '' }, [customCodeFailure('spawn_failed', 'preflight', '', 'Drupal runtime is unavailable.')]),
+        focusedTestExecution: blockedFocusedTestExecution({ fingerprint: '' }, false, [], [customCodeFailure('spawn_failed', 'preflight', '', 'Drupal runtime is unavailable.')]),
         fingerprint: ''
       },
       liveSurfaceInventory: {
@@ -6964,20 +10296,19 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     patternMap
   );
   const consentInventory = inspectConsentInventory(projectRoot, environment);
-  const customCodeInventory = inspectCustomCode(
-    projectRoot,
-    environment,
-    Array.isArray(drupalReadback?.implementationQuality?.customCodeInventory?.routeBindings)
-      ? drupalReadback.implementationQuality.customCodeInventory.routeBindings
-      : []
-  );
-  const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
-  const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
-  const identityReadbackFailed = !bootstrapResult.ok || !uuidResult.ok;
   const describedTarget = inContainer
     ? { primaryUrl: environmentTargetUrl(environment), webOrigins: environmentWebOrigins(environment) }
     : ddevTargetDescription(projectRoot, environment);
   const baseUrl = describedTarget.primaryUrl;
+  const customCodeInventory = inspectCustomCode(
+    projectRoot,
+    environment,
+    drupalReadback?.implementationQuality?.customCodeInventory ?? {},
+    { baseUrl }
+  );
+  const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
+  const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
+  const identityReadbackFailed = !bootstrapResult.ok || !uuidResult.ok;
   const webOrigins = new Set(describedTarget.webOrigins);
   try {
     if (baseUrl) {
@@ -8333,9 +11664,11 @@ export async function verifyLive({
   let routeMatrixText = '';
   let routeMatrix = {};
   let routeMatrixError = '';
+  const runtimeJsonBudget = { bytes: 0 };
   try {
-    routeMatrixText = await readFile(routeMatrixPath, 'utf8');
-    routeMatrix = JSON.parse(routeMatrixText);
+    const boundedRouteMatrix = await readBoundedJsonFile(routeMatrixPath, { budget: runtimeJsonBudget });
+    routeMatrixText = boundedRouteMatrix.text;
+    routeMatrix = boundedRouteMatrix.value;
   } catch (error) {
     routeMatrixError = `route-matrix.json cannot be used for live verification: ${error.message}`;
   }
@@ -8351,47 +11684,33 @@ export async function verifyLive({
   let negativeRouteConsent = null;
   let reviewHandoff = null;
   try {
-    independentVerification = JSON.parse(
-      await readFile(join(absolutePacketDir, 'independent-verification.json'), 'utf8')
-    );
-    blindReview = JSON.parse(
-      await readFile(join(absolutePacketDir, 'blind-adversarial-review.json'), 'utf8')
-    );
-    drupalReadback = JSON.parse(
-      await readFile(join(absolutePacketDir, 'drupal-readback.json'), 'utf8')
-    );
-    browserEvidence = JSON.parse(
-      await readFile(join(absolutePacketDir, 'browser-evidence.json'), 'utf8')
-    );
-    fieldOutputMatrix = JSON.parse(
-      await readFile(join(absolutePacketDir, 'field-output-matrix.json'), 'utf8')
-    );
-    nextCycleVerification = JSON.parse(
-      await readFile(join(absolutePacketDir, 'next-cycle-verification.json'), 'utf8')
-    );
-    parityReport = JSON.parse(
-      await readFile(join(absolutePacketDir, 'parity-report.json'), 'utf8')
-    );
-    patternMap = JSON.parse(
-      await readFile(join(absolutePacketDir, 'pattern-map.json'), 'utf8')
-    );
-    sourceAudit = JSON.parse(
-      await readFile(join(absolutePacketDir, 'source-audit.json'), 'utf8')
-    );
-    negativeRouteConsent = JSON.parse(
-      await readFile(join(absolutePacketDir, 'negative-route-consent.json'), 'utf8')
-    );
+    independentVerification = (await readBoundedJsonFile(join(absolutePacketDir, 'independent-verification.json'), { budget: runtimeJsonBudget })).value;
+    blindReview = (await readBoundedJsonFile(join(absolutePacketDir, 'blind-adversarial-review.json'), { budget: runtimeJsonBudget })).value;
+    drupalReadback = (await readBoundedJsonFile(join(absolutePacketDir, 'drupal-readback.json'), { budget: runtimeJsonBudget })).value;
+    browserEvidence = (await readBoundedJsonFile(join(absolutePacketDir, 'browser-evidence.json'), { budget: runtimeJsonBudget })).value;
+    fieldOutputMatrix = (await readBoundedJsonFile(join(absolutePacketDir, 'field-output-matrix.json'), { budget: runtimeJsonBudget })).value;
+    nextCycleVerification = (await readBoundedJsonFile(join(absolutePacketDir, 'next-cycle-verification.json'), { budget: runtimeJsonBudget })).value;
+    parityReport = (await readBoundedJsonFile(join(absolutePacketDir, 'parity-report.json'), { budget: runtimeJsonBudget })).value;
+    patternMap = (await readBoundedJsonFile(join(absolutePacketDir, 'pattern-map.json'), { budget: runtimeJsonBudget })).value;
+    sourceAudit = (await readBoundedJsonFile(join(absolutePacketDir, 'source-audit.json'), { budget: runtimeJsonBudget })).value;
+    negativeRouteConsent = (await readBoundedJsonFile(join(absolutePacketDir, 'negative-route-consent.json'), { budget: runtimeJsonBudget })).value;
     try {
-      reviewHandoff = JSON.parse(
-        await readFile(join(absolutePacketDir, 'evidence', 'review-handoff.json'), 'utf8')
-      );
-    } catch {
+      reviewHandoff = (
+        await readBoundedJsonFile(
+          join(absolutePacketDir, 'evidence', 'review-handoff.json'),
+          { budget: runtimeJsonBudget }
+        )
+      ).value;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Packet validation records malformed, non-regular, or oversized optional handoff JSON.
+      }
       reviewHandoff = null;
     }
   } catch {
     // Packet validation already records malformed or missing required JSON.
   }
-  const liveErrors = routeMatrixError ? [routeMatrixError] : [];
+  const liveErrors = boundedReportMessages(routeMatrixError ? [routeMatrixError] : []);
   const declaredSource = String(routeMatrix.sourceBaseUrl ?? '').trim();
   const declaredTarget = String(routeMatrix.targetBaseUrl ?? '').trim();
   if (!briefMode && !declaredSource) {
@@ -8969,7 +12288,7 @@ export async function verifyLive({
     stateBlockers.push('The current live-derived Drupal public surface is not exactly reconciled to packet declarations or owned exclusions.');
   }
   if (customCodeErrors.length > 0) {
-    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability-bound or its representative-route/config-schema checks failed.');
+    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability/test-bound or its quality, focused-test, representative-route, or config-schema checks failed.');
   }
   if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
     stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
@@ -9342,7 +12661,9 @@ export async function verifyLive({
       confirmed: liveEditorSurfaceReconciliation.censusTrusted,
       passed: liveEditorSurfaceReconciliation.passed
     },
-    customCodeInventoryFingerprint: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? ''
+    customCodeInventoryFingerprint: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+    customCodeQualityResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
+    customCodeTestExecutionResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? ''
   });
   const sharedPacketReport = {
     ...sharedValue(packetReport, absolutePacketDir),
@@ -9386,12 +12707,14 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       customCodeInventorySha256: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+      customCodeQualityResultSha256: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
+      customCodeTestExecutionResultSha256: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? '',
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 6
+      targetFingerprintInputVersion: 7
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,

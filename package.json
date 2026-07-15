@@ -23,7 +23,7 @@
   },
   "scripts": {
     "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "reconcile": "node bin/reconcile.mjs",
     "doctor": "node bin/doctor.mjs",
     "verify": "node bin/verify.mjs",
@@ -44,6 +44,6 @@
     "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.10.0"
   }
 }

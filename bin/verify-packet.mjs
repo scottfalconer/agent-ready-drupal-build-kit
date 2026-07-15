@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
@@ -90,7 +90,17 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
-const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.1';
+const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
+const CUSTOM_CODE_COVERAGE_ROW_LIMIT = 128;
+export const PACKET_JSON_LIMITS = Object.freeze({
+  aggregateBytes: 64 * 1024 * 1024,
+  collectionEntries: 20_000,
+  depth: 64,
+  fileBytes: 8 * 1024 * 1024,
+  nodes: 250_000,
+  stringBytes: 256 * 1024,
+  totalStringBytes: 16 * 1024 * 1024
+});
 const CUSTOM_SOLUTION_LADDER_STAGES = Object.freeze([
   'core',
   'installed_drupal_cms',
@@ -159,7 +169,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
   'G-SURFACE-01': 'liveDrupalSurfaceReconciliation',
-  'G-CODE-01': 'customCodeInventoryRouteSchema',
+  'G-CODE-01': 'customCodeInventoryQualityTestsRouteSchema',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -375,6 +385,23 @@ export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
 
 class UsageError extends Error {}
 
+function boundedMessageArray(limit, label) {
+  const values = [];
+  Object.defineProperty(values, 'push', {
+    value(...messages) {
+      for (const message of messages) {
+        if (values.length < limit - 1) {
+          Array.prototype.push.call(values, String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1_000));
+        } else if (values.length === limit - 1) {
+          Array.prototype.push.call(values, `${label} reached its ${limit}-message reporting cap; remaining messages were bounded.`);
+        }
+      }
+      return values.length;
+    }
+  });
+  return values;
+}
+
 function parseArgs(argv) {
   const args = {
     packet: 'review-packet',
@@ -434,20 +461,133 @@ function isDirectRun() {
   }
 }
 
-async function readJson(path, errors) {
+function assertBoundedJsonStructure(value, label, limits = PACKET_JSON_LIMITS) {
+  const pending = [{ depth: 0, value }];
+  let nodes = 0;
+  let totalStringBytes = 0;
+  const countString = (candidate) => {
+    const bytes = Buffer.byteLength(candidate);
+    if (bytes > limits.stringBytes) {
+      throw new Error(`${label} contains a string larger than ${limits.stringBytes} bytes`);
+    }
+    totalStringBytes += bytes;
+    if (totalStringBytes > limits.totalStringBytes) {
+      throw new Error(`${label} contains more than ${limits.totalStringBytes} bytes of strings`);
+    }
+  };
+  while (pending.length > 0) {
+    const current = pending.pop();
+    nodes += 1;
+    if (nodes > limits.nodes) {
+      throw new Error(`${label} contains more than ${limits.nodes} JSON nodes`);
+    }
+    if (current.depth > limits.depth) {
+      throw new Error(`${label} is nested more than ${limits.depth} levels`);
+    }
+    if (typeof current.value === 'string') {
+      countString(current.value);
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      if (current.value.length > limits.collectionEntries) {
+        throw new Error(`${label} contains an array with more than ${limits.collectionEntries} entries`);
+      }
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        pending.push({ depth: current.depth + 1, value: current.value[index] });
+      }
+      continue;
+    }
+    if (current.value !== null && typeof current.value === 'object') {
+      const entries = Object.entries(current.value);
+      if (entries.length > limits.collectionEntries) {
+        throw new Error(`${label} contains an object with more than ${limits.collectionEntries} entries`);
+      }
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const [key, nested] = entries[index];
+        countString(key);
+        pending.push({ depth: current.depth + 1, value: nested });
+      }
+    }
+  }
+}
+
+export function parseBoundedJsonText(text, label = 'JSON input', limits = PACKET_JSON_LIMITS) {
+  const bytes = Buffer.byteLength(String(text));
+  if (bytes > limits.fileBytes) {
+    throw new Error(`${label} is ${bytes} bytes; limit is ${limits.fileBytes} bytes`);
+  }
+  const value = JSON.parse(String(text));
+  assertBoundedJsonStructure(value, label, limits);
+  return value;
+}
+
+export async function readBoundedJsonFile(path, options = {}) {
+  const limits = options.limits ?? PACKET_JSON_LIMITS;
+  const label = options.label ?? path;
+  const pathMetadata = await lstat(path);
+  if (pathMetadata.isSymbolicLink() || !pathMetadata.isFile()) {
+    throw new Error(`${label} is not a regular non-symlink JSON file`);
+  }
+  const handle = await open(path, 'r');
   try {
-    return JSON.parse(await readFile(path, 'utf8'));
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > limits.fileBytes) {
+      throw new Error(`${label} is not a bounded regular JSON file (limit ${limits.fileBytes} bytes)`);
+    }
+    const buffer = Buffer.allocUnsafe(limits.fileBytes + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const result = await handle.read(buffer, bytes, buffer.length - bytes, bytes);
+      if (result.bytesRead === 0) break;
+      bytes += result.bytesRead;
+    }
+    if (bytes > limits.fileBytes) throw new Error(`${label} exceeds ${limits.fileBytes} bytes`);
+    const budget = options.budget ?? null;
+    if (budget) {
+      budget.bytes = Number(budget.bytes ?? 0) + bytes;
+      if (budget.bytes > limits.aggregateBytes) {
+        throw new Error(`packet JSON exceeds the ${limits.aggregateBytes}-byte aggregate limit`);
+      }
+    }
+    const text = buffer.subarray(0, bytes).toString('utf8');
+    return { bytes, text, value: parseBoundedJsonText(text, label, limits) };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readJson(path, errors, context = null) {
+  if (context?.cache?.has(path)) {
+    return context.cache.get(path);
+  }
+  try {
+    const result = await readBoundedJsonFile(path, { budget: context?.budget });
+    context?.cache?.set(path, result.value);
+    return result.value;
   } catch (error) {
     errors.push(`${path} must be valid JSON: ${error.message}`);
+    context?.cache?.set(path, null);
     return null;
   }
 }
 
-async function readOptionalJson(path) {
+async function readOptionalJson(path, errors, context = null) {
+  if (context?.cache?.has(path)) {
+    return context.cache.get(path);
+  }
   try {
-    return JSON.parse(await readFile(path, 'utf8'));
+    const result = await readBoundedJsonFile(path, { budget: context?.budget });
+    context?.cache?.set(path, result.value);
+    return result.value;
   } catch (error) {
-    return error?.code === 'ENOENT' ? null : { invalidJson: String(error.message ?? error) };
+    if (error?.code !== 'ENOENT') {
+      errors.push(`${path} failed safely during bounded JSON validation: ${error.message}`);
+    }
+    const value = error?.code === 'ENOENT'
+      ? null
+      : { invalidJson: String(error.message ?? error) };
+    context?.cache?.set(path, value);
+    return value;
   }
 }
 
@@ -487,11 +627,15 @@ export function customCodeReviewReasons(drupalReadback) {
   if (review.inventoryComplete !== true || !Array.isArray(review.blockers) || review.blockers.length > 0) {
     reasons.push('Custom-code review must be complete with an explicit empty blockers array.');
   }
+  if (!Array.isArray(review.capabilities) || !Array.isArray(review.routeBindings) || !Array.isArray(review.testCoverage)) {
+    reasons.push('Custom-code review capabilities, routeBindings, and testCoverage must be explicit arrays.');
+  }
   const capabilities = arrayOrEmpty(review.capabilities);
   const routeBindings = arrayOrEmpty(review.routeBindings);
+  const testCoverage = arrayOrEmpty(review.testCoverage);
   if (review.applies === false) {
-    if (capabilities.length > 0 || routeBindings.length > 0) {
-      reasons.push('A not-applicable custom-code review cannot declare capabilities or route bindings.');
+    if (capabilities.length > 0 || routeBindings.length > 0 || testCoverage.length > 0) {
+      reasons.push('A not-applicable custom-code review cannot declare capabilities, route bindings, or test coverage.');
     }
     if (String(review.runtimeFingerprint ?? '') && !HASH_RE.test(String(review.runtimeFingerprint))) {
       reasons.push('Custom-code runtimeFingerprint must be empty until live inventory or a SHA-256 fingerprint.');
@@ -506,6 +650,7 @@ export function customCodeReviewReasons(drupalReadback) {
   }
   const capabilityIds = new Set();
   const acceptanceCriterionIds = new Set();
+  const loadBearingCriterionExtensions = new Map();
   const boundSurfaceIds = new Set();
   for (const [index, capability] of capabilities.entries()) {
     const extension = String(capability?.extension ?? '').trim();
@@ -538,6 +683,9 @@ export function customCodeReviewReasons(drupalReadback) {
     }
     for (const id of criterionIds) {
       acceptanceCriterionIds.add(id);
+      if (capability?.loadBearing === true) {
+        loadBearingCriterionExtensions.set(id, extension);
+      }
     }
     const ladder = arrayOrEmpty(capability?.solutionLadder);
     if (
@@ -573,12 +721,40 @@ export function customCodeReviewReasons(drupalReadback) {
     for (const id of surfaceIds) {
       boundSurfaceIds.add(id);
     }
-    const testFileIds = arrayOrEmpty(capability?.testFileIds).map(String);
+  }
+  if (testCoverage.length > CUSTOM_CODE_COVERAGE_ROW_LIMIT) {
+    reasons.push(`Custom-code testCoverage exceeds the ${CUSTOM_CODE_COVERAGE_ROW_LIMIT}-row execution limit.`);
+  }
+  const coveredCriteria = new Set();
+  const coverageRowBindings = new Set();
+  for (const [index, coverage] of testCoverage.entries()) {
+    const acceptanceCriterionId = String(coverage?.acceptanceCriterionId ?? '').trim();
+    const testFileId = String(coverage?.testFileId ?? '').trim();
+    const className = String(coverage?.className ?? '').trim().replace(/^\\+/, '');
+    const methodName = String(coverage?.methodName ?? '').trim();
+    const testMethodId = String(coverage?.testMethodId ?? '').trim();
+    const methodKey = `${acceptanceCriterionId}\u0000${testFileId}\u0000${className}\u0000${methodName}`;
     if (
-      testFileIds.some((id) => !/^TEST-[a-f0-9]{16}$/.test(id)) ||
-      new Set(testFileIds).size !== testFileIds.length
+      !acceptanceCriterionIds.has(acceptanceCriterionId) ||
+      coverage?.runner !== 'phpunit' ||
+      !/^TEST-[a-f0-9]{16}$/.test(testFileId) ||
+      className.length > 512 || !/^[A-Za-z_][A-Za-z0-9_\\]*$/.test(className) ||
+      methodName.length > 200 || !/^test[A-Za-z0-9_]+$/.test(methodName) ||
+      !/^TESTMETHOD-[a-f0-9]{16}$/.test(testMethodId)
     ) {
-      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} has an invalid or duplicate testFileId.`);
+      reasons.push(`Custom-code testCoverage row ${index} must bind a known AC to an exact phpunit TEST/TESTMETHOD class and method identity.`);
+    }
+    if (coverageRowBindings.has(methodKey)) {
+      reasons.push(`Custom-code testCoverage row ${index} repeats the same acceptance criterion and exact test method binding.`);
+    }
+    coverageRowBindings.add(methodKey);
+    if (acceptanceCriterionId) {
+      coveredCriteria.add(acceptanceCriterionId);
+    }
+  }
+  for (const acceptanceCriterionId of loadBearingCriterionExtensions.keys()) {
+    if (!coveredCriteria.has(acceptanceCriterionId)) {
+      reasons.push(`Load-bearing custom-code acceptance criterion ${acceptanceCriterionId} has no focused PHPUnit testCoverage row.`);
     }
   }
   const routeNames = new Set();
@@ -921,20 +1097,26 @@ async function validateBuildInput(packetDir, buildInput, routeMatrix, errors) {
   return context;
 }
 
-async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+async function packetEvidenceJson(
+  packetDir,
+  reference,
+  evidenceDir = join(packetDir, 'evidence'),
+  jsonContext = null
+) {
   const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
   if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
     return null;
   }
-  try {
-    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
-    return isJsonObject(evidence) ? evidence : null;
-  } catch {
-    return null;
-  }
+  const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
+  return isJsonObject(evidence) ? evidence : null;
 }
 
-async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+async function packetJsonEvidence(
+  packetDir,
+  reference,
+  evidenceDir = join(packetDir, 'evidence'),
+  jsonContext = null
+) {
   const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
   if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
     return null;
@@ -944,7 +1126,7 @@ async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packe
     if (!evidenceStat.isFile() || evidenceStat.size === 0) {
       return null;
     }
-    const value = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const value = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
     return isJsonObject(value) ? value : null;
   } catch {
     return null;
@@ -964,12 +1146,12 @@ function safeImageDimensions(width, height) {
   );
 }
 
-async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
+async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl, jsonContext = null) {
   if (extname(evidencePath).toLowerCase() !== '.json' || !independentTargetUrl) {
     return false;
   }
   try {
-    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
     const candidates = Array.isArray(evidence?.claims) ? evidence.claims : [evidence];
     return candidates.some((candidate) => {
       const evidenceTargetUrl = httpUrl(candidate?.targetBaseUrl ?? evidence?.targetBaseUrl);
@@ -1236,7 +1418,7 @@ function validateGateVocabulary(gates, errors) {
   }
 }
 
-async function validateRequiredFiles(packetDir, gates, errors) {
+async function validateRequiredFiles(packetDir, gates, errors, jsonContext) {
   for (const file of gates.reviewPacketFiles ?? []) {
     const path = join(packetDir, file);
     if (!existsSync(path)) {
@@ -1245,7 +1427,7 @@ async function validateRequiredFiles(packetDir, gates, errors) {
     }
 
     if (file.endsWith('.json')) {
-      await readJson(path, errors);
+      await readJson(path, errors, jsonContext);
     }
   }
 }
@@ -1363,6 +1545,7 @@ function temporalFieldCandidate(field) {
 async function nextCycleStructuredGateReasons({
   browserEvidence,
   fieldOutputMatrix,
+  jsonContext,
   nextCycleVerification,
   packetDir,
   patternMap
@@ -1434,7 +1617,7 @@ async function nextCycleStructuredGateReasons({
       dimensionRecords.push({ dimension, model });
     }
   }
-  const discoveryEvidence = await packetJsonEvidence(packetDir, discovery?.evidence, evidenceDir);
+  const discoveryEvidence = await packetJsonEvidence(packetDir, discovery?.evidence, evidenceDir, jsonContext);
   const recordSite = httpUrl(record?.site);
   const discoveryTarget = httpUrl(discoveryEvidence?.targetBaseUrl);
   if (
@@ -1597,7 +1780,7 @@ async function nextCycleStructuredGateReasons({
   if (!passingModelBrowserEditor) {
     reasons.push('browser-evidence.json must prove the next-cycle editor identity on the same recurring entity type and bundle.');
   }
-  const probeEvidence = await packetJsonEvidence(packetDir, contentProbe?.evidence, evidenceDir);
+  const probeEvidence = await packetJsonEvidence(packetDir, contentProbe?.evidence, evidenceDir, jsonContext);
   const evidenceTarget = httpUrl(probeEvidence?.targetBaseUrl);
   const evidencePublicUrl = httpUrl(probeEvidence?.publicUrl);
   if (
@@ -1640,7 +1823,7 @@ async function nextCycleStructuredGateReasons({
   ) {
     reasons.push('next-cycle-verification.json cleanup must prove zero content, revision, alias, and period/term residue and a 404/410 probe URL.');
   }
-  const cleanupEvidence = await packetJsonEvidence(packetDir, cleanup?.evidence, evidenceDir);
+  const cleanupEvidence = await packetJsonEvidence(packetDir, cleanup?.evidence, evidenceDir, jsonContext);
   const cleanupTarget = httpUrl(cleanupEvidence?.targetBaseUrl);
   if (
     !cleanupEvidence ||
@@ -1669,6 +1852,7 @@ async function independentStructuredGateReasons({
   drupalReadback,
   fieldOutputMatrix,
   independentVerification,
+  jsonContext,
   nextCycleVerification,
   packetDir,
   patternMap,
@@ -1679,6 +1863,7 @@ async function independentStructuredGateReasons({
   reasons.push(...await nextCycleStructuredGateReasons({
     browserEvidence,
     fieldOutputMatrix,
+    jsonContext,
     nextCycleVerification,
     packetDir,
     patternMap
@@ -2330,7 +2515,7 @@ async function validateIndependentVerification(
   independentVerification,
   relatedRecords,
   errors,
-  { briefAcceptance = null, briefMode = false } = {}
+  { briefAcceptance = null, briefMode = false, jsonContext = null } = {}
 ) {
   if (!isJsonObject(independentVerification)) {
     errors.push('independent-verification.json must be a JSON object (blocked stub at minimum).');
@@ -2423,7 +2608,10 @@ async function validateIndependentVerification(
           `independent-verification.json completionClaims[${index}].verifierEvidence[${evidenceIndex}] must not be empty.`
         );
       }
-      if (evidenceStat.isFile() && await evidenceBindsClaim(evidencePath, claim, independentTargetUrl)) {
+      if (
+        evidenceStat.isFile() &&
+        await evidenceBindsClaim(evidencePath, claim, independentTargetUrl, jsonContext)
+      ) {
         semanticallyBoundEvidence = true;
       }
     }
@@ -2492,6 +2680,7 @@ async function validateIndependentVerification(
     structuredGateReasons.push(...await independentStructuredGateReasons({
       ...relatedRecords,
       independentVerification,
+      jsonContext,
       packetDir
     }));
   }
@@ -2517,7 +2706,7 @@ async function validateBlindAdversarialReview(
   blindReview,
   routeMatrix,
   errors,
-  { briefAcceptance = null, briefContext = null, briefMode = false } = {}
+  { briefAcceptance = null, briefContext = null, briefMode = false, jsonContext = null } = {}
 ) {
   if (!isJsonObject(blindReview)) {
     errors.push('blind-adversarial-review.json must be a JSON object (blocked stub at minimum).');
@@ -2935,7 +3124,7 @@ async function validateBlindAdversarialReview(
       }
       if (extname(evidencePath).toLowerCase() === '.json') {
         try {
-          const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+          const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
           const adminUrl = httpUrl(evidence?.targetAdminUrl);
           const publicUrl = httpUrl(evidence?.resultingPublicUrl);
           if (
@@ -3303,7 +3492,7 @@ async function browserCaptureStateReasons(
   packetDir,
   browserEvidence,
   primaryRoutePaths,
-  { briefMode = false } = {}
+  { briefMode = false, jsonContext = null } = {}
 ) {
   const reasons = [];
   const checks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
@@ -3356,7 +3545,13 @@ async function browserCaptureStateReasons(
         reasons.push(`browser-evidence.json publicRouteChecks[${index}].${field} must reference a credible packet-local image whose width matches and height covers the declared viewport.`);
       }
     }
-    reasons.push(...await accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index));
+    reasons.push(...await accessibilityCheckReasons(
+      packetDir,
+      browserEvidenceDir,
+      check,
+      index,
+      jsonContext
+    ));
     const accessibilityReportPath = resolveReviewEvidencePath(
       packetDir,
       browserEvidenceDir,
@@ -3774,11 +3969,17 @@ async function axeIncompleteEvidenceMatches({
   browserEvidenceDir,
   disposition,
   incomplete,
+  jsonContext,
   nodeTarget,
   packetDir,
   report
 }) {
-  const evidence = await packetEvidenceJson(packetDir, disposition?.evidence, browserEvidenceDir);
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    disposition?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const reportTimestamp = isoTimestamp(report?.timestamp);
   const evidenceTimestamp = isoTimestamp(evidence?.checkedAt);
   return Boolean(
@@ -3797,7 +3998,13 @@ async function axeIncompleteEvidenceMatches({
   );
 }
 
-async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index) {
+async function accessibilityCheckReasons(
+  packetDir,
+  browserEvidenceDir,
+  check,
+  index,
+  jsonContext = null
+) {
   const reasons = [];
   const accessibility = check?.accessibilityCheck ?? {};
   const prefix = `browser-evidence.json publicRouteChecks[${index}].accessibilityCheck`;
@@ -3816,11 +4023,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
   const reportPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, accessibility.report);
   let report = null;
   if (reportPath) {
-    try {
-      report = JSON.parse(await readFile(reportPath, 'utf8'));
-    } catch {
-      // The message below covers missing and malformed reports without leaking local paths.
-    }
+    report = await readJson(reportPath, jsonContext?.errors ?? [], jsonContext);
   }
   if (!isJsonObject(report)) {
     reasons.push(`${prefix}.report must reference packet-local raw axe-core JSON.`);
@@ -3870,6 +4073,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
           browserEvidenceDir,
           disposition,
           incomplete,
+          jsonContext,
           nodeTarget: target,
           packetDir,
           report
@@ -3915,8 +4119,13 @@ function uniqueRecordKeys(records, keyName) {
   return keys.length === records.length && new Set(keys).size === keys.length;
 }
 
-async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) {
-  const evidence = await packetEvidenceJson(packetDir, check?.outcome?.evidence, browserEvidenceDir);
+async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check, jsonContext = null) {
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    check?.outcome?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const mode = String(check?.outcome?.mode ?? '');
   const providerRequired = ['provider_delivery', 'provider_handoff'].includes(mode);
   return Boolean(
@@ -3934,8 +4143,13 @@ async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) 
   );
 }
 
-async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check) {
-  const evidence = await packetEvidenceJson(packetDir, check?.abuseProtection?.evidence, browserEvidenceDir);
+async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check, jsonContext = null) {
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    check?.abuseProtection?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const mode = String(check?.abuseProtection?.mode ?? '');
   const localException = mode === 'local_only_exception';
   const modeSpecific =
@@ -4585,7 +4799,7 @@ async function dispositionReady(packetDir, disposition) {
   );
 }
 
-async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
+async function negativeRouteConsentReasons(packetDir, record, routeMatrix, jsonContext = null) {
   const reasons = [];
   if (!isJsonObject(record) || record.schemaVersion !== 'public-kit.negative-route-consent.1') {
     return ['negative-route-consent.json must use schemaVersion public-kit.negative-route-consent.1.'];
@@ -4721,7 +4935,10 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
       continue;
     }
     try {
-      const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+      const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
+      if (!isJsonObject(evidence)) {
+        throw new Error('evidence is not a JSON object');
+      }
       const target = httpUrl(evidence?.targetBaseUrl);
       const declaredTarget = httpUrl(routeMatrix?.targetBaseUrl);
       if (
@@ -4743,7 +4960,7 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
   return reasons;
 }
 
-async function packetCompletionReadiness(packetDir, gates, records) {
+async function packetCompletionReadiness(packetDir, gates, records, jsonContext = null) {
   const reasons = [];
   const markdownAssessment = await markdownCompletionReadiness(packetDir, records);
   if (!gates) {
@@ -4768,10 +4985,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     if (packetFile.endsWith('.json') && existsSync(packetPath)) {
       try {
         const shippedSentinels = templatePath
-          ? templateEnumSentinels(JSON.parse(await readFile(templatePath, 'utf8')))
+          ? templateEnumSentinels((await readBoundedJsonFile(templatePath)).value)
           : new Set();
         const unresolved = unresolvedEnumSentinels(
-          JSON.parse(await readFile(packetPath, 'utf8')),
+          await readJson(packetPath, jsonContext?.errors ?? [], jsonContext),
           shippedSentinels
         );
         if (unresolved.length > 0) {
@@ -4800,12 +5017,18 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   } = records;
   reasons.push(...customCodeReviewReasons(drupalReadback));
   reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
-  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
+  reasons.push(...await negativeRouteConsentReasons(
+    packetDir,
+    negativeRouteConsent,
+    routeMatrix,
+    jsonContext
+  ));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    jsonContext,
     nextCycleVerification,
     packetDir,
     patternMap,
@@ -4815,7 +5038,12 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
-  reasons.push(...await browserCaptureStateReasons(packetDir, browserEvidence, primaryRoutePaths));
+  reasons.push(...await browserCaptureStateReasons(
+    packetDir,
+    browserEvidence,
+    primaryRoutePaths,
+    { jsonContext }
+  ));
   const primaryRouteRoles = new Map(
     primaryRoutes.map((route) => [normalizeRouteRequestKey(route?.targetPath), String(route?.routeRole ?? '').trim()])
   );
@@ -5729,13 +5957,15 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
       packetDir,
       browserEvidenceDir,
-      check
+      check,
+      jsonContext
     );
     const abuseProtectionMode = String(check?.abuseProtection?.mode ?? '');
     const abuseProtectionEvidenceMatches = check && await formAbuseEvidenceMatches(
       packetDir,
       browserEvidenceDir,
-      check
+      check,
+      jsonContext
     );
     if (check && (
       !exactIdentityMatch(check?.purpose, form?.purpose) ||
@@ -5977,7 +6207,11 @@ async function briefPacketCompletionReadiness(
   gates,
   records,
   briefContext,
-  { blindAdversarialReviewSupportsCompletion = false, independentVerificationSupportsCompletion = false } = {}
+  {
+    blindAdversarialReviewSupportsCompletion = false,
+    independentVerificationSupportsCompletion = false,
+    jsonContext = null
+  } = {}
 ) {
   const reasons = [];
   const markdownAssessment = await markdownCompletionReadiness(packetDir, records, { briefMode: true });
@@ -6007,7 +6241,12 @@ async function briefPacketCompletionReadiness(
   reasons.push(...customCodeReviewReasons(drupalReadback));
   reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
   reasons.push(...markdownAssessment.reasons);
-  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
+  reasons.push(...await negativeRouteConsentReasons(
+    packetDir,
+    negativeRouteConsent,
+    routeMatrix,
+    jsonContext
+  ));
 
   if (briefContext?.mode !== 'brief' || !briefContext?.briefPath || !briefContext?.briefSha256) {
     reasons.push('build-input.json must bind brief mode to a preserved packet-local original brief.');
@@ -6106,7 +6345,7 @@ async function briefPacketCompletionReadiness(
     packetDir,
     browserEvidence,
     [...primaryRouteRequirements.keys()],
-    { briefMode: true }
+    { briefMode: true, jsonContext }
   ));
   if (
     primaryRouteRequirements.has('/') &&
@@ -6285,35 +6524,44 @@ function sharedPacketMessage(value, packetDir) {
 }
 
 export async function validatePacket({ packetDir = 'review-packet' } = {}) {
-  const errors = [];
-  const warnings = [];
-  const gates = await readJson(join(KIT_ROOT, 'gates.json'), errors);
+  const errors = boundedMessageArray(500, 'Packet validation');
+  const warnings = boundedMessageArray(200, 'Packet validation warnings');
+  const jsonContext = { budget: { bytes: 0 }, cache: new Map(), errors };
+  const gates = await readJson(join(KIT_ROOT, 'gates.json'), errors, jsonContext);
 
   if (gates) {
     validateGateVocabulary(gates, errors);
-    await validateRequiredFiles(packetDir, gates, errors);
+    await validateRequiredFiles(packetDir, gates, errors, jsonContext);
   }
 
-  const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
-  const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
-  const reviewHandoff = await readOptionalJson(join(packetDir, 'evidence', 'review-handoff.json'));
+  const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), errors, jsonContext);
+  const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), errors, jsonContext);
+  const reviewHandoff = await readOptionalJson(
+    join(packetDir, 'evidence', 'review-handoff.json'),
+    errors,
+    jsonContext
+  );
   const reviewHandoffIndependent = await readOptionalJson(
-    join(packetDir, 'evidence', 'review-handoff-independent.json')
+    join(packetDir, 'evidence', 'review-handoff-independent.json'),
+    errors,
+    jsonContext
   );
   const reviewHandoffBlind = await readOptionalJson(
-    join(packetDir, 'evidence', 'review-handoff-blind.json')
+    join(packetDir, 'evidence', 'review-handoff-blind.json'),
+    errors,
+    jsonContext
   );
-  const buildInput = await readJson(join(packetDir, 'build-input.json'), []);
-  const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), []);
-  const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
-  const parityReport = await readJson(join(packetDir, 'parity-report.json'), []);
-  const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), []);
-  const drupalReadback = await readJson(join(packetDir, 'drupal-readback.json'), []);
-  const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
-  const nextCycleVerification = await readJson(join(packetDir, 'next-cycle-verification.json'), []);
-  const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
-  const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
-  const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), []);
+  const buildInput = await readJson(join(packetDir, 'build-input.json'), errors, jsonContext);
+  const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), errors, jsonContext);
+  const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), errors, jsonContext);
+  const parityReport = await readJson(join(packetDir, 'parity-report.json'), errors, jsonContext);
+  const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), errors, jsonContext);
+  const drupalReadback = await readJson(join(packetDir, 'drupal-readback.json'), errors, jsonContext);
+  const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), errors, jsonContext);
+  const nextCycleVerification = await readJson(join(packetDir, 'next-cycle-verification.json'), errors, jsonContext);
+  const patternMap = await readJson(join(packetDir, 'pattern-map.json'), errors, jsonContext);
+  const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), errors, jsonContext);
+  const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), errors, jsonContext);
   const structuredRecords = {
     'blind-adversarial-review.json': blindAdversarialReview,
     'brief-acceptance.json': briefAcceptance,
@@ -6347,14 +6595,14 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
       sourceAudit
     },
     errors,
-    { briefAcceptance, briefMode }
+    { briefAcceptance, briefMode, jsonContext }
   );
   const blindAdversarialReviewValidation = await validateBlindAdversarialReview(
     packetDir,
     blindAdversarialReview,
     routeMatrix,
     errors,
-    { briefAcceptance, briefContext, briefMode }
+    { briefAcceptance, briefContext, briefMode, jsonContext }
   );
   let blindAdversarialReviewSupportsCompletion =
     blindAdversarialReviewValidation.supportsCompletion === true;
@@ -6415,9 +6663,10 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const completionReadiness = briefMode
     ? await briefPacketCompletionReadiness(packetDir, gates, completionRecords, briefContext, {
         blindAdversarialReviewSupportsCompletion,
-        independentVerificationSupportsCompletion
+        independentVerificationSupportsCompletion,
+        jsonContext
       })
-    : await packetCompletionReadiness(packetDir, gates, completionRecords);
+    : await packetCompletionReadiness(packetDir, gates, completionRecords, jsonContext);
   const sharedErrors = errors.map((error) => sharedPacketMessage(error, packetDir));
   const sharedCompletionBlockedReasons = completionReadiness.reasons.map((reason) =>
     sharedPacketMessage(reason, packetDir)

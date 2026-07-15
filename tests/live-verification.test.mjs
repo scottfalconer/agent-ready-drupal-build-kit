@@ -14,7 +14,9 @@ import {
   CUSTOM_ROUTE_AUDIT_PHP,
   customCapabilityId,
   customCodeReconciliationErrors,
+  customCodeResultFingerprint,
   customExtensionFiles,
+  customTestMethodId,
   agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
@@ -298,7 +300,9 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
   assert.equal(first.extensions.length, 1);
   assert.equal(first.controllers.length, 1);
   assert.equal(first.routes[0].name, 'catalog.item');
-  assert.equal(first.tests[0].testMethods[0], 'testCatalogRoute');
+  assert.equal(first.tests[0].testMethods[0].methodName, 'testCatalogRoute');
+  assert.equal(first.tests[0].testMethods[0].className, 'CatalogTest');
+  assert.match(first.tests[0].testMethods[0].id, /^TESTMETHOD-[a-f0-9]{16}$/);
   const surfaceKinds = new Set(first.sourceFiles.flatMap((source) => source.surfaces.map((surface) => surface.kind)));
   for (const kind of [
     'hook_or_callback', 'controller_class', 'plugin_class', 'service_registration', 'route',
@@ -453,7 +457,67 @@ function completeSolutionLadder() {
 test('G-CODE reconciliation binds every stable source surface and representative custom route', () => {
   const surfaceId = 'SURFACE-0123456789abcdef';
   const fingerprint = `sha256:${'d'.repeat(64)}`;
+  const testFileId = 'TEST-0123456789abcdef';
+  const testPath = 'web/modules/custom/catalog/tests/src/Kernel/CatalogTest.php';
+  const testMethodId = customTestMethodId('catalog', testPath, 'Drupal\\Tests\\catalog\\Kernel\\CatalogTest', 'testCatalogRoute');
+  const executionBudget = {
+    commandsExecuted: 12,
+    outputBytes: 4096,
+    commandLimit: 384,
+    outputLimit: 64 * 1024 * 1024,
+    deadlineMs: 900_000,
+    cleanupReserveMs: 30_000,
+    cleanupCommandReserve: 2
+  };
+  const bindResult = (record) => ({ ...record, resultFingerprint: customCodeResultFingerprint(record) });
+  const packageRecord = (name, binary = '') => ({
+    binary,
+    distUrlSha256: `sha256:${'1'.repeat(64)}`,
+    name,
+    packagePath: `vendor/${name}`,
+    packageTree: { bytes: 1024, files: 4, sha256: `sha256:${'2'.repeat(64)}` },
+    reference: 'a'.repeat(40),
+    sourceUrlSha256: `sha256:${'3'.repeat(64)}`,
+    version: '1.0.0'
+  });
+  const provenance = (packages) => ({
+    autoloadTreeBytes: 2048,
+    autoloadTreeFiles: 8,
+    autoloadTreeSha256: `sha256:${'d'.repeat(64)}`,
+    closureIdentitySha256: `sha256:${'e'.repeat(64)}`,
+    closurePackageBytes: 8192,
+    closurePackageCount: packages.length,
+    closurePackageFiles: 32,
+    closurePackageTreeSha256: `sha256:${'f'.repeat(64)}`,
+    composerJsonSha256: `sha256:${'0'.repeat(64)}`,
+    composerLockSha256: `sha256:${'4'.repeat(64)}`,
+    sourceComposerLockSha256: `sha256:${'6'.repeat(64)}`,
+    installedMetadataSha256: `sha256:${'5'.repeat(64)}`,
+    rootAutoloadBytes: 512,
+    rootAutoloadSha256: `sha256:${'7'.repeat(64)}`,
+    packages
+  });
+  const isolation = {
+    schemaVersion: 'public-kit.disposable-custom-code-workspace.1',
+    status: 'cleaned',
+    workspaceId: 'DISPOSABLE-fixture',
+    head: 'b'.repeat(40),
+    projectNameSha256: `sha256:${'6'.repeat(64)}`,
+    exactHead: true,
+    freshDatabase: true,
+    executionBoundary: 'exact-head-disposable-ddev',
+    auditVendor: 'fresh-composer-install',
+    runtimeOwner: 'verifier-generated-minimal-ddev-config',
+    runtimeConfigSha256: `sha256:${'b'.repeat(64)}`,
+    runtimeDdevTreeSha256: `sha256:${'d'.repeat(64)}`,
+    runtimeSpecSha256: `sha256:${'c'.repeat(64)}`,
+    workingTargetSnapshotBeforeSha256: `sha256:${'7'.repeat(64)}`,
+    workingTargetSnapshotAfterSha256: `sha256:${'7'.repeat(64)}`,
+    setupCommandResultHashes: [`sha256:${'8'.repeat(64)}`],
+    cleanupCommandResultHashes: [`sha256:${'9'.repeat(64)}`, `sha256:${'a'.repeat(64)}`]
+  };
   const runtime = {
+    schemaVersion: 'public-kit.custom-code-inventory.2',
     completed: true,
     errors: [],
     fingerprint,
@@ -462,7 +526,14 @@ test('G-CODE reconciliation binds every stable source surface and representative
       id: 'SOURCE-0123456789abcdef',
       extension: 'catalog',
       path: 'web/modules/custom/catalog/src/Controller/CatalogController.php',
+      kind: 'php_class',
       surfaces: [{ id: surfaceId, kind: 'controller_class', name: 'CatalogController', line: 3 }]
+    }],
+    tests: [{
+      id: testFileId,
+      extension: 'catalog',
+      path: testPath,
+      testMethods: [{ id: testMethodId, className: 'Drupal\\Tests\\catalog\\Kernel\\CatalogTest', methodName: 'testCatalogRoute' }]
     }],
     configSchema: { completed: true, extensions: [], violations: [] },
     routeAudit: {
@@ -475,11 +546,39 @@ test('G-CODE reconciliation binds every stable source surface and representative
         accessCheckCompleted: true,
         anonymousAccess: 'allowed'
       }]
-    }
+    },
+    qualityAudit: bindResult({
+      schemaVersion: 'public-kit.custom-code-quality.1',
+      applies: true,
+      completed: true,
+      status: 'pass',
+      inputInventoryFingerprint: fingerprint,
+      executionBudget,
+      tools: {
+        phpcs: {
+          status: 'pass',
+          provenance: provenance([
+            packageRecord('squizlabs/php_codesniffer', 'vendor/squizlabs/php_codesniffer/bin/phpcs'),
+            packageRecord('drupal/coder'),
+            packageRecord('slevomat/coding-standard'),
+            packageRecord('sirbrillig/phpcs-variable-analysis')
+          ])
+        },
+        phpstan: { status: 'not_supported', version: '', config: '', configSha256: '' }
+      },
+      checks: {
+        phpSyntax: { status: 'pass', expectedFileIds: ['SOURCE-0123456789abcdef', testFileId], completedFileIds: ['SOURCE-0123456789abcdef', testFileId], findings: [] },
+        phpcs: { status: 'pass', expectedFileIds: ['SOURCE-0123456789abcdef', testFileId], completedFileIds: ['SOURCE-0123456789abcdef', testFileId], findings: [] },
+        phpstan: { status: 'not_supported', expectedFileIds: ['SOURCE-0123456789abcdef', testFileId], requestedFileIds: [], reportedFileIds: [], findings: [] }
+      },
+      isolation,
+      failures: []
+    }),
+    focusedTestExecution: null
   };
   const capabilityKey = 'catalog_item_route';
   const review = {
-    schemaVersion: 'public-kit.custom-code-review.1',
+    schemaVersion: 'public-kit.custom-code-review.2',
     applies: true,
     runtimeFingerprint: fingerprint,
     capabilities: [{
@@ -491,8 +590,15 @@ test('G-CODE reconciliation binds every stable source surface and representative
       loadBearing: true,
       acceptanceCriteria: [{ id: 'AC-CATALOG-01', criterion: 'Anonymous users receive the intended response.' }],
       solutionLadder: completeSolutionLadder(),
-      sourceSurfaceIds: [surfaceId],
-      testFileIds: []
+      sourceSurfaceIds: [surfaceId]
+    }],
+    testCoverage: [{
+      acceptanceCriterionId: 'AC-CATALOG-01',
+      runner: 'phpunit',
+      testFileId,
+      className: 'Drupal\\Tests\\catalog\\Kernel\\CatalogTest',
+      methodName: 'testCatalogRoute',
+      testMethodId
     }],
     routeBindings: [{
       name: 'catalog.item',
@@ -503,8 +609,40 @@ test('G-CODE reconciliation binds every stable source surface and representative
     inventoryComplete: true,
     blockers: []
   };
+  runtime.focusedTestExecution = bindResult({
+    schemaVersion: 'public-kit.custom-code-test-execution.1',
+    applies: true,
+    completed: true,
+    status: 'pass',
+    inputInventoryFingerprint: fingerprint,
+    executionBudget,
+    tools: {
+      phpunit: {
+        status: 'pass', version: 'PHPUnit 11', config: 'phpunit.xml', configSha256: `sha256:${'a'.repeat(64)}`,
+        provenance: provenance([packageRecord('phpunit/phpunit', 'vendor/phpunit/phpunit/phpunit')])
+      },
+      ddevDatabaseFamily: { status: 'pass', family: 'mysql' }
+    },
+    expectedTestMethodIds: [testMethodId],
+    completedTestMethodIds: [testMethodId],
+    discovery: [],
+    runs: [{ testMethodId, status: 'pass', testcaseCount: 1, assertionCount: 1 }],
+    isolation,
+    failures: []
+  });
   assert.deepEqual(customCodeReconciliationErrors(runtime, review), []);
   assert.deepEqual(customCodeReviewReasons({ implementationQuality: { customCodeInventory: review } }), []);
+  const reusedMethodCoverage = structuredClone(review);
+  reusedMethodCoverage.capabilities[0].acceptanceCriteria.push({
+    id: 'AC-CATALOG-02',
+    criterion: 'The same route remains accessible after parameter conversion.'
+  });
+  reusedMethodCoverage.testCoverage.push({
+    ...reusedMethodCoverage.testCoverage[0],
+    acceptanceCriterionId: 'AC-CATALOG-02'
+  });
+  assert.deepEqual(customCodeReviewReasons({ implementationQuality: { customCodeInventory: reusedMethodCoverage } }), []);
+  assert.deepEqual(customCodeReconciliationErrors(runtime, reusedMethodCoverage), []);
   const packetDir = mkdtempSync(join(tmpdir(), 'custom-code-evidence-'));
   writeFileSync(join(packetDir, 'recipe-start-point.md'), '# Core\n# Installed\n# Recipes\n');
   writeFileSync(join(packetDir, 'scoped-gap-list.md'), '# Catalog\n');
@@ -533,8 +671,8 @@ test('G-CODE reconciliation binds every stable source surface and representative
   assert.ok(customCodeReviewReasons({ implementationQuality: { customCodeInventory: contradictoryLadder } })
     .some((error) => /incomplete core solution-ladder/.test(error)));
   const unknownTest = structuredClone(review);
-  unknownTest.capabilities[0].testFileIds = ['TEST-0123456789abcdef'];
-  assert.ok(customCodeReconciliationErrors(runtime, unknownTest).some((error) => /binds unknown test file/.test(error)));
+  unknownTest.testCoverage[0].testFileId = 'TEST-fedcba9876543210';
+  assert.ok(customCodeReconciliationErrors(runtime, unknownTest).some((error) => /unknown_test_method|absent from the verifier inventory/.test(error)));
   const schemaFailure = structuredClone(runtime);
   schemaFailure.configSchema.violations = [{ extension: 'catalog', configName: 'catalog.settings', reason: 'missing_schema' }];
   assert.ok(customCodeReconciliationErrors(schemaFailure, review).some((error) => /schema violation/.test(error)));
@@ -863,7 +1001,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
-  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryRouteSchema');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryQualityTestsRouteSchema');
   assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
   assert.deepEqual(
     gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
@@ -2281,10 +2419,11 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     blockers: []
   };
   readback.implementationQuality.customCodeInventory = {
-    schemaVersion: 'public-kit.custom-code-review.1',
+    schemaVersion: 'public-kit.custom-code-review.2',
     applies: false,
     runtimeFingerprint: '',
     capabilities: [],
+    testCoverage: [],
     routeBindings: [],
     inventoryComplete: true,
     blockers: []

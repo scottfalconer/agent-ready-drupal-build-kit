@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   boundedFailureDetail,
@@ -27,6 +28,28 @@ import { collectFileManifest, sha256 } from '../bin/state-fingerprint.mjs';
 import { runDisposableReproduction } from '../bin/verify-reproduction.mjs';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
+
+test('checked-in disposable reproduction fixture binds its current input bytes', () => {
+  const fixtureRoot = fileURLToPath(new URL('./fixtures/disposable-drupal/', import.meta.url));
+  const plan = JSON.parse(readFileSync(join(fixtureRoot, 'reproduction-plan.json'), 'utf8'));
+
+  assert.equal(
+    plan.dependencies.lockFile.sha256,
+    sha256(readFileSync(join(fixtureRoot, plan.dependencies.lockFile.path)))
+  );
+  assert.equal(
+    plan.trackedConfig.sha256,
+    collectFileManifest(fixtureRoot, [plan.trackedConfig.path]).fingerprint
+  );
+  assert.equal(
+    plan.content.source.sha256,
+    sha256(readFileSync(join(fixtureRoot, plan.content.source.path)))
+  );
+  assert.equal(
+    plan.files.source.sha256,
+    sha256(readFileSync(join(fixtureRoot, plan.files.source.path)))
+  );
+});
 
 function assertTrustedDisposableDdevEnvironment(ddevCalls) {
   assert.ok(ddevCalls.length > 0);

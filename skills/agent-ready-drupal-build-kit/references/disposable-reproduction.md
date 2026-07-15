@@ -6,7 +6,7 @@ The runner never reinstalls or imports into the working target. It reads that ta
 
 ## Preconditions
 
-- Run this command from the DDEV host, not inside the web container. Host `git`, `ddev`, `curl`, and Node 20 or newer must be available.
+- Run this command from the DDEV host, not inside the web container. Host `git`, `ddev`, `curl`, and Node 20.10 or newer must be available.
 - The working target must already be running and have clean active-to-sync configuration.
 - `reproduction-plan.json`, every declared input, and `review-packet/route-matrix.json` must be present, Git-tracked, and byte-exact to `HEAD`.
 - The declared config directory must contain only present, tracked files and at least one YAML file.
