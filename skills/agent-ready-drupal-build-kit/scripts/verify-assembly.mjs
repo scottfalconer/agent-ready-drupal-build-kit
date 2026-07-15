@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
@@ -14,16 +15,18 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assemblyTargetKey,
-  assertChangesWithinProvenance,
-  assertDeletesAuthorized,
   assertInitialMutation,
   assertNoOpDryRun,
+  assertPrefixDeletesAuthorized,
+  assertProvenanceReadbackCoverage,
   assertStateMetadataStable,
   deriveAssemblyChanges,
   fixtureTargetsSurvived,
   loadValidatedAssemblyInputs,
   parseAssemblyDryRun,
-  reconcileDryRun
+  reconcileDryRun,
+  reconcileDryRunPrefix,
+  selectAssemblyInterruptionCutPoints
 } from './assembly-contract.mjs';
 import {
   assertDryRunSurfacesAvailable,
@@ -32,6 +35,24 @@ import {
   discoverAssemblyCapabilities,
   installAssemblyExtensionFixtures
 } from './assembly-fixtures.mjs';
+import {
+  assertDisposableSourceBytesEqual,
+  assertExactEntityIdentityEquality,
+  assertExactPersistenceEquality,
+  assertExactProvenanceStorageResidual,
+  assertFirstRunPersistenceChanges,
+  assertNoOpPersistence,
+  assertRestoredPersistence,
+  captureAssemblyPersistenceSnapshot,
+  captureDisposableSourceBytes,
+  captureProvenanceEntityIdentity,
+  captureProvenanceStorageResidual,
+  compareProvenanceEntityIdentity,
+  createAssemblyFileBackup,
+  disposeAssemblyFileBackup,
+  registerVerifierDatabaseSourceExclusion,
+  restoreAssemblyFileBackup
+} from './assembly-persistence.mjs';
 import {
   assertDeclaredEmptyAdapters,
   cleanupDisposable,
@@ -52,7 +73,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPORT_SCHEMA = 'public-kit.assembly-verification.1';
 const DEFAULT_PLAN = 'assembly-plan.json';
 const DEFAULT_OUTPUT = 'review-packet/evidence/assembly-verification.json';
-const ADAPTER_MODES = new Set(['plan', 'apply', 'failpoint', 'restore']);
+const ADAPTER_MODES = new Set(['plan', 'apply-prefix']);
 const DEFAULT_BUDGET = Object.freeze({
   maxCommands: 5_000,
   reservedFinalizationCommands: 16,
@@ -242,27 +263,80 @@ function runProvisioningStep(execute, disposable, step) {
   }
 }
 
-export function assemblyAdapterArgs(adapterSourcePath, mode) {
+export function assemblyAdapterArgs(adapterSourcePath, mode, options = {}) {
   if (!ADAPTER_MODES.has(mode)) throw new Error(`Unsupported fixed assembly adapter mode: ${mode}.`);
-  return ['drush', 'php:script', adapterSourcePath, '--', mode];
+  if (mode === 'plan') {
+    if (Object.keys(options).length > 0) throw new Error('Assembly plan mode accepts no adapter arguments.');
+    return ['drush', 'php:script', adapterSourcePath, '--', mode];
+  }
+  const prefixCount = Number(options.prefixCount);
+  const planFingerprint = String(options.planFingerprint ?? '');
+  if (!Number.isSafeInteger(prefixCount) || prefixCount < 0 || prefixCount > 5_000) {
+    throw new Error('Assembly apply-prefix count must be an integer from 0 through 5000.');
+  }
+  if (!/^sha256:[a-f0-9]{64}$/.test(planFingerprint)) {
+    throw new Error('Assembly apply-prefix requires the exact dry-run SHA-256 fingerprint.');
+  }
+  return ['drush', 'php:script', adapterSourcePath, '--', mode, String(prefixCount), planFingerprint];
 }
 
-function invokeAdapter(execute, disposable, sourcePath, mode, { expectFailure = false } = {}) {
-  const result = execute('ddev', assemblyAdapterArgs(sourcePath, mode), {
+function invokeAdapter(execute, disposable, sourcePath, mode, options = {}) {
+  const result = execute('ddev', assemblyAdapterArgs(sourcePath, mode, options), {
     cwd: disposable.root,
     phase: `assembly-adapter:${mode}`,
     target: 'disposable',
     timeout: 600_000
   });
-  if (expectFailure) {
-    if (!result || !Number.isInteger(result.status) || result.status === 0 || result.signal || result.error) {
-      throw new Error('Assembly failpoint must exit non-zero under verifier control without timeout, signal, or spawn failure.');
-    }
-  } else if (!result || result.status !== 0) {
+  if (!result || result.status !== 0) {
     const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
     throw new Error(`Fixed assembly adapter mode ${mode} failed${detail ? `: ${detail}` : ''}`);
   }
   return result;
+}
+
+function invokeAdapterPrefix(execute, disposable, sourcePath, dryRun, prefixCount, allowOwnedDeletes) {
+  const deleteCount = assertPrefixDeletesAuthorized(dryRun, prefixCount, allowOwnedDeletes);
+  invokeAdapter(execute, disposable, sourcePath, 'apply-prefix', {
+    prefixCount,
+    planFingerprint: dryRun.fingerprint
+  });
+  return deleteCount;
+}
+
+function createVerifierDatabaseBackup(execute, disposable) {
+  const name = `agent-ready-assembly-${randomUUID()}.sql.gz`;
+  const relativePath = `.ddev/${name}`;
+  const path = join(disposable.root, relativePath);
+  if (existsSync(path)) throw new Error('Verifier database backup path unexpectedly already exists.');
+  checkedOutput(execute, 'ddev', ['export-db', '--skip-hooks', `--file=${relativePath}`], {
+    cwd: disposable.root,
+    phase: 'verifier-database-backup',
+    target: 'disposable',
+    timeout: 600_000
+  });
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) {
+    throw new Error('Verifier database backup was not created as an owned regular file.');
+  }
+  return {
+    relativePath,
+    bytes: lstatSync(path).size,
+    sha256: collectFileManifest(disposable.root, [relativePath]).fingerprint
+  };
+}
+
+function restoreVerifierDatabaseBackup(execute, disposable, backup) {
+  const path = join(disposable.root, backup.relativePath);
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) {
+    throw new Error('Verifier database backup identity changed before restoration.');
+  }
+  const current = collectFileManifest(disposable.root, [backup.relativePath]).fingerprint;
+  if (current !== backup.sha256) throw new Error('Verifier database backup bytes changed before restoration.');
+  checkedOutput(execute, 'ddev', ['import-db', '--skip-hooks', '--no-progress', `--file=${backup.relativePath}`], {
+    cwd: disposable.root,
+    phase: 'verifier-database-restore',
+    target: 'disposable',
+    timeout: 600_000
+  });
 }
 
 function dryRun(execute, disposable, sourcePath, provenance) {
@@ -294,6 +368,21 @@ function sourceUnchanged(before, after) {
   ));
 }
 
+function captureOwnedDisposableSource({ captureSource, databaseSourceExclusion, execute, fileBackup, projectRoot }) {
+  return captureSource({
+    execute,
+    projectRoot,
+    excludedFileBackups: fileBackup ? [fileBackup] : [],
+    excludedSourceArtifacts: databaseSourceExclusion ? [databaseSourceExclusion] : []
+  });
+}
+
+function requireDisposableSourceUnchanged(options, expected, label) {
+  const actual = captureOwnedDisposableSource(options);
+  assertDisposableSourceBytesEqual(expected, actual, label);
+  return actual;
+}
+
 function emptyComparison() {
   return {
     schemaVersion: 'public-kit.reproduction-comparison.1',
@@ -307,6 +396,99 @@ function emptyComparison() {
   };
 }
 
+export function assertIdentityTransitionsMatchPrefix(
+  before,
+  after,
+  dryRunValue,
+  prefixCount,
+  label,
+  allowOwnedDeletes = false
+) {
+  const comparison = compareProvenanceEntityIdentity(before, after);
+  const allowed = new Set(dryRunValue.operations.slice(0, prefixCount)
+    .filter(({ action, target }) => action !== 'unchanged' && target.kind === 'entity')
+    .map(({ target }) => assemblyTargetKey(target)));
+  const outside = comparison.changedTargetKeys.filter((key) => !allowed.has(key));
+  if (outside.length > 0) {
+    throw new Error(`${label} changed opaque storage/revision identity outside the applied operation prefix: ${outside[0]}.`);
+  }
+  const beforeRows = new Map(before.rows.map((row) => [row.key, row]));
+  const afterRows = new Map(after.rows.map((row) => [row.key, row]));
+  for (const [index, operation] of dryRunValue.operations.entries()) {
+    if (operation.target.kind !== 'entity') continue;
+    const key = assemblyTargetKey(operation.target);
+    const beforeRow = beforeRows.get(key);
+    const afterRow = afterRows.get(key);
+    if (!beforeRow || !afterRow) throw new Error(`${label} is missing opaque identity for ${key}.`);
+    const action = index < prefixCount ? operation.action : 'unchanged';
+    if (action === 'unchanged') {
+      if (sha256(beforeRow) !== sha256(afterRow)) {
+        throw new Error(`${label} changed opaque identity for unchanged target ${key}.`);
+      }
+    } else if (action === 'create') {
+      if (beforeRow.present || !afterRow.present) {
+        throw new Error(`${label} create identity transition is invalid for ${key}.`);
+      }
+    } else if (action === 'update') {
+      if (!beforeRow.present || !afterRow.present) {
+        throw new Error(`${label} update identity transition is invalid for ${key}.`);
+      }
+      if (beforeRow.storageIdentitySha256 !== afterRow.storageIdentitySha256) {
+        throw new Error(`${label} update deleted and recreated ${key}; storage identity must remain exact.`);
+      }
+    } else if (action === 'delete') {
+      if (allowOwnedDeletes !== true) {
+        throw new Error(`${label} delete identity transition lacks explicit --allow-owned-deletes authorization.`);
+      }
+      if (!beforeRow.present || afterRow.present) {
+        throw new Error(`${label} delete identity transition is invalid for ${key}.`);
+      }
+    }
+  }
+  return comparison;
+}
+
+function assertIdentityPresenceMatchesState(identity, provenance, state, label) {
+  const present = new Set(Object.entries(state?.entities?.types ?? {}).flatMap(([entityType, type]) => (
+    (type?.items ?? []).map(({ stableId }) => `entity:${entityType}:${stableId}`)
+  )));
+  const expectedKeys = provenance.resources
+    .filter(({ target }) => target.kind === 'entity')
+    .map(({ target }) => assemblyTargetKey(target))
+    .sort();
+  const rows = [...identity.rows].sort((left, right) => String(left.key).localeCompare(String(right.key)));
+  if (canonicalJson(rows.map(({ key }) => key)) !== canonicalJson(expectedKeys)) {
+    throw new Error(`${label} identity rows do not cover every provenance entity target.`);
+  }
+  const mismatch = rows.find((row) => row.present !== present.has(row.key));
+  if (mismatch) throw new Error(`${label} identity presence disagrees with portable state for ${mismatch.key}.`);
+  return true;
+}
+
+export function operationPrefixProvenance(dryRunValue, prefixCount) {
+  const resources = dryRunValue.operations.slice(0, prefixCount)
+    .filter(({ action }) => action !== 'unchanged')
+    .map(({ action: _action, ...resource }) => resource);
+  return { resources };
+}
+
+export function deriveOperationPrefixSequenceTableIds({ dryRunValue, entityIdentity, prefixCount }) {
+  const identityByKey = new Map(entityIdentity.rows.map((row) => [row.key, row]));
+  const allowed = new Set();
+  for (const operation of dryRunValue.operations.slice(0, prefixCount)) {
+    if (operation.target.kind !== 'entity') continue;
+    const identity = identityByKey.get(assemblyTargetKey(operation.target));
+    if (!identity) throw new Error(`Assembly sequence mapping is missing for ${assemblyTargetKey(operation.target)}.`);
+    const tableIds = operation.action === 'create'
+      ? identity.createSequenceTableIds
+      : operation.action === 'update'
+        ? identity.updateSequenceTableIds
+        : [];
+    for (const tableId of tableIds) allowed.add(tableId);
+  }
+  return [...allowed].sort();
+}
+
 /**
  * Run the launch-only assembly state machine. Nothing here reads or invokes
  * Drupal in the working target; all Drupal commands are bound to the clone.
@@ -314,13 +496,21 @@ function emptyComparison() {
 export function runDisposableAssembly({
   allowOwnedDeletes = false,
   captureFixtureIdentity = captureAssemblyFixtureIdentity,
+  capturePersistence = captureAssemblyPersistenceSnapshot,
+  captureProvenanceIdentity = captureProvenanceEntityIdentity,
+  captureSource = captureDisposableSourceBytes,
   captureState = capturePortableDrupalState,
   cleanup = cleanupDisposable,
+  createFileBackup = createAssemblyFileBackup,
+  captureStorageResidual = captureProvenanceStorageResidual,
   discoverCapabilities = discoverAssemblyCapabilities,
+  disposeFileBackup = disposeAssemblyFileBackup,
   execute,
   installFixtures = installAssemblyExtensionFixtures,
   planPath = DEFAULT_PLAN,
   projectRoot,
+  registerDatabaseSourceExclusion = registerVerifierDatabaseSourceExclusion,
+  restoreFileBackup = restoreAssemblyFileBackup,
   tempParent
 }) {
   const checkedAt = new Date().toISOString();
@@ -333,20 +523,24 @@ export function runDisposableAssembly({
   let sourceAfter = null;
   let disposableSourceBeforeAssembly = null;
   let disposableSourceAfterAssembly = null;
+  let disposableSourceOptions = null;
   let validated = null;
   let disposable = null;
   let ddevStartAttempted = false;
   let cleanupResult = { deletedDdevProject: false, removedClone: false };
   let exactHeadClone = false;
+  let disposableSourceVerified = false;
   let completed = false;
   let capabilities = null;
   let fixtureResult = null;
   let baseline = null;
+  let firstPlanState = null;
   let firstState = null;
+  let secondPlanState = null;
   let secondState = null;
   let fixtureState = null;
+  let extensionPlanState = null;
   let extensionState = null;
-  let failureState = null;
   let restoredState = null;
   let firstDryRun = null;
   let secondDryRun = null;
@@ -362,8 +556,37 @@ export function runDisposableAssembly({
   let fixtureInstallationChanges = [];
   let fixtureIdentityBefore = null;
   let fixtureIdentityAfter = null;
-  let fixtureIdentityRestored = null;
-  let failureChanges = [];
+  let databaseBackup = null;
+  let databaseSourceExclusion = null;
+  let fileSurfaceBaseline = null;
+  let fileBackup = null;
+  let fileBackupDisposed = false;
+  let allowedStorageTableIds = [];
+  let firstRunAllowedStorageTableIds = [];
+  let firstRunAllowedSequenceTableIds = [];
+  let firstRunStorageResidualBefore = null;
+  let firstRunStorageResidualAfter = null;
+  let firstRunStorageResidualComparison = null;
+  let baselinePersistence = null;
+  let firstPlanPersistence = null;
+  let firstPersistence = null;
+  let secondPlanPersistence = null;
+  let secondPersistence = null;
+  let fixturePersistence = null;
+  let extensionPlanPersistence = null;
+  let extensionPersistence = null;
+  let restoredPersistence = null;
+  let baselineProvenanceIdentity = null;
+  let firstPlanProvenanceIdentity = null;
+  let firstProvenanceIdentity = null;
+  let secondPlanProvenanceIdentity = null;
+  let secondProvenanceIdentity = null;
+  let fixtureProvenanceIdentity = null;
+  let extensionPlanProvenanceIdentity = null;
+  let extensionProvenanceIdentity = null;
+  let restoredProvenanceIdentity = null;
+  let interruptionCutPoints = [];
+  let interruptionTrials = [];
   let substrateReady = false;
 
   try {
@@ -391,6 +614,27 @@ export function runDisposableAssembly({
       canonicalJson(validated.routes) === canonicalJson(cloned.routes)
     );
     if (!exactHeadClone) throw new Error('Disposable clone assembly inputs or runtime code do not match exact working-source HEAD.');
+    const readPersistence = (target) => capturePersistence({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      target
+    });
+    const readProvenanceIdentity = (target, state) => {
+      const identity = captureProvenanceIdentity({
+        execute: disposableRun,
+        projectRoot: disposable.root,
+        provenance: cloned.provenance,
+        target
+      });
+      assertIdentityPresenceMatchesState(identity, cloned.provenance, state, target);
+      return identity;
+    };
+    const readStorageResidual = (provenance, target) => captureStorageResidual({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      provenance,
+      target
+    });
 
     for (const step of provisioningSteps(cloned.substrate.plan)) {
       if (step.adapter === 'ddev_start') ddevStartAttempted = true;
@@ -410,42 +654,322 @@ export function runDisposableAssembly({
       throw new Error('Assembly substrateReady barrier found a config-sync path mismatch.');
     }
     assertDeclaredEmptyAdapters(cloned.substrate.plan, baseline);
+    assertProvenanceReadbackCoverage(cloned.provenance, baseline);
     capabilities = discoverCapabilities({
       execute: disposableRun,
       projectRoot: disposable.root,
       target: 'assembly-substrate'
     });
     assertFixturePlanAgainstCapabilities(cloned.plan.extensionFixtures, capabilities);
-    disposableSourceBeforeAssembly = sourceSnapshot(
-      run,
-      disposable.root,
-      'disposable-before-assembly',
-      'disposable'
-    );
     substrateReady = true;
 
+    baselinePersistence = readPersistence('assembly-substrate');
+    fileSurfaceBaseline = {
+      files: baselinePersistence.files,
+      aggregateSha256: sha256(baselinePersistence.files)
+    };
+    baselineProvenanceIdentity = readProvenanceIdentity('assembly-substrate', baseline);
+    fileBackup = createFileBackup({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      target: 'assembly-substrate',
+      baseline: fileSurfaceBaseline
+    });
+    databaseBackup = createVerifierDatabaseBackup(run, disposable);
+    databaseSourceExclusion = registerDatabaseSourceExclusion({
+      projectRoot: disposable.root,
+      relativePath: databaseBackup.relativePath,
+      expectedFingerprint: databaseBackup.sha256
+    });
+    disposableSourceOptions = {
+      captureSource,
+      databaseSourceExclusion,
+      execute: run,
+      fileBackup,
+      projectRoot: disposable.root
+    };
+    disposableSourceBeforeAssembly = captureOwnedDisposableSource(disposableSourceOptions);
     firstDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(firstDryRun, capabilities);
     assertInitialMutation(firstDryRun);
-    assertDeletesAuthorized(firstDryRun, allowOwnedDeletes);
-    invokeAdapter(run, disposable, cloned.plan.adapter.source.path, 'apply');
+    firstPlanState = captureState({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      routes: cloned.routes,
+      target: 'assembly-after-first-plan'
+    });
+    assertStateMetadataStable(baseline, firstPlanState, 'First assembly plan');
+    requireExactComparison(exactStateComparison(baseline, firstPlanState), 'First assembly plan');
+    firstPlanPersistence = readPersistence('assembly-after-first-plan');
+    assertExactPersistenceEquality(baselinePersistence, firstPlanPersistence, 'First assembly plan persistence');
+    firstPlanProvenanceIdentity = readProvenanceIdentity('assembly-after-first-plan', firstPlanState);
+    assertExactEntityIdentityEquality(
+      baselineProvenanceIdentity,
+      firstPlanProvenanceIdentity,
+      'First assembly plan entity identity'
+    );
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'First assembly plan source bytes');
+    interruptionCutPoints = selectAssemblyInterruptionCutPoints(firstDryRun);
+    for (const prefixCount of interruptionCutPoints) {
+      const prefixProvenance = operationPrefixProvenance(firstDryRun, prefixCount);
+      const storageResidualBefore = readStorageResidual(
+        prefixProvenance,
+        `assembly-before-interrupted-prefix-${prefixCount}`
+      );
+      const deleteCount = invokeAdapterPrefix(
+        run,
+        disposable,
+        cloned.plan.adapter.source.path,
+        firstDryRun,
+        prefixCount,
+        allowOwnedDeletes
+      );
+      const partialState = captureState({
+        execute: disposableRun,
+        projectRoot: disposable.root,
+        routes: cloned.routes,
+        target: `assembly-interrupted-prefix-${prefixCount}`
+      });
+      assertStateMetadataStable(baseline, partialState, `Assembly interrupted prefix ${prefixCount}`);
+      const prefixReconciliation = reconcileDryRunPrefix(firstDryRun, prefixCount, baseline, partialState);
+      if (!prefixReconciliation.valid) {
+        throw new Error(`Verifier-controlled operation prefix ${prefixCount} does not reconcile with independently derived state.`);
+      }
+      const observedChanges = deriveAssemblyChanges(baseline, partialState);
+      if (observedChanges.length === 0) {
+        throw new Error(`Verifier-controlled operation prefix ${prefixCount} produced no independently observed mutation.`);
+      }
+      const storageResidualAfter = readStorageResidual(
+        prefixProvenance,
+        `assembly-after-interrupted-prefix-${prefixCount}`
+      );
+      const storageResidualComparison = assertExactProvenanceStorageResidual(
+        storageResidualBefore,
+        storageResidualAfter,
+        `Assembly interrupted prefix ${prefixCount}`
+      );
+      const prefixAllowedStorageTableIds = storageResidualBefore.tables.map(({ id }) => id);
+      const prefixAllowedSequenceTableIds = deriveOperationPrefixSequenceTableIds({
+        dryRunValue: firstDryRun,
+        entityIdentity: baselineProvenanceIdentity,
+        prefixCount
+      });
+      const partialPersistence = readPersistence(`assembly-interrupted-prefix-${prefixCount}`);
+      const persistenceComparison = assertFirstRunPersistenceChanges({
+        before: baselinePersistence,
+        after: partialPersistence,
+        allowedTableIds: prefixAllowedStorageTableIds,
+        allowedSequenceTableIds: prefixAllowedSequenceTableIds,
+        label: `Assembly interrupted prefix ${prefixCount}`
+      });
+      const partialProvenanceIdentity = readProvenanceIdentity(`assembly-interrupted-prefix-${prefixCount}`, partialState);
+      const identityComparison = assertIdentityTransitionsMatchPrefix(
+        baselineProvenanceIdentity,
+        partialProvenanceIdentity,
+        firstDryRun,
+        prefixCount,
+        `Assembly interrupted prefix ${prefixCount}`,
+        allowOwnedDeletes
+      );
+      requireDisposableSourceUnchanged(
+        disposableSourceOptions,
+        disposableSourceBeforeAssembly,
+        `Interrupted prefix ${prefixCount} source bytes`
+      );
+      restoreVerifierDatabaseBackup(run, disposable, databaseBackup);
+      const restoredFileSurfaces = restoreFileBackup({
+        execute: disposableRun,
+        projectRoot: disposable.root,
+        backup: fileBackup,
+        target: `assembly-restored-prefix-${prefixCount}`
+      });
+      restoredState = captureState({
+        execute: disposableRun,
+        projectRoot: disposable.root,
+        routes: cloned.routes,
+        target: `assembly-restored-prefix-${prefixCount}`
+      });
+      assertStateMetadataStable(baseline, restoredState, `Verifier-owned restoration after prefix ${prefixCount}`);
+      const exactRestorationComparison = exactStateComparison(baseline, restoredState);
+      requireExactComparison(exactRestorationComparison, `Verifier-owned restoration after prefix ${prefixCount}`);
+      restoredPersistence = readPersistence(`assembly-restored-prefix-${prefixCount}`);
+      const persistenceRestorationComparison = assertRestoredPersistence(
+        baselinePersistence,
+        restoredPersistence
+      );
+      restoredProvenanceIdentity = readProvenanceIdentity(`assembly-restored-prefix-${prefixCount}`, restoredState);
+      const identityRestorationComparison = assertExactEntityIdentityEquality(
+        baselineProvenanceIdentity,
+        restoredProvenanceIdentity,
+        `Verifier-owned restoration after prefix ${prefixCount}`
+      );
+      requireDisposableSourceUnchanged(
+        disposableSourceOptions,
+        disposableSourceBeforeAssembly,
+        `Restored prefix ${prefixCount} source bytes`
+      );
+      restoredDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
+      if (restoredDryRun.fingerprint !== firstDryRun.fingerprint) {
+        throw new Error(`Verifier-owned restoration after prefix ${prefixCount} did not restore the exact first-run plan.`);
+      }
+      requireDisposableSourceUnchanged(
+        disposableSourceOptions,
+        disposableSourceBeforeAssembly,
+        `Restored plan ${prefixCount} source bytes`
+      );
+      const restoredPlanState = captureState({
+        execute: disposableRun,
+        projectRoot: disposable.root,
+        routes: cloned.routes,
+        target: `assembly-after-restored-plan-prefix-${prefixCount}`
+      });
+      const exactPlanComparison = exactStateComparison(baseline, restoredPlanState);
+      requireExactComparison(exactPlanComparison, `Restored plan after prefix ${prefixCount}`);
+      const restoredPlanPersistence = readPersistence(`assembly-after-restored-plan-prefix-${prefixCount}`);
+      const persistencePlanComparison = assertExactPersistenceEquality(
+        baselinePersistence,
+        restoredPlanPersistence,
+        `Restored plan after prefix ${prefixCount}`
+      );
+      const restoredPlanIdentity = readProvenanceIdentity(
+        `assembly-after-restored-plan-prefix-${prefixCount}`,
+        restoredPlanState
+      );
+      const identityPlanComparison = assertExactEntityIdentityEquality(
+        baselineProvenanceIdentity,
+        restoredPlanIdentity,
+        `Restored plan after prefix ${prefixCount}`
+      );
+      requireDisposableSourceUnchanged(
+        disposableSourceOptions,
+        disposableSourceBeforeAssembly,
+        `Restored plan ${prefixCount} source bytes after readback`
+      );
+      interruptionTrials.push({
+        prefixCount,
+        deleteCount,
+        allowedStorageTableIds: prefixAllowedStorageTableIds,
+        allowedSequenceTableIds: prefixAllowedSequenceTableIds,
+        storageResidualBefore,
+        storageResidualAfter,
+        storageResidualComparison,
+        observedChanges,
+        persistenceComparison,
+        identityComparison,
+        prefixReconciliation,
+        partialPersistence,
+        partialProvenanceIdentity,
+        restoredFileSurfaces,
+        exactRestorationComparison,
+        persistenceRestorationComparison,
+        identityRestorationComparison,
+        exactPlanComparison,
+        persistencePlanComparison,
+        identityPlanComparison,
+        restoredPlanFingerprint: restoredDryRun.fingerprint
+      });
+    }
+
+    const firstRunProvenance = operationPrefixProvenance(firstDryRun, firstDryRun.operations.length);
+    firstRunStorageResidualBefore = readStorageResidual(firstRunProvenance, 'assembly-before-first');
+    firstRunAllowedStorageTableIds = firstRunStorageResidualBefore.tables.map(({ id }) => id);
+    allowedStorageTableIds = firstRunAllowedStorageTableIds;
+    firstRunAllowedSequenceTableIds = deriveOperationPrefixSequenceTableIds({
+      dryRunValue: firstDryRun,
+      entityIdentity: baselineProvenanceIdentity,
+      prefixCount: firstDryRun.operations.length
+    });
+    invokeAdapterPrefix(
+      run,
+      disposable,
+      cloned.plan.adapter.source.path,
+      firstDryRun,
+      firstDryRun.operations.length,
+      allowOwnedDeletes
+    );
     firstState = captureState({ execute: disposableRun, projectRoot: disposable.root, routes: cloned.routes, target: 'assembly-first' });
     assertStateMetadataStable(baseline, firstState, 'First assembly run');
     if (!firstState.configStatusClean) throw new Error('First assembly run left active configuration out of sync.');
     firstReconciliation = reconcileDryRun(firstDryRun, baseline, firstState);
     if (!firstReconciliation.valid) throw new Error('First assembly dry-run does not reconcile with verifier-derived state changes.');
+    firstRunStorageResidualAfter = readStorageResidual(firstRunProvenance, 'assembly-first');
+    firstRunStorageResidualComparison = assertExactProvenanceStorageResidual(
+      firstRunStorageResidualBefore,
+      firstRunStorageResidualAfter,
+      'First assembly run'
+    );
+    firstPersistence = readPersistence('assembly-first');
+    assertFirstRunPersistenceChanges({
+      before: baselinePersistence,
+      after: firstPersistence,
+      allowedTableIds: firstRunAllowedStorageTableIds,
+      allowedSequenceTableIds: firstRunAllowedSequenceTableIds,
+      label: 'First assembly run'
+    });
+    firstProvenanceIdentity = readProvenanceIdentity('assembly-first', firstState);
+    assertIdentityTransitionsMatchPrefix(
+      baselineProvenanceIdentity,
+      firstProvenanceIdentity,
+      firstDryRun,
+      firstDryRun.operations.length,
+      'First assembly run',
+      allowOwnedDeletes
+    );
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'First assembly source bytes');
 
     secondDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(secondDryRun, capabilities);
     assertNoOpDryRun(secondDryRun, 'Second assembly dry-run');
-    invokeAdapter(run, disposable, cloned.plan.adapter.source.path, 'apply');
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Second assembly plan source bytes');
+    secondPlanState = captureState({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      routes: cloned.routes,
+      target: 'assembly-after-second-plan'
+    });
+    requireExactComparison(exactStateComparison(firstState, secondPlanState), 'Second assembly plan');
+    secondPlanPersistence = readPersistence('assembly-after-second-plan');
+    assertExactPersistenceEquality(firstPersistence, secondPlanPersistence, 'Second assembly plan persistence');
+    secondPlanProvenanceIdentity = readProvenanceIdentity('assembly-after-second-plan', secondPlanState);
+    assertExactEntityIdentityEquality(
+      firstProvenanceIdentity,
+      secondPlanProvenanceIdentity,
+      'Second assembly plan entity identity'
+    );
+    requireDisposableSourceUnchanged(
+      disposableSourceOptions,
+      disposableSourceBeforeAssembly,
+      'Second assembly plan source bytes after readback'
+    );
+    invokeAdapterPrefix(
+      run,
+      disposable,
+      cloned.plan.adapter.source.path,
+      secondDryRun,
+      secondDryRun.operations.length,
+      allowOwnedDeletes
+    );
     secondState = captureState({ execute: disposableRun, projectRoot: disposable.root, routes: cloned.routes, target: 'assembly-second' });
     assertStateMetadataStable(firstState, secondState, 'Second assembly run');
     if (!secondState.configStatusClean) throw new Error('Second assembly run left active configuration out of sync.');
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Second assembly source bytes');
     secondReconciliation = reconcileDryRun(secondDryRun, firstState, secondState);
     if (!secondReconciliation.valid) throw new Error('Second assembly no-op plan does not reconcile with verifier-derived state.');
     secondComparison = exactStateComparison(firstState, secondState);
     requireExactComparison(secondComparison, 'Second assembly run');
+    secondPersistence = readPersistence('assembly-second');
+    assertNoOpPersistence(firstPersistence, secondPersistence);
+    secondProvenanceIdentity = readProvenanceIdentity('assembly-second', secondState);
+    assertExactEntityIdentityEquality(
+      firstProvenanceIdentity,
+      secondProvenanceIdentity,
+      'Second assembly run entity identity'
+    );
+    requireDisposableSourceUnchanged(
+      disposableSourceOptions,
+      disposableSourceBeforeAssembly,
+      'Second assembly source bytes after readback'
+    );
 
     fixtureResult = installFixtures({
       execute: disposableRun,
@@ -472,11 +996,46 @@ export function runDisposableAssembly({
       target: 'assembly-fixtures-before-rerun',
       targets: fixtureResult.targets
     });
+    fixturePersistence = readPersistence('assembly-fixtures-before-rerun');
+    fixtureProvenanceIdentity = readProvenanceIdentity('assembly-fixtures-before-rerun', fixtureState);
+    assertExactEntityIdentityEquality(
+      secondProvenanceIdentity,
+      fixtureProvenanceIdentity,
+      'Extension fixture installation provenance identity'
+    );
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Extension fixture source bytes');
 
     extensionDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(extensionDryRun, capabilities);
     assertNoOpDryRun(extensionDryRun, 'Post-extension assembly dry-run');
-    invokeAdapter(run, disposable, cloned.plan.adapter.source.path, 'apply');
+    extensionPlanState = captureState({
+      execute: disposableRun,
+      projectRoot: disposable.root,
+      routes: cloned.routes,
+      target: 'assembly-after-extension-plan'
+    });
+    requireExactComparison(exactStateComparison(fixtureState, extensionPlanState), 'Post-extension assembly plan');
+    extensionPlanPersistence = readPersistence('assembly-after-extension-plan');
+    assertExactPersistenceEquality(
+      fixturePersistence,
+      extensionPlanPersistence,
+      'Post-extension assembly plan persistence'
+    );
+    extensionPlanProvenanceIdentity = readProvenanceIdentity('assembly-after-extension-plan', extensionPlanState);
+    assertExactEntityIdentityEquality(
+      fixtureProvenanceIdentity,
+      extensionPlanProvenanceIdentity,
+      'Post-extension assembly plan entity identity'
+    );
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Extension plan source bytes');
+    invokeAdapterPrefix(
+      run,
+      disposable,
+      cloned.plan.adapter.source.path,
+      extensionDryRun,
+      extensionDryRun.operations.length,
+      allowOwnedDeletes
+    );
     extensionState = captureState({ execute: disposableRun, projectRoot: disposable.root, routes: cloned.routes, target: 'assembly-extension-rerun' });
     assertStateMetadataStable(fixtureState, extensionState, 'Post-extension assembly rerun');
     extensionReconciliation = reconcileDryRun(extensionDryRun, fixtureState, extensionState);
@@ -494,58 +1053,40 @@ export function runDisposableAssembly({
     if (fixtureIdentityBefore.fingerprint !== fixtureIdentityAfter.fingerprint) {
       throw new Error('Assembly rerun deleted, recreated, or re-revisioned a verifier-owned extension entity.');
     }
-
-    invokeAdapter(run, disposable, cloned.plan.adapter.source.path, 'failpoint', { expectFailure: true });
-    let failureCaptureError = null;
-    try {
-      failureState = captureState({ execute: disposableRun, projectRoot: disposable.root, routes: cloned.routes, target: 'assembly-failpoint' });
-    } catch (error) {
-      failureCaptureError = error;
-    }
-    let restorationError = null;
-    try {
-      invokeAdapter(run, disposable, cloned.plan.adapter.source.path, 'restore');
-      restoredState = captureState({ execute: disposableRun, projectRoot: disposable.root, routes: cloned.routes, target: 'assembly-restored' });
-    } catch (error) {
-      restorationError = error;
-    }
-    if (failureCaptureError) throw new Error(`Failpoint state could not be independently read before restoration: ${firstError(failureCaptureError)}`);
-    if (restorationError) throw new Error(`Fixed restoration path failed: ${firstError(restorationError)}`);
-    assertStateMetadataStable(extensionState, failureState, 'Assembly failpoint');
-    failureChanges = deriveAssemblyChanges(extensionState, failureState);
-    if (failureChanges.length === 0) throw new Error('Assembly failpoint exited non-zero without an independently observed mid-run state change.');
-    assertChangesWithinProvenance(failureChanges, cloned.provenance, 'Assembly failpoint');
-    if (failureChanges.some(({ action }) => action === 'delete') && !allowOwnedDeletes) {
-      throw new Error('Assembly failpoint performed a provenance-owned delete without explicit --allow-owned-deletes authorization.');
-    }
-    restorationComparison = exactStateComparison(extensionState, restoredState);
-    requireExactComparison(restorationComparison, 'Fixed assembly restoration');
-    fixtureIdentityRestored = captureFixtureIdentity({
-      execute: disposableRun,
-      projectRoot: disposable.root,
-      target: 'assembly-restored',
-      targets: fixtureResult.targets
-    });
-    if (fixtureIdentityAfter.fingerprint !== fixtureIdentityRestored.fingerprint) {
-      throw new Error('Fixed restoration deleted, recreated, or re-revisioned a verifier-owned extension entity.');
-    }
-    restoredDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
-    assertDryRunSurfacesAvailable(restoredDryRun, capabilities);
-    assertNoOpDryRun(restoredDryRun, 'Post-restoration assembly dry-run');
-    disposableSourceAfterAssembly = sourceSnapshot(
-      run,
-      disposable.root,
-      'disposable-after-assembly',
-      'disposable'
+    extensionPersistence = readPersistence('assembly-extension-rerun');
+    assertExactPersistenceEquality(
+      fixturePersistence,
+      extensionPersistence,
+      'Post-extension assembly rerun persistence'
     );
-    if (!sourceUnchanged(disposableSourceBeforeAssembly, disposableSourceAfterAssembly)) {
-      throw new Error('Assembly or restoration changed the disposable clone source tree outside Drupal state.');
-    }
+    extensionProvenanceIdentity = readProvenanceIdentity('assembly-extension-rerun', extensionState);
+    assertExactEntityIdentityEquality(
+      fixtureProvenanceIdentity,
+      extensionProvenanceIdentity,
+      'Post-extension assembly rerun entity identity'
+    );
+    requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Extension rerun source bytes');
+
+    restorationComparison = interruptionTrials.at(-1)?.exactRestorationComparison ?? emptyComparison();
+    disposableSourceAfterAssembly = captureOwnedDisposableSource(disposableSourceOptions);
+    assertDisposableSourceBytesEqual(
+      disposableSourceBeforeAssembly,
+      disposableSourceAfterAssembly,
+      'Final disposable source bytes'
+    );
+    disposableSourceVerified = true;
     completed = true;
   } catch (error) {
     errors.push(firstError(error));
   } finally {
     if (disposable) {
+      if (fileBackup) {
+        try {
+          fileBackupDisposed = disposeFileBackup({ projectRoot: disposable.root, backup: fileBackup });
+        } catch (error) {
+          errors.push(`Verifier file-backup cleanup failed: ${firstError(error)}`);
+        }
+      }
       try {
         cleanupResult = cleanup({ ddevStartAttempted, disposable, execute: run });
       } catch (error) {
@@ -564,12 +1105,23 @@ export function runDisposableAssembly({
     command.target === 'working' && command.argv?.[0] === 'ddev'
   )).length;
   const cleanupComplete = Boolean(!disposable || cleanupResult.removedClone);
+  const verifierBackupsDisposed = Boolean(!fileBackup || fileBackupDisposed);
   const budget = run.snapshot();
   const valid = Boolean(
     errors.length === 0 && completed && substrateReady && exactHeadClone && workingSourceUnchanged &&
-    workingDdevCommands === 0 && cleanupComplete && !budget.exceeded
+    workingDdevCommands === 0 && cleanupComplete && verifierBackupsDisposed && !budget.exceeded
   );
-  const states = { baseline, firstState, secondState, fixtureState, extensionState, failureState, restoredState };
+  const states = {
+    baseline,
+    firstPlanState,
+    firstState,
+    secondPlanState,
+    secondState,
+    fixtureState,
+    extensionPlanState,
+    extensionState,
+    restoredState
+  };
   return {
     schemaVersion: REPORT_SCHEMA,
     gateId: 'G-ASSEMBLY-01',
@@ -592,7 +1144,7 @@ export function runDisposableAssembly({
     declaredInputs: validated?.inputs ?? [],
     adapter: {
       protocol: validated?.plan?.adapter?.protocol ?? '',
-      fixedModes: ['plan', 'apply', 'failpoint', 'restore'],
+      fixedModes: ['plan', 'apply-prefix'],
       failureProof: validated?.plan?.adapter?.failureProof ?? '',
       arbitraryCommandSurface: false
     },
@@ -600,7 +1152,7 @@ export function runDisposableAssembly({
       policy: validated?.plan?.deletion?.policy ?? '',
       cliOptIn: allowOwnedDeletes,
       firstRunDeleteCount: firstDryRun?.summary?.delete ?? 0,
-      failpointDeleteCount: failureChanges.filter(({ action }) => action === 'delete').length
+      interruptedPrefixDeleteCount: interruptionTrials.reduce((total, trial) => total + trial.deleteCount, 0)
     },
     workingTargetProof: {
       untouched: workingSourceUnchanged && workingDdevCommands === 0,
@@ -618,9 +1170,10 @@ export function runDisposableAssembly({
     disposable: {
       projectName: disposable?.name ?? '',
       ownershipNamespaceConfirmed: Boolean(disposable?.name?.startsWith('agent-ready-repro-')),
-      sourceTreeUnchanged: sourceUnchanged(disposableSourceBeforeAssembly, disposableSourceAfterAssembly),
-      sourceTreeBeforeFingerprint: disposableSourceBeforeAssembly?.runtimeCode?.fingerprint ?? '',
-      sourceTreeAfterFingerprint: disposableSourceAfterAssembly?.runtimeCode?.fingerprint ?? '',
+      sourceTreeUnchanged: disposableSourceVerified,
+      sourceTreeBeforeFingerprint: disposableSourceBeforeAssembly?.aggregateSha256 ?? '',
+      sourceTreeAfterFingerprint: disposableSourceAfterAssembly?.aggregateSha256 ?? '',
+      fileBackupDisposed,
       cleanup: cleanupResult
     },
     substrate: {
@@ -633,7 +1186,7 @@ export function runDisposableAssembly({
       first: firstDryRun,
       secondNoOp: secondDryRun,
       postExtensionNoOp: extensionDryRun,
-      postRestorationNoOp: restoredDryRun
+      postRestorationPlan: restoredDryRun
     },
     firstRun: { reconciliation: firstReconciliation },
     secondRun: { reconciliation: secondReconciliation, exactComparison: secondComparison },
@@ -642,16 +1195,48 @@ export function runDisposableAssembly({
       fixtureInstallationChanges,
       fixtureIdentityBefore,
       fixtureIdentityAfter,
-      fixtureIdentityRestored,
       reconciliation: extensionReconciliation,
       exactComparison: extensionComparison,
       targetProof: fixtureSurvival
     },
     failureAndRestoration: {
       mode: validated?.plan?.adapter?.failureProof ?? '',
-      observedMidRunChangeCount: failureChanges.length,
-      observedMidRunChanges: failureChanges,
+      databaseBackup,
+      databaseSourceExclusion,
+      fileBackup,
+      interruptionCutPoints,
+      trials: interruptionTrials,
       exactRestorationComparison: restorationComparison
+    },
+    persistenceProof: {
+      allowedStorageTableIds,
+      firstRunAllowedStorageTableIds,
+      firstRunAllowedSequenceTableIds,
+      baseline: baselinePersistence,
+      firstPlan: firstPlanPersistence,
+      firstRun: firstPersistence,
+      secondPlan: secondPlanPersistence,
+      secondRun: secondPersistence,
+      extensionFixtures: fixturePersistence,
+      extensionPlan: extensionPlanPersistence,
+      extensionRun: extensionPersistence,
+      restored: restoredPersistence
+    },
+    storageResidualProof: {
+      firstRunBefore: firstRunStorageResidualBefore,
+      firstRunAfter: firstRunStorageResidualAfter,
+      firstRunComparison: firstRunStorageResidualComparison
+    },
+    provenanceEntityIdentity: {
+      baseline: baselineProvenanceIdentity,
+      firstPlan: firstPlanProvenanceIdentity,
+      firstRun: firstProvenanceIdentity,
+      secondPlan: secondPlanProvenanceIdentity,
+      secondRun: secondProvenanceIdentity,
+      extensionFixtures: fixtureProvenanceIdentity,
+      extensionPlan: extensionPlanProvenanceIdentity,
+      extensionRun: extensionProvenanceIdentity,
+      restored: restoredProvenanceIdentity
     },
     stateChecksums: Object.fromEntries(Object.entries(states).map(([name, state]) => [name, state?.fingerprint ?? ''])),
     readback: states,

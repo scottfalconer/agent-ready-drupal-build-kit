@@ -238,11 +238,11 @@ export function parseAssemblyPlan(value) {
     throw new Error('Assembly plan deletion.policy must be provenance_owned_only.');
   }
   assertExactKeys(value.adapter, ['protocol', 'source', 'failureProof'], 'Assembly plan adapter');
-  if (value.adapter.protocol !== 'drush_assembly_contract_v1') {
-    throw new Error('Assembly plan adapter.protocol must be drush_assembly_contract_v1.');
+  if (value.adapter.protocol !== 'drush_assembly_contract_v2') {
+    throw new Error('Assembly plan adapter.protocol must be drush_assembly_contract_v2.');
   }
-  if (value.adapter.failureProof !== 'tested_restoration') {
-    throw new Error('Assembly plan adapter.failureProof must be tested_restoration; unobserved transactional claims are not accepted.');
+  if (value.adapter.failureProof !== 'verifier_controlled_restoration') {
+    throw new Error('Assembly plan adapter.failureProof must be verifier_controlled_restoration; target-authored failpoints and restore modes are not accepted.');
   }
   const source = boundSource(value.adapter.source, 'Assembly plan adapter.source');
   if (!source.path.endsWith('.php')) throw new Error('Assembly adapter source must be a .php file.');
@@ -254,9 +254,9 @@ export function parseAssemblyPlan(value) {
     provenance: provenanceSource,
     deletion: { policy: 'provenance_owned_only' },
     adapter: {
-      protocol: 'drush_assembly_contract_v1',
+      protocol: 'drush_assembly_contract_v2',
       source,
-      failureProof: 'tested_restoration'
+      failureProof: 'verifier_controlled_restoration'
     },
     extensionFixtures: parseFixtures(value.extensionFixtures)
   };
@@ -291,6 +291,12 @@ export function parseAssemblyProvenance(value, expectedAssemblyId = '') {
   const targets = new Set();
   const resources = value.resources.map((resource, index) => {
     const parsed = parseResource(resource, namespace, `Assembly provenance resources[${index}]`);
+    if (parsed.target.kind === 'managed_file' || parsed.target.kind === 'route') {
+      throw new Error(`Assembly provenance target ${assemblyTargetKey(parsed.target)} is observational, not a restorable storage owner; use exact config or entity provenance.`);
+    }
+    if (parsed.target.kind === 'entity' && !parsed.target.stableId.startsWith('uuid:')) {
+      throw new Error(`Assembly provenance entity ${assemblyTargetKey(parsed.target)} must use UUID identity so storage/revision churn can be proved opaquely.`);
+    }
     const key = resourceKey(parsed);
     const targetKey = assemblyTargetKey(parsed.target);
     if (keys.has(key)) throw new Error(`Assembly provenance contains duplicate resource ${key}.`);
@@ -326,11 +332,11 @@ export function parseAssemblyDryRun(value, provenance) {
     if (operationKeys.has(key)) throw new Error(`Assembly dry-run contains duplicate operation ${key}.`);
     operationKeys.add(key);
     return parsed;
-  }).sort((left, right) => comparePortable(resourceKey(left), resourceKey(right)));
+  });
   const provenanceKeys = provenance.resources.map(resourceKey);
   const dryKeys = operations.map(resourceKey);
   if (canonicalJson(provenanceKeys) !== canonicalJson(dryKeys)) {
-    throw new Error('Assembly dry-run operations are not exactly bound to the provenance ledger.');
+    throw new Error('Assembly dry-run operations are not exactly bound to the canonical provenance operation order.');
   }
   assertExactKeys(value.summary, [...ACTIONS, 'total'], 'Assembly dry-run summary');
   const counts = Object.fromEntries(ACTIONS.map((action) => [action, operations.filter((row) => row.action === action).length]));
@@ -423,6 +429,17 @@ export function portableAssemblyIndex(state) {
   return rows;
 }
 
+/** Fail before execution when a provenance target is outside portable readback coverage. */
+export function assertProvenanceReadbackCoverage(provenance, state) {
+  const unavailable = provenance.resources.filter(({ target }) => (
+    target.kind === 'entity' && !Object.hasOwn(state?.entities?.types ?? {}, target.entityType)
+  ));
+  if (unavailable.length > 0) {
+    throw new Error(`Assembly provenance entity type ${unavailable[0].target.entityType} is outside portable entity readback coverage and is forbidden for assembly mutation.`);
+  }
+  return true;
+}
+
 function independentlyDerivedAction(before, after, key) {
   const hadBefore = before.has(key);
   const hasAfter = after.has(key);
@@ -492,6 +509,47 @@ export function assertDeletesAuthorized(dryRun, allowOwnedDeletes) {
     throw new Error(`Assembly dry-run contains ${deletes.length} provenance-owned delete(s); rerun with explicit --allow-owned-deletes authorization.`);
   }
   return deletes.length;
+}
+
+/** Require delete authorization for the exact operation prefix before invoking it. */
+export function assertPrefixDeletesAuthorized(dryRun, prefixCount, allowOwnedDeletes) {
+  if (!Number.isSafeInteger(prefixCount) || prefixCount < 0 || prefixCount > dryRun.operations.length) {
+    throw new Error('Assembly operation prefix must be a bounded integer inside the dry-run operation stream.');
+  }
+  const deletes = dryRun.operations.slice(0, prefixCount).filter((operation) => operation.action === 'delete');
+  if (deletes.length > 0 && allowOwnedDeletes !== true) {
+    throw new Error(`Assembly operation prefix contains ${deletes.length} provenance-owned delete(s); rerun with explicit --allow-owned-deletes authorization.`);
+  }
+  return deletes.length;
+}
+
+/** Pick two distinct, partial cut points from the canonical mutating operation stream. */
+export function selectAssemblyInterruptionCutPoints(dryRun) {
+  const mutationEnds = dryRun.operations
+    .map((operation, index) => operation.action === 'unchanged' ? 0 : index + 1)
+    .filter(Boolean);
+  if (mutationEnds.length < 3) {
+    throw new Error('Verifier-controlled restoration requires at least three first-run mutations so two distinct partial cut points can be tested.');
+  }
+  const cutPoints = [mutationEnds[0], mutationEnds.at(-2)];
+  if (new Set(cutPoints).size !== 2 || cutPoints.some((count) => count >= mutationEnds.at(-1))) {
+    throw new Error('Verifier-controlled restoration could not derive two distinct partial cut points.');
+  }
+  return cutPoints;
+}
+
+/** Reconcile the exact prefix the verifier allowed the adapter to apply. */
+export function reconcileDryRunPrefix(dryRun, prefixCount, beforeState, afterState) {
+  if (!Number.isSafeInteger(prefixCount) || prefixCount < 0 || prefixCount > dryRun.operations.length) {
+    throw new Error('Assembly operation prefix must be a bounded integer inside the dry-run operation stream.');
+  }
+  return reconcileDryRun({
+    ...dryRun,
+    operations: dryRun.operations.map((operation, index) => ({
+      ...operation,
+      action: index < prefixCount ? operation.action : 'unchanged'
+    }))
+  }, beforeState, afterState);
 }
 
 export function assertChangesWithinProvenance(changes, provenance, label) {

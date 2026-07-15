@@ -117,6 +117,10 @@ function copyPlan(assetsOnly) {
         destination: join(skillRoot, 'scripts', 'assembly-fixtures.mjs')
       },
       {
+        source: join(repoRoot, 'bin', 'assembly-persistence.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-persistence.mjs')
+      },
+      {
         source: join(repoRoot, 'bin', 'disposable-ddev.mjs'),
         destination: join(skillRoot, 'scripts', 'disposable-ddev.mjs')
       },
