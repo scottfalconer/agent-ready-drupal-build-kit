@@ -2846,13 +2846,25 @@ test('live verifier blocks an undeclared same-origin detail link even when it re
       const detail = report.serverRenderedResponseSurface.linkChecks.find((check) =>
         new URL(check.requestedUrl).pathname === '/article/undeclared'
       );
+      const expectedQueryDigest = createHash('sha256')
+        .update('?preview=private-value')
+        .digest('hex');
+      const doubleRedactedDigest = createHash('sha256')
+        .update(`?query-sha256=${expectedQueryDigest}`)
+        .digest('hex');
       assert.equal(detail?.finalStatus, 200);
       assert.equal(detail?.passed, false);
+      assert.equal(
+        new URL(detail.requestedUrl).search,
+        `?query-sha256=${expectedQueryDigest}`,
+        'redacted query identities must remain stable across nested report sanitizers'
+      );
       assert.match(
         report.errors.join('\n'),
         /not represented by an accepted routes or targetRequiredRoutes entry.*no exact accepted disposition/
       );
       assert.doesNotMatch(JSON.stringify(report), /private-value/);
+      assert.doesNotMatch(JSON.stringify(report), new RegExp(doubleRedactedDigest));
 
       mkdirSync(join(packetDir, 'evidence'), { recursive: true });
       writeFileSync(join(packetDir, 'evidence', 'unlisted-detail.txt'), 'Approved dynamic detail endpoint.\n');
