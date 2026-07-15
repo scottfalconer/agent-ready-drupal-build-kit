@@ -101,7 +101,7 @@ Already fluent in Drupal? Use this as a repeatable agent workflow and review har
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
-The live verifier makes that continuation machine-readable. Until `live-verification.json` reports `agentContinuation.requiredAction: handoff`, the agent repairs the listed failures and reruns the verifier without waiting for a human review checkpoint. Human approval remains separate from the autonomous local rebuild loop.
+The live verifier makes that continuation machine-readable. While `live-verification.json` reports `agentContinuation.shouldContinue: true`, the agent repairs the structured blockers and reruns without waiting for a human review checkpoint. It may pause only on `requiredAction: pause-and-report`, which the verifier emits when every remaining blocker is confirmed external; that state still forbids completion and handoff. Human approval remains separate from the autonomous local rebuild loop.
 
 The precise file-by-file packet and gate vocabulary are listed in [docs/output-inventory.md](docs/output-inventory.md).
 
@@ -124,6 +124,8 @@ Every run asks:
 The review packet shows what is built, what is still blocked, and what another developer should inspect next.
 
 This is a typed local-completion machine bar, not production or human approval: `complete-local-rebuild` for source-site mode and `complete-local-build-from-brief` for brief mode. The default verifier can authorize only the active mode's claim from current packet, browser, Drupal-runtime, independent-review, and blind-review evidence. It reports any human-gate names and choices separately as builder-writable, self-attested records that do not alter the verdict or exit code. Use an authenticated external workflow when actual human approval is required. Deployment, production hardening, credentials, legal/privacy review, rollback, and launch acceptance remain separate human-owned gates.
+
+Generated packet and live reports include a `gateResults` row for every canonical gate. A gate is `pass` only when its evaluator ran in that verification mode and produced no finding; packet-only dependencies remain `not_evaluated`, and human gates remain `human_review`.
 
 ## After The First Verification
 
