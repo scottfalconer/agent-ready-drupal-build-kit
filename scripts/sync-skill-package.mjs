@@ -89,6 +89,11 @@ function copyPlan(assetsOnly) {
   if (!assetsOnly) {
     plan.push(
       {
+        source: join(repoRoot, 'bin', 'doctor.mjs'),
+        destination: join(skillRoot, 'scripts', 'doctor.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'verify.mjs'),
         destination: join(skillRoot, 'scripts', 'verify.mjs'),
         executable: true

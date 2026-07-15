@@ -44,6 +44,8 @@ The result is not a screenshot, static export, or CMS-shaped demo. It is a real 
 
 The kit gives the agent the Drupal-specific instructions it needs to create a complete local Drupal CMS site: real public content, appropriate content structures and visual design, public routes and functionality, editorial workflows, and a review packet that explains the work. With a source site, those decisions are checked for parity; with a brief, they are checked against explicit accepted requirements.
 
+Before applying a candidate Recipe, the agent can run the kit's non-authoring doctor to catch substrate, first-route, browser-runtime, Recipe-manifest, active-config, and upstream-package problems while the full review packet is still incomplete. Its report is diagnostic-only: the doctor cannot apply a Recipe, intentionally change Drupal content or configuration, write reviewer evidence, or authorize completion. Bootstrap, HTTP, and browser diagnostics can still warm caches or write ordinary runtime logs.
+
 For a new project, the agent uses the official Drupal [One Line Installer](https://www.drupal.org/project/one_line_installer) to create the one Drupal project it will rebuild. The current installer supports macOS and Linux. It chooses **Drupal CMS** and the current coding agent, then treats the resulting DDEV project as the rebuild target rather than creating another site beside or inside it.
 
 A normal web chat is not enough because the agent needs filesystem, shell, Drupal, and browser access. Expect an iterative build over multiple agent passes, not one quick chat response.

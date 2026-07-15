@@ -25,6 +25,7 @@
     "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
     "test": "node --test tests/*.test.mjs",
     "reconcile": "node bin/reconcile.mjs",
+    "doctor": "node bin/doctor.mjs",
     "verify": "node bin/verify.mjs",
     "verify-packet": "node bin/verify-packet.mjs",
     "verify-assembly": "node bin/verify-assembly.mjs",
@@ -33,6 +34,7 @@
   },
   "bin": {
     "agent-ready-drupal-reconcile": "bin/reconcile.mjs",
+    "agent-ready-drupal-doctor": "bin/doctor.mjs",
     "agent-ready-drupal-verify": "bin/verify.mjs",
     "agent-ready-drupal-verify-packet": "bin/verify-packet.mjs",
     "agent-ready-drupal-verify-assembly": "bin/verify-assembly.mjs",
