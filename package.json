@@ -44,6 +44,6 @@
     "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.10.0"
   }
 }

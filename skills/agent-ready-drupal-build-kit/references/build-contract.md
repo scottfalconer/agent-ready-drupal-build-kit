@@ -42,7 +42,7 @@ ddev drush status
 ddev exec node --version
 ```
 
-Node.js 20 or newer is required inside DDEV for the build-kit scripts; host Node is not required. If the current directory is not an installed DDEV Drupal CMS target, report the blocker and give the human the official One Line Installer command:
+Node.js 20.10 or newer is required inside DDEV for the build-kit scripts; host Node is not required. If the current directory is not an installed DDEV Drupal CMS target, report the blocker and give the human the official One Line Installer command:
 
 ```bash
 bash <(curl -fsSL https://project.pages.drupalcode.org/one_line_installer/drupalaibp)
@@ -53,7 +53,7 @@ Do not run that installer from inside the current project, and do not run it wit
 A valid local rebuild uses:
 
 - DDEV for local web, PHP, database, and routing.
-- Node.js 20 or newer inside DDEV for build-kit initialization and verification.
+- Node.js 20.10 or newer inside DDEV for build-kit initialization and verification.
 - `drupal/cms` as the Composer project.
 - The Drupal CMS setup assistant or a documented non-interactive equivalent.
 - Composer and installed `recipe.yml` files for Recipe discovery, plus the Recipe runner exposed by the installed target. Prefer `vendor/bin/dr recipe:apply PATH` when present; otherwise use the legacy `php core/scripts/drupal recipe PATH` runner from the webroot. Record the exact runner selected instead of assuming either command exists.
