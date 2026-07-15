@@ -106,6 +106,49 @@ test('draft refresh is deterministic and never auto-dispositions live surfaces',
   assert.equal(first.summary.unresolved, 2);
 });
 
+test('bundle candidate references follow the Drupal entity type instead of treating every bundle as a content type', () => {
+  const live = inventory([
+    publicBundle(),
+    {
+      key: 'bundle:media:image',
+      kind: 'bundle',
+      entityType: 'media',
+      bundle: 'image',
+      publicEditorialRoot: true,
+      publicSurface: true,
+      publishedCount: 1
+    },
+    {
+      key: 'bundle:taxonomy_term:tags',
+      kind: 'bundle',
+      entityType: 'taxonomy_term',
+      bundle: 'tags',
+      publicEditorialRoot: true,
+      publicSurface: true,
+      publishedCount: 1
+    },
+    {
+      key: 'bundle:block_content:basic',
+      kind: 'bundle',
+      entityType: 'block_content',
+      bundle: 'basic',
+      publicEditorialRoot: true,
+      publicSurface: true,
+      publishedCount: 1
+    }
+  ]);
+  const draft = refreshLiveSurfaceDraft(live);
+  const candidates = Object.fromEntries(
+    draft.items.map((row) => [row.key, row.candidatePacketReferences])
+  );
+
+  assert.deepEqual(candidates['bundle:node:page'], ['pattern-map.json#contentTypes']);
+  assert.deepEqual(candidates['bundle:media:image'], ['pattern-map.json#media']);
+  assert.deepEqual(candidates['bundle:taxonomy_term:tags'], ['pattern-map.json#vocabularies']);
+  assert.deepEqual(candidates['bundle:block_content:basic'], ['pattern-map.json#structuredContentModel']);
+  assert.equal(candidates['bundle:media:image'].includes('pattern-map.json#contentTypes'), false);
+});
+
 test('unchanged dispositions survive refresh and count-only facts do not invalidate ownership', () => {
   const original = inventory([publicBundle(1), privateView()]);
   const authored = resolveDraft(refreshLiveSurfaceDraft(original));

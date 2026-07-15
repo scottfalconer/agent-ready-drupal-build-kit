@@ -281,10 +281,17 @@ function dispositionBasis(item) {
   ));
 }
 
-function candidatePacketReferences(kind) {
+function candidatePacketReferences(item) {
+  const kind = String(item?.kind ?? '');
+  if (kind === 'bundle') {
+    return ({
+      node: ['pattern-map.json#contentTypes'],
+      media: ['pattern-map.json#media'],
+      taxonomy_term: ['pattern-map.json#vocabularies']
+    })[String(item?.entityType ?? '')] ?? ['pattern-map.json#structuredContentModel'];
+  }
   return ({
     alias: ['route-matrix.json#routes'],
-    bundle: ['pattern-map.json#contentTypes'],
     canvas_component: ['pattern-map.json#compositionModel.canvasComponentModel'],
     canvas_page: ['pattern-map.json#pageCompositionOwnership', 'route-matrix.json#routes'],
     canvas_template: ['pattern-map.json#compositionModel.flexibleLandingRoutes'],
@@ -405,7 +412,7 @@ export function refreshLiveSurfaceDraft(inventory, {
         dispositionBasisFingerprint,
         observed,
         recommendedDisposition: recommendedDisposition(item),
-        candidatePacketReferences: candidatePacketReferences(kind),
+        candidatePacketReferences: candidatePacketReferences(item),
         disposition,
         invalidatedDisposition
       };
