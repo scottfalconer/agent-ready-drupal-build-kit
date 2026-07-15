@@ -210,15 +210,24 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
   return collectFileManifest(kitRoot, files).fingerprint;
 }
 
+const REDACTED_QUERY_RE = /^\?query-sha256=[a-f0-9]{64}$/;
+
+function redactedQuery(value) {
+  const query = String(value ?? '');
+  if (!query) return '';
+  const normalized = query.startsWith('?') ? query : `?${query}`;
+  return REDACTED_QUERY_RE.test(normalized)
+    ? normalized
+    : `?query-sha256=${sha256(normalized)}`;
+}
+
 function redactedUrl(value, baseUrl = undefined) {
   try {
     const url = baseUrl ? new URL(value, baseUrl) : new URL(value);
     url.username = '';
     url.password = '';
     url.hash = '';
-    if (url.search) {
-      url.search = `?query-sha256=${sha256(url.search)}`;
-    }
+    if (url.search) url.search = redactedQuery(url.search);
     return url.href;
   } catch {
     return '[invalid-url]';
@@ -228,7 +237,7 @@ function redactedUrl(value, baseUrl = undefined) {
 function redactedPath(value, baseUrl) {
   try {
     const url = new URL(value, baseUrl);
-    return `${url.pathname}${url.search ? `?query-sha256=${sha256(url.search)}` : ''}`;
+    return `${url.pathname}${redactedQuery(url.search)}`;
   } catch {
     return '[invalid-path]';
   }
@@ -240,7 +249,7 @@ function redactQueryValuesInMessage(value) {
     (_match, prefix, rawQueryWithPunctuation) => {
       const [, rawQuery, punctuation = ''] = rawQueryWithPunctuation.match(/^(.*?)([),.;:]*)$/) ?? [];
       return rawQuery
-        ? `${prefix}?query-sha256=${sha256(`?${rawQuery}`)}${punctuation}`
+        ? `${prefix}${redactedQuery(rawQuery)}${punctuation}`
         : _match;
     }
   );
@@ -251,7 +260,7 @@ function sharedPacketDirName(absolutePacketDir) {
   const queryIndex = name.indexOf('?');
   return queryIndex === -1
     ? name
-    : `${name.slice(0, queryIndex)}?query-sha256=${sha256(name.slice(queryIndex))}`;
+    : `${name.slice(0, queryIndex)}${redactedQuery(name.slice(queryIndex))}`;
 }
 
 function sharedMessage(value, absolutePacketDir) {
