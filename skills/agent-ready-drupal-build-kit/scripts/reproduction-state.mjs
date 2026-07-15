@@ -474,6 +474,13 @@ foreach ($loaded_by_type as $entity_type_id => $entities) {
             $target_id = (string) $item['target_id'];
             unset($item['target_id'], $item['target_revision_id']);
             $target_stable = $stable_ids[$target_type][$target_id] ?? '';
+            if (
+              $target_stable === '' &&
+              ($definitions[$target_type] ?? NULL) instanceof \Drupal\Core\Config\Entity\ConfigEntityTypeInterface &&
+              $target_id !== ''
+            ) {
+              $target_stable = 'id:' . $target_id;
+            }
             if ($target_stable === '') {
               $errors[] = 'Entity reference from ' . $entity_type_id . ':' . $stable_id . ' to ' . $target_type . ' lacks a stable target.';
               $target_stable = 'missing-stable-target';

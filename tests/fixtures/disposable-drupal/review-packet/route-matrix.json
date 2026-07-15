@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "public-kit.route-matrix.1",
+  "primaryRoutes": [
+    {
+      "targetPath": "/reproduction-proof",
+      "accepted": true
+    }
+  ],
+  "routes": [],
+  "targetRequiredRoutes": []
+}

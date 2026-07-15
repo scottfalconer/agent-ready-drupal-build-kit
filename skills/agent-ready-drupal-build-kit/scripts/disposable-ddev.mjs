@@ -12,7 +12,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import {
   collectFileManifest,
@@ -26,8 +26,22 @@ const DATABASE_ARCHIVE_RE = /\.(?:sql|mysql)(?:\.(?:gz|bz2|xz))?$|\.(?:zip|tgz|t
 const FILE_ARCHIVE_RE = /\.(?:zip|tgz|tar|tar\.gz|tar\.bz2|tar\.xz)$/i;
 const OWNERSHIP_MARKER = '.agent-ready-disposable-owner.json';
 const MAX_REPRODUCTION_ROUTES = 256;
-const DDEV_CONFIG_FILE_RE = /^config(?:\.[A-Za-z0-9_.-]+)?\.ya?ml$/i;
-const DDEV_COMPOSE_FILE_RE = /^(?:docker-compose|router-compose|ssh-auth-compose)(?:\.[A-Za-z0-9_.-]+)?\.ya?ml$/i;
+const MAX_DDEV_CONFIG_BYTES = 1024 * 1024;
+const SOURCE_DDEV_ROOT_FIELDS = new Set([
+  'additional_fqdns',
+  'additional_hostnames',
+  'composer_version',
+  'corepack_enable',
+  'database',
+  'docroot',
+  'name',
+  'php_version',
+  'type',
+  'use_dns_when_possible',
+  'web_environment',
+  'webserver_type',
+  'xdebug_enabled'
+]);
 
 function comparePortable(left, right) {
   const a = String(left);
@@ -69,78 +83,189 @@ function assertNoSymlinkPath(projectRoot, path, label) {
   }
 }
 
-function ddevProjectFiles(projectRoot) {
+function sourceDdevConfigFile(projectRoot) {
   const ddevRoot = resolve(projectRoot, '.ddev');
   if (!existsSync(ddevRoot) || lstatSync(ddevRoot).isSymbolicLink() || !lstatSync(ddevRoot).isDirectory()) {
     throw new Error('Exact HEAD must contain a regular .ddev directory.');
   }
-  const files = [];
-  const visit = (directory) => {
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => comparePortable(left.name, right.name))) {
-      const path = join(directory, entry.name);
-      const relativePath = relative(ddevRoot, path).split(sep).join('/');
-      const metadata = lstatSync(path);
-      if (entry.isSymbolicLink() || metadata.isSymbolicLink()) {
-        throw new Error(`Disposable DDEV configuration must not contain symlinks: .ddev/${relativePath}.`);
-      }
-      if (metadata.isDirectory()) {
-        visit(path);
-      } else if (metadata.isFile()) {
-        files.push({ path, relativePath });
-      } else {
-        throw new Error(`Disposable DDEV configuration contains an unsupported filesystem entry: .ddev/${relativePath}.`);
-      }
-    }
-  };
-  visit(ddevRoot);
-  return files;
+  const entries = readdirSync(ddevRoot, { withFileTypes: true })
+    .sort((left, right) => comparePortable(left.name, right.name));
+  if (entries.length !== 1 || entries[0].name !== 'config.yaml') {
+    const extras = entries.filter((entry) => entry.name !== 'config.yaml').map((entry) => `.ddev/${entry.name}`);
+    throw new Error(
+      extras.length > 0
+        ? `Disposable DDEV verification rejects every project .ddev file or directory except .ddev/config.yaml: ${extras.join(', ')}.`
+        : 'Exact HEAD must contain only a regular .ddev/config.yaml.'
+    );
+  }
+  const configPath = join(ddevRoot, 'config.yaml');
+  const metadata = lstatSync(configPath);
+  if (entries[0].isSymbolicLink() || metadata.isSymbolicLink() || !metadata.isFile() || (metadata.mode & 0o111) !== 0) {
+    throw new Error('Exact HEAD must contain a regular non-symlink, non-executable .ddev/config.yaml.');
+  }
+  if (metadata.size > MAX_DDEV_CONFIG_BYTES) {
+    throw new Error(`Exact HEAD .ddev/config.yaml exceeds ${MAX_DDEV_CONFIG_BYTES} bytes.`);
+  }
+  return { ddevRoot, path: configPath };
 }
 
-function activeDdevConfigText(text) {
-  const active = String(text).split(/\r?\n/)
-    .filter((line) => !line.trimStart().startsWith('#'))
-    .join('\n');
-  return active
-    .replace(/\\u([a-f0-9]{4})/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
-    .replace(/\\x([a-f0-9]{2})/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+function restrictedYamlScalar(raw, label) {
+  const text = String(raw ?? '').trim();
+  let match = text.match(/^"([^"\\]*)"\s*(?:#.*)?$/);
+  if (match) return match[1];
+  match = text.match(/^'([^']*)'\s*(?:#.*)?$/);
+  if (match) return match[1];
+  match = text.match(/^([^#\r\n]*?)\s*(?:#.*)?$/);
+  const value = String(match?.[1] ?? '').trim();
+  if (!value || /["'\\\[\]{}&*!|>@`]/.test(value)) {
+    throw new Error(`${label} must use one bounded plain or simply quoted scalar.`);
+  }
+  return value;
+}
+
+function restrictedYamlBoolean(raw, label) {
+  const value = restrictedYamlScalar(raw, label).toLowerCase();
+  if (!['true', 'false'].includes(value)) throw new Error(`${label} must be true or false.`);
+  return value === 'true';
+}
+
+function restrictedYamlEmptyList(raw, label) {
+  if (!/^\[\]\s*(?:#.*)?$/.test(String(raw ?? '').trim())) {
+    throw new Error(`${label} must be an explicit empty list.`);
+  }
+  return [];
+}
+
+function safeDdevDocroot(projectRoot, value) {
+  const docroot = safeProjectRelativePath(value, 'DDEV docroot');
+  const path = resolve(projectRoot, docroot);
+  if (!isInside(projectRoot, path)) throw new Error('DDEV docroot escaped the exact-HEAD project root.');
+  assertNoSymlinkPath(projectRoot, path, 'DDEV docroot');
+  const metadata = lstatSync(path);
+  if (!metadata.isDirectory()) throw new Error('DDEV docroot must be a regular project directory.');
+  return docroot;
+}
+
+function sourceDdevRuntimeFacts(projectRoot, text) {
+  if (text.includes('\u0000') || /\\(?:u[0-9a-f]{4}|x[0-9a-f]{2})/i.test(text)) {
+    throw new Error('Exact HEAD .ddev/config.yaml must not contain escaped or control key material.');
+  }
+  const values = new Map();
+  const database = new Map();
+  let section = '';
+  for (const [index, line] of String(text).replace(/^\uFEFF/, '').split(/\r?\n/).entries()) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    if (line.includes('\t')) throw new Error(`Exact HEAD .ddev/config.yaml line ${index + 1} must not contain tabs.`);
+    if (/^\s/.test(line)) {
+      if (section !== 'database') {
+        throw new Error(`Exact HEAD .ddev/config.yaml line ${index + 1} contains unsupported nested configuration.`);
+      }
+      const child = line.match(/^ {2,4}([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+      if (!child || !['type', 'version'].includes(child[1])) {
+        throw new Error(`Exact HEAD .ddev/config.yaml database accepts only type and version.`);
+      }
+      if (database.has(child[1])) throw new Error(`Exact HEAD .ddev/config.yaml contains duplicate database.${child[1]}.`);
+      database.set(child[1], restrictedYamlScalar(child[2], `DDEV database.${child[1]}`));
+      continue;
+    }
+    const root = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/);
+    if (!root) throw new Error(`Exact HEAD .ddev/config.yaml line ${index + 1} uses unsupported YAML syntax.`);
+    const [, key, raw] = root;
+    if (!SOURCE_DDEV_ROOT_FIELDS.has(key)) {
+      throw new Error(`Exact HEAD .ddev/config.yaml contains unsupported field ${key}.`);
+    }
+    if (values.has(key)) throw new Error(`Exact HEAD .ddev/config.yaml contains duplicate field ${key}.`);
+    values.set(key, raw);
+    section = key;
+    if (key === 'database') {
+      if (!/^\s*(?:#.*)?$/.test(raw)) throw new Error('DDEV database must be a nested type/version mapping.');
+      continue;
+    }
+    if (key === 'web_environment') restrictedYamlEmptyList(raw, 'DDEV web_environment');
+    section = '';
+  }
+
+  const sourceName = restrictedYamlScalar(values.get('name'), 'DDEV name');
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(sourceName)) throw new Error('DDEV name must use a bounded portable project name.');
+  const type = restrictedYamlScalar(values.get('type'), 'DDEV type');
+  if (!/^drupal(?:9|10|11|12)?$/.test(type)) throw new Error('DDEV type must be a supported Drupal project type.');
+  const docroot = safeDdevDocroot(projectRoot, restrictedYamlScalar(values.get('docroot'), 'DDEV docroot'));
+  const phpVersion = values.has('php_version') ? restrictedYamlScalar(values.get('php_version'), 'DDEV php_version') : '';
+  if (phpVersion && !/^8\.[1-5]$/.test(phpVersion)) throw new Error('DDEV php_version must be an allowed PHP 8 minor version.');
+  const webserverType = values.has('webserver_type')
+    ? restrictedYamlScalar(values.get('webserver_type'), 'DDEV webserver_type')
+    : '';
+  if (webserverType && !['apache-fpm', 'nginx-fpm'].includes(webserverType)) {
+    throw new Error('DDEV webserver_type must be apache-fpm or nginx-fpm.');
+  }
+  if (values.has('xdebug_enabled')) restrictedYamlBoolean(values.get('xdebug_enabled'), 'DDEV xdebug_enabled');
+  if (values.has('additional_hostnames')) restrictedYamlEmptyList(values.get('additional_hostnames'), 'DDEV additional_hostnames');
+  if (values.has('additional_fqdns')) restrictedYamlEmptyList(values.get('additional_fqdns'), 'DDEV additional_fqdns');
+  if (values.has('use_dns_when_possible')) restrictedYamlBoolean(values.get('use_dns_when_possible'), 'DDEV use_dns_when_possible');
+  if (values.has('corepack_enable')) restrictedYamlBoolean(values.get('corepack_enable'), 'DDEV corepack_enable');
+  if (values.has('composer_version') && restrictedYamlScalar(values.get('composer_version'), 'DDEV composer_version') !== '2') {
+    throw new Error('DDEV composer_version must use the default major version 2.');
+  }
+  if (values.has('web_environment')) restrictedYamlEmptyList(values.get('web_environment'), 'DDEV web_environment');
+
+  const databaseType = database.has('type') ? database.get('type') : '';
+  const databaseVersion = database.has('version') ? database.get('version') : '';
+  if (values.has('database') && (!databaseType || !databaseVersion)) {
+    throw new Error('DDEV database must declare both type and version.');
+  }
+  if (databaseType && !['mariadb', 'mysql', 'postgres'].includes(databaseType)) {
+    throw new Error('DDEV database.type must be mariadb, mysql, or postgres.');
+  }
+  if (databaseVersion && !/^\d+(?:\.\d+){0,2}$/.test(databaseVersion)) {
+    throw new Error('DDEV database.version must be a numeric version.');
+  }
+  return { databaseType, databaseVersion, docroot, phpVersion, type, webserverType };
 }
 
 /**
- * Refuse project-controlled DDEV surfaces that can execute on the host, shadow
- * fixed commands, fetch remote configuration, or mount host capabilities into
- * the disposable containers. Exact-HEAD provenance is not an execution sandbox.
+ * Project DDEV configuration is data, never an execution boundary. Accept one
+ * bounded config.yaml, project only strict typed runtime facts, and reject every
+ * extra .ddev file/directory before replacing the directory wholesale.
  */
 export function assertSafeDisposableDdevConfig(projectRoot) {
-  const files = ddevProjectFiles(projectRoot);
-  for (const file of files) {
-    if (file.relativePath.startsWith('commands/')) {
-      throw new Error(`Disposable DDEV verification rejects project custom commands: .ddev/${file.relativePath}.`);
-    }
-    const name = file.relativePath.split('/').at(-1) ?? '';
-    if (DDEV_COMPOSE_FILE_RE.test(name)) {
-      throw new Error(`Disposable DDEV verification rejects project compose overrides: .ddev/${file.relativePath}.`);
-    }
-    if (!DDEV_CONFIG_FILE_RE.test(name)) continue;
-    const text = activeDdevConfigText(readFileSync(file.path, 'utf8'));
-    if (DDEV_CONFIG_FILE_RE.test(name)) {
-      if (/(?:^|[\s,{])["']?hooks["']?\s*:/im.test(text)) {
-        throw new Error(`Disposable DDEV verification rejects project hooks in .ddev/${file.relativePath}.`);
-      }
-      if (/(?:^|[\s,{])["']?remote_config["']?\s*:/im.test(text)) {
-        throw new Error(`Disposable DDEV verification rejects remote_config in .ddev/${file.relativePath}.`);
-      }
-      if (/(?:^|[\s,[{])(?:&|\*)[A-Za-z0-9_.-]+/m.test(text)) {
-        throw new Error(`Disposable DDEV verification rejects YAML anchors or aliases in .ddev/${file.relativePath}.`);
-      }
-    }
+  const config = sourceDdevConfigFile(projectRoot);
+  const bytes = readFileSync(config.path);
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error('Exact HEAD .ddev/config.yaml must be valid UTF-8.');
   }
+  const facts = sourceDdevRuntimeFacts(projectRoot, text);
   return {
-    checkedFileCount: files.length,
-    fingerprint: sha256(files.map((file) => ({
-      path: `.ddev/${file.relativePath}`,
-      sha256: sha256(readFileSync(file.path))
-    })))
+    checkedFileCount: 1,
+    facts,
+    fingerprint: sha256([{ path: '.ddev/config.yaml', sha256: sha256(bytes) }])
   };
+}
+
+function establishVerifierOwnedDdevConfig(projectRoot, name, facts) {
+  const ddevRoot = resolve(projectRoot, '.ddev');
+  rmSync(ddevRoot, { force: false, recursive: true });
+  mkdirSync(ddevRoot, { mode: 0o700 });
+  const lines = [
+    '# Verifier-owned minimal DDEV runtime; project .ddev files are not executed.',
+    `name: ${JSON.stringify(name)}`,
+    `type: ${JSON.stringify(facts.type)}`,
+    `docroot: ${JSON.stringify(facts.docroot)}`,
+    'project_tld: "ddev.site"',
+    'xdebug_enabled: false'
+  ];
+  if (facts.phpVersion) lines.push(`php_version: ${JSON.stringify(facts.phpVersion)}`);
+  if (facts.webserverType) lines.push(`webserver_type: ${JSON.stringify(facts.webserverType)}`);
+  if (facts.databaseType && facts.databaseVersion) {
+    lines.push('database:');
+    lines.push(`  type: ${JSON.stringify(facts.databaseType)}`);
+    lines.push(`  version: ${JSON.stringify(facts.databaseVersion)}`);
+  }
+  const contents = `${lines.join('\n')}\n`;
+  writeFileSync(join(ddevRoot, 'config.yaml'), contents, { flag: 'wx', mode: 0o600 });
+  return { configSha256: sha256(contents), factsSha256: sha256(facts) };
 }
 
 function assertExactKeys(value, allowed, label) {
@@ -521,10 +646,22 @@ export function createRecordedExecutor({ commandLog, environment = process.env, 
   const execute = (command, args, options = {}) => {
     const startedAt = new Date().toISOString();
     const started = Date.now();
+    let commandEnvironment = environment;
+    if (command === 'ddev' && options.ddevXdgConfigHome) {
+      const requestedConfigHome = resolve(String(options.ddevXdgConfigHome));
+      const metadata = lstatSync(requestedConfigHome);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error('Verifier-owned DDEV_XDG_CONFIG_HOME must be a regular directory.');
+      }
+      const configHome = realpathSync(requestedConfigHome);
+      commandEnvironment = Object.fromEntries(Object.entries(environment)
+        .filter(([key]) => !/^(?:DDEV|COMPOSE)_/i.test(key)));
+      commandEnvironment.DDEV_XDG_CONFIG_HOME = configHome;
+    }
     const result = spawn(command, args, {
       cwd: options.cwd,
       encoding: 'utf8',
-      env: environment,
+      env: commandEnvironment,
       input: options.input,
       maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
       shell: false,
@@ -564,7 +701,9 @@ function ddevName(head) {
 
 /** Create an independent exact-HEAD clone and a machine-local DDEV identity. */
 export function createDisposableClone({ execute, head, projectRoot, tempParent = tmpdir() }) {
-  const root = mkdtempSync(join(tempParent, 'agent-ready-drupal-reproduction-'));
+  const ownerRoot = mkdtempSync(join(tempParent, 'agent-ready-drupal-reproduction-'));
+  const root = join(ownerRoot, 'project');
+  const ddevXdgConfigHome = join(ownerRoot, 'xdg');
   const token = randomUUID();
   const name = ddevName(head);
   try {
@@ -579,36 +718,50 @@ export function createDisposableClone({ execute, head, projectRoot, tempParent =
       phase: 'checkout-exact-head',
       target: 'disposable'
     });
+    const exactHeadRuntime = exactHeadRuntimeBinding(root);
     const ddevSafety = assertSafeDisposableDdevConfig(root);
-    const ddevDirectory = resolve(root, '.ddev');
-    if (!existsSync(ddevDirectory) || !lstatSync(ddevDirectory).isDirectory() || lstatSync(ddevDirectory).isSymbolicLink()) {
-      throw new Error('Exact HEAD does not contain a regular .ddev directory.');
-    }
-    const localConfig = join(ddevDirectory, 'config.local.yaml');
-    if (existsSync(localConfig)) throw new Error('Disposable clone unexpectedly contains .ddev/config.local.yaml.');
-    writeFileSync(localConfig, `# Verifier-owned machine-local identity.\nname: ${name}\n`, { flag: 'wx', mode: 0o600 });
-    writeFileSync(join(root, OWNERSHIP_MARKER), `${JSON.stringify({ name, token }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    return { ddevSafety, name, root, token };
+    const runtime = establishVerifierOwnedDdevConfig(root, name, ddevSafety.facts);
+    mkdirSync(ddevXdgConfigHome, { mode: 0o700 });
+    writeFileSync(join(ownerRoot, OWNERSHIP_MARKER), `${JSON.stringify({
+      ddevXdgDirectory: 'xdg',
+      name,
+      projectDirectory: 'project',
+      token
+    }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    return { ddevSafety, ddevXdgConfigHome, exactHeadRuntime, name, ownerRoot, root, runtime, token };
   } catch (error) {
-    rmSync(root, { force: true, recursive: true });
+    rmSync(ownerRoot, { force: true, recursive: true });
     throw error;
   }
 }
 
 export function assertDisposableOwnership(disposable) {
+  const ownerRoot = resolve(disposable?.ownerRoot ?? '');
   const root = resolve(disposable?.root ?? '');
-  if (!root || !existsSync(root) || lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()) {
+  const ddevXdgConfigHome = resolve(disposable?.ddevXdgConfigHome ?? '');
+  if (
+    !ownerRoot || !existsSync(ownerRoot) || lstatSync(ownerRoot).isSymbolicLink() || !lstatSync(ownerRoot).isDirectory() ||
+    !basename(ownerRoot).startsWith('agent-ready-drupal-reproduction-') ||
+    !root || !existsSync(root) || lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() ||
+    !ddevXdgConfigHome || !existsSync(ddevXdgConfigHome) || lstatSync(ddevXdgConfigHome).isSymbolicLink() ||
+    !lstatSync(ddevXdgConfigHome).isDirectory() ||
+    dirname(root) !== ownerRoot || dirname(ddevXdgConfigHome) !== ownerRoot ||
+    basename(root) !== 'project' || basename(ddevXdgConfigHome) !== 'xdg'
+  ) {
     throw new Error('Disposable cleanup root is missing or unsafe.');
   }
-  const markerPath = join(root, OWNERSHIP_MARKER);
-  assertNoSymlinkPath(root, markerPath, 'Disposable ownership marker');
+  const markerPath = join(ownerRoot, OWNERSHIP_MARKER);
+  assertNoSymlinkPath(ownerRoot, markerPath, 'Disposable ownership marker');
   let marker;
   try {
     marker = JSON.parse(readFileSync(markerPath, 'utf8'));
   } catch {
     throw new Error('Disposable ownership marker is invalid.');
   }
-  if (marker?.token !== disposable.token || marker?.name !== disposable.name) {
+  if (
+    marker?.token !== disposable.token || marker?.name !== disposable.name ||
+    marker?.projectDirectory !== 'project' || marker?.ddevXdgDirectory !== 'xdg'
+  ) {
     throw new Error('Disposable ownership marker does not match this verifier run.');
   }
   if (!/^agent-ready-repro-[a-f0-9]{8}-[a-f0-9]{8}$/.test(disposable.name)) {
@@ -644,6 +797,7 @@ export function confirmDisposableDdevIdentity({ disposable, execute, phase = 'co
   const root = assertDisposableOwnership(disposable);
   const output = requiredCommand(execute, 'ddev', ['describe', '-j'], {
     cwd: root,
+    ddevXdgConfigHome: disposable.ddevXdgConfigHome,
     phase,
     target: 'disposable',
     timeout: 20_000
@@ -674,11 +828,12 @@ export function cleanupDisposable({ ddevStartAttempted, disposable, execute }) {
     });
     requiredCommand(execute, 'ddev', ['delete', '--omit-snapshot', '--yes', disposable.name], {
       cwd: root,
+      ddevXdgConfigHome: disposable.ddevXdgConfigHome,
       phase: 'delete-owned-disposable-ddev',
       target: 'disposable'
     });
   }
-  rmSync(root, { force: true, recursive: true });
+  rmSync(disposable.ownerRoot, { force: true, recursive: true });
   return { deletedDdevProject: ddevStartAttempted, removedClone: true };
 }
 
