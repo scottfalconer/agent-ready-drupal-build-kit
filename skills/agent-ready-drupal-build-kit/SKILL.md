@@ -81,6 +81,8 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/verification-observabil
 
 Everything under `.agent-ready-drupal/` is kit-owned, self-ignored local operating state marked `evidenceAuthority: none` and bound to, but outside, the authoritative report; do not commit it or use it as gate evidence. The verifier declines to write if that namespace already exists without its ownership marker or if its ignore policy was modified. Compare only matching workload/environment cohorts and their separate implementation fingerprints. Phase spans can overlap, so never sum their durations. The recorded verification duration stops before observability persistence and is labeled accordingly. Metrics and `agent-next.json` are diagnostic only and never replace a fresh live verification.
 
+For maintainers measuring a future Global Chrome reuse design, `verify.mjs --reuse=shadow` reads a diagnostic prediction and still performs the unchanged fresh capture. It can never alter the report, claim, lifecycle result, or exit status; actual reuse is rejected. Use `references/verification-reuse.md` for the remote-browser-only key, seed plus two-confirmation qualification, permanent mismatch quarantine, and counterfactual timing protocol.
+
 ## Review and verification
 
 Completion authority comes from the final verifier, not builder-authored `completeLocalRebuildClaimAllowed` fields.
@@ -177,6 +179,7 @@ Everything required at runtime is inside this skill directory:
 - `scripts/verify-packet.mjs` performs structural packet linting only.
 - `scripts/verify-assembly.mjs` performs optional launch-only assembly convergence, extension-survival, and restoration proof in an exact-HEAD disposable DDEV clone; use `references/disposable-assembly.md` and never treat it as default handoff authority or a substitute for final-state reproduction.
 - `scripts/verification-observability.mjs` reports bounded, overlap-aware verifier timing and matched workload cohorts; its output is non-evidence.
+- `scripts/verification-reuse.mjs` implements the diagnostic-only Global Chrome shadow predictor; it never skips verification or authorizes completion.
 - `scripts/verify-reproduction.mjs` performs optional exact-HEAD disposable DDEV reproduction from a typed, digest-bound plan; run it from the DDEV host and treat its result as maintainer/launch evidence, not default handoff authority.
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.

@@ -118,7 +118,10 @@ test('verifyLive preflights browser capture before source/target work and awaits
   assert.ok(start >= 0, 'verifyLive must exist');
   const body = source.slice(start);
 
-  const browserCapture = body.indexOf('const rawGlobalChromeCapture = await phaseRecorder.measure(');
+  const browserCapture = body.indexOf(
+    'const globalChromeExecution = await captureGlobalChromeWithShadowPrediction({'
+  );
+  const freshBrowserCapture = body.indexOf("captureFresh: () => phaseRecorder.measure(\n      'global-chrome'");
   const censusAttempted = body.indexOf('const sourceCensusAttempted = Boolean(');
   const censusStart = body.indexOf('const sourceSurfaceCensusPromise = phaseRecorder.measure(');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
@@ -127,6 +130,16 @@ test('verifyLive preflights browser capture before source/target work and awaits
   const censusAwait = body.indexOf('await sourceSurfaceCensusPromise');
 
   assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
+  assert.ok(freshBrowserCapture > browserCapture, 'shadow orchestration must retain the measured fresh capture');
+  assert.equal(
+    body.includes('const codeManifest = reusableCodeManifest ??'),
+    false,
+    'shadow prediction must not replace the late authoritative code-manifest collection'
+  );
+  assert.ok(
+    body.indexOf('const codeManifest = runtimeProjectRoot') > browserCapture,
+    'the authoritative code manifest must still be collected after browser capture'
+  );
   assert.ok(censusAttempted >= 0, 'source census timing must declare whether work was attempted');
   assert.ok(censusStart >= 0, 'source census scheduling must exist');
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
