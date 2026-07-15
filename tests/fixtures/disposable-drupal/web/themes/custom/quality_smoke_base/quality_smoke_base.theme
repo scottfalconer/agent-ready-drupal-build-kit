@@ -1,5 +1,10 @@
 <?php
 
+/**
+ * @file
+ * Provides Phase C entity-output smoke theme hooks.
+ */
+
 declare(strict_types=1);
 
 use Drupal\node\NodeInterface;
