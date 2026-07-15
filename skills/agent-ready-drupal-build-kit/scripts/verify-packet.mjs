@@ -497,6 +497,16 @@ function allPassingRecords(values, { allowNotApplicable = false } = {}) {
   return records.length > 0 && records.every((record) => acceptedStatuses.has(record.status));
 }
 
+function briefModeDispositionReady(record, artifact, briefSha256) {
+  return record?.schemaVersion === 'public-kit.mode-disposition.1' &&
+    record?.artifact === artifact &&
+    record?.buildMode === 'brief' &&
+    record?.claimScope === 'complete-local-build-from-brief' &&
+    record?.briefSha256 === briefSha256 &&
+    record?.status === 'not_applicable' &&
+    String(record?.reason ?? '').trim().length > 0;
+}
+
 function finiteNumberValue(value) {
   return value !== null && value !== '' && Number.isFinite(Number(value));
 }
@@ -5305,14 +5315,22 @@ async function briefPacketCompletionReadiness(
     independentVerification,
     negativeRouteConsent,
     nextCycleVerification,
+    parityReport,
     patternMap,
-    routeMatrix
+    routeMatrix,
+    sourceAudit
   } = records;
   reasons.push(...markdownAssessment.reasons);
   reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
 
   if (briefContext?.mode !== 'brief' || !briefContext?.briefPath || !briefContext?.briefSha256) {
     reasons.push('build-input.json must bind brief mode to a preserved packet-local original brief.');
+  }
+  if (!briefModeDispositionReady(sourceAudit, 'source-audit.json', briefContext?.briefSha256)) {
+    reasons.push('Brief mode source-audit.json must be an explicit not-applicable disposition bound to the preserved brief.');
+  }
+  if (!briefModeDispositionReady(parityReport, 'parity-report.json', briefContext?.briefSha256)) {
+    reasons.push('Brief mode parity-report.json must be an explicit not-applicable disposition bound to the preserved brief.');
   }
   const requirements = arrayOrEmpty(briefAcceptance?.requirements)
     .filter((requirement) => String(requirement?.id ?? '').trim());

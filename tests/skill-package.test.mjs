@@ -341,6 +341,22 @@ test('initializer creates a hash-bound brief packet without inventing a source s
     JSON.parse(readFileSync(join(root, 'review-packet', 'brief-acceptance.json'), 'utf8')).briefSha256,
     expectedHash
   );
+  for (const artifact of ['source-audit.json', 'parity-report.json']) {
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, 'review-packet', artifact), 'utf8')),
+      {
+        schemaVersion: 'public-kit.mode-disposition.1',
+        artifact,
+        buildMode: 'brief',
+        claimScope: 'complete-local-build-from-brief',
+        briefSha256: expectedHash,
+        status: 'not_applicable',
+        reason: artifact === 'source-audit.json'
+          ? 'Brief mode has no source site to audit. The preserved brief and accepted BR requirements are the source of truth.'
+          : 'Brief mode has no source site to compare. Completion is measured against the preserved brief and accepted BR requirements.'
+      }
+    );
+  }
   const agents = readFileSync(join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /Build basis: `brief`/);
   assert.match(agents, /Source-site parity is not claimed/);
@@ -350,6 +366,7 @@ test('initializer creates a hash-bound brief packet without inventing a source s
   assert.equal(repeated.status, 0, repeated.stderr);
   assert.match(repeated.stdout, /AGENTS\.md: unchanged/);
   assert.match(repeated.stdout, /0 created, 22 preserved/);
+  assert.match(repeated.stdout, /Brief-only N\/A dispositions: 0 materialized/);
 
   const packetOnly = spawnSync(process.execPath, [
     join(skillRoot, 'scripts', 'verify.mjs'),

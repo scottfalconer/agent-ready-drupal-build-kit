@@ -5759,7 +5759,14 @@ function completionEvidenceTargetErrors({
     requiredOriginMatch(errors, 'pattern-map.json sourceSite', patternMap?.sourceSite, sourceOrigin);
   }
   requiredOriginMatch(errors, 'field-output-matrix.json site', fieldOutputMatrix?.site, targetOrigin);
-  requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
+  const briefParityNotApplicable = !sourceOrigin &&
+    parityReport?.schemaVersion === 'public-kit.mode-disposition.1' &&
+    parityReport?.artifact === 'parity-report.json' &&
+    parityReport?.buildMode === 'brief' &&
+    parityReport?.status === 'not_applicable';
+  if (!briefParityNotApplicable) {
+    requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
+  }
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
   requiredOriginMatch(errors, 'drupal-readback.json site', drupalReadback?.site, targetOrigin);
   requiredOriginMatch(errors, 'negative-route-consent.json site', negativeRouteConsent?.site, targetOrigin);

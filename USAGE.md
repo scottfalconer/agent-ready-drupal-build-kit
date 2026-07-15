@@ -34,7 +34,7 @@ Use the build kit as your instructions and handle all setup yourself. If needed,
 As soon as the first meaningful brief-defined route works, share its DDEV URL with me, then continue. Preserve the original brief, verify every accepted requirement, and do not claim source-site parity.
 ```
 
-Brief mode keeps the original file in the review packet, derives stable requirement IDs and route-bound acceptance checks, and records assumptions, exclusions, and blockers. Its machine claim is `complete-local-build-from-brief`; source parity is neither required nor implied.
+Brief mode keeps the original file in the review packet, derives stable requirement IDs and route-bound acceptance checks, and records assumptions, exclusions, and blockers. Its machine claim is `complete-local-build-from-brief`; source parity is neither required nor implied. The initializer replaces the source-audit and parity templates with brief-hash-bound `not_applicable` dispositions, so they cannot be mistaken for unfinished source-site evidence.
 
 ## Manual Setup (Optional)
 

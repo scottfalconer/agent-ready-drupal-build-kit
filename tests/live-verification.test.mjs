@@ -1912,6 +1912,17 @@ function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
     outOfScope: [],
     blockers: []
   });
+  for (const artifact of ['source-audit.json', 'parity-report.json']) {
+    writeJson(join(packetDir, artifact), {
+      schemaVersion: 'public-kit.mode-disposition.1',
+      artifact,
+      buildMode: 'brief',
+      claimScope: 'complete-local-build-from-brief',
+      briefSha256: briefHash,
+      status: 'not_applicable',
+      reason: `Brief mode does not use ${artifact} as completion evidence.`
+    });
+  }
 
   mutateJson(join(packetDir, 'route-matrix.json'), (matrix) => {
     matrix.sourceBaseUrl = '';
@@ -3929,6 +3940,18 @@ test('brief mode verifies target routes without requiring or implying a source s
         true,
         JSON.stringify(packetReport.completionEvidence, null, 2)
       );
+
+      const parityPath = join(packetDir, 'parity-report.json');
+      const parityDisposition = JSON.parse(readFileSync(parityPath, 'utf8'));
+      writeJson(parityPath, { ...parityDisposition, briefSha256: `sha256:${'f'.repeat(64)}` });
+      const staleDispositionReport = await validatePacket({ packetDir });
+      assert.equal(staleDispositionReport.valid, true, staleDispositionReport.errors.join('\n'));
+      assert.equal(staleDispositionReport.completionEvidence.packetSupportsCompletion, false);
+      assert.match(
+        staleDispositionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /parity-report\.json.*not-applicable disposition bound to the preserved brief/i
+      );
+      writeJson(parityPath, parityDisposition);
 
       const report = await verifyLive({
         packetDir,
