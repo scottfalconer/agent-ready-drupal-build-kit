@@ -136,6 +136,11 @@ function copyPlan(assetsOnly) {
         destination: join(skillRoot, 'scripts', 'assembly-persistence.mjs')
       },
       {
+        source: join(repoRoot, 'bin', 'verification-observability.mjs'),
+        destination: join(skillRoot, 'scripts', 'verification-observability.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'disposable-ddev.mjs'),
         destination: join(skillRoot, 'scripts', 'disposable-ddev.mjs')
       },

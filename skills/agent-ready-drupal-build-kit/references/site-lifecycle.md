@@ -32,6 +32,19 @@ A pre-lifecycle packet remains structurally valid. A historical green report wit
 
 The intrinsic site fingerprint covers portable tracked configuration and runtime code, effective active configuration and database-update state, declared editorial entity bundles and their revisions/translations, privacy-screened public author data, managed `public://` file bytes, stable route semantics, and a bounded digest manifest of critical same-origin stylesheets, scripts, images/srcset candidates, posters, and declared preloads rendered by verified routes. Asset requests reject cross-origin redirects, invalid responses, incompatible content types, and request/byte/time budget overruns. Third-party assets remain URL-bound route semantics rather than fetched bytes. The passing report also retains a manifest of the packet and evidence bytes it consumed. Verifier version, target origin/raw responses, PHP version, database driver, effective-settings digest, Config Split directory paths, and other digest-only machine-local environment bindings remain evidence rather than intrinsic site components, so a router-port or local runtime change requires a fresh inspection without pretending Drupal content changed.
 
+## Inspect Verification Observability
+
+The live verifier automatically records bounded local run metrics and refreshes `.agent-ready-drupal/agent-next.json`. All `.agent-ready-drupal/` content is kit-owned, self-ignored project-local operating state with explicit `evidenceAuthority: none`, not packet or lifecycle evidence. Read `agent-next.json` for the compact blocker delta during repair, then use the exact hash-bound full live report for the underlying findings and authority decision. The verifier declines to write if the namespace is unowned or its ignore policy was changed.
+
+Summarize human-readable or structured verifier timing with:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/verification-observability.mjs report
+node .agents/skills/agent-ready-drupal-build-kit/scripts/verification-observability.mjs report --json
+```
+
+Reports group like verifier workloads by fingerprint. Each workload binds route roles/multiplicity, source-surface scope, and digest-only machine/runtime environment, then splits by verifier implementation fingerprint. This permits before/after kit comparisons without treating different sites, route sets, source crawls, or runtime environments as equivalent. The plain report labels global inventory as non-comparative and shows matched cohort sample counts; use JSON for full phase cohorts. Verifier phase spans are overlap-aware: source, target, browser, and other work may run concurrently, so phase durations must not be summed. `verificationPreObservabilityMs` stops before observability preparation and persistence and is not full CLI wall time. Use it with completed, attempted phase medians to locate recurring cost; skipped/failed/aborted work is reported separately. These measurements help assess workflow changes; they never authorize reuse, substitute for live evidence, or remove the requirement for a fresh verifier before completion.
+
 ## Anchors And Change Types
 
 Each new change starts from the latest verified or evidence-recorded anchor. That can be the initial baseline, an `evidence_recorded` change result, or a later fully verified checkpoint. `begin` stores its stable identifier as `baseAnchorId` so the next result cannot silently attach to some other starting state.

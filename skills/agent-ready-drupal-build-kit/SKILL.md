@@ -70,6 +70,17 @@ Build the real Drupal site, not a static lookalike, screenshot, packet-only arti
 6. Test anonymous public routes and a realistic non-admin editor workflow. Every custom public bundle and every bundle that owns repeating public content needs this workflow. A representative editor must be able to add or change recurring content and see it on the expected public route without code changes. Independently falsify each load-bearing field and each field claimed to affect anonymous output.
 7. Keep `review-packet/` current using the initialized templates. Record facts and evidence, not optimistic summaries.
 
+## Inspect verification observability
+
+Every default live-verifier run records bounded, best-effort observability data and refreshes `.agent-ready-drupal/agent-next.json` automatically. Read that compact file for the current action, stable blocker IDs, totals, and added/resolved delta before reopening the full report. Summarize matched verification cohorts with:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/verification-observability.mjs report
+node .agents/skills/agent-ready-drupal-build-kit/scripts/verification-observability.mjs report --json
+```
+
+Everything under `.agent-ready-drupal/` is kit-owned, self-ignored local operating state marked `evidenceAuthority: none` and bound to, but outside, the authoritative report; do not commit it or use it as gate evidence. The verifier declines to write if that namespace already exists without its ownership marker or if its ignore policy was modified. Compare only matching workload/environment cohorts and their separate implementation fingerprints. Phase spans can overlap, so never sum their durations. The recorded verification duration stops before observability persistence and is labeled accordingly. Metrics and `agent-next.json` are diagnostic only and never replace a fresh live verification.
+
 ## Review and verification
 
 Completion authority comes from the final verifier, not builder-authored `completeLocalRebuildClaimAllowed` fields.
@@ -165,6 +176,7 @@ Everything required at runtime is inside this skill directory:
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
 - `scripts/verify-assembly.mjs` performs optional launch-only assembly convergence, extension-survival, and restoration proof in an exact-HEAD disposable DDEV clone; use `references/disposable-assembly.md` and never treat it as default handoff authority or a substitute for final-state reproduction.
+- `scripts/verification-observability.mjs` reports bounded, overlap-aware verifier timing and matched workload cohorts; its output is non-evidence.
 - `scripts/verify-reproduction.mjs` performs optional exact-HEAD disposable DDEV reproduction from a typed, digest-bound plan; run it from the DDEV host and treat its result as maintainer/launch evidence, not default handoff authority.
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.

@@ -1,4 +1,5 @@
 .agents/
+.agent-ready-drupal/
 .claude/
 .DS_Store
 *.tgz

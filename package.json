@@ -31,6 +31,7 @@
     "review-handoff": "node bin/review-handoff.mjs",
     "verify-assembly": "node bin/verify-assembly.mjs",
     "verify-reproduction": "node bin/verify-reproduction.mjs",
+    "verification-observability": "node bin/verification-observability.mjs",
     "lifecycle": "node bin/lifecycle.mjs"
   },
   "bin": {
@@ -41,6 +42,7 @@
     "agent-ready-drupal-review-handoff": "bin/review-handoff.mjs",
     "agent-ready-drupal-verify-assembly": "bin/verify-assembly.mjs",
     "agent-ready-drupal-verify-reproduction": "bin/verify-reproduction.mjs",
+    "agent-ready-drupal-verification-observability": "bin/verification-observability.mjs",
     "agent-ready-drupal-lifecycle": "bin/lifecycle.mjs"
   },
   "engines": {

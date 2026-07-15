@@ -118,14 +118,16 @@ test('verifyLive preflights browser capture before source/target work and awaits
   assert.ok(start >= 0, 'verifyLive must exist');
   const body = source.slice(start);
 
-  const browserCapture = body.indexOf('const rawGlobalChromeCapture = browserCaptureAttempted');
-  const censusStart = body.indexOf('const sourceSurfaceCensusPromise = briefMode');
+  const browserCapture = body.indexOf('const rawGlobalChromeCapture = await phaseRecorder.measure(');
+  const censusAttempted = body.indexOf('const sourceCensusAttempted = Boolean(');
+  const censusStart = body.indexOf('const sourceSurfaceCensusPromise = phaseRecorder.measure(');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
   const accessWallCheck = body.indexOf('Access-wall verification could not complete');
   const legalPrivacyCheck = body.indexOf('Legal/privacy-link verification could not complete');
   const censusAwait = body.indexOf('await sourceSurfaceCensusPromise');
 
   assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
+  assert.ok(censusAttempted >= 0, 'source census timing must declare whether work was attempted');
   assert.ok(censusStart >= 0, 'source census scheduling must exist');
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
   assert.ok(accessWallCheck >= 0, 'access-wall target-side check must exist');
@@ -135,6 +137,10 @@ test('verifyLive preflights browser capture before source/target work and awaits
   assert.ok(
     browserCapture < censusStart,
     'browser capture must finish before source census scheduling'
+  );
+  assert.ok(
+    censusAttempted < censusStart,
+    'source census attempted state must be computed before timing begins'
   );
   assert.ok(
     censusStart < contextCreation,
@@ -151,6 +157,11 @@ test('verifyLive preflights browser capture before source/target work and awaits
   assert.ok(
     censusAwait > legalPrivacyCheck,
     'source census must be awaited after the legal/privacy target-side check (the last one)'
+  );
+  assert.match(
+    body.slice(censusStart, contextCreation),
+    /attempted:\s*sourceCensusAttempted/,
+    'synthetic source-census not-run branches must be marked skipped in timing'
   );
 
   const awaitCount = body.split('await sourceSurfaceCensusPromise').length - 1;

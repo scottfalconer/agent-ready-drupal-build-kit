@@ -43,6 +43,10 @@ import {
   collectRuntimeCodeManifest,
   sha256 as stateSha256
 } from './state-fingerprint.mjs';
+import {
+  createPhaseRecorder,
+  recordVerificationObservability
+} from './verification-observability.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -240,6 +244,7 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
+    join(scriptDirectory, 'verification-observability.mjs'),
     join(kitRoot, 'gates.json'),
     join(kitRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js'),
     join(kitRoot, 'vendor', 'ws', '8.21.0', 'INTEGRITY.json'),
@@ -2467,7 +2472,6 @@ export function findDrupalDdevRoot(cwd) {
     candidate = parent;
   }
 }
-
 function ddevConfigValue(projectRoot, key) {
   try {
     const config = readFileSync(join(projectRoot, '.ddev', 'config.yaml'), 'utf8');
@@ -11652,12 +11656,17 @@ export async function verifyLive({
   cwd = process.cwd(),
   environment = process.env,
   drupalRuntime = null,
-  liveHttpLimits = {}
+  liveHttpLimits = {},
+  observabilityRecorder = null
 } = {}) {
+  const phaseRecorder = observabilityRecorder ?? createPhaseRecorder();
   const absolutePacketDir = resolve(cwd, packetDir);
   assertVerificationPacketInputs(absolutePacketDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
-  const packetReport = await validatePacket({ packetDir: absolutePacketDir });
+  const packetReport = await phaseRecorder.measure(
+    'packet-validation',
+    () => validatePacket({ packetDir: absolutePacketDir })
+  );
   const gates = JSON.parse(readFileSync(join(KIT_ROOT, 'gates.json'), 'utf8'));
   const briefMode = packetReport.buildMode === 'brief';
   const claimScope = briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild';
@@ -11732,15 +11741,21 @@ export async function verifyLive({
   }
 
   const runtimeWasInjected = drupalRuntime !== null;
-  const inspectedDrupalRuntime = drupalRuntime ?? inspectDrupalRuntime(
-    cwd,
-    environment,
-    fieldOutputMatrix,
-    browserEvidence,
-    routeMatrix,
-    patternMap,
-    drupalReadback
-  );
+  const inspectedDrupalRuntime = runtimeWasInjected
+    ? phaseRecorder.measureSync('drupal-runtime', () => drupalRuntime, { injected: true })
+    : phaseRecorder.measureSync(
+        'drupal-runtime',
+        () => inspectDrupalRuntime(
+          cwd,
+          environment,
+          fieldOutputMatrix,
+          browserEvidence,
+          routeMatrix,
+          patternMap,
+          drupalReadback
+        ),
+        { injected: false }
+      );
   const runtimeAuthoritativeForCompletion = !runtimeWasInjected;
   const packetSupportsCompletion = packetReport.completionEvidence?.packetSupportsCompletion === true;
   const packetClaimsQualifyingReview =
@@ -11838,40 +11853,44 @@ export async function verifyLive({
     explicitTargetFetchAllowed &&
     runtimeAuthoritativeForCompletion
   );
-  const rawGlobalChromeCapture = browserCaptureAttempted
-    ? await captureGlobalChrome({
-        browserBackend,
-        baseUrl: target.url,
-        primaryRoutes,
-        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-        environment
-      })
-    : globalChromeCaptureWithoutArtifacts({
-        schemaVersion: 'public-kit.global-chrome-capture.1',
-        checkedAt: new Date().toISOString(),
-        status: 'unavailable',
-        authoritative: false,
-        captureMode: 'verifier-owned-browser',
-        targetOrigin: target?.url?.origin ?? '',
-        contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-        browser: { executable: '', product: '' },
-        runtime: {
-          backend: browserBackend === 'remote' ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
-          executionBoundary: browserBackend === 'remote' ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
-          service: browserBackend === 'remote' ? 'selenium-chrome' : '',
-          addOnRelease: '',
-          image: '',
-          executable: '',
-          product: '',
-          protocolVersion: '',
-          ready: false
-        },
-        primaryRoutes: [],
-        routes: [],
-        budget: null,
-        warnings: [],
-        errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
-      });
+  const rawGlobalChromeCapture = await phaseRecorder.measure(
+    'global-chrome',
+    async () => browserCaptureAttempted
+      ? captureGlobalChrome({
+          browserBackend,
+          baseUrl: target.url,
+          primaryRoutes,
+          contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+          environment
+        })
+      : globalChromeCaptureWithoutArtifacts({
+          schemaVersion: 'public-kit.global-chrome-capture.1',
+          checkedAt: new Date().toISOString(),
+          status: 'unavailable',
+          authoritative: false,
+          captureMode: 'verifier-owned-browser',
+          targetOrigin: target?.url?.origin ?? '',
+          contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+          browser: { executable: '', product: '' },
+          runtime: {
+            backend: browserBackend === 'remote' ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
+            executionBoundary: browserBackend === 'remote' ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
+            service: browserBackend === 'remote' ? 'selenium-chrome' : '',
+            addOnRelease: '',
+            image: '',
+            executable: '',
+            product: '',
+            protocolVersion: '',
+            ready: false
+          },
+          primaryRoutes: [],
+          routes: [],
+          budget: null,
+          warnings: [],
+          errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
+        }),
+    { attempted: browserCaptureAttempted, backend: browserBackend }
+  );
   const browserRuntimeUnavailable = browserRuntimePreflightUnavailable(rawGlobalChromeCapture, {
     attempted: browserCaptureAttempted
   });
@@ -11881,22 +11900,36 @@ export async function verifyLive({
       : 'Verifier-owned browser preflight failed before source or target HTTP verification. Use the canonical DDEV agent workflow, or set CHROME_PATH for an explicit host-side maintainer run.');
   }
 
-  const sourceSurfaceCensusPromise = briefMode
-    ? Promise.resolve(sourceSurfaceNotRun(
-        'Source-site discovery does not apply to a brief-based build.',
-        { status: 'not_applicable', authoritative: true }
-      ))
-    : browserRuntimeUnavailable
-    ? Promise.resolve(sourceSurfaceNotRun(
-        'Browser runtime preflight failed; expensive verification was not started.'
-      ))
-    : runtimeAuthoritativeForCompletion && declaredSource
-    ? inspectSourceSurface({ independentVerification, routeMatrix })
-    : Promise.resolve(sourceSurfaceNotRun(
-        runtimeWasInjected
-          ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
-          : 'Verifier-owned source census could not start without sourceBaseUrl.'
-      ));
+  const sourceCensusAttempted = Boolean(
+    !briefMode &&
+    !browserRuntimeUnavailable &&
+    runtimeAuthoritativeForCompletion &&
+    declaredSource
+  );
+  const sourceSurfaceCensusPromise = phaseRecorder.measure(
+    'source-census',
+    async () => briefMode
+      ? sourceSurfaceNotRun(
+          'Source-site discovery does not apply to a brief-based build.',
+          { status: 'not_applicable', authoritative: true }
+        )
+      : browserRuntimeUnavailable
+        ? sourceSurfaceNotRun(
+            'Browser runtime preflight failed; expensive verification was not started.'
+          )
+        : runtimeAuthoritativeForCompletion && declaredSource
+          ? inspectSourceSurface({ independentVerification, routeMatrix })
+          : sourceSurfaceNotRun(
+              runtimeWasInjected
+                ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
+                : 'Verifier-owned source census could not start without sourceBaseUrl.'
+            ),
+    {
+      applicable: !briefMode,
+      attempted: sourceCensusAttempted,
+      authoritativeRuntime: runtimeAuthoritativeForCompletion
+    }
+  );
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
@@ -11936,27 +11969,31 @@ export async function verifyLive({
     maxTasks: liveHttpLimits.maxTasks ?? MAX_LIVE_HTTP_TASKS
   });
   const criticalAssetContext = createCriticalAssetContext({ liveHttpContext });
-  const liveRouteSchedule = fetchChecksEnabled
-    ? await scheduleLiveRouteChecks({
-        allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
-        baseUrl: target.url,
-        criticalAssetContext,
-        liveHttpContext,
-        tasks: liveRouteTasks
-      })
-    : {
-        checks: [],
-        errors: [],
-        budget: {
-          attempted: false,
-          deadlineMs: LIVE_ROUTE_DEADLINE_MS,
-          maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
-          maxRequests: MAX_LIVE_HTTP_REQUESTS,
-          maxRoutes: MAX_LIVE_ROUTE_CHECKS,
-          requestCount: 0,
-          routeCount: liveRouteTasks.length
-        }
-      };
+  const liveRouteSchedule = await phaseRecorder.measure(
+    'target-route-http',
+    async () => fetchChecksEnabled
+      ? scheduleLiveRouteChecks({
+          allowRuntimeBoundLocalCertificate: runtimeAuthoritativeForCompletion && runtimeTargetOriginMatches,
+          baseUrl: target.url,
+          criticalAssetContext,
+          liveHttpContext,
+          tasks: liveRouteTasks
+        })
+      : {
+          checks: [],
+          errors: [],
+          budget: {
+            attempted: false,
+            deadlineMs: LIVE_ROUTE_DEADLINE_MS,
+            maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
+            maxRequests: MAX_LIVE_HTTP_REQUESTS,
+            maxRoutes: MAX_LIVE_ROUTE_CHECKS,
+            requestCount: 0,
+            routeCount: liveRouteTasks.length
+          }
+        },
+    { attempted: fetchChecksEnabled, routeTaskCount: liveRouteTasks.length }
+  );
   liveErrors.push(...liveRouteSchedule.errors);
   const checksForBucket = (bucket) => liveRouteSchedule.checks
     .filter((entry) => entry.bucket === bucket)
@@ -11979,21 +12016,29 @@ export async function verifyLive({
     uniqueInternalLinkCount: 0
   });
   let serverRenderedResponseSurface = emptyServerRenderedResponseSurface();
-  if (fetchChecksEnabled) {
-    try {
+  const serverRenderedPhase = phaseRecorder.start('server-rendered-surface', {
+    attempted: fetchChecksEnabled
+  });
+  try {
+    if (fetchChecksEnabled) {
       serverRenderedResponseSurface = await inspectServerRenderedResponseSurface(
         target.url,
         routeMatrix,
         liveHttpContext
       );
-    } catch (error) {
-      serverRenderedResponseSurface.errors.push(
-        `Server-rendered response surface verification could not complete: ${error.message}`
-      );
     }
+    serverRenderedPhase.end();
+  } catch (error) {
+    serverRenderedResponseSurface.errors.push(
+      `Server-rendered response surface verification could not complete: ${error.message}`
+    );
+    serverRenderedPhase.end({ status: 'failed', details: { errorClass: error?.constructor?.name ?? 'Error' } });
   }
   liveErrors.push(...serverRenderedResponseSurface.errors);
 
+  const securityAndCleanupPhase = phaseRecorder.start('security-and-cleanup', {
+    attempted: fetchChecksEnabled
+  });
   const redirectMaterialization = target
     ? redirectMaterializationExpectations(routeMatrix, absolutePacketDir, target.url)
     : { conflicts: [], expectations: [] };
@@ -12097,6 +12142,7 @@ export async function verifyLive({
   for (const check of legalPrivacyLinkChecks) {
     liveErrors.push(...check.errors);
   }
+  securityAndCleanupPhase.end();
   // Await the verifier-owned source census only AFTER every target-side
   // liveHttpContext check has completed. The census is started concurrently
   // above (sourceSurfaceCensusPromise) but crawls a slow / large / CDN-gated
@@ -12125,30 +12171,38 @@ export async function verifyLive({
     reason: runtimeWasInjected ? '' : 'Consent inventory is unavailable.'
   };
   const consentNetworkApplicable = consentNetworkCaptureRequired(negativeRouteConsent?.consent);
-  const rawBeforeConsentNetworkCapture = consentNetworkApplicable && fetchChecksEnabled && runtimeAuthoritativeForCompletion
-    ? await captureBeforeConsentNetwork({
-        browserBackend,
-        baseUrl: target.url,
-        primaryRoutes,
-        environment
-      })
-    : {
-        schemaVersion: 'public-kit.before-consent-network-capture.1',
-        checkedAt: new Date().toISOString(),
-        status: consentNetworkApplicable ? 'unavailable' : 'not_applicable',
-        authoritative: false,
-        captureMode: 'verifier-owned-cdp-network',
-        targetOrigin: target?.url?.origin ?? '',
-        browser: { executable: '', product: '' },
-        primaryRoutes: primaryRoutes.map((route) => String(route?.targetPath ?? route)),
-        routes: [],
-        budget: null,
-        warnings: [],
-        errors: consentNetworkApplicable
-          ? ['Verifier-owned before-consent capture is disabled for an injected or unavailable Drupal runtime.']
-          : []
-      };
+  const beforeConsentAttempted = Boolean(
+    consentNetworkApplicable && fetchChecksEnabled && runtimeAuthoritativeForCompletion
+  );
+  const rawBeforeConsentNetworkCapture = await phaseRecorder.measure(
+    'before-consent-browser',
+    async () => beforeConsentAttempted
+      ? captureBeforeConsentNetwork({
+          browserBackend,
+          baseUrl: target.url,
+          primaryRoutes,
+          environment
+        })
+      : {
+          schemaVersion: 'public-kit.before-consent-network-capture.1',
+          checkedAt: new Date().toISOString(),
+          status: consentNetworkApplicable ? 'unavailable' : 'not_applicable',
+          authoritative: false,
+          captureMode: 'verifier-owned-cdp-network',
+          targetOrigin: target?.url?.origin ?? '',
+          browser: { executable: '', product: '' },
+          primaryRoutes: primaryRoutes.map((route) => String(route?.targetPath ?? route)),
+          routes: [],
+          budget: null,
+          warnings: [],
+          errors: consentNetworkApplicable
+            ? ['Verifier-owned before-consent capture is disabled for an injected or unavailable Drupal runtime.']
+            : []
+        },
+    { applicable: consentNetworkApplicable, attempted: beforeConsentAttempted }
+  );
 
+  const evidenceReconciliationPhase = phaseRecorder.start('evidence-reconciliation');
   if (target && (packetSupportsCompletion || packetClaimsQualifyingReview) && (briefMode || declaredSource)) {
     try {
       const sourceUrl = briefMode
@@ -12270,6 +12324,8 @@ export async function verifyLive({
       title: route.actualTitle ?? ''
     }))
     .sort((left, right) => comparePortable(`${left.path}\0${left.routeKind}`, `${right.path}\0${right.routeKind}`));
+  evidenceReconciliationPhase.end();
+  const stateFingerprintPhase = phaseRecorder.start('state-fingerprint');
   const stateBlockers = [];
   const runtimeProjectRoot = findDrupalDdevRoot(cwd);
   if (!runtimeProjectRoot) {
@@ -12368,6 +12424,11 @@ export async function verifyLive({
     buildState.complete = buildStateReady;
     buildState.blockers = stateBlockers;
   }
+  stateFingerprintPhase.end({
+    status: buildState ? 'completed' : 'failed',
+    details: { ready: buildStateReady }
+  });
+  const captureFinalizationPhase = phaseRecorder.start('capture-finalization');
   let globalChromeCapture = globalChromeCaptureWithoutArtifacts(rawGlobalChromeCapture, {
     status: rawGlobalChromeCapture.status === 'captured'
       ? 'blocked'
@@ -12433,6 +12494,15 @@ export async function verifyLive({
     }
   );
   liveErrors.push(...consentReconciliation.errors);
+  captureFinalizationPhase.end({
+    status: globalChromeCapture?.status === 'captured' || !browserCaptureAttempted
+      ? 'completed'
+      : 'failed',
+    details: {
+      globalChromeStatus: globalChromeCapture?.status ?? 'missing',
+      beforeConsentStatus: beforeConsentNetworkCapture?.status ?? 'missing'
+    }
+  });
   const verifierOwnedAxeErrors = verifierAxeCompletionErrors(globalChromeCapture);
   const verifierOwnedAxeSupportsCompletion = verifierOwnedAxeErrors.length === 0;
   const liveTargetValid = Boolean(target) && liveErrors.length === 0;
@@ -12807,6 +12877,36 @@ export async function verifyLive({
   });
 }
 
+export async function recordObservabilitySafely({
+  recorder,
+  report = null,
+  reportPath = '',
+  reportPersisted = false,
+  failure = null,
+  projectRoot = findDrupalDdevRoot(process.cwd()),
+  recordObservability = recordVerificationObservability,
+  stderr = process.stderr
+}) {
+  if (!recorder || !projectRoot) return null;
+  try {
+    const timing = recorder.finish({ status: failure ? 'failed' : 'completed' });
+    return await recordObservability({
+      projectRoot,
+      report,
+      reportPath,
+      reportPersisted,
+      timing,
+      verificationPreObservabilityMs: timing.totalWallClockMs,
+      failureClass: failure?.constructor?.name ?? ''
+    });
+  } catch (error) {
+    stderr.write(
+      `Verification metrics could not be recorded (${error?.constructor?.name ?? 'Error'}); the verification result is unchanged.\n`
+    );
+    return null;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -12817,24 +12917,50 @@ async function main() {
     throw new UsageError(`Packet directory does not exist: ${args.packet}.`);
   }
 
-  const report = args.packetOnly
-    ? await validatePacket({ packetDir: resolve(args.packet) })
-    : await verifyLive({
-      packetDir: args.packet,
+  const observabilityRecorder = args.packetOnly ? null : createPhaseRecorder();
+  let report;
+  try {
+    report = args.packetOnly
+      ? await validatePacket({ packetDir: resolve(args.packet) })
+      : await verifyLive({
+        packetDir: args.packet,
         targetUrl: args.targetUrl,
-        outPath: args.out
+        outPath: args.out,
+        observabilityRecorder
       });
+  } catch (error) {
+    await recordObservabilitySafely({
+      recorder: observabilityRecorder,
+      reportPath: args.out,
+      failure: error
+    });
+    throw error;
+  }
   if (!args.packetOnly) {
     const completionClaimAllowed =
       report.completeLocalRebuildClaimAllowed === true ||
       report.completeLocalBuildFromBriefClaimAllowed === true;
     const operationCanRun = !args.changeId || completionClaimAllowed;
-    const lifecycle = applyVerificationLifecycle({
-      packetDir: args.packet,
-      report,
-      checkpointId: operationCanRun ? args.checkpointId : '',
-      changeId: operationCanRun ? args.changeId : ''
-    });
+    let lifecycle;
+    try {
+      lifecycle = observabilityRecorder.measureSync(
+        'lifecycle',
+        () => applyVerificationLifecycle({
+          packetDir: args.packet,
+          report,
+          checkpointId: operationCanRun ? args.checkpointId : '',
+          changeId: operationCanRun ? args.changeId : ''
+        })
+      );
+    } catch (error) {
+      await recordObservabilitySafely({
+        recorder: observabilityRecorder,
+        report,
+        reportPath: args.out,
+        failure: error
+      });
+      throw error;
+    }
     report.lifecycle = {
       ...lifecycle,
       requestedOperation: args.changeId
@@ -12857,8 +12983,31 @@ async function main() {
         : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
     reconcileLifecycleContinuation(report, { baseCompletionAllowed: completionClaimAllowed });
   }
-  await mkdir(dirname(args.out), { recursive: true });
-  await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+  if (observabilityRecorder) {
+    try {
+      await observabilityRecorder.measure('report-write', async () => {
+        await mkdir(dirname(args.out), { recursive: true });
+        await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+      });
+    } catch (error) {
+      await recordObservabilitySafely({
+        recorder: observabilityRecorder,
+        report,
+        reportPath: args.out,
+        failure: error
+      });
+      throw error;
+    }
+    await recordObservabilitySafely({
+      recorder: observabilityRecorder,
+      report,
+      reportPath: args.out,
+      reportPersisted: true
+    });
+  } else {
+    await mkdir(dirname(args.out), { recursive: true });
+    await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+  }
 
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);

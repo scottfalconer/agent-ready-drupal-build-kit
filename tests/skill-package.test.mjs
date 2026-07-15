@@ -441,7 +441,7 @@ test('initializer leaves existing AGENTS.md unchanged when packet creation fails
 });
 
 test('initializer runs from a copy containing only the installed skill directory', () => {
-  const root = mkdtempSync('/tmp/skill-isolated-');
+  const root = mkdtempSync(join(tmpdir(), 'skill-isolated-'));
   mkdirSync(join(root, '.ddev'), { recursive: true });
   writeFileSync(join(root, '.ddev', 'config.yaml'), 'name: kit-test\ntype: drupal11\ndocroot: web\n');
   const installedSkill = join(root, '.agents', 'skills', 'agent-ready-drupal-build-kit');
@@ -478,6 +478,34 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.equal(lifecycleHelp.status, 0, lifecycleHelp.stderr);
   assert.match(lifecycleHelp.stdout, /lifecycle\.mjs/);
 
+  const observabilityPath = join(installedSkill, 'scripts', 'verification-observability.mjs');
+  assert.equal(existsSync(observabilityPath), true);
+  assert.notEqual(
+    statSync(observabilityPath).mode & 0o111,
+    0,
+    'verification-observability.mjs should be executable'
+  );
+  const observabilityHelp = spawnSync(process.execPath, [observabilityPath, '--help'], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.equal(observabilityHelp.status, 0, observabilityHelp.stderr);
+  assert.match(observabilityHelp.stdout, /scripts\/verification-observability\.mjs/);
+  assert.match(observabilityHelp.stdout, /report \[--json\]/);
+  assert.doesNotMatch(observabilityHelp.stdout, /node bin\/verification-observability/);
+
+  const observabilityReport = spawnSync(process.execPath, [observabilityPath, 'report', '--json'], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.equal(observabilityReport.status, 0, observabilityReport.stderr);
+  const emptyObservabilityReport = JSON.parse(observabilityReport.stdout);
+  assert.equal(
+    emptyObservabilityReport.schemaVersion,
+    'public-kit.verification-observability-report.1'
+  );
+  assert.equal(emptyObservabilityReport.verification.runCount, 0);
+
   const packetOnly = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
     '--packet',
@@ -500,7 +528,23 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(60 files\)/);
+  assert.match(result.stdout, /is in sync \(61 files\)/);
+  const canonicalObservability = join(repoRoot, 'bin', 'verification-observability.mjs');
+  const installedObservability = join(skillRoot, 'scripts', 'verification-observability.mjs');
+  assert.ok(
+    readFileSync(canonicalObservability).equals(readFileSync(installedObservability)),
+    'verification-observability.mjs drifted from the canonical CLI'
+  );
+  assert.notEqual(
+    statSync(canonicalObservability).mode & 0o111,
+    0,
+    'canonical verification-observability.mjs should be executable'
+  );
+  assert.notEqual(
+    statSync(installedObservability).mode & 0o111,
+    0,
+    'installed verification-observability.mjs should be executable'
+  );
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -560,8 +604,17 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
   const isolatedSync = join(isolatedRepo, 'scripts', 'sync-skill-package.mjs');
   const copiedGates = join(isolatedRepo, 'skills', 'agent-ready-drupal-build-kit', 'gates.json');
   const copiedVerifier = join(isolatedRepo, 'skills', 'agent-ready-drupal-build-kit', 'scripts', 'verify.mjs');
+  const copiedObservability = join(
+    isolatedRepo,
+    'skills',
+    'agent-ready-drupal-build-kit',
+    'scripts',
+    'verification-observability.mjs'
+  );
   writeFileSync(copiedGates, '{"drift":true}\n');
   chmodSync(copiedVerifier, 0o644);
+  writeFileSync(copiedObservability, '// drift\n');
+  chmodSync(copiedObservability, 0o644);
 
   const drift = spawnSync(process.execPath, [isolatedSync, '--check'], {
     cwd: isolatedRepo,
@@ -571,13 +624,18 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
   assert.match(drift.stderr, /Installable skill package is out of sync/);
   assert.match(drift.stderr, /gates\.json/);
   assert.match(drift.stderr, /verify\.mjs/);
+  assert.match(drift.stderr, /verification-observability\.mjs/);
 
   const repair = spawnSync(process.execPath, [isolatedSync, '--write'], {
     cwd: isolatedRepo,
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(60 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(61 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
+  assert.ok(readFileSync(copiedObservability).equals(readFileSync(
+    join(isolatedRepo, 'bin', 'verification-observability.mjs')
+  )));
+  assert.notEqual(statSync(copiedObservability).mode & 0o111, 0);
 });
