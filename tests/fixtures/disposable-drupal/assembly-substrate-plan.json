@@ -5,7 +5,7 @@
     "adapter": "ddev_composer_install",
     "lockFile": {
       "path": "composer.lock",
-      "sha256": "sha256:26c241146a6c85ec0de062566eafc9a9c8c0d338347431c8f36c47422bf67266"
+      "sha256": "sha256:3568309b946acfbc4b21f999df029d62f82d943ac6f61c3801beb8168641b1a1"
     }
   },
   "trackedConfig": {

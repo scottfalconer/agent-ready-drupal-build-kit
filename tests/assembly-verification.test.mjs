@@ -45,6 +45,28 @@ const TARGET_UUID_2 = '33333333-3333-4333-8333-333333333333';
 const TARGET_UUID_3 = '44444444-4444-4444-8444-444444444444';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 
+test('checked-in disposable assembly fixture binds its current input bytes', () => {
+  const fixtureRoot = new URL('./fixtures/disposable-drupal/', import.meta.url);
+  const planBytes = readFileSync(new URL('assembly-plan.json', fixtureRoot));
+  const substrateBytes = readFileSync(new URL('assembly-substrate-plan.json', fixtureRoot));
+  const plan = JSON.parse(planBytes);
+  const substrate = JSON.parse(substrateBytes);
+
+  assert.equal(
+    substrate.dependencies.lockFile.sha256,
+    sha256(readFileSync(new URL(substrate.dependencies.lockFile.path, fixtureRoot)))
+  );
+  assert.equal(plan.substratePlan.sha256, sha256(substrateBytes));
+  assert.equal(
+    plan.provenance.sha256,
+    sha256(readFileSync(new URL(plan.provenance.path, fixtureRoot)))
+  );
+  assert.equal(
+    plan.adapter.source.sha256,
+    sha256(readFileSync(new URL(plan.adapter.source.path, fixtureRoot)))
+  );
+});
+
 test('assembly capability failures use bounded redacted diagnostics', () => {
   assert.throws(() => discoverAssemblyCapabilities({
     execute: () => ({

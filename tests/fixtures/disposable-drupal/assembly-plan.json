@@ -3,7 +3,7 @@
   "assemblyId": "disposable_assembly_smoke",
   "substratePlan": {
     "path": "assembly-substrate-plan.json",
-    "sha256": "sha256:93a43f0d3011a396555a8d08e7b5e46d4a0c21c7e942d66cb119cdfedd38aefb"
+    "sha256": "sha256:57cdba1293910751510ff1e676a0e4b9c39d8fa1a218b25e6f84bf93b8973242"
   },
   "provenance": {
     "path": "assembly-provenance.json",
