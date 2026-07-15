@@ -16,7 +16,7 @@
     "adapter": "drush_php_script",
     "source": {
       "path": "scripts/import-canonical-content.php",
-      "sha256": "sha256:8cbe0d240217e707cf630a8300d3ae8c190653d4c0585a16b1a03d433c32c786"
+      "sha256": "sha256:0b662ca3db7398b727101e3aec1d32b301f36d8edbd29c6d3e8cfa9c62728b54"
     }
   },
   "files": {

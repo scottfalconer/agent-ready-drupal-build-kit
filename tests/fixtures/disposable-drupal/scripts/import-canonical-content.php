@@ -18,6 +18,7 @@ $file = File::create([
   'uri' => $file_uri,
   'status' => 1,
   'created' => $timestamp,
+  'changed' => $timestamp,
 ]);
 $file->save();
 
