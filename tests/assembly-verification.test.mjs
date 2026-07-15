@@ -312,6 +312,7 @@ function repositoryFixture() {
   mkdirSync(join(root, 'config', 'sync'), { recursive: true });
   mkdirSync(join(root, 'review-packet'), { recursive: true });
   mkdirSync(join(root, 'scripts'), { recursive: true });
+  mkdirSync(join(root, 'web'), { recursive: true });
   writeFileSync(join(root, '.ddev', 'config.yaml'), 'name: assembly-fixture\ntype: drupal11\ndocroot: web\n');
   writeFileSync(join(root, 'composer.json'), '{"name":"fixture/site"}\n');
   writeFileSync(join(root, 'composer.lock'), '{"packages":[]}\n');
@@ -323,6 +324,7 @@ function repositoryFixture() {
     targetRequiredRoutes: []
   }, null, 2)}\n`);
   writeFileSync(join(root, 'scripts', 'assembly.php'), '<?php // Fixed fixture adapter; fake DDEV owns test output.\n');
+  writeFileSync(join(root, 'web', 'index.php'), '<?php // Tracked fixture docroot required by the disposable DDEV sandbox.\n');
   const reproduction = {
     schemaVersion: 'public-kit.reproduction-plan.1',
     mode: 'clean_install_config_import',
@@ -709,8 +711,8 @@ test('disposable runner rejects an interrupted delete prefix before invoking the
   const spawn = (command, args, options) => {
     if (command === 'git') return spawnSync(command, args, options);
     if (command === 'ddev' && args[0] === 'describe') {
-      const local = readFileSync(join(options.cwd, '.ddev', 'config.local.yaml'), 'utf8');
-      const name = local.match(/^name:\s*(.+)$/m)?.[1]?.trim();
+      const config = readFileSync(join(options.cwd, '.ddev', 'config.yaml'), 'utf8');
+      const name = JSON.parse(config.match(/^name:\s*(.+)$/m)[1]);
       return {
         status: 0,
         stdout: JSON.stringify({ raw: { name, approot: options.cwd, primary_url: `https://${name}.ddev.site` } }),
@@ -770,8 +772,8 @@ test('mocked disposable run proves two verifier-selected interruptions, exact re
   const spawn = (command, args, options) => {
     if (command === 'git') return spawnSync(command, args, options);
     if (command === 'ddev' && args[0] === 'describe') {
-      const local = readFileSync(join(options.cwd, '.ddev', 'config.local.yaml'), 'utf8');
-      const name = local.match(/^name:\s*(.+)$/m)?.[1]?.trim();
+      const config = readFileSync(join(options.cwd, '.ddev', 'config.yaml'), 'utf8');
+      const name = JSON.parse(config.match(/^name:\s*(.+)$/m)[1]);
       return { status: 0, stdout: JSON.stringify({ raw: { name, approot: options.cwd, primary_url: `https://${name}.ddev.site` } }), stderr: '', signal: null };
     }
     if (command === 'ddev' && args[0] === 'export-db') {

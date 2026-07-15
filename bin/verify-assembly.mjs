@@ -605,7 +605,7 @@ export function runDisposableAssembly({
       planPath: validated.planPath,
       projectRoot: disposable.root
     });
-    const clonedRuntime = exactHeadRuntimeBinding(disposable.root);
+    const clonedRuntime = disposable.exactHeadRuntime;
     exactHeadClone = (
       sourceBefore.runtimeCode.fingerprint === clonedRuntime.fingerprint &&
       sha256(validated.plan) === sha256(cloned.plan) &&
