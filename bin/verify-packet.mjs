@@ -1097,20 +1097,26 @@ async function validateBuildInput(packetDir, buildInput, routeMatrix, errors) {
   return context;
 }
 
-async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+async function packetEvidenceJson(
+  packetDir,
+  reference,
+  evidenceDir = join(packetDir, 'evidence'),
+  jsonContext = null
+) {
   const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
   if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
     return null;
   }
-  try {
-    const evidence = (await readBoundedJsonFile(evidencePath)).value;
-    return isJsonObject(evidence) ? evidence : null;
-  } catch {
-    return null;
-  }
+  const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
+  return isJsonObject(evidence) ? evidence : null;
 }
 
-async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packetDir, 'evidence')) {
+async function packetJsonEvidence(
+  packetDir,
+  reference,
+  evidenceDir = join(packetDir, 'evidence'),
+  jsonContext = null
+) {
   const evidencePath = resolveReviewEvidencePath(packetDir, evidenceDir, reference);
   if (!evidencePath || extname(evidencePath).toLowerCase() !== '.json') {
     return null;
@@ -1120,7 +1126,7 @@ async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packe
     if (!evidenceStat.isFile() || evidenceStat.size === 0) {
       return null;
     }
-    const value = (await readBoundedJsonFile(evidencePath)).value;
+    const value = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
     return isJsonObject(value) ? value : null;
   } catch {
     return null;
@@ -1140,12 +1146,12 @@ function safeImageDimensions(width, height) {
   );
 }
 
-async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
+async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl, jsonContext = null) {
   if (extname(evidencePath).toLowerCase() !== '.json' || !independentTargetUrl) {
     return false;
   }
   try {
-    const evidence = (await readBoundedJsonFile(evidencePath)).value;
+    const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
     const candidates = Array.isArray(evidence?.claims) ? evidence.claims : [evidence];
     return candidates.some((candidate) => {
       const evidenceTargetUrl = httpUrl(candidate?.targetBaseUrl ?? evidence?.targetBaseUrl);
@@ -1539,6 +1545,7 @@ function temporalFieldCandidate(field) {
 async function nextCycleStructuredGateReasons({
   browserEvidence,
   fieldOutputMatrix,
+  jsonContext,
   nextCycleVerification,
   packetDir,
   patternMap
@@ -1610,7 +1617,7 @@ async function nextCycleStructuredGateReasons({
       dimensionRecords.push({ dimension, model });
     }
   }
-  const discoveryEvidence = await packetJsonEvidence(packetDir, discovery?.evidence, evidenceDir);
+  const discoveryEvidence = await packetJsonEvidence(packetDir, discovery?.evidence, evidenceDir, jsonContext);
   const recordSite = httpUrl(record?.site);
   const discoveryTarget = httpUrl(discoveryEvidence?.targetBaseUrl);
   if (
@@ -1773,7 +1780,7 @@ async function nextCycleStructuredGateReasons({
   if (!passingModelBrowserEditor) {
     reasons.push('browser-evidence.json must prove the next-cycle editor identity on the same recurring entity type and bundle.');
   }
-  const probeEvidence = await packetJsonEvidence(packetDir, contentProbe?.evidence, evidenceDir);
+  const probeEvidence = await packetJsonEvidence(packetDir, contentProbe?.evidence, evidenceDir, jsonContext);
   const evidenceTarget = httpUrl(probeEvidence?.targetBaseUrl);
   const evidencePublicUrl = httpUrl(probeEvidence?.publicUrl);
   if (
@@ -1816,7 +1823,7 @@ async function nextCycleStructuredGateReasons({
   ) {
     reasons.push('next-cycle-verification.json cleanup must prove zero content, revision, alias, and period/term residue and a 404/410 probe URL.');
   }
-  const cleanupEvidence = await packetJsonEvidence(packetDir, cleanup?.evidence, evidenceDir);
+  const cleanupEvidence = await packetJsonEvidence(packetDir, cleanup?.evidence, evidenceDir, jsonContext);
   const cleanupTarget = httpUrl(cleanupEvidence?.targetBaseUrl);
   if (
     !cleanupEvidence ||
@@ -1845,6 +1852,7 @@ async function independentStructuredGateReasons({
   drupalReadback,
   fieldOutputMatrix,
   independentVerification,
+  jsonContext,
   nextCycleVerification,
   packetDir,
   patternMap,
@@ -1855,6 +1863,7 @@ async function independentStructuredGateReasons({
   reasons.push(...await nextCycleStructuredGateReasons({
     browserEvidence,
     fieldOutputMatrix,
+    jsonContext,
     nextCycleVerification,
     packetDir,
     patternMap
@@ -2506,7 +2515,7 @@ async function validateIndependentVerification(
   independentVerification,
   relatedRecords,
   errors,
-  { briefAcceptance = null, briefMode = false } = {}
+  { briefAcceptance = null, briefMode = false, jsonContext = null } = {}
 ) {
   if (!isJsonObject(independentVerification)) {
     errors.push('independent-verification.json must be a JSON object (blocked stub at minimum).');
@@ -2599,7 +2608,10 @@ async function validateIndependentVerification(
           `independent-verification.json completionClaims[${index}].verifierEvidence[${evidenceIndex}] must not be empty.`
         );
       }
-      if (evidenceStat.isFile() && await evidenceBindsClaim(evidencePath, claim, independentTargetUrl)) {
+      if (
+        evidenceStat.isFile() &&
+        await evidenceBindsClaim(evidencePath, claim, independentTargetUrl, jsonContext)
+      ) {
         semanticallyBoundEvidence = true;
       }
     }
@@ -2668,6 +2680,7 @@ async function validateIndependentVerification(
     structuredGateReasons.push(...await independentStructuredGateReasons({
       ...relatedRecords,
       independentVerification,
+      jsonContext,
       packetDir
     }));
   }
@@ -2693,7 +2706,7 @@ async function validateBlindAdversarialReview(
   blindReview,
   routeMatrix,
   errors,
-  { briefAcceptance = null, briefContext = null, briefMode = false } = {}
+  { briefAcceptance = null, briefContext = null, briefMode = false, jsonContext = null } = {}
 ) {
   if (!isJsonObject(blindReview)) {
     errors.push('blind-adversarial-review.json must be a JSON object (blocked stub at minimum).');
@@ -3111,7 +3124,7 @@ async function validateBlindAdversarialReview(
       }
       if (extname(evidencePath).toLowerCase() === '.json') {
         try {
-          const evidence = (await readBoundedJsonFile(evidencePath)).value;
+          const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
           const adminUrl = httpUrl(evidence?.targetAdminUrl);
           const publicUrl = httpUrl(evidence?.resultingPublicUrl);
           if (
@@ -3479,7 +3492,7 @@ async function browserCaptureStateReasons(
   packetDir,
   browserEvidence,
   primaryRoutePaths,
-  { briefMode = false } = {}
+  { briefMode = false, jsonContext = null } = {}
 ) {
   const reasons = [];
   const checks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
@@ -3532,7 +3545,13 @@ async function browserCaptureStateReasons(
         reasons.push(`browser-evidence.json publicRouteChecks[${index}].${field} must reference a credible packet-local image whose width matches and height covers the declared viewport.`);
       }
     }
-    reasons.push(...await accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index));
+    reasons.push(...await accessibilityCheckReasons(
+      packetDir,
+      browserEvidenceDir,
+      check,
+      index,
+      jsonContext
+    ));
     const accessibilityReportPath = resolveReviewEvidencePath(
       packetDir,
       browserEvidenceDir,
@@ -3950,11 +3969,17 @@ async function axeIncompleteEvidenceMatches({
   browserEvidenceDir,
   disposition,
   incomplete,
+  jsonContext,
   nodeTarget,
   packetDir,
   report
 }) {
-  const evidence = await packetEvidenceJson(packetDir, disposition?.evidence, browserEvidenceDir);
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    disposition?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const reportTimestamp = isoTimestamp(report?.timestamp);
   const evidenceTimestamp = isoTimestamp(evidence?.checkedAt);
   return Boolean(
@@ -3973,7 +3998,13 @@ async function axeIncompleteEvidenceMatches({
   );
 }
 
-async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, index) {
+async function accessibilityCheckReasons(
+  packetDir,
+  browserEvidenceDir,
+  check,
+  index,
+  jsonContext = null
+) {
   const reasons = [];
   const accessibility = check?.accessibilityCheck ?? {};
   const prefix = `browser-evidence.json publicRouteChecks[${index}].accessibilityCheck`;
@@ -3992,11 +4023,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
   const reportPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, accessibility.report);
   let report = null;
   if (reportPath) {
-    try {
-      report = (await readBoundedJsonFile(reportPath)).value;
-    } catch {
-      // The message below covers missing and malformed reports without leaking local paths.
-    }
+    report = await readJson(reportPath, jsonContext?.errors ?? [], jsonContext);
   }
   if (!isJsonObject(report)) {
     reasons.push(`${prefix}.report must reference packet-local raw axe-core JSON.`);
@@ -4046,6 +4073,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
           browserEvidenceDir,
           disposition,
           incomplete,
+          jsonContext,
           nodeTarget: target,
           packetDir,
           report
@@ -4091,8 +4119,13 @@ function uniqueRecordKeys(records, keyName) {
   return keys.length === records.length && new Set(keys).size === keys.length;
 }
 
-async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) {
-  const evidence = await packetEvidenceJson(packetDir, check?.outcome?.evidence, browserEvidenceDir);
+async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check, jsonContext = null) {
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    check?.outcome?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const mode = String(check?.outcome?.mode ?? '');
   const providerRequired = ['provider_delivery', 'provider_handoff'].includes(mode);
   return Boolean(
@@ -4110,8 +4143,13 @@ async function formOutcomeEvidenceMatches(packetDir, browserEvidenceDir, check) 
   );
 }
 
-async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check) {
-  const evidence = await packetEvidenceJson(packetDir, check?.abuseProtection?.evidence, browserEvidenceDir);
+async function formAbuseEvidenceMatches(packetDir, browserEvidenceDir, check, jsonContext = null) {
+  const evidence = await packetEvidenceJson(
+    packetDir,
+    check?.abuseProtection?.evidence,
+    browserEvidenceDir,
+    jsonContext
+  );
   const mode = String(check?.abuseProtection?.mode ?? '');
   const localException = mode === 'local_only_exception';
   const modeSpecific =
@@ -4761,7 +4799,7 @@ async function dispositionReady(packetDir, disposition) {
   );
 }
 
-async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
+async function negativeRouteConsentReasons(packetDir, record, routeMatrix, jsonContext = null) {
   const reasons = [];
   if (!isJsonObject(record) || record.schemaVersion !== 'public-kit.negative-route-consent.1') {
     return ['negative-route-consent.json must use schemaVersion public-kit.negative-route-consent.1.'];
@@ -4897,7 +4935,10 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
       continue;
     }
     try {
-      const evidence = (await readBoundedJsonFile(evidencePath)).value;
+      const evidence = await readJson(evidencePath, jsonContext?.errors ?? [], jsonContext);
+      if (!isJsonObject(evidence)) {
+        throw new Error('evidence is not a JSON object');
+      }
       const target = httpUrl(evidence?.targetBaseUrl);
       const declaredTarget = httpUrl(routeMatrix?.targetBaseUrl);
       if (
@@ -4919,7 +4960,7 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
   return reasons;
 }
 
-async function packetCompletionReadiness(packetDir, gates, records) {
+async function packetCompletionReadiness(packetDir, gates, records, jsonContext = null) {
   const reasons = [];
   const markdownAssessment = await markdownCompletionReadiness(packetDir, records);
   if (!gates) {
@@ -4947,7 +4988,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
           ? templateEnumSentinels((await readBoundedJsonFile(templatePath)).value)
           : new Set();
         const unresolved = unresolvedEnumSentinels(
-          (await readBoundedJsonFile(packetPath)).value,
+          await readJson(packetPath, jsonContext?.errors ?? [], jsonContext),
           shippedSentinels
         );
         if (unresolved.length > 0) {
@@ -4976,12 +5017,18 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   } = records;
   reasons.push(...customCodeReviewReasons(drupalReadback));
   reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
-  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
+  reasons.push(...await negativeRouteConsentReasons(
+    packetDir,
+    negativeRouteConsent,
+    routeMatrix,
+    jsonContext
+  ));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
     drupalReadback,
     fieldOutputMatrix,
     independentVerification,
+    jsonContext,
     nextCycleVerification,
     packetDir,
     patternMap,
@@ -4991,7 +5038,12 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
-  reasons.push(...await browserCaptureStateReasons(packetDir, browserEvidence, primaryRoutePaths));
+  reasons.push(...await browserCaptureStateReasons(
+    packetDir,
+    browserEvidence,
+    primaryRoutePaths,
+    { jsonContext }
+  ));
   const primaryRouteRoles = new Map(
     primaryRoutes.map((route) => [normalizeRouteRequestKey(route?.targetPath), String(route?.routeRole ?? '').trim()])
   );
@@ -5905,13 +5957,15 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
       packetDir,
       browserEvidenceDir,
-      check
+      check,
+      jsonContext
     );
     const abuseProtectionMode = String(check?.abuseProtection?.mode ?? '');
     const abuseProtectionEvidenceMatches = check && await formAbuseEvidenceMatches(
       packetDir,
       browserEvidenceDir,
-      check
+      check,
+      jsonContext
     );
     if (check && (
       !exactIdentityMatch(check?.purpose, form?.purpose) ||
@@ -6153,7 +6207,11 @@ async function briefPacketCompletionReadiness(
   gates,
   records,
   briefContext,
-  { blindAdversarialReviewSupportsCompletion = false, independentVerificationSupportsCompletion = false } = {}
+  {
+    blindAdversarialReviewSupportsCompletion = false,
+    independentVerificationSupportsCompletion = false,
+    jsonContext = null
+  } = {}
 ) {
   const reasons = [];
   const markdownAssessment = await markdownCompletionReadiness(packetDir, records, { briefMode: true });
@@ -6183,7 +6241,12 @@ async function briefPacketCompletionReadiness(
   reasons.push(...customCodeReviewReasons(drupalReadback));
   reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
   reasons.push(...markdownAssessment.reasons);
-  reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
+  reasons.push(...await negativeRouteConsentReasons(
+    packetDir,
+    negativeRouteConsent,
+    routeMatrix,
+    jsonContext
+  ));
 
   if (briefContext?.mode !== 'brief' || !briefContext?.briefPath || !briefContext?.briefSha256) {
     reasons.push('build-input.json must bind brief mode to a preserved packet-local original brief.');
@@ -6282,7 +6345,7 @@ async function briefPacketCompletionReadiness(
     packetDir,
     browserEvidence,
     [...primaryRouteRequirements.keys()],
-    { briefMode: true }
+    { briefMode: true, jsonContext }
   ));
   if (
     primaryRouteRequirements.has('/') &&
@@ -6463,7 +6526,7 @@ function sharedPacketMessage(value, packetDir) {
 export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const errors = boundedMessageArray(500, 'Packet validation');
   const warnings = boundedMessageArray(200, 'Packet validation warnings');
-  const jsonContext = { budget: { bytes: 0 }, cache: new Map() };
+  const jsonContext = { budget: { bytes: 0 }, cache: new Map(), errors };
   const gates = await readJson(join(KIT_ROOT, 'gates.json'), errors, jsonContext);
 
   if (gates) {
@@ -6532,14 +6595,14 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
       sourceAudit
     },
     errors,
-    { briefAcceptance, briefMode }
+    { briefAcceptance, briefMode, jsonContext }
   );
   const blindAdversarialReviewValidation = await validateBlindAdversarialReview(
     packetDir,
     blindAdversarialReview,
     routeMatrix,
     errors,
-    { briefAcceptance, briefContext, briefMode }
+    { briefAcceptance, briefContext, briefMode, jsonContext }
   );
   let blindAdversarialReviewSupportsCompletion =
     blindAdversarialReviewValidation.supportsCompletion === true;
@@ -6600,9 +6663,10 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const completionReadiness = briefMode
     ? await briefPacketCompletionReadiness(packetDir, gates, completionRecords, briefContext, {
         blindAdversarialReviewSupportsCompletion,
-        independentVerificationSupportsCompletion
+        independentVerificationSupportsCompletion,
+        jsonContext
       })
-    : await packetCompletionReadiness(packetDir, gates, completionRecords);
+    : await packetCompletionReadiness(packetDir, gates, completionRecords, jsonContext);
   const sharedErrors = errors.map((error) => sharedPacketMessage(error, packetDir));
   const sharedCompletionBlockedReasons = completionReadiness.reasons.map((reason) =>
     sharedPacketMessage(reason, packetDir)

@@ -11,6 +11,7 @@ import {
   createCustomCodeExecutionRunner,
   createDisposableCustomCodeWorkspace,
   cleanupDisposableCustomCodeWorkspace,
+  customCodeDdevTreeSnapshot,
   customTestMethodId,
   inspectCustomCodeFilesystem,
   inspectCustomCodeQuality
@@ -132,11 +133,24 @@ function composerLockForNames(lock, names) {
   };
 }
 
-function qualityFixture({ phpstanBinary = true, phpstanConfig = true, phpcsBinary = true } = {}) {
+function qualityFixture({
+  executableSource = false,
+  phpcsBinary = true,
+  phpstanBinary = true,
+  phpstanConfig = true
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'custom-code-quality-'));
   writeFixture(root, '.ddev/config.yaml', 'name: custom-quality\ntype: drupal11\ndocroot: web\n');
   writeFixture(root, 'web/modules/custom/catalog/catalog.info.yml', 'name: Catalog\ntype: module\n');
-  writeFixture(root, 'web/modules/custom/catalog/src/CatalogService.php', '<?php\nnamespace Drupal\\catalog;\nfinal class CatalogService {}\n');
+  writeFixture(
+    root,
+    executableSource
+      ? 'web/modules/custom/catalog/src/Controller/CatalogController.php'
+      : 'web/modules/custom/catalog/src/CatalogService.php',
+    executableSource
+      ? '<?php\nnamespace Drupal\\catalog\\Controller;\nfinal class CatalogController {}\n'
+      : '<?php\nnamespace Drupal\\catalog;\nfinal class CatalogService {}\n'
+  );
   writeFixture(
     root,
     'web/modules/custom/catalog/tests/src/Kernel/CatalogTest.php',
@@ -154,6 +168,9 @@ function qualityFixture({ phpstanBinary = true, phpstanConfig = true, phpcsBinar
     capabilities: [{
       extension: 'catalog',
       loadBearing: true,
+      sourceSurfaceIds: inventory.sourceFiles
+        .filter((source) => source.extension === 'catalog')
+        .flatMap((source) => source.surfaces.map((surface) => surface.id)),
       acceptanceCriteria: [
         { id: 'AC-CATALOG-01', criterion: 'Route works.' },
         { id: 'AC-CATALOG-02', criterion: 'Route remains accessible.' }
@@ -192,6 +209,58 @@ function initializeGitFixture(root) {
   }
 }
 
+function disposableWorkspaceHostSpawn({ ddevCalls, hostCalls, validateExitCode = 0 }) {
+  return (command, args, options) => {
+    hostCalls.push({ command, args: [...args], cwd: options.cwd });
+    if (command !== 'ddev') return spawnSync(command, args, options);
+    ddevCalls.push({ args: [...args], cwd: options.cwd, env: options.env });
+    if (args[0] === 'start') {
+      writeFixture(options.cwd, '.ddev/web-entrypoint.d/README.txt', 'DDEV-generated runtime scaffold.\n');
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'delete') return { status: 0, stdout: '', stderr: '' };
+    if (args[0] === 'describe') {
+      const config = readFileSync(join(options.cwd, '.ddev/config.yaml'), 'utf8');
+      const projectName = JSON.parse(config.match(/^name:\s*(.+)$/m)[1]);
+      return { status: 0, stdout: JSON.stringify({ raw: {
+        name: projectName,
+        approot: options.cwd,
+        primary_url: `http://${projectName}.ddev.site:8800`
+      } }), stderr: '' };
+    }
+    if (args[0] === 'exec') {
+      const separator = args.indexOf('--');
+      const inner = args.slice(separator + 1);
+      if (inner[0] !== 'composer') return { status: 1, stdout: '', stderr: 'unexpected fake ddev exec command' };
+      const workingDirectory = inner.find((argument) => argument.startsWith('--working-dir='))?.slice('--working-dir='.length) ?? '';
+      const composerCommand = inner.find((argument) => ['install', 'update', 'validate'].includes(argument));
+      if (!workingDirectory && composerCommand === 'validate') {
+        return {
+          status: validateExitCode,
+          stdout: validateExitCode === 0 ? 'composer inputs are synchronized' : '',
+          stderr: validateExitCode === 0 ? '' : 'composer.lock is not up to date with composer.json'
+        };
+      }
+      if (!workingDirectory && composerCommand === 'install') {
+        materializeInstalledToolchain(options.cwd, JSON.parse(readFileSync(join(options.cwd, 'composer.lock'), 'utf8')));
+        return { status: 0, stdout: 'project dependencies installed', stderr: '' };
+      }
+      const auditRoot = join(options.cwd, workingDirectory);
+      if (composerCommand === 'update' && inner.includes('--no-install')) {
+        const sourceLock = JSON.parse(readFileSync(join(options.cwd, 'composer.lock'), 'utf8'));
+        const auditComposer = JSON.parse(readFileSync(join(auditRoot, 'composer.json'), 'utf8'));
+        writeFixture(auditRoot, 'composer.lock', `${JSON.stringify(composerLockForNames(sourceLock, Object.keys(auditComposer.require ?? {})))}\n`);
+        return { status: 0, stdout: 'audit lock resolved', stderr: '' };
+      }
+      if (composerCommand === 'install') {
+        materializeInstalledToolchain(auditRoot, JSON.parse(readFileSync(join(auditRoot, 'composer.lock'), 'utf8')));
+        return { status: 0, stdout: 'audit dependencies installed', stderr: '' };
+      }
+    }
+    return { status: 1, stdout: '', stderr: 'unexpected fake ddev command' };
+  };
+}
+
 function fakeQualityExecutor(root, options = {}) {
   const calls = [];
   const listFormat = options.listFormat ?? 'phpunit9';
@@ -218,6 +287,9 @@ function fakeQualityExecutor(root, options = {}) {
     if (isBinary('vendor/squizlabs/php_codesniffer/bin/phpcs') && argv.includes('-i')) return rawResult(`${standardOutput}\n`);
     if (isBinary('vendor/squizlabs/php_codesniffer/bin/phpcs') && argv.includes('--report=json')) {
       if (options.phpcsInvalidReport) return rawResult(JSON.stringify(options.phpcsInvalidReport));
+      if (options.phpcsCleanOmitFiles) {
+        return rawResult(JSON.stringify({ totals: { errors: 0, warnings: 0, fixable: 0 }, files: {} }));
+      }
       const paths = argv.slice(argv.indexOf('--report=json') + 1);
       const files = Object.fromEntries(paths.map((path) => [path, { errors: 0, warnings: 0, messages: [] }]));
       if (options.phpcsNegativeTotals) {
@@ -259,35 +331,38 @@ function fakeQualityExecutor(root, options = {}) {
     if (argv.includes('--log-junit')) {
       const outputPath = argv[argv.indexOf('--log-junit') + 1];
       let cases = listFormat === 'phpunit9'
-        ? '<testcase class="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute"/>'
+        ? '<testcase class="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute" assertions="1"/>'
         : listFormat === 'phpunit10'
-          ? '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute"/>'
-          : '<testcase name="Drupal\\Tests\\catalog\\Kernel\\CatalogTest::testCatalogRoute"/>';
-      let attributes = 'tests="1" failures="0" errors="0" skipped="0"';
+          ? '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute" assertions="1"/>'
+          : '<testcase name="Drupal\\Tests\\catalog\\Kernel\\CatalogTest::testCatalogRoute" assertions="1"/>';
+      let attributes = 'tests="1" assertions="1" failures="0" errors="0" skipped="0"';
       let status = 0;
       if (junitMode === 'fail') {
-        cases = '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute"><failure/></testcase>';
-        attributes = 'tests="1" failures="1" errors="0" skipped="0"';
+        cases = '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute" assertions="1"><failure/></testcase>';
+        attributes = 'tests="1" assertions="1" failures="1" errors="0" skipped="0"';
         status = 1;
       } else if (junitMode === 'skip') {
-        cases = '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute"><skipped/></testcase>';
-        attributes = 'tests="1" failures="0" errors="0" skipped="1"';
+        cases = '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute" assertions="0"><skipped/></testcase>';
+        attributes = 'tests="1" assertions="0" failures="0" errors="0" skipped="1"';
         status = 1;
+      } else if (junitMode === 'no-assertions') {
+        cases = '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute" assertions="0"/>';
+        attributes = 'tests="1" assertions="0" failures="0" errors="0" skipped="0"';
       } else if (junitMode === 'extra') {
-        cases += '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testOther"/>';
-        attributes = 'tests="2" failures="0" errors="0" skipped="0"';
+        cases += '<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testOther" assertions="1"/>';
+        attributes = 'tests="2" assertions="2" failures="0" errors="0" skipped="0"';
       } else if (junitMode === 'zero') {
         cases = '';
-        attributes = 'tests="0" failures="0" errors="0" skipped="0"';
+        attributes = 'tests="0" assertions="0" failures="0" errors="0" skipped="0"';
       } else if (junitMode === 'data-overflow') {
-        cases = Array.from({ length: 257 }, (_, index) => `<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute with data set #${index}"/>`).join('');
-        attributes = 'tests="257" failures="0" errors="0" skipped="0"';
+        cases = Array.from({ length: 257 }, (_, index) => `<testcase classname="Drupal\\Tests\\catalog\\Kernel\\CatalogTest" name="testCatalogRoute with data set #${index}" assertions="1"/>`).join('');
+        attributes = 'tests="257" assertions="257" failures="0" errors="0" skipped="0"';
       } else if (junitMode === 'missing-totals') {
-        attributes = 'tests="1" failures="0" errors="0"';
+        attributes = 'tests="1" assertions="1" failures="0" errors="0"';
       } else if (junitMode === 'negative-totals') {
-        attributes = 'tests="1" failures="0" errors="0" skipped="-1"';
+        attributes = 'tests="1" assertions="1" failures="0" errors="0" skipped="-1"';
       } else if (junitMode === 'inconsistent-totals') {
-        attributes = 'tests="2" failures="0" errors="0" skipped="0"';
+        attributes = 'tests="2" assertions="1" failures="0" errors="0" skipped="0"';
       }
       const junit = junitMode === 'malformed-xml'
         ? `<testsuites><testsuite ${attributes}>${cases}</testsuites>`
@@ -327,6 +402,7 @@ function fakeQualityExecutor(root, options = {}) {
         runtimeProvenance: {
           configSha256: digest(runtimeConfig),
           databaseFamily: 'mysql',
+          ddevTreeFingerprint: customCodeDdevTreeSnapshot(projectRoot).fingerprint,
           specSha256: `sha256:${'4'.repeat(64)}`
         },
         setupCommandResultHashes: [`sha256:${'1'.repeat(64)}`],
@@ -468,11 +544,112 @@ test('packet verifier rejects an oversized JSON file before semantic processing'
   rmSync(root, { recursive: true, force: true });
 });
 
+test('packet evidence JSON shares one aggregate budget while repeated references use the cache', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'bounded-packet-evidence-'));
+  const packetDir = join(root, 'review-packet');
+  const evidenceDir = join(packetDir, 'evidence', 'independent-verification');
+  const gates = JSON.parse(readFileSync(resolve('gates.json'), 'utf8'));
+  mkdirSync(packetDir);
+  mkdirSync(evidenceDir, { recursive: true });
+  for (const file of gates.reviewPacketFiles) {
+    const parsed = parse(file);
+    cpSync(resolve('templates', `${parsed.name}.template${parsed.ext}`), join(packetDir, file));
+  }
+
+  const checkedAt = new Date().toISOString();
+  const targetBaseUrl = 'https://packet-evidence-budget.example';
+  const gateIds = {
+    accessibility: 'G-A11Y-01',
+    architecture: 'G-COMPOSITION-01',
+    behavior: 'G-BROWSER-01',
+    content: 'G-CONTENT-01',
+    editor: 'G-EDITOR-01',
+    media: 'G-PARITY-01',
+    packet: 'G-VERIFY-01',
+    route: 'G-ROUTE-01',
+    security_privacy: 'G-PRIVACY-01',
+    seo: 'G-SEO-01',
+    visual: 'G-BROWSER-02'
+  };
+  const claims = Object.entries(gateIds).map(([gate, gateId]) => ({
+    claimId: `${gate}-checked`,
+    claim: `${gate} evidence was independently checked.`,
+    gate,
+    gateId,
+    builderEvidence: [],
+    falsificationChecks: [`Falsified ${gate} against the target.`],
+    verifierEvidence: ['shared.json'],
+    status: 'pass',
+    failureEvidence: [],
+    nextFix: ''
+  }));
+  const independentPath = join(packetDir, 'independent-verification.json');
+  const independent = JSON.parse(readFileSync(independentPath, 'utf8'));
+  independent.checkedAt = checkedAt;
+  independent.site = targetBaseUrl;
+  independent.target = { ...independent.target, baseUrl: targetBaseUrl };
+  independent.verifier = {
+    ...independent.verifier,
+    nameOrRole: 'fresh independent verifier',
+    runtimeOrTool: 'bounded evidence test',
+    freshContextUsed: true,
+    sameContextAsBuilder: false,
+    builderSummaryExcluded: true,
+    liveSiteInspected: true,
+    packetInspected: true,
+    independenceDegradedReason: ''
+  };
+  independent.completionClaims = claims;
+  independent.summary = {
+    failedClaimCount: 0,
+    blockedClaimCount: 0,
+    highestRiskFailures: [],
+    verdict: 'pass',
+    notes: ''
+  };
+  writeFileSync(independentPath, `${JSON.stringify(independent)}\n`);
+
+  const largeEvidence = {
+    schemaVersion: 'public-kit.independent-claim-evidence.1',
+    targetBaseUrl,
+    checkedAt,
+    claims: claims.map((claim) => ({
+      claimId: claim.claimId,
+      gate: claim.gate,
+      gateId: claim.gateId,
+      checks: [{
+        name: `${claim.gate} falsification`,
+        method: 'live target and packet inspection',
+        result: 'pass',
+        observation: `${claim.gate} matched the inspected target.`
+      }]
+    })),
+    padding: Array.from({ length: 6_500 }, () => 'x'.repeat(950))
+  };
+  const largeEvidenceText = `${JSON.stringify(largeEvidence)}\n`;
+  assert.ok(Buffer.byteLength(largeEvidenceText) < PACKET_JSON_LIMITS.fileBytes);
+  writeFileSync(join(evidenceDir, 'shared.json'), largeEvidenceText);
+
+  const cachedReport = await validatePacket({ packetDir });
+  assert.equal(cachedReport.errors.some((error) => /aggregate limit/.test(error)), false);
+
+  for (const [index, claim] of claims.entries()) {
+    const reference = `unique-${index}.json`;
+    claim.verifierEvidence = [reference];
+    writeFileSync(join(evidenceDir, reference), largeEvidenceText);
+  }
+  writeFileSync(independentPath, `${JSON.stringify(independent)}\n`);
+  const overBudgetReport = await validatePacket({ packetDir });
+  assert.ok(overBudgetReport.errors.some((error) => /packet JSON exceeds the .*aggregate limit/.test(error)));
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('cleanup refuses a disposable DDEV identity mismatch before delete', () => {
   const ownerRoot = mkdtempSync(join(tmpdir(), 'agent-ready-custom-code-'));
   const projectRoot = join(ownerRoot, 'project');
   mkdirSync(join(projectRoot, '.ddev'), { recursive: true });
-  writeFixture(projectRoot, '.ddev/config.yaml', 'name: owned-project\ntype: drupal11\ndocroot: web\n');
+  const verifierConfig = 'name: "owned-project"\ntype: "drupal11"\ndocroot: "web"\n';
+  writeFixture(projectRoot, '.ddev/config.yaml', verifierConfig);
   const identity = {
     head: 'a'.repeat(40),
     projectName: 'owned-project',
@@ -494,6 +671,7 @@ test('cleanup refuses a disposable DDEV identity mismatch before delete', () => 
     markerPath,
     ownerRoot,
     projectRoot,
+    runtimeProvenance: { configSha256: digest(verifierConfig) },
     tempParent: tmpdir()
   }, runner);
   assert.equal(result.completed, false);
@@ -506,7 +684,8 @@ test('cleanup refuses a disposable DDEV identity mismatch before delete', () => 
 test('cleanup rejects unsafe DDEV configuration before describe or delete', () => {
   const ownerRoot = mkdtempSync(join(tmpdir(), 'agent-ready-custom-code-'));
   const projectRoot = join(ownerRoot, 'project');
-  writeFixture(projectRoot, '.ddev/config.yaml', 'name: owned-project\ntype: drupal11\ndocroot: web\n');
+  const verifierConfig = 'name: "owned-project"\ntype: "drupal11"\ndocroot: "web"\n';
+  writeFixture(projectRoot, '.ddev/config.yaml', verifierConfig);
   writeFixture(projectRoot, '.ddev/config.hooks.yaml', 'hooks:\n  pre-delete:\n    - exec-host: "touch /tmp/unsafe"\n');
   const identity = {
     head: 'a'.repeat(40),
@@ -526,6 +705,7 @@ test('cleanup rejects unsafe DDEV configuration before describe or delete', () =
     markerPath,
     ownerRoot,
     projectRoot,
+    runtimeProvenance: { configSha256: digest(verifierConfig) },
     tempParent: tmpdir()
   }, runner);
   assert.equal(result.completed, false);
@@ -534,7 +714,7 @@ test('cleanup rejects unsafe DDEV configuration before describe or delete', () =
   rmSync(ownerRoot, { recursive: true, force: true });
 });
 
-test('cleanup refuses describe-failure fallback after the verifier-owned config changes', () => {
+test('cleanup refuses verifier-owned config drift before describe or delete', () => {
   const ownerRoot = mkdtempSync(join(tmpdir(), 'agent-ready-custom-code-'));
   const projectRoot = join(ownerRoot, 'project');
   const verifierConfig = 'name: "owned-project"\ntype: "drupal11"\ndocroot: "web"\nproject_tld: "ddev.site"\nxdebug_enabled: false\n';
@@ -566,7 +746,49 @@ test('cleanup refuses describe-failure fallback after the verifier-owned config 
     tempParent: tmpdir()
   }, runner);
   assert.equal(result.completed, false);
-  assert.deepEqual(calls, [['ddev', 'describe', '-j']]);
+  assert.deepEqual(calls, []);
+  assert.equal(existsSync(ownerRoot), true);
+  rmSync(ownerRoot, { recursive: true, force: true });
+});
+
+test('cleanup rejects a DDEV runtime-tree mutation before describe or delete', () => {
+  const ownerRoot = mkdtempSync(join(tmpdir(), 'agent-ready-custom-code-'));
+  const projectRoot = join(ownerRoot, 'project');
+  const verifierConfig = 'name: "owned-project"\ntype: "drupal11"\ndocroot: "web"\n';
+  writeFixture(projectRoot, '.ddev/config.yaml', verifierConfig);
+  writeFixture(projectRoot, '.ddev/web-entrypoint.d/README.txt', 'DDEV-generated runtime scaffold.\n');
+  const identity = {
+    head: 'a'.repeat(40),
+    projectName: 'owned-project',
+    schemaVersion: 'public-kit.disposable-custom-code-workspace.1',
+    tokenSha256: `sha256:${'b'.repeat(64)}`,
+    workspaceId: 'DISPOSABLE-runtime-tree-drift'
+  };
+  const markerPath = join(ownerRoot, 'identity.json');
+  writeFileSync(markerPath, JSON.stringify(identity));
+  const runtimeTree = customCodeDdevTreeSnapshot(projectRoot);
+  const calls = [];
+  const hostExecutor = ({ argv }) => {
+    calls.push(argv);
+    return rawResult('');
+  };
+  const runner = createCustomCodeExecutionRunner(hostExecutor);
+  writeFixture(projectRoot, '.ddev/web-entrypoint.d/10-active.sh', '#!/bin/sh\nexit 0\n');
+  const result = cleanupDisposableCustomCodeWorkspace({
+    hostExecutor,
+    identity,
+    markerPath,
+    ownerRoot,
+    projectRoot,
+    runtimeProvenance: {
+      configSha256: digest(verifierConfig),
+      ddevTreeFingerprint: runtimeTree.fingerprint
+    },
+    tempParent: tmpdir()
+  }, runner);
+  assert.equal(result.completed, false);
+  assert.match(result.failures[0]?.message ?? '', /runtime tree changed before cleanup/i);
+  assert.deepEqual(calls, []);
   assert.equal(existsSync(ownerRoot), true);
   rmSync(ownerRoot, { recursive: true, force: true });
 });
@@ -593,44 +815,7 @@ test('disposable workspace factory clones exact HEAD, owns a distinct DDEV ident
   initializeGitFixture(fixture.root);
   const ddevCalls = [];
   const hostCalls = [];
-  const hostSpawnSync = (command, args, options) => {
-    hostCalls.push({ command, args: [...args], cwd: options.cwd });
-    if (command !== 'ddev') return spawnSync(command, args, options);
-    ddevCalls.push({ args: [...args], cwd: options.cwd, env: options.env });
-    if (args[0] === 'start' || args[0] === 'delete') return { status: 0, stdout: '', stderr: '' };
-    if (args[0] === 'describe') {
-      const config = readFileSync(join(options.cwd, '.ddev/config.yaml'), 'utf8');
-      const projectName = JSON.parse(config.match(/^name:\s*(.+)$/m)[1]);
-      return { status: 0, stdout: JSON.stringify({ raw: {
-        name: projectName,
-        approot: options.cwd,
-        primary_url: `https://${projectName}.ddev.site`
-      } }), stderr: '' };
-    }
-    if (args[0] === 'exec') {
-      const separator = args.indexOf('--');
-      const inner = args.slice(separator + 1);
-      if (inner[0] !== 'composer') return { status: 1, stdout: '', stderr: 'unexpected fake ddev exec command' };
-      const workingDirectory = inner.find((argument) => argument.startsWith('--working-dir='))?.slice('--working-dir='.length) ?? '';
-      const composerCommand = inner.find((argument) => ['install', 'update'].includes(argument));
-      if (!workingDirectory && composerCommand === 'install') {
-        materializeInstalledToolchain(options.cwd, JSON.parse(readFileSync(join(options.cwd, 'composer.lock'), 'utf8')));
-        return { status: 0, stdout: 'project dependencies installed', stderr: '' };
-      }
-      const auditRoot = join(options.cwd, workingDirectory);
-      if (composerCommand === 'update' && inner.includes('--no-install')) {
-        const sourceLock = JSON.parse(readFileSync(join(options.cwd, 'composer.lock'), 'utf8'));
-        const auditComposer = JSON.parse(readFileSync(join(auditRoot, 'composer.json'), 'utf8'));
-        writeFixture(auditRoot, 'composer.lock', `${JSON.stringify(composerLockForNames(sourceLock, Object.keys(auditComposer.require ?? {})))}\n`);
-        return { status: 0, stdout: 'audit lock resolved', stderr: '' };
-      }
-      if (composerCommand === 'install') {
-        materializeInstalledToolchain(auditRoot, JSON.parse(readFileSync(join(auditRoot, 'composer.lock'), 'utf8')));
-        return { status: 0, stdout: 'audit dependencies installed', stderr: '' };
-      }
-    }
-    return { status: 1, stdout: '', stderr: 'unexpected fake ddev command' };
-  };
+  const hostSpawnSync = disposableWorkspaceHostSpawn({ ddevCalls, hostCalls });
   const runner = createCustomCodeExecutionRunner(() => { throw new Error('working target executor must not run'); });
   const created = createDisposableCustomCodeWorkspace(fixture.root, fixture.inventory, runner, {
     ...process.env,
@@ -642,6 +827,8 @@ test('disposable workspace factory clones exact HEAD, owns a distinct DDEV ident
   assert.notEqual(created.workspace.projectRoot, fixture.root);
   assert.equal(created.workspace.exactHead, true);
   assert.equal(created.workspace.freshDatabase, true);
+  assert.equal(created.workspace.baseUrl, `http://${created.workspace.identity.projectName}.ddev.site:8800`);
+  assert.match(created.workspace.runtimeProvenance.ddevTreeFingerprint, /^sha256:[a-f0-9]{64}$/);
   assert.notEqual(created.workspace.auditRoot, created.workspace.projectRoot);
   const verifierConfig = readFileSync(join(created.workspace.projectRoot, '.ddev/config.yaml'), 'utf8');
   assert.doesNotMatch(verifierConfig, /webimage|web_environment|web_extra_daemons|attacker/);
@@ -651,16 +838,56 @@ test('disposable workspace factory clones exact HEAD, owns a distinct DDEV ident
   assert.doesNotMatch(readFileSync(join(created.workspace.auditRoot, 'vendor/phpunit/phpunit/phpunit'), 'utf8'), /hostile-direct-package-stub/);
   assert.match(readFileSync(join(fixture.root, 'vendor/phpunit/phpunit/phpunit'), 'utf8'), /hostile-direct-package-stub/);
   assert.equal(hostCalls.some((call) => call.command === 'cp'), false);
+  assert.ok(ddevCalls.some((call) =>
+    call.args.includes('composer') && call.args.includes('validate') && call.args.includes('--check-lock') &&
+    call.args.includes('--no-check-publish') && call.args.includes('--no-plugins') && call.args.includes('--no-scripts')
+  ));
   assert.ok(ddevCalls.some((call) => call.args.includes('composer') && call.args.includes('update') && call.args.includes('--no-install') && call.args.includes('--no-plugins') && call.args.includes('--no-scripts') && call.args.includes('--prefer-dist')));
   assert.ok(ddevCalls.some((call) => call.args.includes('composer') && call.args.includes('install') && call.args.includes('--no-plugins') && call.args.includes('--no-scripts') && call.args.includes('--prefer-dist')));
   assert.ok(ddevCalls.every((call) => !Object.hasOwn(call.env, 'DDEV_PROJECT') && !Object.hasOwn(call.env, 'IS_DDEV_PROJECT') && !Object.hasOwn(call.env, 'COMPOSE_FILE')));
   assert.ok(ddevCalls.some((call) => call.args[0] === 'start' && call.cwd === created.workspace.projectRoot));
+  assert.equal(
+    customCodeDdevTreeSnapshot(created.workspace.projectRoot).fingerprint,
+    created.workspace.runtimeProvenance.ddevTreeFingerprint
+  );
   const ownerRoot = created.workspace.ownerRoot;
   const cleanup = cleanupDisposableCustomCodeWorkspace(created.workspace, runner);
   assert.equal(cleanup.completed, true, JSON.stringify(cleanup.failures));
   assert.equal(existsSync(ownerRoot), false);
   assert.ok(ddevCalls.some((call) => call.args[0] === 'delete' && call.cwd !== fixture.root));
+  assert.ok(ddevCalls.filter((call) => ['start', 'describe', 'delete'].includes(call.args[0])).every((call) => call.args.includes('--skip-hooks')));
   assert.equal(ddevCalls.some((call) => call.cwd === fixture.root), false);
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
+test('stale project Composer lock blocks before dependency installation or analyzers', () => {
+  const fixture = qualityFixture();
+  initializeGitFixture(fixture.root);
+  const ddevCalls = [];
+  const hostCalls = [];
+  const hostSpawnSync = disposableWorkspaceHostSpawn({
+    ddevCalls,
+    hostCalls,
+    validateExitCode: 2
+  });
+  const runner = createCustomCodeExecutionRunner(() => {
+    throw new Error('working target executor must not run');
+  });
+  const created = createDisposableCustomCodeWorkspace(
+    fixture.root,
+    fixture.inventory,
+    runner,
+    process.env,
+    { containerMarker: false, hostSpawnSync }
+  );
+  const composerCalls = ddevCalls
+    .filter((call) => call.args[0] === 'exec')
+    .map((call) => call.args.slice(call.args.indexOf('--') + 1));
+  assert.equal(created.workspace, null);
+  assert.ok(created.failures.some((failure) => failure.check === 'phpunit-isolation'));
+  assert.ok(composerCalls.some((argv) => argv.includes('validate') && argv.includes('--check-lock')));
+  assert.equal(composerCalls.some((argv) => argv.includes('install') || argv.includes('update')), false);
+  assert.ok(ddevCalls.some((call) => call.args[0] === 'delete'));
   rmSync(fixture.root, { recursive: true, force: true });
 });
 
@@ -825,6 +1052,89 @@ for (const listFormat of ['phpunit9', 'phpunit10', 'phpunit11']) {
   });
 }
 
+test('clean PHPCS JSON may omit requested files while exact argv remains completed evidence', () => {
+  const fixture = qualityFixture();
+  const fake = fakeQualityExecutor(fixture.root, { phpcsCleanOmitFiles: true });
+  const result = inspectCustomCodeQuality(fixture.root, {}, fixture.inventory, fixture.review, {
+    executor: fake.executor,
+    baseUrl: 'https://custom-quality.ddev.site'
+  });
+  assert.equal(result.qualityAudit.status, 'pass', JSON.stringify(result.qualityAudit.failures));
+  assert.deepEqual(
+    result.qualityAudit.checks.phpcs.completedFileIds,
+    result.qualityAudit.checks.phpcs.expectedFileIds
+  );
+  assert.deepEqual(result.qualityAudit.checks.phpcs.findings, []);
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
+for (const [name, invalidate] of [
+  ['provenance', (workspace) => { workspace.runtimeProvenance.specSha256 = 'invalid'; }],
+  ['runtime config', (workspace) => { workspace.runtimeProvenance.configSha256 = `sha256:${'f'.repeat(64)}`; }],
+  ['base origin', (workspace) => { workspace.baseUrl = 'https://custom-quality.ddev.site'; }]
+]) {
+  test(`invalid disposable ${name} still cleans the verifier-owned workspace exactly once`, () => {
+    const fixture = qualityFixture();
+    const fake = fakeQualityExecutor(fixture.root);
+    let cleanupCalls = 0;
+    const result = inspectCustomCodeQuality(fixture.root, {}, fixture.inventory, fixture.review, {
+      baseUrl: 'https://custom-quality.ddev.site',
+      executor: fake.executor,
+      disposableWorkspaceFactory(args) {
+        const created = fake.disposableWorkspaceFactory(args);
+        const cleanup = created.workspace.cleanup;
+        created.workspace.cleanup = (...cleanupArgs) => {
+          cleanupCalls += 1;
+          return cleanup(...cleanupArgs);
+        };
+        invalidate(created.workspace);
+        return created;
+      }
+    });
+    assert.equal(cleanupCalls, 1);
+    assert.equal(result.qualityAudit.status, 'blocked');
+    assert.equal(result.focusedTestExecution.status, 'blocked');
+    assert.ok(result.qualityAudit.failures.some((failure) => failure.check === 'custom-code-isolation'));
+    assert.deepEqual(fake.calls, []);
+    rmSync(fixture.root, { recursive: true, force: true });
+  });
+}
+
+test('an unexpected post-validation audit failure still cleans and returns blocked evidence', () => {
+  const fixture = qualityFixture();
+  const fake = fakeQualityExecutor(fixture.root);
+  let cleanupCalls = 0;
+  const result = inspectCustomCodeQuality(fixture.root, {}, fixture.inventory, fixture.review, {
+    baseUrl: 'https://custom-quality.ddev.site',
+    executor: fake.executor,
+    disposableWorkspaceFactory(args) {
+      const created = fake.disposableWorkspaceFactory(args);
+      const auditRoot = created.workspace.auditRoot;
+      const cleanup = created.workspace.cleanup;
+      let auditRootReads = 0;
+      Object.defineProperty(created.workspace, 'auditRoot', {
+        configurable: true,
+        get() {
+          auditRootReads += 1;
+          if (auditRootReads > 1) throw new Error('synthetic audit access failure');
+          return auditRoot;
+        }
+      });
+      created.workspace.cleanup = (...cleanupArgs) => {
+        cleanupCalls += 1;
+        return cleanup(...cleanupArgs);
+      };
+      return created;
+    }
+  });
+  assert.equal(cleanupCalls, 1);
+  assert.equal(result.qualityAudit.status, 'blocked');
+  assert.ok(result.qualityAudit.failures.some((failure) =>
+    failure.code === 'spawn_failed' && failure.check === 'custom-code-isolation'
+  ));
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
 test('PHPCS is mandatory, both standards are required, and violations fail without raw output', () => {
   const missing = qualityFixture({ phpcsBinary: false });
   const missingFake = fakeQualityExecutor(missing.root);
@@ -851,10 +1161,13 @@ test('PHPCS is mandatory, both standards are required, and violations fail witho
   rmSync(violation.root, { recursive: true, force: true });
 });
 
-test('analyzer JSON schemas reject empty or inconsistent reports instead of inferring completion', () => {
+test('analyzer JSON schemas reject malformed or inconsistent reports instead of inferring completion', () => {
   const phpcsFixture = qualityFixture();
   const phpcsFake = fakeQualityExecutor(phpcsFixture.root, {
-    phpcsInvalidReport: { totals: { errors: 0, warnings: 0, fixable: 0 }, files: {} }
+    phpcsInvalidReport: {
+      totals: { errors: 0, warnings: 0, fixable: 0 },
+      files: { 'web/modules/custom/unknown.php': { errors: 0, warnings: 0, messages: [] } }
+    }
   });
   const phpcsResult = inspectCustomCodeQuality(phpcsFixture.root, {}, phpcsFixture.inventory, phpcsFixture.review, {
     executor: phpcsFake.executor,
@@ -1071,6 +1384,24 @@ test('coverage rejects unsupported, stale, foreign, and uncovered rows before PH
   }
 });
 
+test('an executable custom surface cannot opt out of focused tests with loadBearing false', () => {
+  const fixture = qualityFixture({ executableSource: true });
+  fixture.review.capabilities[0].loadBearing = false;
+  fixture.review.testCoverage = [];
+  const fake = fakeQualityExecutor(fixture.root);
+  const result = inspectCustomCodeQuality(fixture.root, {}, fixture.inventory, fixture.review, {
+    executor: fake.executor,
+    baseUrl: 'https://custom-quality.ddev.site'
+  });
+  assert.equal(result.focusedTestExecution.applies, true);
+  assert.equal(result.focusedTestExecution.status, 'blocked');
+  assert.ok(result.focusedTestExecution.failures.some((failure) =>
+    failure.code === 'uncovered_acceptance_criterion'
+  ));
+  assert.equal(fake.calls.some((call) => call.argv.some((value) => String(value).includes('phpunit'))), false);
+  rmSync(fixture.root, { recursive: true, force: true });
+});
+
 test('coverage row and focused method bounds are preflighted before PHPUnit commands', () => {
   const fixture = qualityFixture();
   const criteria = Array.from({ length: 129 }, (_, index) => ({
@@ -1119,6 +1450,7 @@ test('PHP file-count and aggregate path-argv bounds block before any tool comman
 for (const [junitMode, expectedStatus, expectedCode] of [
   ['fail', 'fail', 'test_failed'],
   ['skip', 'fail', 'test_skipped'],
+  ['no-assertions', 'fail', 'no_assertions_executed'],
   ['extra', 'blocked', 'unexpected_test_executed'],
   ['zero', 'blocked', 'no_tests_executed'],
   ['data-overflow', 'blocked', 'input_limit_exceeded'],

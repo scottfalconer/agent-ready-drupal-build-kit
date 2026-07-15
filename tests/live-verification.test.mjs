@@ -509,6 +509,7 @@ test('G-CODE reconciliation binds every stable source surface and representative
     auditVendor: 'fresh-composer-install',
     runtimeOwner: 'verifier-generated-minimal-ddev-config',
     runtimeConfigSha256: `sha256:${'b'.repeat(64)}`,
+    runtimeDdevTreeSha256: `sha256:${'d'.repeat(64)}`,
     runtimeSpecSha256: `sha256:${'c'.repeat(64)}`,
     workingTargetSnapshotBeforeSha256: `sha256:${'7'.repeat(64)}`,
     workingTargetSnapshotAfterSha256: `sha256:${'7'.repeat(64)}`,
@@ -623,7 +624,7 @@ test('G-CODE reconciliation binds every stable source surface and representative
     expectedTestMethodIds: [testMethodId],
     completedTestMethodIds: [testMethodId],
     discovery: [],
-    runs: [{ testMethodId, status: 'pass' }],
+    runs: [{ testMethodId, status: 'pass', testcaseCount: 1, assertionCount: 1 }],
     isolation,
     failures: []
   });
