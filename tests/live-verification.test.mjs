@@ -3896,6 +3896,19 @@ test('browser capture states bind state-specific artifacts and structured intera
     legacyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
+  const legacyScaledPacket = join(temp, 'legacy-v1-device-pixel-screenshots');
+  cpSync(legacyPacket, legacyScaledPacket, { recursive: true });
+  const legacyBrowser = JSON.parse(readFileSync(join(legacyScaledPacket, 'browser-evidence.json'), 'utf8'));
+  const legacyDesktop = legacyBrowser.publicRouteChecks.find((check) => check.viewport.name === 'desktop');
+  writeFileSync(join(legacyScaledPacket, legacyDesktop.sourceScreenshot), screenshotPng(74, 2560, 1600));
+  writeFileSync(join(legacyScaledPacket, legacyDesktop.targetScreenshot), screenshotPng(75, 2560, 1600));
+  const legacyScaledReport = await validatePacket({ packetDir: legacyScaledPacket });
+  assert.equal(
+    legacyScaledReport.completionEvidence.packetSupportsCompletion,
+    true,
+    legacyScaledReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
   const cases = [
     {
       name: 'unsupported-browser-evidence-schema',
@@ -4102,6 +4115,20 @@ test('browser capture states bind state-specific artifacts and structured intera
       expected: /must use the default state's fixtureRevision/i,
       mutate(browser, packetDir) {
         addOpenMenuState(browser, packetDir, { fixtureRevision: 'fixture-home-v2' });
+      }
+    },
+    {
+      name: 'interacted-state-wrong-final-route',
+      expected: /must keep the default state's targetFinalUrl/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir);
+        const open = browser.publicRouteChecks.find((check) => check.captureState.id === 'mobile-menu-open');
+        open.targetFinalUrl = 'https://target.example/unrelated-state-page';
+        const axePath = join(packetDir, open.accessibilityCheck.report);
+        const axe = JSON.parse(readFileSync(axePath, 'utf8'));
+        axe.url = open.targetFinalUrl;
+        writeJson(axePath, axe);
+        open.captureState.evidenceBindings.accessibilityReportSha256 = sha256File(axePath);
       }
     },
     {
