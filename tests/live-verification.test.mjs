@@ -442,6 +442,25 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function sha256File(path) {
+  return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
+}
+
+function refreshCaptureEvidenceBindings(packetDir) {
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks) {
+      if (!check.captureState) continue;
+      check.captureState.evidenceBindings = {
+        sourceScreenshotSha256: String(check.sourceScreenshot ?? '').trim()
+          ? sha256File(join(packetDir, check.sourceScreenshot))
+          : 'not_applicable',
+        targetScreenshotSha256: sha256File(join(packetDir, check.targetScreenshot)),
+        accessibilityReportSha256: sha256File(join(packetDir, check.accessibilityCheck.report))
+      };
+    }
+  });
+}
+
 function mutateJson(path, mutate) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
   mutate(value);
@@ -1481,9 +1500,23 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       viewport: { name: viewport, width: desktop ? 1280 : 390, height: desktop ? 800 : 844 },
       captureState: {
         id: 'default',
+        authority: 'self_attested_capture_evidence',
         fixtureRevision: 'fixture-home-v1',
+        evidenceBindings: {
+          sourceScreenshotSha256: sha256File(join(blindEvidenceDir, `source-${viewport}.png`)),
+          targetScreenshotSha256: sha256File(join(blindEvidenceDir, `target-${viewport}.png`)),
+          accessibilityReportSha256: sha256File(join(browserEvidenceDir, `axe-home-${viewport}.json`))
+        },
         interactionSteps: [],
-        menuState: { toggleVisible: false, requested: 'not_applicable', observed: 'not_applicable' },
+        menuState: {
+          toggleVisible: false,
+          toggleSelector: '',
+          controlledRegionSelector: '',
+          requested: 'not_applicable',
+          observed: 'not_applicable',
+          observedExpanded: false,
+          controlledRegionVisible: false
+        },
         consentState: { requested: 'not_applicable', observed: 'not_applicable' },
         contentCountAssertions: [],
         dynamicMasks: []
@@ -2083,6 +2116,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     enforcementVerified: true,
     observation: 'Anonymous submission throttling was read back from Drupal configuration and exercised.'
   });
+  refreshCaptureEvidenceBindings(packetDir);
 }
 
 function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
@@ -2238,6 +2272,7 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
     writeFileSync(join(blindEvidenceDir, `source-search-${viewport}.png`), screenshotPng(40 + index, width, height));
     writeFileSync(join(blindEvidenceDir, `target-search-${viewport}.png`), screenshotPng(50 + index, width, height));
   }
+  refreshCaptureEvidenceBindings(packetDir);
 }
 
 function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
@@ -3770,7 +3805,7 @@ test('brief mode verifies target routes without requiring or implying a source s
   );
 });
 
-test('browser capture states are bounded, tuple-unique, and require open-menu evidence only from structured toggle evidence', async () => {
+test('browser capture states bind state-specific artifacts and structured interaction semantics', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'browser-capture-states-'));
   const canonicalPacket = join(temp, 'canonical');
   copyTemplatePacket(canonicalPacket);
@@ -3784,12 +3819,89 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
     canonicalReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
+  function addOpenMenuState(browser, packetDir, options = {}) {
+    const toggleSelector = '[data-test="mobile-menu-toggle"]';
+    const controlledRegionSelector = '[data-test="mobile-menu-region"]';
+    const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
+    mobile.captureState.menuState = {
+      toggleVisible: true,
+      toggleSelector,
+      controlledRegionSelector,
+      requested: 'closed',
+      observed: 'closed',
+      observedExpanded: false,
+      controlledRegionVisible: false
+    };
+    const open = structuredClone(mobile);
+    const openToggleSelector = options.selectorMismatch ? '[data-test="other-toggle"]' : toggleSelector;
+    open.captureState = {
+      ...open.captureState,
+      id: 'mobile-menu-open',
+      fixtureRevision: options.fixtureRevision ?? mobile.captureState.fixtureRevision,
+      interactionSteps: [{
+        action: options.stepAction ?? 'click',
+        target: openToggleSelector,
+        value: options.stepValue ?? '',
+        expectedState: 'The controlled navigation is visible and the toggle is expanded.'
+      }],
+      menuState: {
+        toggleVisible: true,
+        toggleSelector: openToggleSelector,
+        controlledRegionSelector,
+        requested: 'open',
+        observed: 'open',
+        observedExpanded: true,
+        controlledRegionVisible: true
+      }
+    };
+
+    if (!options.reuseArtifacts) {
+      const blindEvidenceDir = join(packetDir, 'evidence', 'blind-adversarial-review');
+      const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
+      const sourcePath = join(blindEvidenceDir, 'source-mobile-menu-open.png');
+      const targetPath = join(blindEvidenceDir, 'target-mobile-menu-open.png');
+      const axePath = join(browserEvidenceDir, 'axe-home-mobile-menu-open.json');
+      writeFileSync(sourcePath, screenshotPng(70, 390, 844));
+      writeFileSync(targetPath, screenshotPng(71, 390, 844));
+      const axe = JSON.parse(readFileSync(join(browserEvidenceDir, 'axe-home-mobile.json'), 'utf8'));
+      axe.captureStateObservation = 'mobile-menu-open';
+      writeJson(axePath, axe);
+      open.sourceScreenshot = 'evidence/blind-adversarial-review/source-mobile-menu-open.png';
+      open.targetScreenshot = options.missingTarget
+        ? 'evidence/blind-adversarial-review/missing-mobile-menu-open.png'
+        : 'evidence/blind-adversarial-review/target-mobile-menu-open.png';
+      open.accessibilityCheck.report = options.missingAxe
+        ? 'evidence/browser/missing-mobile-menu-open.json'
+        : 'evidence/browser/axe-home-mobile-menu-open.json';
+      open.captureState.evidenceBindings = {
+        sourceScreenshotSha256: sha256File(sourcePath),
+        targetScreenshotSha256: options.missingTarget ? `sha256:${'0'.repeat(64)}` : sha256File(targetPath),
+        accessibilityReportSha256: options.missingAxe ? `sha256:${'0'.repeat(64)}` : sha256File(axePath)
+      };
+    }
+    open.notes = 'Captured after opening the mobile menu.';
+    browser.publicRouteChecks.push(open);
+  }
+
+  const legacyPacket = join(temp, 'legacy-v1-default-only');
+  cpSync(canonicalPacket, legacyPacket, { recursive: true });
+  mutateJson(join(legacyPacket, 'browser-evidence.json'), (browser) => {
+    browser.schemaVersion = 'public-kit.browser-evidence.1';
+    for (const check of browser.publicRouteChecks) delete check.captureState;
+  });
+  const legacyReport = await validatePacket({ packetDir: legacyPacket });
+  assert.equal(
+    legacyReport.completionEvidence.packetSupportsCompletion,
+    true,
+    legacyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
   const cases = [
     {
-      name: 'legacy-browser-evidence-schema',
-      expected: /must use schemaVersion public-kit\.browser-evidence\.2/i,
+      name: 'unsupported-browser-evidence-schema',
+      expected: /must use schemaVersion public-kit\.browser-evidence\.1 or public-kit\.browser-evidence\.2/i,
       mutate(browser) {
-        browser.schemaVersion = 'public-kit.browser-evidence.1';
+        browser.schemaVersion = 'public-kit.browser-evidence.999';
       }
     },
     {
@@ -3797,6 +3909,22 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
       expected: /publicRouteChecks\[0\]\.captureState is required/i,
       mutate(browser) {
         delete browser.publicRouteChecks[0].captureState;
+      }
+    },
+    {
+      name: 'missing-self-attested-authority',
+      expected: /authority must be self_attested_capture_evidence/i,
+      mutate(browser) {
+        delete browser.publicRouteChecks[0].captureState.authority;
+      }
+    },
+    {
+      name: 'accessibility-report-is-directory',
+      expected: /report must reference packet-local raw axe-core JSON/i,
+      mutate(browser, packetDir) {
+        mkdirSync(join(packetDir, 'evidence', 'browser', 'report-directory'));
+        browser.publicRouteChecks[0].accessibilityCheck.report = 'evidence/browser/report-directory';
+        browser.publicRouteChecks[0].captureState.evidenceBindings.accessibilityReportSha256 = '';
       }
     },
     {
@@ -3836,8 +3964,20 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
       }
     },
     {
+      name: 'mutating-default-state',
+      expected: /must be empty or contain one non-mutating wait_for step for the default state/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.interactionSteps = [{
+          action: 'click',
+          target: '[data-test="control"]',
+          value: '',
+          expectedState: 'The control is active.'
+        }];
+      }
+    },
+    {
       name: 'count-assertion-mismatch',
-      expected: /must be a passing bounded exact-count assertion/i,
+      expected: /must use a unique selector and a passing bounded exact-count assertion/i,
       mutate(browser) {
         browser.publicRouteChecks[0].captureState.contentCountAssertions = [{
           selector: '.card',
@@ -3848,13 +3988,78 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
       }
     },
     {
-      name: 'oversized-dynamic-mask',
-      expected: /maximumViewportAreaRatio no greater than 0\.25/i,
+      name: 'contradictory-count-assertions',
+      expected: /must use a unique selector/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.contentCountAssertions = [
+          { selector: '.card', expectedCount: 4, observedCount: 4, status: 'pass' },
+          { selector: '.card', expectedCount: 5, observedCount: 5, status: 'pass' }
+        ];
+      }
+    },
+    {
+      name: 'page-wide-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: 'body',
+          reason: 'Invalid page-wide mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'universal-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '*',
+          reason: 'Invalid universal mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'functional-pseudo-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: ':is(body)',
+          reason: 'Invalid functional selector mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'common-header-class-mask',
+      expected: /common page\/global-chrome tokens/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '.header',
+          reason: 'Invalid global-header mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'common-header-data-value-mask',
+      expected: /common page\/global-chrome tokens/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '[data-region=header]',
+          reason: 'Invalid global-header data region mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'oversized-mask-union',
+      expected: /observed rectangle union must cover no more than 0\.25/i,
       mutate(browser) {
         browser.publicRouteChecks[0].captureState.dynamicMasks = [{
           selector: '[data-dynamic="weather"]',
           reason: 'Weather changes between captures.',
-          maximumViewportAreaRatio: 0.5
+          observedRect: { x: 0, y: 0, width: 1280, height: 300 }
         }];
       }
     },
@@ -3863,7 +4068,61 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
       expected: /needs an explicit mobile-menu-open captureState.*declares a visible toggle/i,
       mutate(browser) {
         const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
-        mobile.captureState.menuState = { toggleVisible: true, requested: 'closed', observed: 'closed' };
+        mobile.captureState.menuState = {
+          toggleVisible: true,
+          toggleSelector: '[data-test="mobile-menu-toggle"]',
+          controlledRegionSelector: '[data-test="mobile-menu-region"]',
+          requested: 'closed',
+          observed: 'closed',
+          observedExpanded: false,
+          controlledRegionVisible: false
+        };
+      }
+    },
+    {
+      name: 'reused-state-artifacts',
+      expected: /must use a distinct packet-local target screenshot path and bytes/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { reuseArtifacts: true });
+      }
+    },
+    {
+      name: 'two-interacted-states-reuse-artifacts',
+      expected: /must use a distinct packet-local target screenshot path and bytes from every other state/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir);
+        const open = browser.publicRouteChecks.find((check) => check.captureState.id === 'mobile-menu-open');
+        const alternate = structuredClone(open);
+        alternate.captureState.id = 'alternate-menu-open';
+        browser.publicRouteChecks.push(alternate);
+      }
+    },
+    {
+      name: 'mismatched-state-fixture',
+      expected: /must use the default state's fixtureRevision/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { fixtureRevision: 'fixture-home-v2' });
+      }
+    },
+    {
+      name: 'wait-only-menu-activation',
+      expected: /clicks or presses Enter\/Space.*declared toggle selector/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { stepAction: 'wait_for' });
+      }
+    },
+    {
+      name: 'empty-key-menu-press',
+      expected: /interactionSteps\[0\] must name a supported action, bounded target\/value/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { stepAction: 'press' });
+      }
+    },
+    {
+      name: 'mismatched-menu-toggle-selector',
+      expected: /observes the same controlled region open/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { selectorMismatch: true });
       }
     }
   ];
@@ -3871,7 +4130,7 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
   for (const fixture of cases) {
     const packetDir = join(temp, fixture.name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
-    mutateJson(join(packetDir, 'browser-evidence.json'), fixture.mutate);
+    mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => fixture.mutate(browser, packetDir));
     const report = await validatePacket({ packetDir });
     assert.equal(report.completionEvidence.packetSupportsCompletion, false, fixture.name);
     assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), fixture.expected, fixture.name);
@@ -3890,32 +4149,125 @@ test('browser capture states are bounded, tuple-unique, and require open-menu ev
     proseOnlyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
+  const boundedMaskPacket = join(temp, 'bounded-element-specific-mask');
+  cpSync(canonicalPacket, boundedMaskPacket, { recursive: true });
+  mutateJson(join(boundedMaskPacket, 'browser-evidence.json'), (browser) => {
+    browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+      selector: '.weather-widget[data-dynamic=weather]',
+      reason: 'The weather observation changes between captures.',
+      observedRect: { x: 980, y: 620, width: 200, height: 100 }
+    }];
+  });
+  const boundedMaskReport = await validatePacket({ packetDir: boundedMaskPacket });
+  assert.equal(
+    boundedMaskReport.completionEvidence.packetSupportsCompletion,
+    true,
+    boundedMaskReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
   const openMenuPacket = join(temp, 'structured-open-menu-state');
   cpSync(canonicalPacket, openMenuPacket, { recursive: true });
-  mutateJson(join(openMenuPacket, 'browser-evidence.json'), (browser) => {
-    const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
-    mobile.captureState.menuState = { toggleVisible: true, requested: 'closed', observed: 'closed' };
-    const open = structuredClone(mobile);
-    open.captureState = {
-      ...open.captureState,
-      id: 'mobile-menu-open',
-      interactionSteps: [{
-        action: 'click',
-        target: '[data-test="mobile-menu-toggle"]',
-        value: '',
-        expectedState: 'The controlled navigation is visible and the toggle is expanded.'
-      }],
-      menuState: { toggleVisible: true, requested: 'open', observed: 'open' }
-    };
-    open.notes = 'Captured after opening the mobile menu.';
-    browser.publicRouteChecks.push(open);
-  });
+  mutateJson(
+    join(openMenuPacket, 'browser-evidence.json'),
+    (browser) => addOpenMenuState(browser, openMenuPacket)
+  );
   const openMenuReport = await validatePacket({ packetDir: openMenuPacket });
   assert.equal(
     openMenuReport.completionEvidence.packetSupportsCompletion,
     true,
     openMenuReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
+
+  const keyboardOpenMenuPacket = join(temp, 'structured-keyboard-open-menu-state');
+  cpSync(canonicalPacket, keyboardOpenMenuPacket, { recursive: true });
+  mutateJson(
+    join(keyboardOpenMenuPacket, 'browser-evidence.json'),
+    (browser) => addOpenMenuState(browser, keyboardOpenMenuPacket, { stepAction: 'press', stepValue: 'Enter' })
+  );
+  const keyboardOpenMenuReport = await validatePacket({ packetDir: keyboardOpenMenuPacket });
+  assert.equal(
+    keyboardOpenMenuReport.completionEvidence.packetSupportsCompletion,
+    true,
+    keyboardOpenMenuReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const briefMissingArtifactsRoot = join(temp, 'brief-interacted-state-missing-artifacts');
+  const briefMissingArtifactsPacket = join(briefMissingArtifactsRoot, 'review-packet');
+  mkdirSync(briefMissingArtifactsRoot, { recursive: true });
+  cpSync(canonicalPacket, briefMissingArtifactsPacket, { recursive: true });
+  convertQualifyingPacketToBrief(briefMissingArtifactsPacket, 'https://target.example');
+  mutateJson(join(briefMissingArtifactsPacket, 'browser-evidence.json'), (browser) => {
+    addOpenMenuState(browser, briefMissingArtifactsPacket, { missingTarget: true, missingAxe: true });
+  });
+  const briefMissingArtifactsReport = await validatePacket({ packetDir: briefMissingArtifactsPacket });
+  const briefArtifactReasons = briefMissingArtifactsReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(briefMissingArtifactsReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(briefArtifactReasons, /targetScreenshot must reference a credible packet-local image/i);
+  assert.match(briefArtifactReasons, /accessibilityCheck\.report must reference packet-local raw axe-core JSON/i);
+  assert.doesNotMatch(briefArtifactReasons, /brief\.path|original brief/i);
+
+  const briefFailedStateRoot = join(temp, 'brief-interacted-state-failed');
+  const briefFailedStatePacket = join(briefFailedStateRoot, 'review-packet');
+  mkdirSync(briefFailedStateRoot, { recursive: true });
+  cpSync(canonicalPacket, briefFailedStatePacket, { recursive: true });
+  convertQualifyingPacketToBrief(briefFailedStatePacket, 'https://target.example');
+  mutateJson(join(briefFailedStatePacket, 'browser-evidence.json'), (browser) => {
+    const desktop = browser.publicRouteChecks.find((check) => check.viewport.name === 'desktop');
+    const failed = structuredClone(desktop);
+    const blindEvidenceDir = join(briefFailedStatePacket, 'evidence', 'blind-adversarial-review');
+    const browserEvidenceDir = join(briefFailedStatePacket, 'evidence', 'browser');
+    const sourcePath = join(blindEvidenceDir, 'source-desktop-consent-accepted.png');
+    const targetPath = join(blindEvidenceDir, 'target-desktop-consent-accepted.png');
+    const axePath = join(browserEvidenceDir, 'axe-home-desktop-consent-accepted.json');
+    writeFileSync(sourcePath, screenshotPng(72, 1280, 800));
+    writeFileSync(targetPath, screenshotPng(73, 1280, 800));
+    const axe = JSON.parse(readFileSync(join(browserEvidenceDir, 'axe-home-desktop.json'), 'utf8'));
+    axe.captureStateObservation = 'consent-accepted';
+    writeJson(axePath, axe);
+    failed.captureState = {
+      ...failed.captureState,
+      id: 'consent-accepted',
+      interactionSteps: [{
+        action: 'click',
+        target: '[data-test="accept-consent"]',
+        value: '',
+        expectedState: 'Consent is accepted.'
+      }],
+      consentState: { requested: 'accepted', observed: 'accepted' },
+      evidenceBindings: {
+        sourceScreenshotSha256: sha256File(sourcePath),
+        targetScreenshotSha256: sha256File(targetPath),
+        accessibilityReportSha256: sha256File(axePath)
+      }
+    };
+    failed.sourceScreenshot = 'evidence/blind-adversarial-review/source-desktop-consent-accepted.png';
+    failed.targetScreenshot = 'evidence/blind-adversarial-review/target-desktop-consent-accepted.png';
+    failed.accessibilityCheck.report = 'evidence/browser/axe-home-desktop-consent-accepted.json';
+    failed.accepted = false;
+    failed.blockers = ['Consent interaction failed.'];
+    failed.visualComparison.status = 'fail';
+    browser.publicRouteChecks.push(failed);
+  });
+  const briefFailedStateReport = await validatePacket({ packetDir: briefFailedStatePacket });
+  const briefFailedStateReasons = briefFailedStateReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(briefFailedStateReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(briefFailedStateReasons, /capture state must be accepted and passing.*no blockers/i);
+  assert.doesNotMatch(briefFailedStateReasons, /brief\.path|original brief/i);
+
+  const privateQueryPacket = join(temp, 'private-query-duplicate');
+  cpSync(canonicalPacket, privateQueryPacket, { recursive: true });
+  mutateJson(join(privateQueryPacket, 'browser-evidence.json'), (browser) => {
+    const first = structuredClone(browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile'));
+    first.targetUrl = 'https://target.example/search?preview_token=super-secret-value';
+    first.targetFinalUrl = first.targetUrl;
+    const second = structuredClone(first);
+    browser.publicRouteChecks.push(first, second);
+  });
+  const privateQueryReport = await validatePacket({ packetDir: privateQueryPacket });
+  const privateQueryReasons = privateQueryReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(privateQueryReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(privateQueryReasons, /\/search\?query-sha256=[a-f0-9]{64}/i);
+  assert.doesNotMatch(privateQueryReasons, /super-secret-value|preview_token/i);
 });
 
 test('live verifier rejects fetched SEO metadata that is missing or differs from packet claims', async () => {
@@ -6476,6 +6828,7 @@ test('browser completion evidence requires route-bound in-browser axe results wi
         : { type: 'tag', values: realWcagTags };
     });
   }
+  refreshCaptureEvidenceBindings(realWcagTagsPacket);
   const realWcagTagsReport = await validatePacket({ packetDir: realWcagTagsPacket });
   assert.equal(
     realWcagTagsReport.completionEvidence.packetSupportsCompletion,
@@ -6512,6 +6865,7 @@ test('browser completion evidence requires route-bound in-browser axe results wi
       evidence: 'evidence/browser/axe-incomplete-review.json'
     }];
   });
+  refreshCaptureEvidenceBindings(dispositionedPacket);
   const dispositioned = await validatePacket({ packetDir: dispositionedPacket });
   assert.equal(
     dispositioned.completionEvidence.packetSupportsCompletion,

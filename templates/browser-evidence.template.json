@@ -23,7 +23,13 @@
       },
       "captureState": {
         "id": "default",
+        "authority": "self_attested_capture_evidence",
         "fixtureRevision": "",
+        "evidenceBindings": {
+          "sourceScreenshotSha256": "",
+          "targetScreenshotSha256": "",
+          "accessibilityReportSha256": ""
+        },
         "interactionSteps": [
           {
             "action": "click | press | fill | select | scroll | wait_for",
@@ -34,8 +40,12 @@
         ],
         "menuState": {
           "toggleVisible": false,
+          "toggleSelector": "",
+          "controlledRegionSelector": "",
           "requested": "not_applicable | closed | open",
-          "observed": "not_applicable | closed | open"
+          "observed": "not_applicable | closed | open",
+          "observedExpanded": false,
+          "controlledRegionVisible": false
         },
         "consentState": {
           "requested": "not_applicable | before_consent | accepted | rejected",
@@ -53,7 +63,12 @@
           {
             "selector": "",
             "reason": "",
-            "maximumViewportAreaRatio": 0
+            "observedRect": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            }
           }
         ]
       },
