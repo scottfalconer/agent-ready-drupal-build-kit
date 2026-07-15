@@ -186,6 +186,7 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     'bin/reconcile.mjs',
     'bin/verify.mjs',
     'bin/verify-packet.mjs',
+    'bin/review-handoff.mjs',
     'bin/verify-assembly.mjs',
     'bin/verify-reproduction.mjs',
     'bin/lifecycle.mjs'

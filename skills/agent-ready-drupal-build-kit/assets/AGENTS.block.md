@@ -16,6 +16,7 @@ Non-negotiable gates:
 - Test actual anonymous routes and realistic non-admin editor tasks against the running Drupal site. Every custom or repeating public bundle needs an editor workflow, and load-bearing/anonymous-output fields need falsification checks.
 - Complete negative-route and consent evidence: generated 404 quality, access-wall canonicals, rendered legal/privacy links, active consent configuration, and fresh before-consent resource behavior.
 - Preserve real packet-local evidence and separate builder work from independent and blind review.
+- Before reviewer work, run one live verification to establish state, then generate the root `review-handoff.json` and isolated independent/blind projections; give each reviewer only its projection and byte-bound packet-local inputs, and require both reviewer records to copy the exact root digest. Final verification re-discovers exact input membership as well as bytes. The bundle is self-attested and has no reviewer-identity, verdict, or completion authority.
 - Treat packet-only validation and injected test runtimes as diagnostic only. The default live-target verifier must independently inspect the current DDEV origin and Git-tracked config YAML before it may derive local completion authorization.
 - Treat `live-verification.json.agentContinuation.shouldContinue: true` as a required autonomous repair loop. Fix locally resolvable failures and rerun without waiting for human review. Pause only when `requiredAction` is `pause-and-report` and `agentMayPause` is true, which requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Handoff is allowed only when `requiredAction` is `handoff`.
 - After the first successful full verification, preserve its create-once, integrity-checked historical baseline under kit tooling. The initial rebuild remains done. For later work, begin a repair or extension before editing, allow detected impact to widen required checks, and report targeted authored evidence separately as `evidence_recorded` without calling it independent verification or a new completion certificate.
@@ -24,6 +25,12 @@ Default verification:
 
 ```bash
 node {{SHELL_SKILL_PATH}}/scripts/verify.mjs --packet {{SHELL_PACKET_PATH}}
+```
+
+After that preliminary run has established the finished builder state and before independent/blind review:
+
+```bash
+node {{SHELL_SKILL_PATH}}/scripts/review-handoff.mjs --packet {{SHELL_PACKET_PATH}}
 ```
 
 For later work, `status` reads the last inspected cached state. Refresh with the default verifier before `begin` when `currentStateFresh` is false. Begin one `repair` or `extension` before editing and declare every affected anonymous `--route`, or explicit `--no-public-route` when there is no anonymous route effect; use `--adopt-current` only for existing edits, which always adds conservative `unknown` impact. Every concrete route must be in the packet route matrix and pass the fresh fetch. Copy the base fingerprint from `begin` and the result fingerprint from the fresh report into the targeted JSON. Then complete with evidence for every criterion and non-machine check; `complete` performs its own fresh inspection and snapshots evidence bytes. Use `abandon --reason "..."` when the active record will not be completed. Only after targeted evidence is recorded may `verify --change` re-evaluate the current packet/live state against the full original verifier gates and optionally create a checkpoint; it validates existing review artifacts rather than recreating them.

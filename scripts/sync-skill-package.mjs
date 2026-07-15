@@ -109,6 +109,11 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'review-handoff.mjs'),
+        destination: join(skillRoot, 'scripts', 'review-handoff.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'verify-assembly.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-assembly.mjs'),
         executable: true
