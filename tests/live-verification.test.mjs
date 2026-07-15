@@ -23,6 +23,7 @@ import {
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
+  reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
@@ -153,6 +154,37 @@ test('agent continuation pauses only for verifier-confirmed external-only blocke
   assert.equal(complete.agentMayStop, true);
   assert.equal(complete.agentMayPause, false);
   assert.deepEqual(complete.blockers, []);
+});
+
+test('lifecycle continuation keeps canonical blockers and compatibility reasons aligned', () => {
+  const report = {
+    agentContinuation: null,
+    claimScope: 'complete-local-rebuild',
+    completionBlockers: [{
+      attemptedEvidence: ['evidence/provider-response.json'],
+      code: 'blind.defect.DEF-EXT-1',
+      message: 'Provider credentials are unavailable.',
+      missingInput: 'A provider-issued API credential.',
+      nextAction: 'Supply the credential and rerun verification.',
+      origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+      resolutionClass: 'external',
+      verifierConfirmedExternal: true
+    }],
+    completionBlockedReasons: ['stale compatibility value'],
+    currentSiteClaimAllowed: false,
+    currentStateBlockedReasons: ['Current lifecycle state is unclassified.']
+  };
+
+  reconcileLifecycleContinuation(report, { baseCompletionAllowed: true });
+
+  assert.deepEqual(
+    report.completionBlockedReasons,
+    report.completionBlockers.map((blocker) => blocker.message)
+  );
+  assert.equal(report.completionBlockers.at(-1).origin, 'lifecycle-verifier');
+  assert.equal(report.agentContinuation.status, 'continue_required');
+  assert.equal(report.agentContinuation.shouldContinue, true);
+  assert.equal(report.agentContinuation.blockers.length, report.completionBlockers.length);
 });
 
 test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
@@ -6435,6 +6467,13 @@ test('packet verification normalizes evidenced external blockers without authori
     resolutionClass: 'external',
     verifierConfirmedExternal: true
   });
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects[0].id = 'unstable id';
+  });
+  const unstableIdReport = await validatePacket({ packetDir });
+  assert.equal(unstableIdReport.valid, false);
+  assert.match(unstableIdReport.errors.join('\n'), /requires a stable alphanumeric id/);
 });
 
 test('blind accepted-out-of-scope dispositions require an owner and reconciled summary counts', async () => {

@@ -4512,6 +4512,32 @@ export function agentContinuation({
   };
 }
 
+export function reconcileLifecycleContinuation(report, { baseCompletionAllowed = false } = {}) {
+  const lifecycleBlockers = baseCompletionAllowed
+    ? (Array.isArray(report?.currentStateBlockedReasons) ? report.currentStateBlockedReasons : [])
+      .map((message) => ({
+        code: 'lifecycle.current-state',
+        message,
+        nextAction: 'Classify, repair, or revert the current lifecycle state, then rerun the default live verifier.',
+        origin: 'lifecycle-verifier',
+        resolutionClass: 'agent_resolvable'
+      }))
+    : [];
+  report.completionBlockers = [
+    ...(Array.isArray(report?.completionBlockers) ? report.completionBlockers : []),
+    ...lifecycleBlockers
+  ];
+  report.completionBlockedReasons = report.completionBlockers
+    .map((blocker) => String(blocker?.message ?? '').trim())
+    .filter(Boolean);
+  report.agentContinuation = agentContinuation({
+    complete: report.currentSiteClaimAllowed === true,
+    claimLabel: report.claimScope,
+    blockers: report.completionBlockers
+  });
+  return report;
+}
+
 function pathIsInside(parent, child) {
   const pathFromParent = relative(parent, child);
   return pathFromParent === '' || (
@@ -7750,20 +7776,7 @@ async function main() {
           report.lifecycle.currentStateClassification?.kind === 'unclassified'
         ? ['Current state differs from the latest lifecycle anchor and has no classified repair or extension; revert it or begin with explicit --adopt-current classification.']
         : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
-    report.agentContinuation = agentContinuation({
-      complete: report.currentSiteClaimAllowed === true,
-      claimLabel: report.claimScope,
-      blockers: [
-        ...report.completionBlockers,
-        ...(completionClaimAllowed ? report.currentStateBlockedReasons : []).map((message) => ({
-          code: 'lifecycle.current-state',
-          message,
-          nextAction: 'Classify, repair, or revert the current lifecycle state, then rerun the default live verifier.',
-          origin: 'lifecycle-verifier',
-          resolutionClass: 'agent_resolvable'
-        }))
-      ]
-    });
+    reconcileLifecycleContinuation(report, { baseCompletionAllowed: completionClaimAllowed });
   }
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);

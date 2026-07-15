@@ -2452,6 +2452,7 @@ async function validateBlindAdversarialReview(
         arrayOrEmpty(defect.evidence).map((reference) => nonEmptyPacketEvidence(packetDir, reference, evidenceDir))
       );
       const reason = String(defect.acceptedReason || defect.reason || defect.rationale || '').trim();
+      const defectId = String(defect.id ?? '').trim();
       const missingInput = String(defect.missingInput ?? '').trim();
       const nextAction = String(defect.nextAction ?? defect.recommendedFix ?? '').trim();
       if (
@@ -2464,14 +2465,18 @@ async function validateBlindAdversarialReview(
         );
       }
       if (defect.status === 'external_blocker') {
-        if (!missingInput || !nextAction) {
+        if (!/^[A-Za-z0-9._-]+$/.test(defectId)) {
+          errors.push(
+            `blind-adversarial-review.json productDefects[${index}] external_blocker requires a stable alphanumeric id.`
+          );
+        } else if (!missingInput || !nextAction) {
           errors.push(
             `blind-adversarial-review.json productDefects[${index}] external_blocker requires missingInput and nextAction.`
           );
         } else if (reason && evidenceResults.some(Boolean)) {
           externalBlockers.push({
             attemptedEvidence: arrayOrEmpty(defect.evidence).map((reference) => String(reference).trim()).filter(Boolean),
-            code: `blind.defect.${String(defect.id ?? index).trim() || index}`,
+            code: `blind.defect.${defectId}`,
             message: String(defect.title || reason).trim(),
             missingInput,
             nextAction,
