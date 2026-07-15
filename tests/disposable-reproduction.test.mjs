@@ -191,6 +191,35 @@ test('independent clone uses config.local identity and cleanup refuses to target
   }
 });
 
+test('disposable clone rejects project-controlled hooks, remote config, custom commands, and every compose override before DDEV start', () => {
+  for (const [path, contents, expected] of [
+    ['.ddev/config.hooks.yaml', 'hooks:\n  pre-start:\n    - exec-host: "touch /tmp/owned"\n', /rejects project hooks/],
+    ['.ddev/config.quoted-hooks.yaml', '"hooks":\n  pre-start:\n    - exec-host: "touch /tmp/owned"\n', /rejects project hooks/],
+    ['.ddev/config.flow-hooks.yaml', '{ hooks: { pre-start: [{ exec-host: "touch /tmp/owned" }] } }\n', /rejects project hooks/],
+    ['.ddev/config.escaped-hooks.yaml', '"h\\u006foks": { pre-start: [{ exec-host: "touch /tmp/owned" }] }\n', /rejects project hooks/],
+    ['.ddev/config.anchor.yaml', 'shared: &danger { web_environment: ["X=1"] }\ncopy: *danger\n', /anchors or aliases/],
+    ['.ddev/config.remote.yaml', 'remote_config: https://example.test/unsafe.yaml\n', /rejects remote_config/],
+    ['.ddev/commands/host/pwn', '#!/usr/bin/env bash\ntouch /tmp/owned\n', /rejects project custom commands/],
+    ['.ddev/commands/web/drush', '#!/usr/bin/env bash\necho forged\n', /rejects project custom commands/],
+    ['.ddev/docker-compose.safe-looking.yaml', 'services:\n  redis:\n    image: redis:7\n', /rejects project compose overrides/],
+    ['.ddev/docker-compose.flow.yaml', '{ services: { web: { volumes: ["/var/run/docker.sock:/var/run/docker.sock"] } } }\n', /rejects project compose overrides/]
+  ]) {
+    const { root } = fixture();
+    try {
+      mkdirSync(join(root, path, '..'), { recursive: true });
+      writeFileSync(join(root, path), contents);
+      git(root, ['add', '.']);
+      git(root, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--quiet', '-m', 'unsafe ddev config']);
+      assert.throws(
+        () => createDisposableClone({ execute: realExecutor(), head: git(root, ['rev-parse', 'HEAD']), projectRoot: root }),
+        expected
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  }
+});
+
 test('cleanup retains the owned clone when live DDEV identity cannot be reconfirmed', () => {
   const { root } = fixture();
   let disposable;
@@ -201,19 +230,51 @@ test('cleanup retains the owned clone when live DDEV identity cannot be reconfir
     const unsafeExecute = (command, args, options) => {
       calls.push({ command, args, options });
       if (command === 'ddev' && args[0] === 'describe') {
-        return { status: 0, stdout: JSON.stringify({ raw: { name: 'another-project' } }), stderr: '', signal: null };
+        return { status: 0, stdout: JSON.stringify({ raw: { name: 'another-project', approot: disposable.root } }), stderr: '', signal: null };
       }
       throw new Error(`Unexpected cleanup command: ${command} ${args.join(' ')}`);
     };
 
     assert.throws(
       () => cleanupDisposable({ ddevStartAttempted: true, disposable, execute: unsafeExecute }),
-      /did not confirm the verifier-owned disposable project identity/
+      /did not confirm the verifier-owned disposable project name and real app root/
     );
     assert.equal(calls.some(({ args }) => args[0] === 'delete'), false);
     assert.equal(existsSync(disposable.root), true);
   } finally {
     if (disposable?.root) rmSync(disposable.root, { force: true, recursive: true });
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('cleanup refuses a same-name DDEV project whose real app root is not the owned clone', () => {
+  const { root } = fixture();
+  const wrongRoot = mkdtempSync(join(tmpdir(), 'wrong-disposable-root-'));
+  let disposable;
+  try {
+    disposable = createDisposableClone({ execute: realExecutor(), head: git(root, ['rev-parse', 'HEAD']), projectRoot: root });
+    const calls = [];
+    const unsafeExecute = (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === 'ddev' && args[0] === 'describe') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({ raw: { name: disposable.name, approot: wrongRoot } }),
+          stderr: '',
+          signal: null
+        };
+      }
+      throw new Error(`Unexpected cleanup command: ${command} ${args.join(' ')}`);
+    };
+    assert.throws(
+      () => cleanupDisposable({ ddevStartAttempted: true, disposable, execute: unsafeExecute }),
+      /name and real app root/
+    );
+    assert.equal(calls.some(({ args }) => args[0] === 'delete'), false);
+    assert.equal(existsSync(disposable.root), true);
+  } finally {
+    if (disposable?.root) rmSync(disposable.root, { force: true, recursive: true });
+    rmSync(wrongRoot, { force: true, recursive: true });
     rmSync(root, { force: true, recursive: true });
   }
 });
@@ -226,7 +287,7 @@ test('mocked end-to-end run proves exact-HEAD reproduction and working-target be
     if (command === 'ddev' && args[0] === 'describe') {
       const local = readFileSync(join(options.cwd, '.ddev', 'config.local.yaml'), 'utf8');
       const name = local.match(/^name:\s*(.+)$/m)?.[1]?.trim();
-      return { status: 0, stdout: JSON.stringify({ raw: { name, primary_url: `https://${name}.ddev.site` } }), stderr: '', signal: null };
+      return { status: 0, stdout: JSON.stringify({ raw: { name, approot: options.cwd, primary_url: `https://${name}.ddev.site` } }), stderr: '', signal: null };
     }
     if (command === 'ddev') return { status: 0, stdout: 'ok', stderr: '', signal: null };
     throw new Error(`Unexpected mocked command: ${command}`);
@@ -266,7 +327,7 @@ test('working-target proof binds dirty file bytes even when porcelain status tex
     if (command === 'ddev' && args[0] === 'describe') {
       const local = readFileSync(join(options.cwd, '.ddev', 'config.local.yaml'), 'utf8');
       const name = local.match(/^name:\s*(.+)$/m)?.[1]?.trim();
-      return { status: 0, stdout: JSON.stringify({ raw: { name, primary_url: `https://${name}.ddev.site` } }), stderr: '', signal: null };
+      return { status: 0, stdout: JSON.stringify({ raw: { name, approot: options.cwd, primary_url: `https://${name}.ddev.site` } }), stderr: '', signal: null };
     }
     if (command === 'ddev') return { status: 0, stdout: 'ok', stderr: '', signal: null };
     throw new Error(`Unexpected mocked command: ${command}`);
