@@ -480,6 +480,18 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
+  assert.deepEqual(
+    gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
+    {
+      id: 'G-REPRO-01',
+      title: 'Exact-HEAD Drupal build reproduced in a verifier-owned disposable DDEV environment',
+      phase: 6,
+      evidenceFile: 'evidence/reproduction-verification.json',
+      checkedBy: 'verify-script',
+      blocking: 'launch'
+    }
+  );
 });
 
 test('gates.json defines checker semantics, including the non-authoritative human-record rule', () => {

@@ -1,0 +1,15 @@
+_core:
+  default_config_hash: HlN7eAN2N4JIHsYv56V4E7sqC9bS609KwvGFjyD_mgk
+langcode: en
+uuid: 495d4d7d-4810-43d1-8c4d-87790978e8c7
+name: 'Disposable reproduction fixture'
+mail: admin@example.com
+slogan: ''
+page:
+  403: ''
+  404: ''
+  front: /user/login
+admin_compact_mode: false
+weight_select_max: 100
+default_langcode: en
+mail_notification: null

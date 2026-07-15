@@ -145,7 +145,8 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-EDITOR-01': 'editorWorkflow',
   'G-SEO-01': 'renderedSeo',
   'G-EDITOR-02': 'nextCycleEditorWorkflow',
-  'G-PRIVACY-01': 'negativeRouteConsent'
+  'G-PRIVACY-01': 'negativeRouteConsent',
+  'G-REPRO-01': 'disposableReproduction'
 });
 
 function collectTemplateEnumRules(value, path = [], rules = new Map()) {

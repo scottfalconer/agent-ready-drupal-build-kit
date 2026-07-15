@@ -1,0 +1,8 @@
+name: agent-ready-reproduction-ci
+type: drupal11
+docroot: web
+php_version: "8.3"
+webserver_type: nginx-fpm
+database:
+  type: mariadb
+  version: "10.11"
