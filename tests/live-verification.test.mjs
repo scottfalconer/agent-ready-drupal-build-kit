@@ -10,6 +10,7 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
@@ -22,6 +23,7 @@ import {
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
+  reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
@@ -86,6 +88,103 @@ test('config YAML blob comparison rejects Config Split bytes hidden by skip-work
 
   assert.equal(scopedConfigStatus(root, configDirectories), '');
   assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('agent continuation pauses only for verifier-confirmed external-only blockers', () => {
+  const externalBlocker = {
+    attemptedEvidence: ['evidence/provider-response.json'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable.',
+    missingInput: 'A provider-issued API credential.',
+    nextAction: 'The owner supplies the credential, then the agent reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+  const externalOnly = agentContinuation({ blockers: [externalBlocker] });
+  assert.equal(externalOnly.status, 'externally_blocked');
+  assert.equal(externalOnly.requiredAction, 'pause-and-report');
+  assert.equal(externalOnly.shouldContinue, false);
+  assert.equal(externalOnly.agentMayPause, true);
+  assert.equal(externalOnly.agentMayStop, false);
+  assert.equal(externalOnly.blockers[0].resolutionClass, 'external');
+  assert.deepEqual(externalOnly.blockers[0].attemptedEvidence, externalBlocker.attemptedEvidence);
+
+  const mixed = agentContinuation({
+    blockers: [
+      externalBlocker,
+      {
+        code: 'runtime.config-status',
+        message: 'Current DDEV config status is not clean.',
+        origin: 'live-verifier',
+        resolutionClass: 'agent_resolvable'
+      }
+    ]
+  });
+  assert.equal(mixed.status, 'continue_required');
+  assert.equal(mixed.requiredAction, 'repair-and-reverify');
+  assert.equal(mixed.shouldContinue, true);
+  assert.equal(mixed.agentMayPause, false);
+  assert.match(mixed.instruction, /Do not hand off or pause while any agent-resolvable blocker remains/);
+
+  const unconfirmedAuthoredLabel = agentContinuation({
+    blockers: [{ ...externalBlocker, verifierConfirmedExternal: false }]
+  });
+  assert.equal(unconfirmedAuthoredLabel.status, 'continue_required');
+  assert.equal(unconfirmedAuthoredLabel.blockers[0].resolutionClass, 'agent_resolvable');
+
+  for (const [name, incompleteBlocker] of [
+    ['missing code', { ...externalBlocker, code: '' }],
+    ['non-verifier origin', { ...externalBlocker, origin: 'blind-adversarial-review.productDefects[0]' }],
+    ['missing attempted evidence', { ...externalBlocker, attemptedEvidence: [] }],
+    ['missing input', { ...externalBlocker, missingInput: '' }],
+    ['missing next action', { ...externalBlocker, nextAction: '' }]
+  ]) {
+    const incomplete = agentContinuation({ blockers: [incompleteBlocker] });
+    assert.equal(incomplete.status, 'continue_required', name);
+    assert.equal(incomplete.requiredAction, 'repair-and-reverify', name);
+    assert.equal(incomplete.shouldContinue, true, name);
+    assert.equal(incomplete.agentMayPause, false, name);
+    assert.equal(incomplete.blockers[0].resolutionClass, 'agent_resolvable', name);
+  }
+
+  const complete = agentContinuation({ complete: true, blockers: [externalBlocker] });
+  assert.equal(complete.status, 'complete');
+  assert.equal(complete.requiredAction, 'handoff');
+  assert.equal(complete.agentMayStop, true);
+  assert.equal(complete.agentMayPause, false);
+  assert.deepEqual(complete.blockers, []);
+});
+
+test('lifecycle continuation keeps canonical blockers and compatibility reasons aligned', () => {
+  const report = {
+    agentContinuation: null,
+    claimScope: 'complete-local-rebuild',
+    completionBlockers: [{
+      attemptedEvidence: ['evidence/provider-response.json'],
+      code: 'blind.defect.DEF-EXT-1',
+      message: 'Provider credentials are unavailable.',
+      missingInput: 'A provider-issued API credential.',
+      nextAction: 'Supply the credential and rerun verification.',
+      origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+      resolutionClass: 'external',
+      verifierConfirmedExternal: true
+    }],
+    completionBlockedReasons: ['stale compatibility value'],
+    currentSiteClaimAllowed: false,
+    currentStateBlockedReasons: ['Current lifecycle state is unclassified.']
+  };
+
+  reconcileLifecycleContinuation(report, { baseCompletionAllowed: true });
+
+  assert.deepEqual(
+    report.completionBlockedReasons,
+    report.completionBlockers.map((blocker) => blocker.message)
+  );
+  assert.equal(report.completionBlockers.at(-1).origin, 'lifecycle-verifier');
+  assert.equal(report.agentContinuation.status, 'continue_required');
+  assert.equal(report.agentContinuation.shouldContinue, true);
+  assert.equal(report.agentContinuation.blockers.length, report.completionBlockers.length);
 });
 
 test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
@@ -2519,16 +2618,18 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.equal(report.target.resolutionSource, 'explicit');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
       assert.deepEqual(report.agentContinuation, {
-        schemaVersion: 'public-kit.agent-continuation.1',
+        schemaVersion: 'public-kit.agent-continuation.2',
         status: 'continue_required',
         requiredAction: 'repair-and-reverify',
         shouldContinue: true,
+        agentMayPause: false,
         agentMayStop: false,
         stopConditionMet: false,
         humanReviewRequiredBeforeContinuing: false,
         externalBlockerMayPauseOnlyWhenRecorded: true,
+        blockers: report.completionBlockers.map(({ verifierConfirmedExternal, ...blocker }) => blocker),
         blockedReasons: report.completionBlockedReasons,
-        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off or pause while any agent-resolvable blocker remains, even when other blockers are external. Do not wait for routine human review.'
       });
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
@@ -4284,10 +4385,12 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.agentContinuation.requiredAction, 'handoff');
       assert.equal(cleanReport.agentContinuation.status, 'complete');
       assert.equal(cleanReport.agentContinuation.shouldContinue, false);
+      assert.equal(cleanReport.agentContinuation.agentMayPause, false);
       assert.equal(cleanReport.agentContinuation.agentMayStop, true);
       assert.equal(cleanReport.agentContinuation.stopConditionMet, true);
       assert.equal(cleanReport.agentContinuation.humanReviewRequiredBeforeContinuing, false);
       assert.deepEqual(cleanReport.agentContinuation.blockedReasons, []);
+      assert.deepEqual(cleanReport.agentContinuation.blockers, []);
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
       assert.equal(cleanReport.verifierOwnedAccessibility.passed, true);
@@ -6315,8 +6418,62 @@ test('blind review cannot treat an external blocker as an accepted primary-route
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     report.errors.join('\n'),
-    /external.blocker.*(?:cannot support|blocks).*completion|completion.*blocked.*external/i
+    /external_blocker requires missingInput and nextAction|requires a rationale.*concrete packet-local evidence/i
   );
+});
+
+test('packet verification normalizes evidenced external blockers without authorizing completion', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blind-external-pause-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects = [{
+      id: 'DEF-EXT-1',
+      severity: 'high',
+      title: 'Provider credentials are unavailable',
+      briefExpectation: 'The provider-backed behavior can be exercised.',
+      sourceTruthEvidence: 'source-desktop.png',
+      targetFinding: 'The verifier cannot exercise the provider without an owner-issued credential.',
+      evidence: ['target-desktop.png'],
+      recommendedFix: 'Supply the credential and rerun the provider behavior check.',
+      status: 'external_blocker',
+      resolvedByReviewPassId: '',
+      acceptedBy: '',
+      acceptedReason: 'The credential can be issued only by the external provider account owner.',
+      missingInput: 'An owner-issued provider API credential.',
+      nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.'
+    }];
+    blind.summary.verdict = 'blocked';
+    blind.summary.completionState = 'blocked';
+    blind.summary.externalBlockerIssueCount = 1;
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.equal(report.completionEvidence.externalBlockersOnly, true);
+  assert.equal(report.completionEvidence.externalBlockers.length, 1);
+  assert.deepEqual(report.completionEvidence.externalBlockers[0], {
+    attemptedEvidence: ['target-desktop.png'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable',
+    missingInput: 'An owner-issued provider API credential.',
+    nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  });
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects[0].id = 'unstable id';
+  });
+  const unstableIdReport = await validatePacket({ packetDir });
+  assert.equal(unstableIdReport.valid, false);
+  assert.match(unstableIdReport.errors.join('\n'), /requires a stable alphanumeric id/);
 });
 
 test('blind accepted-out-of-scope dispositions require an owner and reconciled summary counts', async () => {

@@ -101,7 +101,7 @@ Already fluent in Drupal? Use this as a repeatable agent workflow and review har
 
 Partial or representative builds are not useful deliverables. If reachable public content, media, routes, visual patterns, behavior, or editor forms are missing, the agent keeps working or records the specific blocker.
 
-The live verifier makes that continuation machine-readable. Until `live-verification.json` reports `agentContinuation.requiredAction: handoff`, the agent repairs the listed failures and reruns the verifier without waiting for a human review checkpoint. Human approval remains separate from the autonomous local rebuild loop.
+The live verifier makes that continuation machine-readable. While `live-verification.json` reports `agentContinuation.shouldContinue: true`, the agent repairs the structured blockers and reruns without waiting for a human review checkpoint. It may pause only on `requiredAction: pause-and-report`, which the verifier emits when every remaining blocker is confirmed external; that state still forbids completion and handoff. Human approval remains separate from the autonomous local rebuild loop.
 
 The precise file-by-file packet and gate vocabulary are listed in [docs/output-inventory.md](docs/output-inventory.md).
 

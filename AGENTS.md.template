@@ -379,7 +379,7 @@ A checkpoint is optional and never replaces the historical initial baseline. Do 
 
 Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
 
-The default verifier's `live-verification.json` contains `agentContinuation`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Stop only after `requiredAction: handoff`, or when a specific external blocker or genuinely owner-only decision is recorded with the attempted evidence and next action.
+The default verifier's `live-verification.json` contains `agentContinuation` and structured `completionBlockers`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Pause only when `requiredAction` is `pause-and-report` and `agentMayPause` is true; that state requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Only `requiredAction: handoff` authorizes handoff.
 
 If the agent runtime has a goal, plan, review, reflection, or task-loop feature, use it. If it does not, emulate the loop with a visible checklist in the conversation or working notes.
 
