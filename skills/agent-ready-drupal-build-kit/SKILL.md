@@ -76,6 +76,20 @@ Completion authority comes from the final verifier, not builder-authored `comple
 - A failing default verifier is a continuation signal, not a handoff condition. Read `agentContinuation` from `live-verification.json`; while `shouldContinue` is `true`, repair the listed agent-resolvable failures, refresh affected evidence, and rerun the verifier without waiting for human review. Pause only when the verifier emits `requiredAction: pause-and-report` and `agentMayPause: true`, which requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Human review is never required merely to let the agent continue.
 - Treat every verifier-discovered reachable public source path as agent-resolvable work: declare it, implement it, and rerun. Builder-authored legacy, test/staging, or intentionally-drop records cannot waive a public route. A matching private or persistently unreachable boundary may clear after the verifier confirms the same boundary response twice; do not pause for human review of that machine-evidenced boundary.
 
+Before manually shaping a large live-surface reconciliation block, refresh the non-passing worksheet:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Explicitly disposition every row in `review-packet/live-surface-reconciliation-draft.json`. The suggested direction and candidate packet sections never count as authored evidence. Then materialize the resolved rows:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/reconcile.mjs --packet review-packet --materialize
+```
+
+Materialization reruns the live census and exits `2` without changing `drupal-readback.json` if any row is unresolved, invalidated, stale, or lacks the references/evidence required by the full verifier. It writes only the resolved `liveSurfaceReconciliation` block and never creates reviewer verdicts or completion authority.
+
 Run the live-target verifier by default:
 
 ```bash

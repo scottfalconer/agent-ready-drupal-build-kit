@@ -300,6 +300,14 @@ The blind review claim set comes from the brief, source-truth materials, target,
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
+Before the full verifier, bootstrap the exact live Drupal surface into a non-passing worksheet instead of hand-shaping hundreds of census rows:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Edit `review-packet/live-surface-reconciliation-draft.json` and explicitly disposition every row. `recommendedDisposition` and `candidatePacketReferences` are navigation aids only; the command never copies them into claim-bearing fields. Public declarations still require a specific non-empty `file#section` reference. Non-public exclusions still require a named owner, rationale, and real packet-local evidence. New or materially changed surfaces reset to unresolved, and deleted packet rows remain stale until acknowledged. When the worksheet is resolved, run `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --materialize`. Materialization reruns the live census, refuses unresolved or stale rows with exit `2`, and changes only `drupal-readback.json.liveSurfaceReconciliation`. It does not set `readbackComplete`, recreate reviewer evidence, or authorize completion. Run the default verifier afterward.
+
 After independent verification, run the installed skill's default target-local verifier from the target workspace inside the active DDEV agent. The plain `node` command below assumes that context; from a host terminal, prefix it with `ddev exec`:
 
 ```bash

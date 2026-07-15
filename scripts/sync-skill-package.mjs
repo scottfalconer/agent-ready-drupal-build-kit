@@ -94,6 +94,11 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'reconcile.mjs'),
+        destination: join(skillRoot, 'scripts', 'reconcile.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'verify-packet.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-packet.mjs'),
         executable: true

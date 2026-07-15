@@ -182,6 +182,7 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.doesNotMatch(path, /\.tgz$/);
   }
   for (const path of [
+    'bin/reconcile.mjs',
     'bin/verify.mjs',
     'bin/verify-packet.mjs',
     'bin/verify-assembly.mjs',

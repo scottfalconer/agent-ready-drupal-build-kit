@@ -56,6 +56,7 @@
     "docs/positioning.md",
     "docs/recommended-agent-skills.md",
     "docs/output-inventory.md",
+    "Verifier-owned live-surface reconciliation worksheet plus guarded materialization that preserves explicit builder dispositions and strict packet evidence checks",
     "gates.json stable machine-readable gate vocabulary",
     "bin/verify.mjs default DDEV live-target verifier plus bin/verify-packet.mjs structural packet linter, with server-rendered response-link declaration integrity, exact external-redirect expectations, source-origin leak blocking with exact exceptions, representative route-role coverage, target-origin, Drupal site UUID, front-page, config-sync, clean-config, semantic packet, credible screenshot, recipe, and durable-intent checks",
     "templates/maintainer-review.template.md",

@@ -36,6 +36,10 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `negative-route-consent.json`
 - `launch-checklist.md`
 
+## Author-Editable Reconciliation Work Queue
+
+`review-packet/live-surface-reconciliation-draft.json` is created on demand by `reconcile.mjs --draft`. It is optional shaping state rather than a required gate record or verifier-authored pass artifact. The command refreshes machine-observed live Drupal surface facts while leaving declaration/exclusion decisions, packet references, and exclusion evidence explicit. `reconcile.mjs --materialize` reruns the census and copies only a fully resolved, strictly validated block into `drupal-readback.json.liveSurfaceReconciliation`; it cannot authorize completion.
+
 ## Generated Verifier Evidence
 
 The verifier writes these files under `review-packet/evidence/`; agents do not create them by hand:
