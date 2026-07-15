@@ -3181,7 +3181,7 @@ async function browserCaptureStateReasons(
       const screenshotPath = resolveReviewEvidencePath(packetDir, browserEvidenceDir, check?.[field]);
       const metadata = screenshotPath ? await evidenceImageMetadata(screenshotPath) : null;
       evidence[field] = { metadata, path: screenshotPath };
-      if (!credibleCaptureScreenshot(metadata, viewport)) {
+      if (statefulSchema && !credibleCaptureScreenshot(metadata, viewport)) {
         reasons.push(`browser-evidence.json publicRouteChecks[${index}].${field} must reference a credible packet-local image whose width matches and height covers the declared viewport.`);
       }
     }
@@ -3427,6 +3427,12 @@ async function browserCaptureStateReasons(
       }
       if (check.captureState?.fixtureRevision !== baseline.captureState?.fixtureRevision) {
         reasons.push(`browser-evidence.json state ${stateId} at ${privacySafeRouteRequestLabel(targetRequest)} ${viewportName} must use the default state's fixtureRevision.`);
+      }
+      if (
+        normalizeRouteRequestKey(check?.targetFinalUrl) !==
+        normalizeRouteRequestKey(baseline?.targetFinalUrl)
+      ) {
+        reasons.push(`browser-evidence.json state ${stateId} at ${privacySafeRouteRequestLabel(targetRequest)} ${viewportName} must keep the default state's targetFinalUrl; navigation outcomes belong in their own route record.`);
       }
     }
 
