@@ -148,6 +148,7 @@ function confirmDisposableIdentity(execute, disposable) {
 function runStep(execute, disposable, step) {
   const result = execute(step.command, step.args, {
     cwd: disposable.root,
+    ...(step.command === 'ddev' ? { ddevXdgConfigHome: disposable.ddevXdgConfigHome } : {}),
     phase: `provision:${step.adapter}`,
     target: 'disposable',
     timeout: step.timeout
@@ -224,13 +225,17 @@ export function runDisposableReproduction({
       projectRoot,
       ...(tempParent ? { tempParent } : {})
     });
-    const disposableRun = (command, args, options = {}) => run(command, args, { ...options, target: 'disposable' });
+    const disposableRun = (command, args, options = {}) => run(command, args, {
+      ...options,
+      ...(command === 'ddev' ? { ddevXdgConfigHome: disposable.ddevXdgConfigHome } : {}),
+      target: 'disposable'
+    });
     const cloned = loadValidatedReproductionInputs({
       execute: disposableRun,
       planPath: validated.planPath,
       projectRoot: disposable.root
     });
-    const clonedRuntime = exactHeadRuntimeBinding(disposable.root);
+    const clonedRuntime = disposable.exactHeadRuntime;
     exactHeadClone = (
       sourceBefore.runtimeCode.fingerprint === clonedRuntime.fingerprint &&
       sha256(validated.plan) === sha256(cloned.plan) &&
