@@ -88,6 +88,16 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
+const BROWSER_EVIDENCE_SCHEMA = 'public-kit.browser-evidence.2';
+const CAPTURE_STATE_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const CAPTURE_FIXTURE_REVISION_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$/;
+const CAPTURE_INTERACTION_ACTIONS = new Set(['click', 'press', 'fill', 'select', 'scroll', 'wait_for']);
+const CAPTURE_MENU_STATES = new Set(['not_applicable', 'closed', 'open']);
+const CAPTURE_CONSENT_STATES = new Set(['not_applicable', 'before_consent', 'accepted', 'rejected']);
+const MAX_CAPTURE_INTERACTION_STEPS = 12;
+const MAX_CAPTURE_CONTENT_COUNT_ASSERTIONS = 16;
+const MAX_CAPTURE_DYNAMIC_MASKS = 8;
+const MAX_CAPTURE_DYNAMIC_MASK_AREA_RATIO = 0.25;
 
 // Keep this map explicit. A non-human gate without a named evaluator is a prose-only
 // promise and must make the gate vocabulary invalid.
@@ -1262,7 +1272,7 @@ async function independentStructuredGateReasons({
     .filter((route) => route.source && route.target);
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
   const recurringObjects = substantiveObjects(patternMap?.structuredContentModel?.recurringSourceObjects);
-  const browserItemCounts = arrayOrEmpty(browserEvidence?.publicRouteChecks)
+  const browserItemCounts = defaultCaptureStateChecks(browserEvidence?.publicRouteChecks)
     .flatMap((check) => substantiveObjects(check?.renderedItemCounts).map((count) => ({
       ...count,
       sourceRoute: normalizeRouteKey(httpUrl(check?.sourceUrl)?.pathname),
@@ -1506,7 +1516,7 @@ async function independentStructuredGateReasons({
     record?.accepted === true && record?.detailRouteMode === 'separate_public_route'
   )) {
     const expectedFields = detailExpectedFields(ledger, fieldOutputMatrix, recurringObjects);
-    const browserDetail = arrayOrEmpty(browserEvidence?.publicRouteChecks).find((candidate) =>
+    const browserDetail = defaultCaptureStateChecks(browserEvidence?.publicRouteChecks).find((candidate) =>
       candidate?.routeRole === 'detail' &&
       normalizeRouteKey(candidate?.sourceUrl) === normalizeRouteKey(ledger?.representativeDetailSourcePath) &&
       routeRecordPath(candidate) === normalizeRouteKey(ledger?.representativeDetailTargetPath)
@@ -2671,11 +2681,198 @@ function routeRecordRequestKey(record) {
   return normalizeRouteRequestKey(record?.route || record?.targetPath || record?.targetUrl || record?.targetFinalUrl);
 }
 
-function routeHasViewport(checks, route, viewport) {
+function captureStateId(check) {
+  return String(check?.captureState?.id ?? '').trim();
+}
+
+function defaultCaptureStateChecks(checks) {
+  return arrayOrEmpty(checks).filter((check) => captureStateId(check) === 'default');
+}
+
+function routeHasViewport(checks, route, viewport, stateId = 'default') {
   return checks.some((check) => {
     const viewportName = String(check?.viewport?.name ?? check?.viewport ?? '').trim();
-    return routeRecordRequestKey(check) === route && viewportName === viewport;
+    return routeRecordRequestKey(check) === route &&
+      viewportName === viewport &&
+      captureStateId(check) === stateId;
   });
+}
+
+function browserCaptureStateReasons(browserEvidence, primaryRoutePaths) {
+  const reasons = [];
+  const checks = arrayOrEmpty(browserEvidence?.publicRouteChecks);
+  const tupleKeys = new Set();
+
+  if (browserEvidence?.schemaVersion !== BROWSER_EVIDENCE_SCHEMA) {
+    reasons.push(`browser-evidence.json must use schemaVersion ${BROWSER_EVIDENCE_SCHEMA}.`);
+  }
+
+  for (const [index, check] of checks.entries()) {
+    const prefix = `browser-evidence.json publicRouteChecks[${index}].captureState`;
+    const targetRequest = normalizeRouteRequestKey(check?.targetUrl);
+    const viewportName = String(check?.viewport?.name ?? '').trim();
+    const state = check?.captureState;
+    if (!isJsonObject(state)) {
+      reasons.push(`${prefix} is required.`);
+      continue;
+    }
+
+    const stateId = String(state.id ?? '').trim();
+    if (!CAPTURE_STATE_ID_RE.test(stateId) || stateId.length > 64) {
+      reasons.push(`${prefix}.id must be a stable lowercase kebab-case identifier no longer than 64 characters.`);
+    }
+    if (!CAPTURE_FIXTURE_REVISION_RE.test(String(state.fixtureRevision ?? '').trim())) {
+      reasons.push(`${prefix}.fixtureRevision must be a non-empty stable revision identifier no longer than 128 characters.`);
+    }
+
+    if (targetRequest && viewportName && stateId) {
+      const tupleKey = JSON.stringify([targetRequest, viewportName, stateId]);
+      if (tupleKeys.has(tupleKey)) {
+        reasons.push(`browser-evidence.json publicRouteChecks must use a unique normalized target request, viewport name, and captureState.id tuple; duplicate ${targetRequest} ${viewportName} ${stateId}.`);
+      }
+      tupleKeys.add(tupleKey);
+    }
+
+    if (!Array.isArray(state.interactionSteps) || state.interactionSteps.length > MAX_CAPTURE_INTERACTION_STEPS) {
+      reasons.push(`${prefix}.interactionSteps must be an array with at most ${MAX_CAPTURE_INTERACTION_STEPS} steps.`);
+    } else {
+      for (const [stepIndex, step] of state.interactionSteps.entries()) {
+        if (
+          !isJsonObject(step) ||
+          !CAPTURE_INTERACTION_ACTIONS.has(step.action) ||
+          !String(step.target ?? '').trim() ||
+          String(step.target).length > 512 ||
+          typeof step.value !== 'string' ||
+          step.value.length > 512 ||
+          !String(step.expectedState ?? '').trim() ||
+          String(step.expectedState).length > 512
+        ) {
+          reasons.push(`${prefix}.interactionSteps[${stepIndex}] must name a supported action, bounded target/value, and expectedState.`);
+        }
+      }
+    }
+
+    const menu = state.menuState;
+    if (
+      !isJsonObject(menu) ||
+      typeof menu.toggleVisible !== 'boolean' ||
+      !CAPTURE_MENU_STATES.has(menu.requested) ||
+      !CAPTURE_MENU_STATES.has(menu.observed) ||
+      menu.requested !== menu.observed ||
+      (menu.toggleVisible === false && menu.requested !== 'not_applicable') ||
+      (menu.toggleVisible === true && menu.requested === 'not_applicable')
+    ) {
+      reasons.push(`${prefix}.menuState must coherently record toggleVisible plus matching requested and observed states.`);
+    }
+    if (
+      stateId === 'default' &&
+      viewportName === 'mobile' &&
+      menu?.toggleVisible === true &&
+      (menu.requested !== 'closed' || menu.observed !== 'closed')
+    ) {
+      reasons.push(`${prefix}.menuState must record the visible mobile toggle closed in the default state; use mobile-menu-open for the interacted state.`);
+    }
+
+    const consent = state.consentState;
+    if (
+      !isJsonObject(consent) ||
+      !CAPTURE_CONSENT_STATES.has(consent.requested) ||
+      !CAPTURE_CONSENT_STATES.has(consent.observed) ||
+      consent.requested !== consent.observed
+    ) {
+      reasons.push(`${prefix}.consentState must record matching requested and observed consent states.`);
+    }
+
+    if (
+      !Array.isArray(state.contentCountAssertions) ||
+      state.contentCountAssertions.length > MAX_CAPTURE_CONTENT_COUNT_ASSERTIONS
+    ) {
+      reasons.push(`${prefix}.contentCountAssertions must be an array with at most ${MAX_CAPTURE_CONTENT_COUNT_ASSERTIONS} assertions.`);
+    } else {
+      for (const [assertionIndex, assertion] of state.contentCountAssertions.entries()) {
+        if (
+          !isJsonObject(assertion) ||
+          !String(assertion.selector ?? '').trim() ||
+          String(assertion.selector).length > 512 ||
+          !Number.isInteger(assertion.expectedCount) ||
+          assertion.expectedCount < 0 ||
+          assertion.expectedCount > 100_000 ||
+          !Number.isInteger(assertion.observedCount) ||
+          assertion.observedCount < 0 ||
+          assertion.observedCount > 100_000 ||
+          assertion.expectedCount !== assertion.observedCount ||
+          assertion.status !== 'pass'
+        ) {
+          reasons.push(`${prefix}.contentCountAssertions[${assertionIndex}] must be a passing bounded exact-count assertion.`);
+        }
+      }
+    }
+
+    if (!Array.isArray(state.dynamicMasks) || state.dynamicMasks.length > MAX_CAPTURE_DYNAMIC_MASKS) {
+      reasons.push(`${prefix}.dynamicMasks must be an array with at most ${MAX_CAPTURE_DYNAMIC_MASKS} masks.`);
+    } else {
+      const selectors = new Set();
+      for (const [maskIndex, mask] of state.dynamicMasks.entries()) {
+        const selector = String(mask?.selector ?? '').trim();
+        const ratio = mask?.maximumViewportAreaRatio;
+        if (
+          !isJsonObject(mask) ||
+          !selector ||
+          selector.length > 512 ||
+          selectors.has(selector) ||
+          !String(mask.reason ?? '').trim() ||
+          String(mask.reason).length > 512 ||
+          typeof ratio !== 'number' ||
+          !Number.isFinite(ratio) ||
+          ratio <= 0 ||
+          ratio > MAX_CAPTURE_DYNAMIC_MASK_AREA_RATIO
+        ) {
+          reasons.push(`${prefix}.dynamicMasks[${maskIndex}] must use a unique bounded selector, reason, and maximumViewportAreaRatio no greater than ${MAX_CAPTURE_DYNAMIC_MASK_AREA_RATIO}.`);
+        }
+        selectors.add(selector);
+      }
+    }
+  }
+
+  for (const targetRequest of new Set(primaryRoutePaths)) {
+    for (const viewportName of ['desktop', 'mobile']) {
+      if (!checks.some((check) =>
+        normalizeRouteRequestKey(check?.targetUrl) === targetRequest &&
+        check?.viewport?.name === viewportName &&
+        captureStateId(check) === 'default'
+      )) {
+        reasons.push(`browser-evidence.json needs a default captureState for primary route ${targetRequest} at ${viewportName}.`);
+      }
+    }
+
+    const defaultMobile = checks.find((check) =>
+      normalizeRouteRequestKey(check?.targetUrl) === targetRequest &&
+      check?.viewport?.name === 'mobile' &&
+      captureStateId(check) === 'default'
+    );
+    if (defaultMobile?.captureState?.menuState?.toggleVisible === true) {
+      const openMobileMenu = checks.find((check) =>
+        normalizeRouteRequestKey(check?.targetUrl) === targetRequest &&
+        check?.viewport?.name === 'mobile' &&
+        captureStateId(check) === 'mobile-menu-open'
+      );
+      if (
+        !openMobileMenu ||
+        openMobileMenu.captureState?.menuState?.toggleVisible !== true ||
+        openMobileMenu.captureState?.menuState?.requested !== 'open' ||
+        openMobileMenu.captureState?.menuState?.observed !== 'open' ||
+        arrayOrEmpty(openMobileMenu.captureState?.interactionSteps).length === 0 ||
+        openMobileMenu.accepted !== true ||
+        arrayOrEmpty(openMobileMenu.blockers).length > 0 ||
+        openMobileMenu.visualComparison?.status !== 'pass' ||
+        !String(openMobileMenu.targetScreenshot ?? '').trim()
+      ) {
+        reasons.push(`browser-evidence.json needs an explicit mobile-menu-open captureState that is accepted and passing with a target screenshot and bounded interaction step for primary route ${targetRequest} because its default mobile evidence declares a visible toggle.`);
+      }
+    }
+  }
+
+  return reasons;
 }
 
 const AXE_WCAG_TAG_RE = /^wcag(?:2|21|22)(?:a|aa)$/i;
@@ -3783,6 +3980,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
+  reasons.push(...browserCaptureStateReasons(browserEvidence, primaryRoutePaths));
   const primaryRouteRoles = new Map(
     primaryRoutes.map((route) => [normalizeRouteRequestKey(route?.targetPath), String(route?.routeRole ?? '').trim()])
   );
@@ -4192,7 +4390,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
 
   const collectionLedger = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger);
   const recurringSourceObjects = substantiveObjects(patternMap?.structuredContentModel?.recurringSourceObjects);
-  const publicRouteItemCounts = arrayOrEmpty(browserEvidence?.publicRouteChecks)
+  const publicRouteItemCounts = defaultCaptureStateChecks(browserEvidence?.publicRouteChecks)
     .flatMap((check) => substantiveObjects(check?.renderedItemCounts));
   const collectionScope = patternMap?.structuredContentModel?.collectionScope ?? {};
   const discoveredCollectionEvidence = collectionLedger.length > 0 || recurringSourceObjects.some(
@@ -4583,6 +4781,7 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     );
     const detailCheck = publicRouteChecks.find((check) =>
       check?.routeRole === 'detail' &&
+      captureStateId(check) === 'default' &&
       normalizeRouteKey(httpUrl(check?.sourceUrl)?.pathname) === sourceDetail &&
       routeRecordPath(check) === targetDetail &&
       check?.accepted === true
@@ -4688,7 +4887,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
       normalizeRouteKey(candidate?.targetPath) === targetRoute && candidate?.accepted === true
     );
     const browserFormCheck = publicRouteChecks.find((candidate) =>
-      candidate?.routeRole === 'form' && routeRecordPath(candidate) === targetRoute && candidate?.accepted === true
+      candidate?.routeRole === 'form' &&
+      captureStateId(candidate) === 'default' &&
+      routeRecordPath(candidate) === targetRoute &&
+      candidate?.accepted === true
     );
     const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
       packetDir,
@@ -5056,6 +5258,7 @@ async function briefPacketCompletionReadiness(
       }
     }
   }
+  reasons.push(...browserCaptureStateReasons(browserEvidence, [...primaryRouteRequirements.keys()]));
   if (
     primaryRouteRequirements.has('/') &&
     (
@@ -5078,7 +5281,9 @@ async function briefPacketCompletionReadiness(
   for (const [targetPath, expectedRequirementIds] of primaryRouteRequirements) {
     for (const viewport of ['desktop', 'mobile']) {
       const check = browserChecks.find((candidate) =>
-        normalizeRouteRequestKey(candidate?.targetUrl) === targetPath && candidate?.viewport?.name === viewport
+        normalizeRouteRequestKey(candidate?.targetUrl) === targetPath &&
+        candidate?.viewport?.name === viewport &&
+        captureStateId(candidate) === 'default'
       );
       const checkedIds = new Set(arrayOrEmpty(check?.briefRequirementIds).map((id) => String(id).trim()).filter(Boolean));
       const screenshotPath = resolveReviewEvidencePath(packetDir, join(packetDir, 'evidence', 'browser'), check?.targetScreenshot);

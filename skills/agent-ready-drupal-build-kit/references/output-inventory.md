@@ -27,7 +27,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `production-target.md`
 - `parity-report.json`
 - `route-matrix.json`
-- `browser-evidence.json`
+- `browser-evidence.json`: schema v2 route/viewport/state evidence. Each public record owns its stable capture state and fixture revision; normalized target request + viewport + state ID tuples are unique. Primary routes require `default` desktop/mobile states, while a structured visible mobile-toggle declaration conditionally requires `mobile-menu-open`. Interaction steps, count assertions, and dynamic masks are bounded in this file rather than split into a second manifest.
 - `next-cycle-verification.json`
 - `independent-verification.json`
 - `blind-adversarial-review.json`

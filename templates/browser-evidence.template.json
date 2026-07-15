@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "public-kit.browser-evidence.1",
+  "schemaVersion": "public-kit.browser-evidence.2",
   "site": "",
   "checkedAt": "",
   "toolOrMethod": "",
@@ -20,6 +20,42 @@
         "name": "desktop | mobile | tablet | custom",
         "width": 0,
         "height": 0
+      },
+      "captureState": {
+        "id": "default",
+        "fixtureRevision": "",
+        "interactionSteps": [
+          {
+            "action": "click | press | fill | select | scroll | wait_for",
+            "target": "",
+            "value": "",
+            "expectedState": ""
+          }
+        ],
+        "menuState": {
+          "toggleVisible": false,
+          "requested": "not_applicable | closed | open",
+          "observed": "not_applicable | closed | open"
+        },
+        "consentState": {
+          "requested": "not_applicable | before_consent | accepted | rejected",
+          "observed": "not_applicable | before_consent | accepted | rejected"
+        },
+        "contentCountAssertions": [
+          {
+            "selector": "",
+            "expectedCount": 0,
+            "observedCount": 0,
+            "status": "pass | fail"
+          }
+        ],
+        "dynamicMasks": [
+          {
+            "selector": "",
+            "reason": "",
+            "maximumViewportAreaRatio": 0
+          }
+        ]
       },
       "sourceScreenshot": "",
       "targetScreenshot": "",

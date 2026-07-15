@@ -1479,6 +1479,15 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       targetUrl: `${targetBaseUrl}/`,
       targetFinalUrl: `${targetBaseUrl}/`,
       viewport: { name: viewport, width: desktop ? 1280 : 390, height: desktop ? 800 : 844 },
+      captureState: {
+        id: 'default',
+        fixtureRevision: 'fixture-home-v1',
+        interactionSteps: [],
+        menuState: { toggleVisible: false, requested: 'not_applicable', observed: 'not_applicable' },
+        consentState: { requested: 'not_applicable', observed: 'not_applicable' },
+        contentCountAssertions: [],
+        dynamicMasks: []
+      },
       sourceScreenshot: `evidence/blind-adversarial-review/source-${viewport}.png`,
       targetScreenshot: `evidence/blind-adversarial-review/target-${viewport}.png`,
       visualComparison: { method: 'agent_review', reviewer: '', diffImage: '', diffScore: null, status: 'pass', acceptedExceptions: [] },
@@ -3758,6 +3767,154 @@ test('brief mode verifies target routes without requiring or implying a source s
       assert.doesNotMatch(report.completionBlockedReasons.join('\n'), /source route discovery|sourceBaseUrl/i);
       assert.match(report.completionBlockedReasons.join('\n'), /non-authoritative/i);
     }
+  );
+});
+
+test('browser capture states are bounded, tuple-unique, and require open-menu evidence only from structured toggle evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'browser-capture-states-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    true,
+    canonicalReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const cases = [
+    {
+      name: 'legacy-browser-evidence-schema',
+      expected: /must use schemaVersion public-kit\.browser-evidence\.2/i,
+      mutate(browser) {
+        browser.schemaVersion = 'public-kit.browser-evidence.1';
+      }
+    },
+    {
+      name: 'missing-capture-state',
+      expected: /publicRouteChecks\[0\]\.captureState is required/i,
+      mutate(browser) {
+        delete browser.publicRouteChecks[0].captureState;
+      }
+    },
+    {
+      name: 'unstable-fixture-revision',
+      expected: /fixtureRevision must be a non-empty stable revision/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.fixtureRevision = '';
+      }
+    },
+    {
+      name: 'normalized-tuple-duplicate',
+      expected: /unique normalized target request, viewport name, and captureState\.id tuple; duplicate \/ mobile default/i,
+      mutate(browser) {
+        const duplicate = structuredClone(browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile'));
+        duplicate.targetUrl = 'https://target.example/?';
+        duplicate.targetFinalUrl = 'https://target.example/?';
+        browser.publicRouteChecks.push(duplicate);
+      }
+    },
+    {
+      name: 'missing-default-mobile-state',
+      expected: /needs a default captureState for primary route \/ at mobile/i,
+      mutate(browser) {
+        browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile').captureState.id = 'alternate';
+      }
+    },
+    {
+      name: 'too-many-interaction-steps',
+      expected: /interactionSteps must be an array with at most 12 steps/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.interactionSteps = Array.from({ length: 13 }, () => ({
+          action: 'click',
+          target: '[data-test="control"]',
+          value: '',
+          expectedState: 'The control is active.'
+        }));
+      }
+    },
+    {
+      name: 'count-assertion-mismatch',
+      expected: /must be a passing bounded exact-count assertion/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.contentCountAssertions = [{
+          selector: '.card',
+          expectedCount: 4,
+          observedCount: 3,
+          status: 'pass'
+        }];
+      }
+    },
+    {
+      name: 'oversized-dynamic-mask',
+      expected: /maximumViewportAreaRatio no greater than 0\.25/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '[data-dynamic="weather"]',
+          reason: 'Weather changes between captures.',
+          maximumViewportAreaRatio: 0.5
+        }];
+      }
+    },
+    {
+      name: 'structured-visible-toggle-without-open-state',
+      expected: /needs an explicit mobile-menu-open captureState.*declares a visible toggle/i,
+      mutate(browser) {
+        const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
+        mobile.captureState.menuState = { toggleVisible: true, requested: 'closed', observed: 'closed' };
+      }
+    }
+  ];
+
+  for (const fixture of cases) {
+    const packetDir = join(temp, fixture.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'browser-evidence.json'), fixture.mutate);
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, fixture.name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), fixture.expected, fixture.name);
+  }
+
+  const proseOnlyPacket = join(temp, 'prose-only-toggle-claim');
+  cpSync(canonicalPacket, proseOnlyPacket, { recursive: true });
+  mutateJson(join(proseOnlyPacket, 'browser-evidence.json'), (browser) => {
+    browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile').notes =
+      'The mobile layout has a visible menu toggle.';
+  });
+  const proseOnlyReport = await validatePacket({ packetDir: proseOnlyPacket });
+  assert.equal(
+    proseOnlyReport.completionEvidence.packetSupportsCompletion,
+    true,
+    proseOnlyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const openMenuPacket = join(temp, 'structured-open-menu-state');
+  cpSync(canonicalPacket, openMenuPacket, { recursive: true });
+  mutateJson(join(openMenuPacket, 'browser-evidence.json'), (browser) => {
+    const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
+    mobile.captureState.menuState = { toggleVisible: true, requested: 'closed', observed: 'closed' };
+    const open = structuredClone(mobile);
+    open.captureState = {
+      ...open.captureState,
+      id: 'mobile-menu-open',
+      interactionSteps: [{
+        action: 'click',
+        target: '[data-test="mobile-menu-toggle"]',
+        value: '',
+        expectedState: 'The controlled navigation is visible and the toggle is expanded.'
+      }],
+      menuState: { toggleVisible: true, requested: 'open', observed: 'open' }
+    };
+    open.notes = 'Captured after opening the mobile menu.';
+    browser.publicRouteChecks.push(open);
+  });
+  const openMenuReport = await validatePacket({ packetDir: openMenuPacket });
+  assert.equal(
+    openMenuReport.completionEvidence.packetSupportsCompletion,
+    true,
+    openMenuReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 });
 
