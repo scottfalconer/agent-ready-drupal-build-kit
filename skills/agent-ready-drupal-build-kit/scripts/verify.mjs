@@ -210,15 +210,31 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
   return collectFileManifest(kitRoot, files).fingerprint;
 }
 
-const REDACTED_QUERY_RE = /^\?query-sha256=[a-f0-9]{64}$/;
+const REDACTED_QUERY_TOKEN_RE = /^\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000$/;
+const REDACTED_QUERY_TOKEN_GLOBAL_RE = /\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000/g;
 
 function redactedQuery(value) {
   const query = String(value ?? '');
   if (!query) return '';
   const normalized = query.startsWith('?') ? query : `?${query}`;
-  return REDACTED_QUERY_RE.test(normalized)
+  return REDACTED_QUERY_TOKEN_RE.test(normalized)
     ? normalized
-    : `?query-sha256=${sha256(normalized)}`;
+    : `?\u0000agent-ready-query-sha256:${sha256(normalized)}\u0000`;
+}
+
+function publicRedactedValue(value) {
+  if (typeof value === 'string') {
+    return value.replace(REDACTED_QUERY_TOKEN_GLOBAL_RE, '?query-sha256=$1');
+  }
+  if (Array.isArray(value)) {
+    return value.map(publicRedactedValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, publicRedactedValue(entry)])
+    );
+  }
+  return value;
 }
 
 function redactedUrl(value, baseUrl = undefined) {
@@ -227,8 +243,9 @@ function redactedUrl(value, baseUrl = undefined) {
     url.username = '';
     url.password = '';
     url.hash = '';
-    if (url.search) url.search = redactedQuery(url.search);
-    return url.href;
+    const search = redactedQuery(url.search);
+    url.search = '';
+    return `${url.href}${search}`;
   } catch {
     return '[invalid-url]';
   }
@@ -263,26 +280,25 @@ function sharedPacketDirName(absolutePacketDir) {
     : `${name.slice(0, queryIndex)}${redactedQuery(name.slice(queryIndex))}`;
 }
 
-function sharedMessage(value, absolutePacketDir) {
+function sharedMessage(value, absolutePacketDir, { redactQueries = true } = {}) {
   const rawName = basename(absolutePacketDir);
   const sharedName = sharedPacketDirName(absolutePacketDir);
-  return redactQueryValuesInMessage(
-    String(value)
-      .replaceAll(absolutePacketDir, sharedName)
-      .replaceAll(rawName, sharedName)
-  );
+  const shared = String(value)
+    .replaceAll(absolutePacketDir, sharedName)
+    .replaceAll(rawName, sharedName);
+  return redactQueries ? redactQueryValuesInMessage(shared) : shared;
 }
 
-function sharedValue(value, absolutePacketDir) {
+function sharedValue(value, absolutePacketDir, options = {}) {
   if (typeof value === 'string') {
-    return sharedMessage(value, absolutePacketDir);
+    return sharedMessage(value, absolutePacketDir, options);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => sharedValue(entry, absolutePacketDir));
+    return value.map((entry) => sharedValue(entry, absolutePacketDir, options));
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, sharedValue(entry, absolutePacketDir)])
+      Object.entries(value).map(([key, entry]) => [key, sharedValue(entry, absolutePacketDir, options)])
     );
   }
   return value;
@@ -341,7 +357,7 @@ function sharedRouteCheck(route, absolutePacketDir) {
 }
 
 export function sharedBeforeConsentNetworkCapture(capture, absolutePacketDir) {
-  const shared = sharedValue(capture, absolutePacketDir);
+  const shared = publicRedactedValue(sharedValue(capture, absolutePacketDir));
   if (!capture?.captureFingerprint) {
     return shared;
   }
@@ -350,6 +366,21 @@ export function sharedBeforeConsentNetworkCapture(capture, absolutePacketDir) {
     targetOrigin: capture.targetOrigin,
     primaryRoutes: capture.primaryRoutes
   });
+  const fingerprintInput = { ...shared };
+  delete fingerprintInput.captureFingerprint;
+  return { ...shared, captureFingerprint: stateSha256(fingerprintInput) };
+}
+
+export function sharedGlobalChromeCapture(capture, absolutePacketDir) {
+  const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
+    capture?.queryPrivacy?.method === 'sha256' &&
+    capture?.queryPrivacy?.authoritative === true;
+  const shared = publicRedactedValue(sharedValue(capture, absolutePacketDir, {
+    redactQueries: !privacyBound
+  }));
+  if (!capture?.captureFingerprint) {
+    return shared;
+  }
   const fingerprintInput = { ...shared };
   delete fingerprintInput.captureFingerprint;
   return { ...shared, captureFingerprint: stateSha256(fingerprintInput) };
@@ -7071,17 +7102,17 @@ export async function verifyLive({
     ));
   const routeStateManifest = [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]
     .map((route) => ({
-      canonicalPath: normalizeRouteKey(route.actualMetadata?.canonicalUrl),
+      canonicalPath: normalizeRouteKey(publicRedactedValue(route.actualMetadata?.canonicalUrl)),
       criticalAssetManifest: route.criticalAssets?.manifest ?? [],
       criticalAssetManifestSha256: route.criticalAssets?.fingerprint ?? '',
-      finalPath: normalizeRouteKey(route.finalUrl),
+      finalPath: normalizeRouteKey(publicRedactedValue(route.finalUrl)),
       h1: route.actualH1 ?? '',
       initialStatus: route.initialStatus ?? 0,
       intrinsicSemanticsSha256: route.intrinsicSemantics?.fingerprint ?? '',
       metaDescriptionSha256: stateSha256(route.actualMetadata?.metaDescription ?? ''),
       noindex: route.actualMetadata?.noindex === true,
-      openGraphImagePath: normalizePath(route.actualMetadata?.openGraphImage),
-      path: normalizeRouteKey(route.requestTarget || route.targetPath),
+      openGraphImagePath: normalizePath(publicRedactedValue(route.actualMetadata?.openGraphImage)),
+      path: normalizeRouteKey(publicRedactedValue(route.requestTarget || route.targetPath)),
       routeKind: route.routeKind ?? '',
       status: route.finalStatus ?? 0,
       title: route.actualTitle ?? ''
@@ -7398,13 +7429,14 @@ export async function verifyLive({
     beforeConsentNetworkCapture,
     absolutePacketDir
   );
-  const globalChromeCaptureSummary = captureSummary(globalChromeCapture);
+  const sharedGlobalChrome = sharedGlobalChromeCapture(globalChromeCapture, absolutePacketDir);
+  const globalChromeCaptureSummary = captureSummary(sharedGlobalChrome);
   const sharedConsentReconciliation = sharedValue(consentReconciliation, absolutePacketDir);
   if (sharedConsentReconciliation.authoritativeBeforeConsentCapture === true) {
     sharedConsentReconciliation.beforeConsentCaptureFingerprint = sharedBeforeConsentCapture.captureFingerprint;
   }
 
-  return {
+  return publicRedactedValue({
     schemaVersion: 'public-kit.live-verification.1',
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
@@ -7445,7 +7477,7 @@ export async function verifyLive({
     routeChecks: routeChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     sourceSurfaceCensus: sharedValue(sourceSurfaceCensus, absolutePacketDir),
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
-    globalChromeCapture,
+    globalChromeCapture: sharedGlobalChrome,
     globalChromeCaptureSummary,
     verifierOwnedAccessibility: {
       authority: 'verifier-owned-global-chrome',
@@ -7510,7 +7542,7 @@ export async function verifyLive({
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
     warnings: sharedPacketReport.warnings
-  };
+  });
 }
 
 async function main() {
