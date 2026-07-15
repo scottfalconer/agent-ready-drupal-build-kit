@@ -97,6 +97,11 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'review-handoff.mjs'),
+        destination: join(skillRoot, 'scripts', 'review-handoff.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'state-fingerprint.mjs'),
         destination: join(skillRoot, 'scripts', 'state-fingerprint.mjs')
       },

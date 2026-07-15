@@ -1,5 +1,10 @@
 {
   "schemaVersion": "public-kit.independent-verification.1",
+  "reviewHandoff": {
+    "schemaVersion": "public-kit.review-handoff-reference.1",
+    "manifest": "evidence/review-handoff.json",
+    "digest": ""
+  },
   "site": "",
   "checkedAt": "",
   "verifier": {

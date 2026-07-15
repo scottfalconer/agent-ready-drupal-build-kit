@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, relative, resolve } from 'node:path';
@@ -24,6 +24,12 @@ import {
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  reviewHandoffInputFileBindings,
+  reviewHandoffReference,
+  sealReviewHandoff,
+  sealReviewHandoffBundle
+} from '../bin/review-handoff.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
@@ -960,6 +966,137 @@ evidence_scope: "No durable intent records apply to this fixture."
 `);
 }
 
+function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
+  const projectRoot = dirname(packetDir);
+  if (!existsSync(join(projectRoot, 'AGENTS.md'))) writeFileSync(join(projectRoot, 'AGENTS.md'), '# Fixture instructions\n');
+  const routeMatrix = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8'));
+  const buildInput = JSON.parse(readFileSync(join(packetDir, 'build-input.json'), 'utf8'));
+  const independentPath = join(packetDir, 'independent-verification.json');
+  const blindPath = join(packetDir, 'blind-adversarial-review.json');
+  const independent = JSON.parse(readFileSync(independentPath, 'utf8'));
+  const blind = JSON.parse(readFileSync(blindPath, 'utf8'));
+  const targetOrigin = new URL(targetBaseUrl).origin;
+  const briefReference = String(blind.reviewInputs?.originalBrief ?? 'Rebuild the source site.');
+  const primaryRoutes = routeMatrix.primaryRoutes.map((route) => ({
+    briefRequirementIds: [...(route.briefRequirementIds ?? [])].sort(),
+    sourceTruthReference: buildInput.mode === 'brief'
+      ? briefReference
+      : new URL(route.sourcePath || '/', routeMatrix.sourceBaseUrl).href,
+    targetPath: route.targetPath,
+    targetUrl: new URL(route.targetPath, targetOrigin).href
+  }));
+  const excludedBlindInputs = [
+    'implementation files',
+    'review packet before public or artifact review',
+    'builder notes and scripts',
+    'prior build conversation',
+    'self-authored completion claims',
+    'builder final summary'
+  ];
+  const fileBinding = (reference) => {
+    const path = resolve(projectRoot, reference);
+    const bytes = readFileSync(path);
+    return {
+      path: reference,
+      size: statSync(path).size,
+      sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+    };
+  };
+  const briefPath = briefReference.startsWith('review-packet/') && existsSync(resolve(projectRoot, briefReference))
+    ? resolve(projectRoot, briefReference)
+    : '';
+  const briefBytes = briefPath ? readFileSync(briefPath) : Buffer.from(briefReference);
+  const brief = {
+    kind: briefPath ? 'packet_file' : 'literal',
+    reference: briefReference,
+    size: briefBytes.length,
+    sha256: `sha256:${createHash('sha256').update(briefBytes).digest('hex')}`
+  };
+  const sourceOfTruthMaterials = (blind.reviewInputs?.sourceOfTruthMaterials ?? []).map((material) => {
+    if (/^https?:\/\//i.test(material.reference)) {
+      return { kind: 'url', reference: new URL(material.reference).href, type: material.type };
+    }
+    const binding = fileBinding(material.reference);
+    return {
+      kind: 'packet_file',
+      reference: binding.path,
+      type: material.type,
+      size: binding.size,
+      sha256: binding.sha256
+    };
+  });
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const existingDeclaredPacketFiles = gates.reviewPacketFiles.filter((reference) =>
+    existsSync(join(packetDir, reference))
+  );
+  const extraPacketPaths = [
+    brief.kind === 'packet_file' ? brief.reference : '',
+    ...sourceOfTruthMaterials
+      .filter((material) => material.kind === 'packet_file')
+      .map((material) => material.reference)
+  ].filter(Boolean);
+  const independentFiles = reviewHandoffInputFileBindings(
+    projectRoot,
+    packetDir,
+    existingDeclaredPacketFiles,
+    extraPacketPaths
+  );
+  const { manifest, projections } = sealReviewHandoffBundle({
+    binding: {
+      buildMode: buildInput.mode,
+      configSyncDirectory: '../config/sync',
+      frontPage: '/',
+      packetPath: relative(projectRoot, packetDir),
+      preliminaryPacketEvidenceFingerprint: `sha256:${'6'.repeat(64)}`,
+      siteStateFingerprint: `sha256:${'4'.repeat(64)}`,
+      siteUuid: testSiteUuid,
+      targetIdentityFingerprint: `sha256:${'5'.repeat(64)}`,
+      targetOrigin
+    },
+    blind: {
+      allowedInputs: {
+        acceptanceCriteria: [...(blind.reviewInputs?.acceptanceCriteria ?? [])],
+        brief,
+        credentialLabels: [...(blind.reviewInputs?.credentialsUsed ?? [])],
+        primaryRoutes,
+        sourceOfTruthMaterials,
+        targetUrlsOrArtifacts: [...(blind.reviewInputs?.targetUrlsOrArtifacts ?? [])]
+      },
+      excludedInputs: excludedBlindInputs
+    },
+    independent: {
+      allowedInputs: {
+        credentialLabels: [],
+        files: independentFiles,
+        urls: [targetBaseUrl, `${targetOrigin}/admin`, routeMatrix.sourceBaseUrl].filter(Boolean)
+      },
+      excludedInputs: [
+        'builder final summary',
+        'prior build conversation',
+        'independent-verification.json from an earlier run',
+        'blind-adversarial-review.json from an earlier run'
+      ]
+    }
+  });
+  independent.artifactsReviewed = projections.independent.allowedInputs.files.map((binding) => binding.path);
+  independent.reviewHandoff = reviewHandoffReference(manifest.handoffDigest);
+  blind.reviewHandoff = reviewHandoffReference(manifest.handoffDigest);
+  blind.reviewInputs = {
+    originalBrief: projections.blind.allowedInputs.brief.reference,
+    acceptanceCriteria: [...projections.blind.allowedInputs.acceptanceCriteria],
+    targetUrlsOrArtifacts: [...projections.blind.allowedInputs.targetUrlsOrArtifacts],
+    sourceOfTruthMaterials: structuredClone(projections.blind.allowedInputs.sourceOfTruthMaterials),
+    credentialsUsed: [...projections.blind.allowedInputs.credentialLabels],
+    excludedInputs: [...projections.blind.excludedInputs]
+  };
+  writeJson(independentPath, independent);
+  writeJson(blindPath, blind);
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeJson(join(packetDir, 'evidence', 'review-handoff.json'), manifest);
+  writeJson(join(packetDir, 'evidence', 'review-handoff-independent.json'), projections.independent);
+  writeJson(join(packetDir, 'evidence', 'review-handoff-blind.json'), projections.blind);
+}
+
 function writeOpenDecisionRow(packetDir, {
   currentEvidence = 'unrelated-evidence',
   includeAcceptedSummary = true,
@@ -1681,6 +1818,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
@@ -1779,6 +1917,7 @@ function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
   mutateText(join(packetDir, 'scoped-gap-list.md'), (text) =>
     text.replace('Overall status: `complete-local-rebuild`', 'Overall status: `complete-local-build-from-brief`')
   );
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode = 'local_mail_capture') {
@@ -2074,6 +2213,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     enforcementVerified: true,
     observation: 'Anonymous submission throttling was read back from Drupal configuration and exercised.'
   });
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
@@ -2229,6 +2369,7 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
     writeFileSync(join(blindEvidenceDir, `source-search-${viewport}.png`), screenshotPng(40 + index, width, height));
     writeFileSync(join(blindEvidenceDir, `target-search-${viewport}.png`), screenshotPng(50 + index, width, height));
   }
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
@@ -2395,6 +2536,7 @@ function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
       blockers: []
     });
   });
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -3664,6 +3806,7 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
           '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
           '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
         ));
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const packetOnlyReport = await validatePacket({ packetDir });
       assert.equal(packetOnlyReport.valid, true, packetOnlyReport.errors.join('\n'));
@@ -3759,6 +3902,86 @@ test('brief mode verifies target routes without requiring or implying a source s
       assert.match(report.completionBlockedReasons.join('\n'), /non-authoritative/i);
     }
   );
+});
+
+test('completed reviewer artifacts fail closed when their review handoff digest drifts', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-digest-drift-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.reviewHandoff.digest = `sha256:${'f'.repeat(64)}`;
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /independent-verification\.json must reference the exact review-handoff\.json digest/);
+});
+
+test('completed reviewer artifacts fail closed when a byte-bound handoff input changes', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-input-drift-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  writeFileSync(join(packetDir, 'maintainer-review.md'), '# Changed after reviewer handoff\n');
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /maintainer-review\.md.*no longer matches.*(?:size|sha256)/i);
+});
+
+test('malformed reviewer projections return structured packet errors instead of throwing', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-malformed-projection-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'evidence', 'review-handoff-independent.json'), (projection) => {
+    projection.allowedInputs = 'malformed';
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /review-handoff-independent\.json\.allowedInputs must be a JSON object/i);
+});
+
+test('deeply nested reviewer projection JSON fails safely without escaping packet validation', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-deep-projection-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const projectionPath = join(packetDir, 'evidence', 'review-handoff-blind.json');
+  const deeplyNestedJson = `${'{"nested":'.repeat(20000)}null${'}'.repeat(20000)}`;
+  const projectionJson = readFileSync(projectionPath, 'utf8').replace(
+    /^\{/,
+    `{"unexpectedDeepValue":${deeplyNestedJson},`
+  );
+  writeFileSync(projectionPath, projectionJson);
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /validation depth limit|cannot be canonically hashed|failed safely/i);
+});
+
+test('packet validation rejects evidence added after the reviewer handoff', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-added-evidence-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  writeJson(join(packetDir, 'evidence', 'post-handoff-builder-claim.json'), { claim: 'not reviewed' });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /input added after handoff.*post-handoff-builder-claim\.json/i);
 });
 
 test('live verifier rejects fetched SEO metadata that is missing or differs from packet claims', async () => {
@@ -4110,6 +4333,7 @@ process.stdout.write(outputs.get(command) + '\\n');
           '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
           '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
         ));
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const verifierArgs = [join(repoRoot, 'bin', 'verify.mjs'), '--packet', 'review-packet'];
       const cleanEnvironment = {
@@ -4139,6 +4363,7 @@ process.stdout.write(outputs.get(command) + '\\n');
         readback.drupal.trackedConfigYamlFiles.reverse();
         readback.drupal.trackedConfigYamlFiles.push('config/split/local/system.logging.yml');
       });
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const missingRootResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_MISSING_ROOT: '1' }
@@ -4173,6 +4398,36 @@ process.stdout.write(outputs.get(command) + '\\n');
         ],
         { cwd: targetRoot }
       );
+
+      const handoffPrepResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
+      assert.equal(handoffPrepResult.status, 2, handoffPrepResult.stderr);
+      const handoffPrepReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      const handoffPath = join(packetDir, 'evidence', 'review-handoff.json');
+      const handoff = JSON.parse(readFileSync(handoffPath, 'utf8'));
+      handoff.binding = {
+        ...handoff.binding,
+        buildMode: handoffPrepReport.buildMode,
+        configSyncDirectory: handoffPrepReport.buildState.targetIdentity.configSyncDirectory,
+        frontPage: handoffPrepReport.buildState.targetIdentity.frontPage,
+        siteStateFingerprint: handoffPrepReport.buildState.fingerprint,
+        siteUuid: handoffPrepReport.buildState.targetIdentity.siteUuid,
+        targetIdentityFingerprint: handoffPrepReport.buildState.componentFingerprints.targetIdentity,
+        targetOrigin: new URL(handoffPrepReport.target.resolvedBaseUrl).origin
+      };
+      const stateBoundHandoff = sealReviewHandoff(handoff);
+      writeJson(handoffPath, stateBoundHandoff);
+      for (const projectionFile of ['review-handoff-independent.json', 'review-handoff-blind.json']) {
+        mutateJson(join(packetDir, 'evidence', projectionFile), (projection) => {
+          projection.handoff = reviewHandoffReference(stateBoundHandoff.handoffDigest);
+        });
+      }
+      for (const reviewerFile of ['independent-verification.json', 'blind-adversarial-review.json']) {
+        mutateJson(join(packetDir, reviewerFile), (review) => {
+          review.reviewHandoff = reviewHandoffReference(stateBoundHandoff.handoffDigest);
+        });
+      }
 
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(cleanResult.status, 0, cleanResult.stderr);
@@ -4727,6 +4982,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -4818,6 +5074,7 @@ test('self-authored count and exclusion dispositions cannot hide collection shor
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -4924,6 +5181,7 @@ test('human-gate records are reported separately while packet contradictions fai
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -5158,6 +5416,7 @@ test('human-gate records are reported separately while packet contradictions fai
     blind.summary.acceptedOutOfScopeIssueCount = 1;
   });
   writeOpenDecisionRow(exactDeviationPacket, { currentEvidence: 'DEF-001' });
+  attachFixtureReviewHandoff(exactDeviationPacket, 'https://target.example');
   const exactDeviationReport = await validatePacket({ packetDir: exactDeviationPacket });
   assert.equal(
     exactDeviationReport.completionEvidence.packetSupportsCompletion,
@@ -5185,6 +5444,7 @@ test('human-gate records are reported separately while packet contradictions fai
       check.visualComparison.diffScore = 0.01;
     }
   });
+  attachFixtureReviewHandoff(pixelDiffPacket, 'https://target.example');
   const pixelDiffReport = await validatePacket({ packetDir: pixelDiffPacket });
   assert.equal(
     pixelDiffReport.completionEvidence.packetSupportsCompletion,
@@ -5200,6 +5460,7 @@ test('human-gate records are reported separately while packet contradictions fai
       check.visualComparison.reviewer = 'Fixture Reviewer';
     }
   });
+  attachFixtureReviewHandoff(namedReviewerPacket, 'https://target.example');
   const namedReviewerReport = await validatePacket({ packetDir: namedReviewerPacket });
   assert.equal(
     namedReviewerReport.completionEvidence.packetSupportsCompletion,
@@ -5379,6 +5640,7 @@ test('next-cycle verification requires discovery, a least-privilege future publi
   mutateJson(join(dateOnlyPacket, 'evidence', 'next-cycle', 'probe.json'), (value) => {
     value.futureDate = futureDateOnly;
   });
+  attachFixtureReviewHandoff(dateOnlyPacket, 'https://target.example');
   const dateOnlyReport = await validatePacket({ packetDir: dateOnlyPacket });
   assert.equal(dateOnlyReport.completionEvidence.packetSupportsCompletion, true, 'Drupal date-only values are valid future dates');
 
@@ -5906,6 +6168,7 @@ test('blanket-filled packet templates remain valid lint but cannot support compl
       `${readFileSync(join(templatesDir, templateName(file)), 'utf8')}\nRun-specific completion evidence recorded.\n`
     );
   }
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -5947,6 +6210,7 @@ test('completed Markdown can retain instructional references to UNKNOWN without 
     .replace(/```text\s*UNKNOWN\s*```/m, '```text\nNo recipe was applied; discovery output reviewed.\n```');
   assert.match(recipe, /Decision values:.*UNKNOWN/);
   writeFileSync(join(packetDir, 'recipe-start-point.md'), recipe);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -5976,6 +6240,7 @@ intent_records:
     stale_behavior: "treat_as_no_intent"
 `;
   writeFileSync(join(packetDir, 'durable-intent.yml'), validRecord);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const currentReport = await validatePacket({ packetDir });
   assert.equal(currentReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(currentReport, null, 2));
 
@@ -5990,6 +6255,7 @@ intent_records:
     status: "draft"
     stale_behavior: "treat_as_no_intent"
 `);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const staleReport = await validatePacket({ packetDir });
   assert.equal(staleReport.valid, true, staleReport.errors.join('\n'));
   assert.equal(staleReport.completionEvidence.packetSupportsCompletion, false);
@@ -6199,6 +6465,7 @@ test('browser completion evidence requires real public and editor screenshots', 
     browser.publicRouteChecks[0].sourceScreenshot = 'evidence/browser/missing-source.png';
     browser.editorWorkflowChecks[0].formScreenshot = 'evidence/browser/missing-editor.png';
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -6319,6 +6586,7 @@ test('browser completion evidence requires route-bound in-browser axe results wi
         : { type: 'tag', values: realWcagTags };
     });
   }
+  attachFixtureReviewHandoff(realWcagTagsPacket, 'https://target.example');
   const realWcagTagsReport = await validatePacket({ packetDir: realWcagTagsPacket });
   assert.equal(
     realWcagTagsReport.completionEvidence.packetSupportsCompletion,
@@ -6355,6 +6623,7 @@ test('browser completion evidence requires route-bound in-browser axe results wi
       evidence: 'evidence/browser/axe-incomplete-review.json'
     }];
   });
+  attachFixtureReviewHandoff(dispositionedPacket, 'https://target.example');
   const dispositioned = await validatePacket({ packetDir: dispositionedPacket });
   assert.equal(
     dispositioned.completionEvidence.packetSupportsCompletion,
@@ -6448,6 +6717,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     mode: 'provider_managed', result: 'pass', provider: 'Fixture provider',
     enforcementVerified: true, observation: 'Provider-managed protection was verified.'
   });
+  attachFixtureReviewHandoff(twoFormsPacket, 'https://target.example');
   const twoForms = await validatePacket({ packetDir: twoFormsPacket });
   assert.equal(
     twoForms.completionEvidence.packetSupportsCompletion,
@@ -6546,6 +6816,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     evidence.mode = 'other';
     evidence.rationale = 'The explicit fixture outcome is intentionally custom.';
   });
+  attachFixtureReviewHandoff(explicitOtherPacket, 'https://target.example');
   const explicitOther = await validatePacket({ packetDir: explicitOtherPacket });
   assert.equal(
     explicitOther.completionEvidence.packetSupportsCompletion,
@@ -6597,6 +6868,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     independent.anonymousFormChecks[0].abuseProtectionRationale = 'This DDEV-only review target remains a launch gap.';
     independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-local-abuse-exception.json';
   });
+  attachFixtureReviewHandoff(localExceptionPacket, 'https://target.example');
   const localException = await validatePacket({ packetDir: localExceptionPacket });
   assert.equal(
     localException.completionEvidence.packetSupportsCompletion,
@@ -6615,6 +6887,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
   mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
     evidence.targetUrl = 'https://fixture.ddev.site/contact';
   });
+  attachFixtureReviewHandoff(localDdevExceptionPacket, 'https://target.example');
   const localDdevException = await validatePacket({ packetDir: localDdevExceptionPacket });
   assert.equal(
     localDdevException.completionEvidence.packetSupportsCompletion,
@@ -6637,6 +6910,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     independent.anonymousFormChecks[0].abuseProtectionRationale = 'Drupal-owned anonymous submission throttling is configured.';
     independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-rate-limiting.json';
   });
+  attachFixtureReviewHandoff(rateLimitedPacket, 'https://target.example');
   const rateLimited = await validatePacket({ packetDir: rateLimitedPacket });
   assert.equal(
     rateLimited.completionEvidence.packetSupportsCompletion,
@@ -7228,6 +7502,7 @@ test('imported-body route candidates require exact path-plus-query drift classif
       dispositionEvidence: 'The imported-body legacy link was independently reviewed.'
     }];
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const classified = await validatePacket({ packetDir });
   assert.equal(
     classified.completionEvidence.packetSupportsCompletion,
@@ -7299,6 +7574,7 @@ test('noRedirectDisposition fails closed unless acceptance, owner, rationale, an
       evidence: 'evidence/redirect-approval.txt'
     };
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const strong = await validatePacket({ packetDir });
   assert.equal(
     strong.completionEvidence.packetSupportsCompletion,

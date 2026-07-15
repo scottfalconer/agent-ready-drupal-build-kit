@@ -1,5 +1,10 @@
 {
   "schemaVersion": "public-kit.blind-adversarial-review.1",
+  "reviewHandoff": {
+    "schemaVersion": "public-kit.review-handoff-reference.1",
+    "manifest": "evidence/review-handoff.json",
+    "digest": ""
+  },
   "site": "",
   "checkedAt": "",
   "evidenceRoot": "review-packet/evidence/blind-adversarial-review/",
@@ -22,9 +27,11 @@
     "targetUrlsOrArtifacts": [],
     "sourceOfTruthMaterials": [
       {
+        "kind": "url | packet_file",
         "type": "source_site | screenshot | design_file | content_inventory | brand_guide | written_spec | other",
         "reference": "",
-        "notes": ""
+        "size": 0,
+        "sha256": ""
       }
     ],
     "credentialsUsed": [],

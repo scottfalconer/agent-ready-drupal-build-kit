@@ -64,6 +64,7 @@ Build the real Drupal site, not a static lookalike, screenshot, packet-only arti
 
 Completion authority comes from the final verifier, not builder-authored `completeLocalRebuildClaimAllowed` fields.
 
+- Run the default live verifier once after builder work to establish the exact target state; exit `2` is expected while reviewer evidence is pending. Seed only the blind review's original brief, acceptance criteria, and explicit source-truth references, then run `scripts/review-handoff.mjs --packet review-packet`. Give each fresh reviewer only its strict reviewer-specific projection and byte-bound packet-local inputs. Both reviewer artifacts must copy the exact root handoff digest. The bundle is self-attested and non-authoritative; target, Drupal-state, projection, declared-input membership, or byte drift requires a regenerated handoff and a rerun of the affected review.
 - Run independent verification against the actual Drupal target and try to falsify route, content-count, ownership, media, config, editor, accessibility, SEO, and packet-freshness claims.
 - Run a fresh blind product review against the original brief/source and target before showing the reviewer implementation notes or packet rationale. Cover every primary route at desktop and mobile widths. `accepted_out_of_scope` requires a named accepter, reason, and evidence. An external blocker leaves completion blocked and cannot substitute for route coverage.
 - Review rendered SEO on every primary route. `not_applicable` for meta description or `og:image` requires a reviewed rationale and evidence.
@@ -133,6 +134,7 @@ Everything required at runtime is inside this skill directory:
 
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
 - `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
+- `scripts/review-handoff.mjs` generates the deterministic, state- and byte-bound root handoff plus isolated independent/blind reviewer projections without writing reviewer output.
 - `scripts/setup-browser-runtime.sh` is the pre-agent host entrypoint that pins, starts, and smokes the supported DDEV browser add-on.
 - `scripts/repair-browser-runtime.sh` is the only supported host repair entrypoint and recreates only the browser service.
 - `scripts/verify.mjs` performs default live-target verification.

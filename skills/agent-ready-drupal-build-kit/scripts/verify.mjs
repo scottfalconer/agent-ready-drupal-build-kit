@@ -9,6 +9,7 @@ import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validatePacket } from './verify-packet.mjs';
+import { reviewHandoffStateErrors } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
   captureBeforeConsentNetwork,
@@ -144,7 +145,10 @@ function sha256(value) {
 function packetEvidenceManifest(packetDir, outPath = '') {
   const excluded = new Set([
     'evidence/live-verification.json',
-    'evidence/packet-verification.json'
+    'evidence/packet-verification.json',
+    'evidence/review-handoff.json',
+    'evidence/review-handoff-independent.json',
+    'evidence/review-handoff-blind.json'
   ]);
   const absoluteOut = outPath ? resolve(outPath) : '';
   if (absoluteOut && pathIsInside(packetDir, absoluteOut)) {
@@ -6493,6 +6497,7 @@ export async function verifyLive({
   let patternMap = null;
   let sourceAudit = null;
   let negativeRouteConsent = null;
+  let reviewHandoff = null;
   try {
     independentVerification = JSON.parse(
       await readFile(join(absolutePacketDir, 'independent-verification.json'), 'utf8')
@@ -6524,6 +6529,13 @@ export async function verifyLive({
     negativeRouteConsent = JSON.parse(
       await readFile(join(absolutePacketDir, 'negative-route-consent.json'), 'utf8')
     );
+    try {
+      reviewHandoff = JSON.parse(
+        await readFile(join(absolutePacketDir, 'evidence', 'review-handoff.json'), 'utf8')
+      );
+    } catch {
+      reviewHandoff = null;
+    }
   } catch {
     // Packet validation already records malformed or missing required JSON.
   }
@@ -7254,12 +7266,25 @@ export async function verifyLive({
     drupalRuntimeTrackedConfigReadbackMatches &&
     drupalRuntimeSeoUrlsPortable &&
     buildStateReady;
+  const reviewHandoffRequired =
+    independentVerification?.summary?.verdict === 'pass' ||
+    ['good', 'good_enough'].includes(blindReview?.summary?.verdict);
+  const reviewHandoffBindingErrors = reviewHandoffRequired
+    ? reviewHandoffStateErrors({
+        manifest: reviewHandoff,
+        buildMode: briefMode ? 'brief' : 'source_site',
+        buildState,
+        targetOrigin: target?.url?.origin ?? ''
+      })
+    : [];
+  const reviewHandoffStateValid = reviewHandoffRequired && reviewHandoffBindingErrors.length === 0;
   const completionClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
-    drupalRuntimeSupportsCompletion;
+    drupalRuntimeSupportsCompletion &&
+    reviewHandoffStateValid;
   const completeLocalRebuildClaimAllowed = !briefMode && completionClaimAllowed;
   const completeLocalBuildFromBriefClaimAllowed = briefMode && completionClaimAllowed;
   const completionBlockedReasons = [];
@@ -7280,6 +7305,13 @@ export async function verifyLive({
   }
   if (!packetReport.completionEvidence?.packetCompletionReady) {
     completionBlockedReasons.push('Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.');
+  }
+  if (!reviewHandoffStateValid) {
+    completionBlockedReasons.push(...(
+      reviewHandoffBindingErrors.length > 0
+        ? reviewHandoffBindingErrors
+        : ['A state-bound review handoff has not been completed.']
+    ));
   }
   completionBlockedReasons.push(...verifierOwnedAxeErrors);
   const runtimeDrushCommandFailures = Array.isArray(inspectedDrupalRuntime.drushCommandFailures)
@@ -7460,6 +7492,13 @@ export async function verifyLive({
     liveNextCycleReconciliation,
     liveTargetValid,
     buildState,
+    reviewHandoffBinding: {
+      attribution: 'builder-writable-self-attested-non-authoritative',
+      digest: reviewHandoff?.handoffDigest ?? '',
+      errors: reviewHandoffBindingErrors,
+      required: reviewHandoffRequired,
+      valid: reviewHandoffStateValid
+    },
     drupalRuntime: {
       ...inspectedDrupalRuntime,
       authoritativeForCompletion: runtimeAuthoritativeForCompletion,

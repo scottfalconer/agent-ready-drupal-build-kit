@@ -6,6 +6,8 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
 
+import { reviewHandoffReviewerErrors } from './review-handoff.mjs';
+
 const KIT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const USAGE = 'Usage: node <path-to-skill>/scripts/verify-packet.mjs --packet review-packet --out review-packet/evidence/packet-verification.json';
@@ -192,6 +194,14 @@ async function readJson(path, errors) {
   } catch (error) {
     errors.push(`${path} must be valid JSON: ${error.message}`);
     return null;
+  }
+}
+
+async function readOptionalJson(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    return error?.code === 'ENOENT' ? null : { invalidJson: String(error.message ?? error) };
   }
 }
 
@@ -5242,6 +5252,13 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
 
   const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
   const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
+  const reviewHandoff = await readOptionalJson(join(packetDir, 'evidence', 'review-handoff.json'));
+  const reviewHandoffIndependent = await readOptionalJson(
+    join(packetDir, 'evidence', 'review-handoff-independent.json')
+  );
+  const reviewHandoffBlind = await readOptionalJson(
+    join(packetDir, 'evidence', 'review-handoff-blind.json')
+  );
   const buildInput = await readJson(join(packetDir, 'build-input.json'), []);
   const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), []);
   const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
@@ -5256,7 +5273,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
   const briefContext = await validateBuildInput(packetDir, buildInput, routeMatrix, errors);
   const briefMode = briefContext.mode === 'brief';
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);
-  const independentVerificationSupportsCompletion = await validateIndependentVerification(
+  let independentVerificationSupportsCompletion = await validateIndependentVerification(
     packetDir,
     independentVerification,
     {
@@ -5271,13 +5288,50 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     errors,
     { briefAcceptance, briefMode }
   );
-  const blindAdversarialReviewSupportsCompletion = await validateBlindAdversarialReview(
+  let blindAdversarialReviewSupportsCompletion = await validateBlindAdversarialReview(
     packetDir,
     blindAdversarialReview,
     routeMatrix,
     errors,
     { briefAcceptance, briefContext, briefMode }
   );
+  const independentHandoffRequired =
+    independentVerification?.summary?.verdict === 'pass' &&
+    Number(independentVerification?.summary?.failedClaimCount) === 0 &&
+    Number(independentVerification?.summary?.blockedClaimCount) === 0;
+  const blindHandoffRequired =
+    BLIND_COMPLETE_VERDICTS.has(blindAdversarialReview?.summary?.verdict) &&
+    ['parity_reviewed', 'human_accepted', 'complete'].includes(blindAdversarialReview?.summary?.completionState);
+  if (independentHandoffRequired || blindHandoffRequired) {
+    let handoffErrors;
+    try {
+      handoffErrors = reviewHandoffReviewerErrors({
+        manifest: reviewHandoff,
+        projections: {
+          independent: reviewHandoffIndependent,
+          blind: reviewHandoffBlind
+        },
+        independentVerification,
+        blindReview: blindAdversarialReview,
+        packetDir,
+        declaredPacketFiles: gates?.reviewPacketFiles ?? []
+      });
+    } catch (error) {
+      const message = `Review handoff validation failed safely: ${String(error?.message ?? error)}`;
+      handoffErrors = { blind: [message], common: [message], independent: [message] };
+    }
+    const applicableErrors = new Set([
+      ...(independentHandoffRequired ? handoffErrors.independent : []),
+      ...(blindHandoffRequired ? handoffErrors.blind : [])
+    ]);
+    errors.push(...applicableErrors);
+    if (independentHandoffRequired && handoffErrors.independent.length > 0) {
+      independentVerificationSupportsCompletion = false;
+    }
+    if (blindHandoffRequired && handoffErrors.blind.length > 0) {
+      blindAdversarialReviewSupportsCompletion = false;
+    }
+  }
   await validateDurableIntent(packetDir, errors);
   await validateRecipeStartPoint(packetDir, errors);
   const completionRecords = {
@@ -5319,6 +5373,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
       independentVerificationSupportsCompletion,
       blindAdversarialReviewSupportsCompletion,
       scopeDispositionAttribution: 'builder-writable-self-attested',
+      reviewHandoffAttribution: 'builder-writable-self-attested-non-authoritative',
       humanDecisionPresentationStatus: completionReadiness.humanDecisionPresentationStatus,
       independence: {
         independentVerification: independenceAttestation(independentVerification?.verifier),
