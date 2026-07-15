@@ -10,6 +10,11 @@ import test from 'node:test';
 import { deflateSync } from 'node:zlib';
 
 import {
+  CUSTOM_CONFIG_SCHEMA_AUDIT_PHP,
+  CUSTOM_ROUTE_AUDIT_PHP,
+  customCapabilityId,
+  customCodeReconciliationErrors,
+  customExtensionFiles,
   agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
@@ -18,6 +23,7 @@ import {
   DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
+  inspectCustomCodeFilesystem,
   inspectSourceSurface,
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
@@ -26,7 +32,7 @@ import {
   reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
-import { MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import { customCodeReviewReasons, MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
 import {
   reviewHandoffInputFileBindings,
   reviewHandoffReference,
@@ -260,6 +266,278 @@ test('Drupal live surface census is bounded, metadata-only, privacy-safe, and li
   assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicSurface'\s*=>\s*\$public_surface/);
   assert.match(DRUPAL_LIVE_SURFACE_EVAL, /'publicEditorialRoot'\s*=>\s*\$is_public_root_type/);
   assert.doesNotMatch(DRUPAL_LIVE_SURFACE_EVAL, /->label\(\)|->getTitle\(\)|->toArray\(\)/);
+});
+
+test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal lexical/registration surfaces', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'custom-code-inventory-'));
+  const writeFixture = (path, contents) => {
+    mkdirSync(dirname(join(projectRoot, path)), { recursive: true });
+    writeFileSync(join(projectRoot, path), contents);
+  };
+  writeFixture('.ddev/config.yaml', 'name: inventory-fixture\ndocroot: web\n');
+  writeFixture('web/modules/custom/catalog/catalog.info.yml', 'name: Catalog\ntype: module\ncore_version_requirement: ^11\n');
+  writeFixture('web/modules/custom/catalog/catalog.module', '<?php\nfunction catalog_help() {}\n');
+  writeFixture('web/modules/custom/catalog/src/Controller/CatalogController.php', '<?php\nfinal class CatalogController {}\n');
+  writeFixture('web/modules/custom/catalog/src/Plugin/Block/CatalogBlock.php', '<?php\nfinal class CatalogBlock {}\n');
+  writeFixture('web/modules/custom/catalog/src/CommentOnly.php', '<?php\n// class Phantom {}\n$example = "class Ghost";\n');
+  writeFixture('web/modules/custom/catalog/catalog.services.yml', 'services:\n  catalog.repository:\n    class: Drupal\\catalog\\Repository\n');
+  writeFixture('web/modules/custom/catalog/catalog.routing.yml', "catalog.item:\n  path: '/catalog/{node}'\n  defaults:\n    _controller: 'Drupal\\\\catalog\\\\Controller\\\\CatalogController::view'\n");
+  writeFixture('web/modules/custom/catalog/templates/catalog.html.twig', '<article>{{ title }}</article>\n');
+  writeFixture('web/modules/custom/catalog/js/catalog.js', 'Drupal.behaviors.catalogFilters = {};\n');
+  writeFixture('web/modules/custom/catalog/css/catalog.css', '.catalog { display: grid; }\n');
+  writeFixture('web/modules/custom/catalog/components/card/card.component.yml', 'name: Card\nstatus: stable\n');
+  writeFixture('web/modules/custom/catalog/config/install/catalog.settings.yml', 'enabled: true\n');
+  writeFixture('web/modules/custom/catalog/config/schema/catalog.schema.yml', 'catalog.settings:\n  type: config_object\n');
+  writeFixture('web/modules/custom/catalog/tests/src/Kernel/CatalogTest.php', '<?php\nfinal class CatalogTest {\n  public function testCatalogRoute() {}\n}\n');
+  writeFixture('web/modules/custom/catalog/assets/large-photo.jpg', Buffer.alloc(6 * 1024 * 1024));
+
+  const first = inspectCustomCodeFilesystem(projectRoot);
+  const second = inspectCustomCodeFilesystem(projectRoot);
+  assert.equal(first.completed, true, first.errors.join('\n'));
+  assert.equal(first.fingerprint, second.fingerprint);
+  assert.equal(first.extensions.length, 1);
+  assert.equal(first.controllers.length, 1);
+  assert.equal(first.routes[0].name, 'catalog.item');
+  assert.equal(first.tests[0].testMethods[0], 'testCatalogRoute');
+  const surfaceKinds = new Set(first.sourceFiles.flatMap((source) => source.surfaces.map((surface) => surface.kind)));
+  for (const kind of [
+    'hook_or_callback', 'controller_class', 'plugin_class', 'service_registration', 'route',
+    'twig_template', 'drupal_behavior', 'stylesheet', 'sdc_component', 'shipped_config'
+  ]) {
+    assert.ok(surfaceKinds.has(kind), `missing ${kind}: ${[...surfaceKinds].join(', ')}`);
+  }
+  for (const source of first.sourceFiles) {
+    assert.match(source.id, /^SOURCE-[a-f0-9]{16}$/);
+    for (const surface of source.surfaces) {
+      assert.match(surface.id, /^SURFACE-[a-f0-9]{16}$/);
+    }
+  }
+  assert.equal(first.sourceFiles.flatMap((source) => source.surfaces).some((surface) => ['Phantom', 'Ghost'].includes(surface.name)), false);
+  assert.ok(first.sourceFiles.some((source) => source.kind === 'extension_metadata'));
+  writeFixture('web/modules/custom/catalog/dist/catalog.min.js', 'window.catalogBuild = true;\n');
+  const builtAssetInventory = inspectCustomCodeFilesystem(projectRoot);
+  assert.ok(builtAssetInventory.sourceFiles.some((source) => source.path.endsWith('/dist/catalog.min.js')));
+  assert.notEqual(builtAssetInventory.fingerprint, first.fingerprint);
+  const invalidUtf8Path = join(projectRoot, 'web/modules/custom/catalog/dist/invalid.min.js');
+  writeFileSync(invalidUtf8Path, Buffer.from([0xff]));
+  const invalidUtf8First = inspectCustomCodeFilesystem(projectRoot);
+  writeFileSync(invalidUtf8Path, Buffer.from([0xfe]));
+  const invalidUtf8Second = inspectCustomCodeFilesystem(projectRoot);
+  assert.notEqual(
+    invalidUtf8First.sourceFiles.find((source) => source.path.endsWith('/dist/invalid.min.js')).sha256,
+    invalidUtf8Second.sourceFiles.find((source) => source.path.endsWith('/dist/invalid.min.js')).sha256
+  );
+
+  const outside = mkdtempSync(join(tmpdir(), 'custom-code-outside-'));
+  writeFileSync(join(outside, 'escaped.php'), '<?php\n');
+  symlinkSync(outside, join(projectRoot, 'web/modules/custom/catalog/escape'));
+  const walked = customExtensionFiles(
+    join(projectRoot, 'web/modules/custom/catalog'),
+    'web/modules/custom/catalog'
+  );
+  assert.ok(walked.errors.some((error) => /resolves outside custom extension root/.test(error)));
+  assert.equal(walked.files.some((path) => path.endsWith('escaped.php')), false);
+  const deadline = customExtensionFiles(
+    join(projectRoot, 'web/modules/custom/catalog'),
+    'web/modules/custom/catalog',
+    { deadlineMs: 5, now: (() => { let value = 0; return () => (value += 10); })() }
+  );
+  assert.ok(deadline.errors.some((error) => /deadline/.test(error)));
+  const byteBound = customExtensionFiles(
+    join(projectRoot, 'web/modules/custom/catalog'),
+    'web/modules/custom/catalog',
+    { fileBytesLimit: 1 }
+  );
+  assert.ok(byteBound.errors.some((error) => /source file limit/.test(error)));
+
+  const portableRoot = mkdtempSync(join(tmpdir(), 'custom-code-portable-order-'));
+  mkdirSync(join(portableRoot, 'z'), { recursive: true });
+  mkdirSync(join(portableRoot, 'ä'), { recursive: true });
+  writeFileSync(join(portableRoot, 'z/first.php'), '<?php\n');
+  writeFileSync(join(portableRoot, 'ä/first.php'), '<?php\n');
+  const portableTraversal = customExtensionFiles(
+    portableRoot,
+    'portable-order-fixture',
+    { fileLimit: 1 }
+  );
+  assert.ok(portableTraversal.files[0].endsWith('/ä/first.php'), portableTraversal.files[0]);
+
+  const aggregateBytes = inspectCustomCodeFilesystem(projectRoot, { totalBytesLimit: 1 });
+  assert.ok(aggregateBytes.errors.some((error) => /aggregate exceeded 1 total source bytes/.test(error)));
+  const aggregateDeadline = inspectCustomCodeFilesystem(projectRoot, {
+    deadlineMs: 5,
+    now: (() => { let value = 0; return () => (value += 10); })()
+  });
+  assert.ok(aggregateDeadline.errors.some((error) => /aggregate exceeded its 5ms deadline/.test(error)));
+
+  writeFixture('web/modules/custom/second/second.info.yml', 'name: Second\ntype: module\ncore_version_requirement: ^11\n');
+  const aggregateExtensions = inspectCustomCodeFilesystem(projectRoot, { extensionLimit: 1 });
+  assert.ok(aggregateExtensions.errors.some((error) => /aggregate exceeded 1 custom extensions/.test(error)));
+
+  writeFixture('web/themes/custom/catalog/catalog.info.yml', 'name: Catalog theme\ntype: theme\ncore_version_requirement: ^11\n');
+  const duplicateIdentity = inspectCustomCodeFilesystem(projectRoot);
+  assert.ok(duplicateIdentity.errors.some((error) => /machine name catalog is declared more than once/.test(error)));
+
+  const surfaceRoot = mkdtempSync(join(tmpdir(), 'custom-code-surface-bound-'));
+  mkdirSync(join(surfaceRoot, 'web/modules/custom/many'), { recursive: true });
+  writeFileSync(join(surfaceRoot, 'web/modules/custom/many/many.info.yml'), 'name: Many\ntype: module\ncore_version_requirement: ^11\n');
+  writeFileSync(
+    join(surfaceRoot, 'web/modules/custom/many/many.module'),
+    `<?php\n${Array.from({ length: 5_001 }, (_, index) => `function many_${index}() {}`).join('\n')}\n`
+  );
+  const surfaceBound = inspectCustomCodeFilesystem(surfaceRoot);
+  assert.ok(surfaceBound.errors.some((error) => /exceeded 5000 lexical\/registration custom-code surfaces/.test(error)));
+
+  const nestedRoot = mkdtempSync(join(tmpdir(), 'custom-code-nested-extension-'));
+  mkdirSync(join(nestedRoot, 'web/modules/custom/parent/modules/child'), { recursive: true });
+  writeFileSync(join(nestedRoot, 'web/modules/custom/parent/parent.info.yml'), 'name: Parent\ntype: module\n');
+  writeFileSync(join(nestedRoot, 'web/modules/custom/parent/modules/child/child.info.yml'), 'name: Child\ntype: module\n');
+  const nestedExtension = inspectCustomCodeFilesystem(nestedRoot);
+  assert.ok(nestedExtension.errors.some((error) => /nested custom extension/.test(error)));
+
+  const testMethodRoot = mkdtempSync(join(tmpdir(), 'custom-code-test-method-bound-'));
+  mkdirSync(join(testMethodRoot, 'web/modules/custom/many_tests/tests/src/Unit'), { recursive: true });
+  writeFileSync(join(testMethodRoot, 'web/modules/custom/many_tests/many_tests.info.yml'), 'name: Many tests\ntype: module\n');
+  writeFileSync(
+    join(testMethodRoot, 'web/modules/custom/many_tests/tests/src/Unit/ManyTest.php'),
+    `<?php\nfinal class ManyTest {\n${Array.from({ length: 5_001 }, (_, index) => `public function test${index}() {}`).join('\n')}\n}\n`
+  );
+  const testMethodBound = inspectCustomCodeFilesystem(testMethodRoot);
+  assert.ok(testMethodBound.errors.some((error) => /exceeded 5000 discovered test methods/.test(error)));
+});
+
+test('G-CODE route and schema probes use Drupal routing, anonymous access manager, and SchemaCheckTrait', () => {
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /router\.no_access_checks/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /request_stack/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /\$request_stack->push\(\$request\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /finally \{\s*\$request_stack->pop\(\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /matchRequest\(\$request\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /AnonymousUserSession/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /access_manager->checkRequest\(\$request, \$anonymous, TRUE\)/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /anonymous_access_mismatch/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /expectedAnonymousAccess/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /custom_extension_runtime_path_mismatch/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /\$custom_route_callback_class = static function/);
+  assert.doesNotMatch(CUSTOM_ROUTE_AUDIT_PHP, /function custom_route_/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /convertedParameterTypes/);
+  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /route_scan_limit = 5000/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /SchemaCheckTrait/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /checkConfigSchema\(\$typed_config, \$config_name, \$dataset\['data'\], TRUE\)/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\['source' => 'active', 'data' => \$active_data\]/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\['source' => 'shipped', 'data' => \$shipped\['data'\]\]/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /skippedInactiveOptionalConfigNames/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /shipped_config_file_limit_exceeded/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /config_ownership_scan_limit_exceeded/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /aggregate_config_ownership_name_limit_exceeded/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /ownership_nodes_scanned > 1000000/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /aggregate_config_schema_dataset_limit_exceeded/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /custom_extension_runtime_path_mismatch/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\$record\['status'\] = 'not_applicable'/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\$custom_schema_data_contains = static function/);
+  assert.doesNotMatch(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /function custom_schema_/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /custom_schema_data_contains/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /config\/(?:' \.[^\n]+)?install|\['install', 'optional'\]/);
+  assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /active_config_name_limit_exceeded/);
+});
+
+function completeSolutionLadder() {
+  return [
+    { stage: 'core', checked: true, decision: 'no_candidate', rationale: 'Core has no equivalent.', evidence: ['recipe-start-point.md#core'] },
+    { stage: 'installed_drupal_cms', checked: true, decision: 'no_candidate', rationale: 'Installed packages have no equivalent.', evidence: ['recipe-start-point.md#installed'] },
+    { stage: 'recipe', checked: true, decision: 'no_candidate', rationale: 'Recipe discovery found no fit.', evidence: ['recipe-start-point.md#recipes'] },
+    { stage: 'maintained_contrib', checked: true, decision: 'rejected', rationale: 'Maintained contrib does not meet the route contract.', evidence: ['scoped-gap-list.md#catalog'] },
+    { stage: 'custom_exception', checked: true, decision: 'accepted', rationale: 'A bounded custom route is required.', evidence: ['off-road-inventory.md#catalog'] }
+  ];
+}
+
+test('G-CODE reconciliation binds every stable source surface and representative custom route', () => {
+  const surfaceId = 'SURFACE-0123456789abcdef';
+  const fingerprint = `sha256:${'d'.repeat(64)}`;
+  const runtime = {
+    completed: true,
+    errors: [],
+    fingerprint,
+    extensions: [{ machineName: 'catalog', type: 'module' }],
+    sourceFiles: [{
+      id: 'SOURCE-0123456789abcdef',
+      extension: 'catalog',
+      path: 'web/modules/custom/catalog/src/Controller/CatalogController.php',
+      surfaces: [{ id: surfaceId, kind: 'controller_class', name: 'CatalogController', line: 3 }]
+    }],
+    configSchema: { completed: true, extensions: [], violations: [] },
+    routeAudit: {
+      completed: true,
+      violations: [],
+      routes: [{
+        name: 'catalog.item',
+        requestMatched: true,
+        parameterConversionCompleted: true,
+        accessCheckCompleted: true,
+        anonymousAccess: 'allowed'
+      }]
+    }
+  };
+  const capabilityKey = 'catalog_item_route';
+  const review = {
+    schemaVersion: 'public-kit.custom-code-review.1',
+    applies: true,
+    runtimeFingerprint: fingerprint,
+    capabilities: [{
+      capabilityId: customCapabilityId('catalog', capabilityKey),
+      capabilityKey,
+      extension: 'catalog',
+      need: 'Expose one catalog item route.',
+      responsibility: 'Route matching, access, and render response.',
+      loadBearing: true,
+      acceptanceCriteria: [{ id: 'AC-CATALOG-01', criterion: 'Anonymous users receive the intended response.' }],
+      solutionLadder: completeSolutionLadder(),
+      sourceSurfaceIds: [surfaceId],
+      testFileIds: []
+    }],
+    routeBindings: [{
+      name: 'catalog.item',
+      requestMethod: 'GET',
+      routeParameters: { node: '1' },
+      expectedAnonymousAccess: 'allowed'
+    }],
+    inventoryComplete: true,
+    blockers: []
+  };
+  assert.deepEqual(customCodeReconciliationErrors(runtime, review), []);
+  assert.deepEqual(customCodeReviewReasons({ implementationQuality: { customCodeInventory: review } }), []);
+  const packetDir = mkdtempSync(join(tmpdir(), 'custom-code-evidence-'));
+  writeFileSync(join(packetDir, 'recipe-start-point.md'), '# Core\n# Installed\n# Recipes\n');
+  writeFileSync(join(packetDir, 'scoped-gap-list.md'), '# Catalog\n');
+  writeFileSync(join(packetDir, 'off-road-inventory.md'), '# Catalog\n');
+  assert.deepEqual(customCodeReconciliationErrors(runtime, review, packetDir), []);
+  const missingEvidence = structuredClone(review);
+  missingEvidence.capabilities[0].solutionLadder[0].evidence = ['missing.md#core'];
+  assert.ok(customCodeReconciliationErrors(runtime, missingEvidence, packetDir)
+    .some((error) => /missing packet-local file#fragment/.test(error)));
+
+  const missingSurface = structuredClone(review);
+  missingSurface.capabilities[0].sourceSurfaceIds = [];
+  assert.ok(customCodeReconciliationErrors(runtime, missingSurface).some((error) => /sourceSurfaceIds|not bound/.test(error)));
+  const neutralAccess = structuredClone(runtime);
+  neutralAccess.routeAudit.routes[0].anonymousAccess = 'neutral';
+  assert.ok(customCodeReconciliationErrors(neutralAccess, review).some((error) => /anonymous access-manager/.test(error)));
+  const unexpectedAccess = structuredClone(runtime);
+  unexpectedAccess.routeAudit.routes[0].anonymousAccess = 'denied';
+  assert.ok(customCodeReconciliationErrors(unexpectedAccess, review).some((error) => /does not match expected allowed/.test(error)));
+  const missingExpectedAccess = structuredClone(review);
+  delete missingExpectedAccess.routeBindings[0].expectedAnonymousAccess;
+  assert.ok(customCodeReviewReasons({ implementationQuality: { customCodeInventory: missingExpectedAccess } })
+    .some((error) => /expectedAnonymousAccess/.test(error)));
+  const contradictoryLadder = structuredClone(review);
+  contradictoryLadder.capabilities[0].solutionLadder[0].decision = 'selected';
+  assert.ok(customCodeReviewReasons({ implementationQuality: { customCodeInventory: contradictoryLadder } })
+    .some((error) => /incomplete core solution-ladder/.test(error)));
+  const unknownTest = structuredClone(review);
+  unknownTest.capabilities[0].testFileIds = ['TEST-0123456789abcdef'];
+  assert.ok(customCodeReconciliationErrors(runtime, unknownTest).some((error) => /binds unknown test file/.test(error)));
+  const schemaFailure = structuredClone(runtime);
+  schemaFailure.configSchema.violations = [{ extension: 'catalog', configName: 'catalog.settings', reason: 'missing_schema' }];
+  assert.ok(customCodeReconciliationErrors(schemaFailure, review).some((error) => /schema violation/.test(error)));
 });
 
 test('Drupal live editor-surface census is read-only, bounded, and emits no field values', () => {
@@ -585,6 +863,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryRouteSchema');
   assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
   assert.deepEqual(
     gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
@@ -1999,6 +2278,15 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     ],
     exclusions: [],
     reconciliationComplete: true,
+    blockers: []
+  };
+  readback.implementationQuality.customCodeInventory = {
+    schemaVersion: 'public-kit.custom-code-review.1',
+    applies: false,
+    runtimeFingerprint: '',
+    capabilities: [],
+    routeBindings: [],
+    inventoryComplete: true,
     blockers: []
   };
   readback.rolesAndPermissionsNotes = ['Content editor can create and edit Page content.'];

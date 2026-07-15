@@ -50,6 +50,17 @@
     "reconciliationComplete": false,
     "blockers": []
   },
+  "implementationQuality": {
+    "customCodeInventory": {
+      "schemaVersion": "public-kit.custom-code-review.1",
+      "applies": false,
+      "runtimeFingerprint": "",
+      "capabilities": [],
+      "routeBindings": [],
+      "inventoryComplete": false,
+      "blockers": []
+    }
+  },
   "workflows": [],
   "rolesAndPermissionsNotes": [],
   "readbackComplete": false,

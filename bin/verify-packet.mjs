@@ -90,6 +90,14 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
+const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.1';
+const CUSTOM_SOLUTION_LADDER_STAGES = Object.freeze([
+  'core',
+  'installed_drupal_cms',
+  'recipe',
+  'maintained_contrib',
+  'custom_exception'
+]);
 const LEGACY_BROWSER_EVIDENCE_SCHEMA = 'public-kit.browser-evidence.1';
 const BROWSER_EVIDENCE_SCHEMA = 'public-kit.browser-evidence.2';
 const CAPTURE_STATE_AUTHORITY = 'self_attested_capture_evidence';
@@ -151,6 +159,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
   'G-SURFACE-01': 'liveDrupalSurfaceReconciliation',
+  'G-CODE-01': 'customCodeInventoryRouteSchema',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -458,6 +467,138 @@ function arrayOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function customCapabilityId(extension, capabilityKey) {
+  const digest = createHash('sha256').update(`${extension}\u0000${capabilityKey}`).digest('hex');
+  return `CAP-${digest.slice(0, 16)}`;
+}
+
+export function customCodeReviewReasons(drupalReadback) {
+  const reasons = [];
+  const review = drupalReadback?.implementationQuality?.customCodeInventory;
+  if (!isJsonObject(review)) {
+    return ['drupal-readback.json implementationQuality.customCodeInventory must be an object.'];
+  }
+  if (review.schemaVersion !== CUSTOM_CODE_REVIEW_SCHEMA) {
+    reasons.push(`Custom-code review must use schemaVersion ${CUSTOM_CODE_REVIEW_SCHEMA}.`);
+  }
+  if (typeof review.applies !== 'boolean') {
+    reasons.push('Custom-code review must explicitly declare applies true or false.');
+  }
+  if (review.inventoryComplete !== true || !Array.isArray(review.blockers) || review.blockers.length > 0) {
+    reasons.push('Custom-code review must be complete with an explicit empty blockers array.');
+  }
+  const capabilities = arrayOrEmpty(review.capabilities);
+  const routeBindings = arrayOrEmpty(review.routeBindings);
+  if (review.applies === false) {
+    if (capabilities.length > 0 || routeBindings.length > 0) {
+      reasons.push('A not-applicable custom-code review cannot declare capabilities or route bindings.');
+    }
+    if (String(review.runtimeFingerprint ?? '') && !HASH_RE.test(String(review.runtimeFingerprint))) {
+      reasons.push('Custom-code runtimeFingerprint must be empty until live inventory or a SHA-256 fingerprint.');
+    }
+    return reasons;
+  }
+  if (!HASH_RE.test(String(review.runtimeFingerprint ?? ''))) {
+    reasons.push('Applicable custom code must bind a verifier-owned runtimeFingerprint.');
+  }
+  if (capabilities.length === 0) {
+    reasons.push('Applicable custom code must declare at least one capability.');
+  }
+  const capabilityIds = new Set();
+  const acceptanceCriterionIds = new Set();
+  const boundSurfaceIds = new Set();
+  for (const [index, capability] of capabilities.entries()) {
+    const extension = String(capability?.extension ?? '').trim();
+    const capabilityKey = String(capability?.capabilityKey ?? '').trim();
+    const capabilityId = String(capability?.capabilityId ?? '').trim();
+    if (!/^[a-z][a-z0-9_]*$/.test(extension) || !/^[a-z][a-z0-9_]*$/.test(capabilityKey)) {
+      reasons.push(`Custom capability row ${index} needs valid extension and capabilityKey machine names.`);
+    }
+    if (capabilityId !== customCapabilityId(extension, capabilityKey) || capabilityIds.has(capabilityId)) {
+      reasons.push(`Custom capability row ${index} needs its unique verifier-derived stable capabilityId.`);
+    }
+    capabilityIds.add(capabilityId);
+    if (
+      !String(capability?.need ?? '').trim() ||
+      !String(capability?.responsibility ?? '').trim() ||
+      typeof capability?.loadBearing !== 'boolean'
+    ) {
+      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} needs a bounded need, responsibility, and loadBearing boolean.`);
+    }
+    const acceptanceCriteria = arrayOrEmpty(capability?.acceptanceCriteria);
+    const criterionIds = acceptanceCriteria.map((criterion) => String(criterion?.id ?? '').trim());
+    if (
+      acceptanceCriteria.length === 0 ||
+      criterionIds.some((id) => !/^AC-[A-Z0-9][A-Z0-9._-]*$/.test(id)) ||
+      new Set(criterionIds).size !== criterionIds.length ||
+      criterionIds.some((id) => acceptanceCriterionIds.has(id)) ||
+      acceptanceCriteria.some((criterion) => !String(criterion?.criterion ?? '').trim())
+    ) {
+      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} needs unique stable AC- acceptance criteria.`);
+    }
+    for (const id of criterionIds) {
+      acceptanceCriterionIds.add(id);
+    }
+    const ladder = arrayOrEmpty(capability?.solutionLadder);
+    if (
+      ladder.length !== CUSTOM_SOLUTION_LADDER_STAGES.length ||
+      ladder.some((stage, stageIndex) => stage?.stage !== CUSTOM_SOLUTION_LADDER_STAGES[stageIndex])
+    ) {
+      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} must record the five native-first solution-ladder stages in order.`);
+    } else {
+      for (const stage of ladder) {
+        const evidence = arrayOrEmpty(stage?.evidence);
+        const decisions = stage.stage === 'custom_exception'
+          ? new Set(['accepted'])
+          : new Set(['rejected', 'no_candidate']);
+        if (
+          stage.checked !== true ||
+          !decisions.has(stage.decision) ||
+          !String(stage.rationale ?? '').trim() ||
+          evidence.length === 0 ||
+          evidence.some((reference) => !String(reference ?? '').trim())
+        ) {
+          reasons.push(`Custom capability ${capabilityId || `(row ${index})`} has an incomplete ${stage.stage} solution-ladder record.`);
+        }
+      }
+    }
+    const surfaceIds = arrayOrEmpty(capability?.sourceSurfaceIds).map((id) => String(id));
+    if (
+      surfaceIds.length === 0 ||
+      surfaceIds.some((id) => !/^SURFACE-[a-f0-9]{16}$/.test(id) || boundSurfaceIds.has(id)) ||
+      new Set(surfaceIds).size !== surfaceIds.length
+    ) {
+      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} needs unique stable sourceSurfaceIds not used by another capability.`);
+    }
+    for (const id of surfaceIds) {
+      boundSurfaceIds.add(id);
+    }
+    const testFileIds = arrayOrEmpty(capability?.testFileIds).map(String);
+    if (
+      testFileIds.some((id) => !/^TEST-[a-f0-9]{16}$/.test(id)) ||
+      new Set(testFileIds).size !== testFileIds.length
+    ) {
+      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} has an invalid or duplicate testFileId.`);
+    }
+  }
+  const routeNames = new Set();
+  for (const [index, binding] of routeBindings.entries()) {
+    const name = String(binding?.name ?? '').trim();
+    if (!name || routeNames.has(name)) {
+      reasons.push(`Custom route binding row ${index} has a missing or duplicate name.`);
+    }
+    routeNames.add(name);
+    if (
+      !/^[A-Z]+$/.test(String(binding?.requestMethod ?? '')) ||
+      !isJsonObject(binding?.routeParameters) ||
+      !['allowed', 'denied'].includes(binding?.expectedAnonymousAccess)
+    ) {
+      reasons.push(`Custom route binding ${name || `(row ${index})`} needs an uppercase requestMethod, routeParameters object, and expectedAnonymousAccess of allowed or denied.`);
+    }
+  }
+  return reasons;
+}
+
 function isoTimestamp(value) {
   const text = String(value ?? '').trim();
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(text)) {
@@ -683,6 +824,26 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   } catch {
     return false;
   }
+}
+
+async function customCodeEvidenceReasons(packetDir, drupalReadback) {
+  const reasons = [];
+  const capabilities = arrayOrEmpty(drupalReadback?.implementationQuality?.customCodeInventory?.capabilities);
+  for (const capability of capabilities) {
+    const capabilityId = String(capability?.capabilityId ?? '(unknown capability)');
+    for (const stage of arrayOrEmpty(capability?.solutionLadder)) {
+      for (const reference of arrayOrEmpty(stage?.evidence)) {
+        const text = String(reference ?? '').trim();
+        const hashIndex = text.indexOf('#');
+        const path = hashIndex === -1 ? '' : text.slice(0, hashIndex);
+        const fragment = hashIndex === -1 ? '' : text.slice(hashIndex + 1).trim();
+        if (!path || !fragment || !(await nonEmptyPacketEvidence(packetDir, path, packetDir))) {
+          reasons.push(`Custom capability ${capabilityId} ${stage?.stage || '(unknown stage)'} evidence must reference a non-empty packet-local file#fragment.`);
+        }
+      }
+    }
+  }
+  return reasons;
 }
 
 async function fileSha256(path) {
@@ -4637,6 +4798,8 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     routeMatrix,
     sourceAudit
   } = records;
+  reasons.push(...customCodeReviewReasons(drupalReadback));
+  reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
   reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
   reasons.push(...await independentStructuredGateReasons({
     browserEvidence,
@@ -5841,6 +6004,8 @@ async function briefPacketCompletionReadiness(
     routeMatrix,
     sourceAudit
   } = records;
+  reasons.push(...customCodeReviewReasons(drupalReadback));
+  reasons.push(...await customCodeEvidenceReasons(packetDir, drupalReadback));
   reasons.push(...markdownAssessment.reasons);
   reasons.push(...await negativeRouteConsentReasons(packetDir, negativeRouteConsent, routeMatrix));
 
