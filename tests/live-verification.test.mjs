@@ -559,7 +559,9 @@ test('G-CODE reconciliation binds every stable source surface and representative
           status: 'pass',
           provenance: provenance([
             packageRecord('squizlabs/php_codesniffer', 'vendor/squizlabs/php_codesniffer/bin/phpcs'),
-            packageRecord('drupal/coder')
+            packageRecord('drupal/coder'),
+            packageRecord('slevomat/coding-standard'),
+            packageRecord('sirbrillig/phpcs-variable-analysis')
           ])
         },
         phpstan: { status: 'not_supported', version: '', config: '', configSha256: '' }

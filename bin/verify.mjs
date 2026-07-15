@@ -7363,6 +7363,16 @@ const CUSTOM_CODE_COMPOSER_PACKAGES = Object.freeze({
     distPrefixes: ['https://api.github.com/repos/pfrenssen/coder/zipball/'],
     sourceUrls: ['https://github.com/pfrenssen/coder.git']
   },
+  slevomat: {
+    binary: '', name: 'slevomat/coding-standard',
+    distPrefixes: ['https://api.github.com/repos/slevomat/coding-standard/zipball/'],
+    sourceUrls: ['https://github.com/slevomat/coding-standard.git']
+  },
+  variableAnalysis: {
+    binary: '', name: 'sirbrillig/phpcs-variable-analysis',
+    distPrefixes: ['https://api.github.com/repos/sirbrillig/phpcs-variable-analysis/zipball/'],
+    sourceUrls: ['https://github.com/sirbrillig/phpcs-variable-analysis.git']
+  },
   phpcs: {
     binary: 'bin/phpcs', name: 'squizlabs/php_codesniffer',
     distPrefixes: [
@@ -7467,7 +7477,7 @@ function composerRootAutoloadFingerprint(projectRoot) {
 
 function requiredComposerPackageKeys(needs) {
   return [
-    ...(needs.phpcs ? ['phpcs', 'coder'] : []),
+    ...(needs.phpcs ? ['phpcs', 'coder', 'slevomat', 'variableAnalysis'] : []),
     ...(needs.phpstan ? ['phpstan'] : []),
     ...(needs.phpunit ? ['phpunit'] : [])
   ];
@@ -7841,6 +7851,37 @@ function auditToolBinary(projectRoot, auditRoot, packageRecord) {
   return relative(projectReal, binaryReal).split(sep).join('/');
 }
 
+function auditPhpcsStandardsPath(projectRoot, auditRoot, packages) {
+  try {
+    const projectReal = realpathSync(projectRoot);
+    const auditReal = realpathSync(auditRoot);
+    if (!pathIsInside(projectReal, auditReal) || auditReal === projectReal) return '';
+    const standards = [
+      [packages?.coder, 'coder_sniffer'],
+      [packages?.slevomat, ''],
+      [packages?.variableAnalysis, '']
+    ].map(([record, suffix]) => {
+      const expectedPackagePath = `vendor/${record?.name ?? ''}`;
+      if (!record || record.packagePath !== expectedPackagePath) throw new Error('noncanonical PHPCS standard package path');
+      const packageReal = realpathSync(join(auditReal, ...expectedPackagePath.split('/')));
+      const standardReal = suffix ? realpathSync(join(packageReal, suffix)) : packageReal;
+      if (
+        packageReal !== realpathSync(join(auditReal, 'vendor', ...record.name.split('/'))) ||
+        !pathIsInside(auditReal, packageReal) || !pathIsInside(packageReal, standardReal) ||
+        !statSync(standardReal).isDirectory()
+      ) throw new Error('unsafe PHPCS standard package path');
+      const projectRelative = relative(projectReal, standardReal).split(sep).join('/');
+      if (!projectRelative || projectRelative.startsWith('../') || projectRelative.includes('/../')) {
+        throw new Error('PHPCS standard path escaped the project');
+      }
+      return `/var/www/html/${projectRelative}`;
+    });
+    return standards.join(',');
+  } catch {
+    return '';
+  }
+}
+
 function parseJsonOutput(result) {
   try {
     return JSON.parse(result.stdout);
@@ -8049,16 +8090,13 @@ function runCustomCodeQualityAudit(projectRoot, inventory, phpFiles, runner, pro
   };
 
   const phpcsBinary = auditToolBinary(projectRoot, auditRoot, provenance?.packages?.phpcs);
-  const coderPackageRoot = String(provenance?.packages?.coder?.packagePath ?? '');
-  const coderStandardsPath = coderPackageRoot
-    ? relative(realpathSync(projectRoot), join(realpathSync(auditRoot), coderPackageRoot, 'coder_sniffer')).split(sep).join('/')
-    : '';
+  const phpcsStandardsPath = auditPhpcsStandardsPath(projectRoot, auditRoot, provenance?.packages);
   const phpstanConfigCandidates = ['phpstan.neon', 'phpstan.neon.dist', 'phpstan.dist.neon'];
   const phpstanConfig = recognizedProjectFile(projectRoot, phpstanConfigCandidates);
   const phpstanConfigDeclared = phpstanConfigCandidates.some((candidate) => existsSync(join(projectRoot, candidate)));
   const phpstanBinary = auditToolBinary(projectRoot, auditRoot, provenance?.packages?.phpstan);
-  if (!phpcsBinary || !coderStandardsPath) {
-    failures.push(customCodeFailure('tool_missing', 'phpcs', CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name, 'Custom PHP requires a provenance-bound direct PHPCS package binary.'));
+  if (!phpcsBinary || !phpcsStandardsPath) {
+    failures.push(customCodeFailure('tool_missing', 'phpcs', CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name, 'Custom PHP requires provenance-bound PHPCS, Drupal Coder, Slevomat, and VariableAnalysis package paths.'));
   }
   if (phpstanConfig && !phpstanBinary) {
     failures.push(customCodeFailure('tool_missing', 'phpstan', phpstanConfig, 'Recognized PHPStan config exists but its provenance-bound direct package binary is missing.'));
@@ -8126,7 +8164,7 @@ function runCustomCodeQualityAudit(projectRoot, inventory, phpFiles, runner, pro
     return blockedQualityAudit(inventory, failures, phpFiles);
   }
   const phpcsStandards = runner.run({
-    argv: [phpcsBinary, '--runtime-set', 'installed_paths', coderStandardsPath, '-i'],
+    argv: [phpcsBinary, '--runtime-set', 'installed_paths', phpcsStandardsPath, '-i'],
     timeoutMs: 10_000,
     outputLimitBytes: CUSTOM_CODE_EXECUTION_LIMITS.lintOutputBytes
   });
@@ -8141,7 +8179,12 @@ function runCustomCodeQualityAudit(projectRoot, inventory, phpFiles, runner, pro
     version: normalizedPhpcsVersion,
     requiredStandards: ['Drupal', 'DrupalPractice'],
     installedStandards,
-    provenance: reportedComposerProvenance(provenance, [provenance.packages.phpcs, provenance.packages.coder]),
+    provenance: reportedComposerProvenance(provenance, [
+      provenance.packages.phpcs,
+      provenance.packages.coder,
+      provenance.packages.slevomat,
+      provenance.packages.variableAnalysis
+    ]),
     versionCommandResultHash: phpcsVersion.record.resultSha256,
     standardsCommandResultHash: phpcsStandards.record.resultSha256
   };
@@ -8154,7 +8197,7 @@ function runCustomCodeQualityAudit(projectRoot, inventory, phpFiles, runner, pro
     const result = runner.run({
       argv: [
         phpcsBinary,
-        '--runtime-set', 'installed_paths', coderStandardsPath,
+        '--runtime-set', 'installed_paths', phpcsStandardsPath,
         '--standard=Drupal,DrupalPractice',
         '--extensions=php,module,inc,install,test,profile,theme',
         '--no-cache',
@@ -9417,7 +9460,12 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     }
     if (runtimePhpFileIds.length > 0 && !trustedComposerProvenance(
       qualityAudit?.tools?.phpcs?.provenance,
-      [CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name, CUSTOM_CODE_COMPOSER_PACKAGES.coder.name]
+      [
+        CUSTOM_CODE_COMPOSER_PACKAGES.phpcs.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.coder.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.slevomat.name,
+        CUSTOM_CODE_COMPOSER_PACKAGES.variableAnalysis.name
+      ]
     )) {
       push('Verifier-owned PHPCS result lacks exact canonical Composer package provenance.');
     }

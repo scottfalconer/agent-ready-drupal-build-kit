@@ -27,6 +27,8 @@ function writeFixture(root, path, contents = '') {
 const TOOL_PACKAGES = [
   { key: 'phpcs', name: 'squizlabs/php_codesniffer', binary: 'bin/phpcs' },
   { key: 'coder', name: 'drupal/coder', binary: '' },
+  { key: 'slevomat', name: 'slevomat/coding-standard', binary: '' },
+  { key: 'variableAnalysis', name: 'sirbrillig/phpcs-variable-analysis', binary: '' },
   { key: 'phpstan', name: 'phpstan/phpstan', binary: 'phpstan' },
   { key: 'phpunit', name: 'phpunit/phpunit', binary: 'phpunit' }
 ];
@@ -39,13 +41,16 @@ function writeComposerToolchain(root, {
   writeLock = true
 } = {}) {
   const included = TOOL_PACKAGES.filter((tool) =>
-    !((tool.key === 'phpcs' || tool.key === 'coder') && !phpcsBinary) && !(tool.key === 'phpstan' && !phpstanBinary)
+    !(['phpcs', 'coder', 'slevomat', 'variableAnalysis'].includes(tool.key) && !phpcsBinary) &&
+    !(tool.key === 'phpstan' && !phpstanBinary)
   );
   const locked = [];
   const installed = [];
   const repositories = {
     phpcs: ['https://github.com/PHPCSStandards/PHP_CodeSniffer.git', 'https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/'],
     coder: ['https://github.com/pfrenssen/coder.git', 'https://api.github.com/repos/pfrenssen/coder/zipball/'],
+    slevomat: ['https://github.com/slevomat/coding-standard.git', 'https://api.github.com/repos/slevomat/coding-standard/zipball/'],
+    variableAnalysis: ['https://github.com/sirbrillig/phpcs-variable-analysis.git', 'https://api.github.com/repos/sirbrillig/phpcs-variable-analysis/zipball/'],
     phpstan: ['', 'https://api.github.com/repos/phpstan/phpstan/zipball/'],
     phpunit: ['https://github.com/sebastianbergmann/phpunit.git', 'https://api.github.com/repos/sebastianbergmann/phpunit/zipball/']
   };
@@ -53,7 +58,12 @@ function writeComposerToolchain(root, {
     const reference = String(index + 1).repeat(40).slice(0, 40);
     const [sourceUrl, distPrefix] = repositories[tool.key];
     const dist = { type: 'zip', url: `${distPrefix}${reference}`, reference };
-    const record = { name: tool.name, version: '1.0.0', type: tool.key === 'coder' ? 'phpcodesniffer-standard' : 'library', dist };
+    const record = {
+      name: tool.name,
+      version: '1.0.0',
+      type: ['coder', 'slevomat', 'variableAnalysis'].includes(tool.key) ? 'phpcodesniffer-standard' : 'library',
+      dist
+    };
     if (sourceUrl) record.source = { type: 'git', url: sourceUrl, reference };
     if (tool.binary) record.bin = [tool.binary];
     if (tool.key === 'phpunit') record.require = { [TRANSITIVE_TOOL_PACKAGE.name]: TRANSITIVE_TOOL_PACKAGE.version };
@@ -107,6 +117,9 @@ function materializeInstalledToolchain(root, lock, { rootAutoload = 'regular' } 
     const tool = TOOL_PACKAGES.find((candidate) => candidate.name === record.name);
     installed.push({ ...structuredClone(record), 'installation-source': 'dist', 'install-path': `../${record.name}` });
     writeFixture(root, `vendor/${record.name}/README.md`, `fresh ${record.name}\n`);
+    if (tool?.key === 'coder') {
+      writeFixture(root, `vendor/${record.name}/coder_sniffer/README.md`, 'fresh Drupal coding standards\n');
+    }
     if (tool?.binary) {
       const binaryPath = `vendor/${record.name}/${tool.binary}`;
       writeFixture(root, binaryPath, `#!/usr/bin/env php\n<?php // freshly installed ${record.name}\n`);
@@ -1036,7 +1049,15 @@ for (const listFormat of ['phpunit9', 'phpunit10', 'phpunit11']) {
     const phpstan = fake.calls.find((call) => call.argv.includes('analyse'));
     assert.ok(phpstan.argv.includes('--memory-limit=512M'));
     const phpcs = fake.calls.find((call) => call.argv.includes('--report=json'));
-    assert.deepEqual(phpcs.argv.slice(1, 4), ['--runtime-set', 'installed_paths', '.agent-ready-audit-fixture/vendor/drupal/coder/coder_sniffer']);
+    assert.deepEqual(phpcs.argv.slice(1, 4), [
+      '--runtime-set',
+      'installed_paths',
+      [
+        '/var/www/html/.agent-ready-audit-fixture/vendor/drupal/coder/coder_sniffer',
+        '/var/www/html/.agent-ready-audit-fixture/vendor/slevomat/coding-standard',
+        '/var/www/html/.agent-ready-audit-fixture/vendor/sirbrillig/phpcs-variable-analysis'
+      ].join(',')
+    ]);
     assert.ok(phpcs.argv[0].startsWith('.agent-ready-audit-fixture/vendor/'));
     assert.ok(phpstan.argv[0].startsWith('.agent-ready-audit-fixture/vendor/'));
     const discovery = fake.calls.find((call) => call.argv.includes('--list-tests-xml'));
