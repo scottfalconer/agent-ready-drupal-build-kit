@@ -35,6 +35,11 @@ import {
   verifyLive
 } from '../bin/verify.mjs';
 import { customCodeReviewReasons, MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import { customMutableIdentityResultFingerprint } from '../bin/custom-mutable-identity-audit.mjs';
+import {
+  CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+  customEntityOutputAuditResultFingerprint
+} from '../bin/custom-entity-output-audit.mjs';
 import {
   reviewHandoffInputFileBindings,
   reviewHandoffReference,
@@ -288,6 +293,7 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
   writeFixture('web/modules/custom/catalog/js/catalog.js', 'Drupal.behaviors.catalogFilters = {};\n');
   writeFixture('web/modules/custom/catalog/css/catalog.css', '.catalog { display: grid; }\n');
   writeFixture('web/modules/custom/catalog/components/card/card.component.yml', 'name: Card\nstatus: stable\n');
+  writeFixture('web/modules/custom/catalog/components/card/card.twig', "{% if node.title == 'Hero' %}<article>{{ content }}</article>{% endif %}\n");
   writeFixture('web/modules/custom/catalog/config/install/catalog.settings.yml', 'enabled: true\n');
   writeFixture('web/modules/custom/catalog/config/schema/catalog.schema.yml', 'catalog.settings:\n  type: config_object\n');
   writeFixture('web/modules/custom/catalog/tests/src/Kernel/CatalogTest.php', '<?php\nfinal class CatalogTest {\n  public function testCatalogRoute() {}\n}\n');
@@ -318,6 +324,9 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
   }
   assert.equal(first.sourceFiles.flatMap((source) => source.surfaces).some((surface) => ['Phantom', 'Ghost'].includes(surface.name)), false);
   assert.ok(first.sourceFiles.some((source) => source.kind === 'extension_metadata'));
+  assert.ok(first.sourceFiles.some((source) =>
+    source.kind === 'twig_template' && source.path.endsWith('/components/card/card.twig')
+  ));
   writeFixture('web/modules/custom/catalog/dist/catalog.min.js', 'window.catalogBuild = true;\n');
   const builtAssetInventory = inspectCustomCodeFilesystem(projectRoot);
   assert.ok(builtAssetInventory.sourceFiles.some((source) => source.path.endsWith('/dist/catalog.min.js')));
@@ -517,10 +526,11 @@ test('G-CODE reconciliation binds every stable source surface and representative
     cleanupCommandResultHashes: [`sha256:${'9'.repeat(64)}`, `sha256:${'a'.repeat(64)}`]
   };
   const runtime = {
-    schemaVersion: 'public-kit.custom-code-inventory.2',
+    schemaVersion: 'public-kit.custom-code-inventory.3',
     completed: true,
     errors: [],
     fingerprint,
+    filesystemFingerprint: `sha256:${'c'.repeat(64)}`,
     extensions: [{ machineName: 'catalog', type: 'module' }],
     sourceFiles: [{
       id: 'SOURCE-0123456789abcdef',
@@ -547,6 +557,8 @@ test('G-CODE reconciliation binds every stable source surface and representative
         anonymousAccess: 'allowed'
       }]
     },
+    mutableIdentityAudit: null,
+    customEntityOutputAudit: null,
     qualityAudit: bindResult({
       schemaVersion: 'public-kit.custom-code-quality.1',
       applies: true,
@@ -575,6 +587,60 @@ test('G-CODE reconciliation binds every stable source surface and representative
       failures: []
     }),
     focusedTestExecution: null
+  };
+  const mutableIdentityAudit = {
+    schemaVersion: 'public-kit.custom-mutable-identity-audit.1',
+    inputInventoryFingerprint: runtime.filesystemFingerprint,
+    applies: true,
+    completed: true,
+    status: 'pass',
+    excludedTestFileIds: [],
+    runtimeTypeScriptSurfaceIds: [],
+    unboundRuntimeTypeScriptSurfaceIds: [],
+    expectedFileIds: ['SOURCE-0123456789abcdef'],
+    completedFileIds: ['SOURCE-0123456789abcdef'],
+    findingCount: 0,
+    blockerCount: 0,
+    entityOutputCandidates: [],
+    javascript: {
+      schemaVersion: 'public-kit.mutable-identity-worker-result.1',
+      status: 'pass',
+      files: [],
+      findings: [],
+      blockers: []
+    },
+    drupal: {
+      schemaVersion: 'public-kit.mutable-identity-drupal-ast.1',
+      completed: true,
+      status: 'pass',
+      completedFileIds: ['SOURCE-0123456789abcdef'],
+      findings: [],
+      blockers: [],
+      entityOutputCandidates: []
+    }
+  };
+  runtime.mutableIdentityAudit = {
+    ...mutableIdentityAudit,
+    resultFingerprint: customMutableIdentityResultFingerprint(mutableIdentityAudit)
+  };
+  const entityOutputAudit = {
+    schemaVersion: CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+    candidateSourceFileIds: ['SOURCE-0123456789abcdef'],
+    candidateSurfaceIds: [surfaceId],
+    typedDeclarationIds: [],
+    publicRouteCount: 1,
+    inputFingerprint: `sha256:${'b'.repeat(64)}`,
+    noExplicitVerifierMutation: true,
+    allowOwnedCacheInvalidation: false,
+    applies: false,
+    completed: true,
+    status: 'not_applicable',
+    runtime: null,
+    failures: []
+  };
+  runtime.customEntityOutputAudit = {
+    ...entityOutputAudit,
+    resultFingerprint: customEntityOutputAuditResultFingerprint(entityOutputAudit)
   };
   const capabilityKey = 'catalog_item_route';
   const review = {
@@ -631,6 +697,47 @@ test('G-CODE reconciliation binds every stable source surface and representative
     failures: []
   });
   assert.deepEqual(customCodeReconciliationErrors(runtime, review), []);
+  const routeLevelNotApplicableRuntime = {
+    schemaVersion: CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+    completed: true,
+    status: 'not_applicable',
+    noExplicitVerifierMutation: true,
+    allowOwnedCacheInvalidation: false,
+    inputFingerprint: runtime.customEntityOutputAudit.inputFingerprint,
+    activeCandidateExtensionCount: 1,
+    applicableRouteCount: 0,
+    matchedNodeRouteCount: 0,
+    renderedRouteCount: 0,
+    dependencyCount: 0,
+    coveredDeclarationCount: 0,
+    coveredDeclarationSetSha256: '',
+    coveredCandidateSourceFileCount: 0,
+    coveredCandidateSourceFileSetSha256: '',
+    coveredCandidateSurfaceCount: 0,
+    coveredCandidateSurfaceSetSha256: '',
+    routes: [{ applies: false, matched: false, rendered: false }],
+    violations: []
+  };
+  routeLevelNotApplicableRuntime.resultFingerprint = customEntityOutputAuditResultFingerprint(routeLevelNotApplicableRuntime);
+  const routeLevelNotApplicable = structuredClone(runtime);
+  routeLevelNotApplicable.customEntityOutputAudit = {
+    ...routeLevelNotApplicable.customEntityOutputAudit,
+    runtime: routeLevelNotApplicableRuntime
+  };
+  routeLevelNotApplicable.customEntityOutputAudit.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    routeLevelNotApplicable.customEntityOutputAudit
+  );
+  assert.deepEqual(customCodeReconciliationErrors(routeLevelNotApplicable, review), []);
+  const forgedRouteApplicability = structuredClone(routeLevelNotApplicable);
+  forgedRouteApplicability.customEntityOutputAudit.runtime.routes[0].applies = true;
+  forgedRouteApplicability.customEntityOutputAudit.runtime.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteApplicability.customEntityOutputAudit.runtime
+  );
+  forgedRouteApplicability.customEntityOutputAudit.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteApplicability.customEntityOutputAudit
+  );
+  assert.ok(customCodeReconciliationErrors(forgedRouteApplicability, review)
+    .some((error) => /N\/A evidence contradicts/i.test(error)));
   assert.deepEqual(customCodeReviewReasons({ implementationQuality: { customCodeInventory: review } }), []);
   const reusedMethodCoverage = structuredClone(review);
   reusedMethodCoverage.capabilities[0].acceptanceCriteria.push({
@@ -1001,7 +1108,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
-  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryQualityTestsRouteSchema');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryAstEntityOutputQualityTestsRouteSchema');
   assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
   assert.deepEqual(
     gates.gates.find((gate) => gate.id === 'G-REPRO-01'),

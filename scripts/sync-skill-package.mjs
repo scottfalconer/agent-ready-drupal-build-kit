@@ -99,6 +99,23 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'mutable-identity-worker.mjs'),
+        destination: join(skillRoot, 'scripts', 'mutable-identity-worker.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'mutable-identity-drupal.mjs'),
+        destination: join(skillRoot, 'scripts', 'mutable-identity-drupal.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'custom-mutable-identity-audit.mjs'),
+        destination: join(skillRoot, 'scripts', 'custom-mutable-identity-audit.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'custom-entity-output-audit.mjs'),
+        destination: join(skillRoot, 'scripts', 'custom-entity-output-audit.mjs')
+      },
+      {
         source: join(repoRoot, 'bin', 'reconcile.mjs'),
         destination: join(skillRoot, 'scripts', 'reconcile.mjs'),
         executable: true
@@ -178,6 +195,10 @@ function copyPlan(assetsOnly) {
       ...['ws.mjs', 'LICENSE', 'INTEGRITY.json'].map((name) => ({
         source: join(repoRoot, 'vendor', 'ws', '8.21.0', name),
         destination: join(skillRoot, 'vendor', 'ws', '8.21.0', name)
+      })),
+      ...['acorn.mjs', 'LICENSE', 'INTEGRITY.json'].map((name) => ({
+        source: join(repoRoot, 'vendor', 'acorn', '8.15.0', name),
+        destination: join(skillRoot, 'vendor', 'acorn', '8.15.0', name)
       }))
     );
   }

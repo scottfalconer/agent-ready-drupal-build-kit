@@ -66,6 +66,8 @@ jobs:
           ddev drush cache:rebuild
       - name: Run the real isolated custom-code quality smoke
         run: node tests/assert-custom-code-quality-smoke.mjs "$REPRODUCTION_FIXTURE"
+      - name: Run the real custom entity-output runtime smoke
+        run: node tests/assert-custom-entity-output-smoke.mjs "$REPRODUCTION_FIXTURE"
       - name: Run the real disposable reproduction verifier
         run: node bin/verify-reproduction.mjs --project "$REPRODUCTION_FIXTURE"
       - name: Assert exact clone, state parity, isolation, and cleanup evidence

@@ -500,7 +500,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(60 files\)/);
+  assert.match(result.stdout, /is in sync \(67 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -515,7 +515,10 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
     ['scripts', 'repair-browser-runtime.sh'],
     ['vendor', 'ws', '8.21.0', 'ws.mjs'],
     ['vendor', 'ws', '8.21.0', 'LICENSE'],
-    ['vendor', 'ws', '8.21.0', 'INTEGRITY.json']
+    ['vendor', 'ws', '8.21.0', 'INTEGRITY.json'],
+    ['vendor', 'acorn', '8.15.0', 'acorn.mjs'],
+    ['vendor', 'acorn', '8.15.0', 'LICENSE'],
+    ['vendor', 'acorn', '8.15.0', 'INTEGRITY.json']
   ]) {
     assert.ok(readFileSync(
       join(repoRoot, ...relativePath)
@@ -528,12 +531,25 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   ).equals(readFileSync(
     join(skillRoot, 'scripts', 'review-handoff.mjs')
   )), 'scripts/review-handoff.mjs drifted from the canonical runtime');
+  for (const verifier of [
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-mutable-identity-audit.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    assert.ok(readFileSync(
+      join(repoRoot, 'bin', verifier)
+    ).equals(readFileSync(
+      join(skillRoot, 'scripts', verifier)
+    )), `scripts/${verifier} drifted from the canonical runtime`);
+  }
   for (const relativePath of [
     ['scripts', 'reconcile.mjs'],
     ['scripts', 'browser-runtime-smoke.mjs'],
     ['scripts', 'setup-browser-runtime.sh'],
     ['scripts', 'repair-browser-runtime.sh'],
-    ['scripts', 'review-handoff.mjs']
+    ['scripts', 'review-handoff.mjs'],
+    ['scripts', 'mutable-identity-worker.mjs']
   ]) {
     assert.notEqual(
       statSync(join(skillRoot, ...relativePath)).mode & 0o111,
@@ -577,7 +593,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(60 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(67 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

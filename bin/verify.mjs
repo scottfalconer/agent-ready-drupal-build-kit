@@ -43,6 +43,15 @@ import {
   collectRuntimeCodeManifest,
   sha256 as stateSha256
 } from './state-fingerprint.mjs';
+import {
+  customMutableIdentityAuditErrors,
+  inspectCustomMutableIdentity
+} from './custom-mutable-identity-audit.mjs';
+import {
+  CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+  customEntityOutputAuditResultFingerprint,
+  inspectCustomEntityOutputAudit
+} from './custom-entity-output-audit.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -240,10 +249,16 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
+    join(scriptDirectory, 'custom-mutable-identity-audit.mjs'),
+    join(scriptDirectory, 'mutable-identity-worker.mjs'),
+    join(scriptDirectory, 'mutable-identity-drupal.mjs'),
+    join(scriptDirectory, 'custom-entity-output-audit.mjs'),
     join(kitRoot, 'gates.json'),
     join(kitRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js'),
     join(kitRoot, 'vendor', 'ws', '8.21.0', 'INTEGRITY.json'),
-    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs')
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs'),
+    join(kitRoot, 'vendor', 'acorn', '8.15.0', 'INTEGRITY.json'),
+    join(kitRoot, 'vendor', 'acorn', '8.15.0', 'acorn.mjs')
   ]
     .filter((path) => existsSync(path))
     .map((path) => relative(kitRoot, path));
@@ -4808,7 +4823,7 @@ function ddevDocroot(projectRoot) {
   }
 }
 
-const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.2';
+const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.3';
 const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
 const CUSTOM_CODE_QUALITY_SCHEMA = 'public-kit.custom-code-quality.1';
 const CUSTOM_CODE_TEST_EXECUTION_SCHEMA = 'public-kit.custom-code-test-execution.1';
@@ -5035,11 +5050,14 @@ function customSourceKind(extensionRelativePath) {
   if (/\.php$/.test(filename)) {
     return 'php_class';
   }
-  if (/\.html\.twig$/.test(filename)) {
+  if (/\.twig$/.test(filename)) {
     return 'twig_template';
   }
-  if (/\.(?:js|mjs|ts)$/.test(filename)) {
+  if (/\.(?:js|mjs)$/.test(filename)) {
     return 'javascript';
+  }
+  if (/\.ts$/.test(filename)) {
+    return 'typescript_source';
   }
   if (/\.(?:css|less|sass|scss)$/.test(filename)) {
     return 'stylesheet';
@@ -5093,14 +5111,141 @@ function sourceLineLocator(text) {
   };
 }
 
-function customSourceSurface(extension, path, kind, name, locateLine, index = 0) {
-  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}`;
+function customSourceSurface(extension, path, kind, name, locateLine, index = 0, details = {}) {
+  const { identitySuffix = '', ...surfaceDetails } = details;
+  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}\u0000${identitySuffix}`;
   return {
     id: `SURFACE-${sha256(identity).slice(0, 16)}`,
     kind,
     name,
-    line: locateLine(index)
+    line: locateLine(index),
+    ...surfaceDetails
   };
+}
+
+const DRUPAL_HOOK_ATTRIBUTE_CLASS = 'Drupal\\Core\\Hook\\Attribute\\Hook';
+
+function phpMatchingAttributeEnd(masked, start, limit = masked.length) {
+  if (masked.slice(start, start + 2) !== '#[') return -1;
+  let depth = 1;
+  for (let index = start + 2; index < limit; index += 1) {
+    if (masked[index] === '[') {
+      depth += 1;
+    } else if (masked[index] === ']') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function phpTopLevelParts(text, masked = phpCodeMask(text)) {
+  const parts = [];
+  let start = 0;
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < masked.length; index += 1) {
+    if (masked[index] === '(') parentheses += 1;
+    else if (masked[index] === ')') parentheses = Math.max(0, parentheses - 1);
+    else if (masked[index] === '[') brackets += 1;
+    else if (masked[index] === ']') brackets = Math.max(0, brackets - 1);
+    else if (masked[index] === '{') braces += 1;
+    else if (masked[index] === '}') braces = Math.max(0, braces - 1);
+    else if (masked[index] === ',' && parentheses === 0 && brackets === 0 && braces === 0) {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+function phpDrupalHookAliases(masked) {
+  const aliases = new Set();
+  const importPattern = /^[ \t]*use\s+Drupal\\Core\\Hook\\Attribute\\Hook(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;/gmi;
+  for (const match of masked.matchAll(importPattern)) {
+    aliases.add(String(match[1] || 'Hook').toLowerCase());
+  }
+  return aliases;
+}
+
+function phpHookNamesFromAttributeGroup(text, masked, start, end, aliases) {
+  const rawBody = text.slice(start + 2, end);
+  const maskedBody = masked.slice(start + 2, end);
+  const expressions = phpTopLevelParts(rawBody, maskedBody);
+  const hookNames = [];
+  for (const expression of expressions) {
+    const attribute = expression.match(/^\s*([\\A-Za-z_][\\A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*$/);
+    if (!attribute) continue;
+    const attributeName = attribute[1];
+    const normalizedName = attributeName.replace(/^\\/, '').toLowerCase();
+    const importedAlias = !attributeName.includes('\\') && aliases.has(attributeName.toLowerCase());
+    if (normalizedName !== DRUPAL_HOOK_ATTRIBUTE_CLASS.toLowerCase() && !importedAlias) continue;
+    const argumentsList = phpTopLevelParts(attribute[2]);
+    let hookName = '';
+    for (const [index, argument] of argumentsList.entries()) {
+      const value = argument.match(/^\s*(?:hook\s*:\s*)?(['"])([a-z][a-z0-9_]*)\1\s*$/i);
+      const namedHook = /^\s*hook\s*:/i.test(argument);
+      if (value && (index === 0 || namedHook)) {
+        hookName = value[2];
+        if (namedHook) break;
+      }
+    }
+    if (hookName) hookNames.push(hookName);
+  }
+  return hookNames;
+}
+
+function phpAttributedHookMethods(text) {
+  const masked = phpCodeMask(text);
+  const namespace = masked.match(/^[ \t]*namespace\s+([A-Za-z_][A-Za-z0-9_\\]*)\s*[;{]/m)?.[1] ?? '';
+  const aliases = phpDrupalHookAliases(masked);
+  const hooks = [];
+  const classPattern = /(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const classMatch of masked.matchAll(classPattern)) {
+    const openingBrace = masked.indexOf('{', (classMatch.index ?? 0) + classMatch[0].length);
+    if (openingBrace === -1) continue;
+    const className = namespace ? `${namespace}\\${classMatch[1]}` : classMatch[1];
+    let depth = 1;
+    for (let index = openingBrace + 1; index < masked.length && depth > 0; index += 1) {
+      if (masked[index] === '{') {
+        depth += 1;
+        continue;
+      }
+      if (masked[index] === '}') {
+        depth -= 1;
+        continue;
+      }
+      if (depth !== 1 || masked.slice(index, index + 2) !== '#[') continue;
+
+      const attributeGroups = [];
+      let cursor = index;
+      while (masked.slice(cursor, cursor + 2) === '#[') {
+        const end = phpMatchingAttributeEnd(masked, cursor);
+        if (end === -1) break;
+        attributeGroups.push({ start: cursor, end });
+        cursor = end + 1;
+        while (/\s/.test(masked[cursor] ?? '')) cursor += 1;
+      }
+      if (attributeGroups.length === 0) continue;
+      const declaration = masked.slice(cursor);
+      const method = declaration.match(/^(?:(?:public|protected|private|static|final|abstract)\s+)*function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      if (!method) {
+        index = attributeGroups.at(-1).end;
+        continue;
+      }
+      const methodName = method[1];
+      const callable = `${className}::${methodName}`;
+      for (const group of attributeGroups) {
+        for (const hookName of phpHookNamesFromAttributeGroup(text, masked, group.start, group.end, aliases)) {
+          hooks.push({ callable, className, hookName, index: group.start, methodName });
+        }
+      }
+      index = attributeGroups.at(-1).end;
+    }
+  }
+  return hooks;
 }
 
 function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FILE_LIMIT + 1) {
@@ -5146,12 +5291,12 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
   const surfaces = [];
   const locateLine = sourceLineLocator(text);
   let truncated = false;
-  const add = (surfaceKind, name, index = 0) => {
+  const add = (surfaceKind, name, index = 0, details = {}) => {
     if (surfaces.length >= CUSTOM_CODE_SURFACES_PER_FILE_LIMIT) {
       truncated = true;
       return false;
     }
-    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index));
+    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index, details));
     return true;
   };
   const normalized = extensionRelativePath.split(sep).join('/');
@@ -5161,13 +5306,22 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
       if (!add(surfaceKind, match[1], match.index)) break;
     }
   } else if (kind === 'php_class') {
-    for (const match of text.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
+    const masked = phpCodeMask(text);
+    for (const match of masked.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
       const surfaceKind = /(?:^|\/)src\/Controller\//i.test(normalized)
         ? 'controller_class'
         : /(?:^|\/)src\/Plugin\//i.test(normalized)
           ? 'plugin_class'
           : match[1];
       if (!add(surfaceKind, match[2], match.index)) break;
+    }
+    for (const hook of phpAttributedHookMethods(text)) {
+      if (!add('hook_or_callback', hook.callable, hook.index, {
+        className: hook.className,
+        hookName: hook.hookName,
+        identitySuffix: hook.hookName,
+        methodName: hook.methodName
+      })) break;
     }
   } else if (kind === 'javascript') {
     for (const match of text.matchAll(/^[ \t]*Drupal\.behaviors\.([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
@@ -5186,6 +5340,12 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
       for (const match of text.matchAll(/^([A-Za-z0-9_.\\-]+):\s*(?:#.*)?$/gm)) {
         if (!match[1].startsWith('_')) {
           if (!add('registration', match[1], match.index)) break;
+        }
+      }
+      if (/\.libraries\.ya?ml$/i.test(sharedPath)) {
+        for (const match of text.matchAll(/^[ \t]+(['"]?)([^'"#\n]+\.ts(?:\?[^'"#\n]*)?)\1\s*:\s*/gmi)) {
+          const asset = match[2].trim().replace(/\?.*$/, '');
+          if (!add('runtime_typescript_asset', asset, match.index)) break;
         }
       }
     }
@@ -7196,6 +7356,42 @@ function exactInventoryPhpFiles(projectRoot, inventory) {
   return { argvBytes, failures, files: unique };
 }
 
+function exactInventorySourceFiles(projectRoot, inventory) {
+  let realProjectRoot = projectRoot;
+  try {
+    realProjectRoot = realpathSync(projectRoot);
+  } catch {
+    // Individual file checks below fail closed.
+  }
+  const records = [
+    ...(Array.isArray(inventory?.sourceFiles) ? inventory.sourceFiles : []),
+    ...(Array.isArray(inventory?.tests) ? inventory.tests : [])
+  ].map((file) => ({
+    id: String(file?.id ?? ''),
+    path: String(file?.path ?? ''),
+    sha256: String(file?.sha256 ?? '')
+  }));
+  const files = [...new Map(records.map((file) => [file.path, file])).values()]
+    .sort((left, right) => comparePortable(left.path, right.path));
+  const failures = [];
+  for (const file of files) {
+    if (!file.path || isAbsolute(file.path) || file.path.includes('\u0000')) {
+      failures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', file.id, 'Inventoried custom source path is unsafe.'));
+      continue;
+    }
+    const absolute = resolve(projectRoot, file.path);
+    try {
+      const metadata = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || !pathIsInside(realProjectRoot, real)) throw new Error('unsafe path');
+      if (`sha256:${sha256(readFileSync(real))}` !== file.sha256) throw new Error('stale bytes');
+    } catch {
+      failures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', file.id, 'Inventoried custom source changed before snapshot reconciliation.'));
+    }
+  }
+  return { failures, files };
+}
+
 function executableCustomSurfaceIds(inventory) {
   return new Set(
     (Array.isArray(inventory?.sourceFiles) ? inventory.sourceFiles : [])
@@ -8945,11 +9141,11 @@ function runFocusedCustomCodeTests(projectRoot, inventory, coverage, runner, bas
 }
 
 function workingCustomCodeSnapshot(projectRoot, inventory) {
-  const php = exactInventoryPhpFiles(projectRoot, inventory);
-  if (php.failures.length > 0) throw new Error('working custom PHP changed');
+  const sources = exactInventorySourceFiles(projectRoot, inventory);
+  if (sources.failures.length > 0) throw new Error('working custom source changed');
   const runtime = collectRuntimeCodeManifest(projectRoot);
   return stateSha256({
-    inventoriedPhp: php.files.map((file) => ({ id: file.id, path: file.path, sha256: file.sha256 })),
+    inventoriedSources: sources.files,
     runtime
   });
 }
@@ -9218,17 +9414,42 @@ export function inspectCustomCodeQuality(projectRoot, environment, inventory, re
   return { qualityAudit, focusedTestExecution, executionBudget };
 }
 
+function stableMutableIdentityInventoryEvidence(audit) {
+  if (!audit || typeof audit !== 'object' || Array.isArray(audit)) return null;
+  const drupal = audit.drupal && typeof audit.drupal === 'object' && !Array.isArray(audit.drupal)
+    ? { ...audit.drupal, durationMs: 0, resultFingerprint: '' }
+    : audit.drupal ?? null;
+  return { ...audit, drupal, resultFingerprint: '' };
+}
+
 export function inspectCustomCode(projectRoot, environment, review = {}, options = {}) {
   const filesystem = inspectCustomCodeFilesystem(projectRoot);
+  const filesystemFingerprint = filesystem.fingerprint;
   const reviewRecord = Array.isArray(review) ? { routeBindings: review, capabilities: [], testCoverage: [] } : (review ?? {});
   const routeBindings = Array.isArray(reviewRecord?.routeBindings) ? reviewRecord.routeBindings : [];
+  const mutableIdentityAudit = inspectCustomMutableIdentity(projectRoot, filesystem, environment, options.mutableIdentity ?? {});
   const routeAudit = filesystem.completed
     ? inspectCustomRouteRuntime(projectRoot, environment, filesystem.routes, filesystem.extensions, routeBindings)
     : { completed: false, error: 'Filesystem custom-code inventory did not complete.', routes: [], violations: [] };
   const configSchema = filesystem.completed
     ? inspectCustomConfigSchema(projectRoot, environment, filesystem.extensions)
     : { completed: false, error: 'Filesystem custom-code inventory did not complete.', extensions: [], violations: [] };
+  const customEntityOutputAudit = inspectCustomEntityOutputAudit({
+    projectRoot,
+    environment,
+    sourceInventory: filesystem,
+    staticAudit: mutableIdentityAudit,
+    targetOrigin: options.baseUrl ?? '',
+    fieldOutputMatrix: options.fieldOutputMatrix ?? {},
+    routeMatrix: options.routeMatrix ?? {},
+    allowOwnedCacheInvalidation: options.allowOwnedCacheInvalidation === true,
+    isolation: options.entityOutputIsolation ?? null,
+    ...(typeof options.entityOutputRunner === 'function' ? { runner: options.entityOutputRunner } : {})
+  });
   const errors = [...filesystem.errors];
+  if (!['pass', 'not_applicable'].includes(mutableIdentityAudit.status)) {
+    errors.push(`Verifier-owned mutable-identity AST audit status is ${mutableIdentityAudit.status}.`);
+  }
   if (!routeAudit.completed) {
     errors.push(routeAudit.error || 'Live custom-route audit did not complete.');
   }
@@ -9241,17 +9462,30 @@ export function inspectCustomCode(projectRoot, environment, review = {}, options
   if (configSchema.violations.length > 0) {
     errors.push(`Live custom config-schema audit found ${configSchema.violations.length} violation(s).`);
   }
+  if (!['pass', 'not_applicable'].includes(customEntityOutputAudit.status)) {
+    errors.push(`Verifier-owned custom entity-output audit status is ${customEntityOutputAudit.status}.`);
+  }
   const fingerprintInput = {
     extensions: filesystem.extensions,
     sourceFiles: filesystem.sourceFiles,
     controllers: filesystem.controllers,
     routes: filesystem.routes,
     tests: filesystem.tests,
+    mutableIdentityAudit: stableMutableIdentityInventoryEvidence(mutableIdentityAudit),
     routeAudit,
-    configSchema
+    configSchema,
+    customEntityOutputAudit
   };
   const phaseAFingerprint = `sha256:${sha256(JSON.stringify(fingerprintInput))}`;
-  const phaseAInventory = { ...filesystem, routeAudit, configSchema, fingerprint: phaseAFingerprint };
+  const phaseAInventory = {
+    ...filesystem,
+    filesystemFingerprint,
+    mutableIdentityAudit,
+    routeAudit,
+    configSchema,
+    customEntityOutputAudit,
+    fingerprint: phaseAFingerprint
+  };
   const { qualityAudit, focusedTestExecution, executionBudget } = filesystem.completed
     ? inspectCustomCodeQuality(projectRoot, environment, phaseAInventory, reviewRecord, options)
     : {
@@ -9275,12 +9509,18 @@ export function inspectCustomCode(projectRoot, environment, review = {}, options
   }
   return {
     ...filesystem,
-    completed: filesystem.completed && routeAudit.completed && configSchema.completed &&
+    filesystemFingerprint,
+    completed: filesystem.completed && mutableIdentityAudit.completed &&
+      ['pass', 'not_applicable'].includes(mutableIdentityAudit.status) &&
+      routeAudit.completed && configSchema.completed && customEntityOutputAudit.completed &&
+      ['pass', 'not_applicable'].includes(customEntityOutputAudit.status) &&
       ['pass', 'not_applicable'].includes(qualityAudit.status) &&
       ['pass', 'not_applicable'].includes(focusedTestExecution.status) && errors.length === 0,
     errors,
+    mutableIdentityAudit,
     routeAudit,
     configSchema,
+    customEntityOutputAudit,
     qualityAudit,
     focusedTestExecution,
     executionBudget,
@@ -9358,6 +9598,82 @@ function trustedCustomCodeIsolation(isolation) {
     isolation.cleanupCommandResultHashes.every((hash) => /^sha256:[a-f0-9]{64}$/.test(String(hash)));
 }
 
+export function customEntityOutputAuditErrors(runtimeInventory) {
+  const errors = [];
+  const audit = runtimeInventory?.customEntityOutputAudit;
+  if (!audit || audit.schemaVersion !== CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA) {
+    return [`Verifier-owned custom entity-output audit must use schemaVersion ${CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA}.`];
+  }
+  if (audit.resultFingerprint !== customEntityOutputAuditResultFingerprint(audit)) {
+    errors.push('Verifier-owned custom entity-output audit result fingerprint is invalid.');
+  }
+  const sourceIds = new Set((Array.isArray(runtimeInventory?.sourceFiles) ? runtimeInventory.sourceFiles : [])
+    .map((source) => String(source?.id ?? ''))
+    .filter(Boolean));
+  const surfaceIds = new Set((Array.isArray(runtimeInventory?.sourceFiles) ? runtimeInventory.sourceFiles : [])
+    .flatMap((source) => Array.isArray(source?.surfaces) ? source.surfaces : [])
+    .map((surface) => String(surface?.id ?? ''))
+    .filter(Boolean));
+  if (!Array.isArray(audit.candidateSourceFileIds) ||
+    audit.candidateSourceFileIds.some((id, index, values) => !sourceIds.has(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output candidates are not exact unique inventory source identities.');
+  }
+  if (!Array.isArray(audit.candidateSurfaceIds) ||
+    audit.candidateSurfaceIds.some((id, index, values) => !surfaceIds.has(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output candidates are not exact unique inventory surface identities.');
+  }
+  if (!Array.isArray(audit.typedDeclarationIds) ||
+    audit.typedDeclarationIds.some((id, index, values) => !/^DECLARATION-[a-f0-9]{16}$/.test(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output declarations are not bounded typed identities.');
+  }
+  if (audit.completed !== true || !['pass', 'not_applicable'].includes(audit.status) ||
+    audit.applies !== (audit.status === 'pass') ||
+    audit.noExplicitVerifierMutation !== true || audit.allowOwnedCacheInvalidation !== false ||
+    !Array.isArray(audit.failures) || audit.failures.length > 0) {
+    errors.push('Verifier-owned custom entity-output audit must complete without explicit verifier mutation, with pass or exact N/A and no failures.');
+  }
+  const runtime = audit.runtime;
+  if (audit.status === 'pass') {
+    if (!runtime || runtime.schemaVersion !== CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA ||
+      runtime.resultFingerprint !== customEntityOutputAuditResultFingerprint(runtime) ||
+      runtime.inputFingerprint !== audit.inputFingerprint || runtime.status !== 'pass' || runtime.completed !== true ||
+      runtime.noExplicitVerifierMutation !== true || runtime.allowOwnedCacheInvalidation !== false ||
+      !Number.isSafeInteger(runtime.applicableRouteCount) || runtime.applicableRouteCount < 1 ||
+      runtime.matchedNodeRouteCount !== runtime.applicableRouteCount ||
+      runtime.renderedRouteCount !== runtime.applicableRouteCount || runtime.dependencyCount < 3 ||
+      !Array.isArray(runtime.violations) || runtime.violations.length > 0) {
+      errors.push('Passing custom entity-output evidence lacks a bound anonymous rendered Node/Media/File runtime result.');
+    } else {
+      const dependencies = runtime.routes.flatMap((route) => Array.isArray(route?.dependencies) ? route.dependencies : []);
+      for (const entityType of ['node', 'media', 'file']) {
+        if (!dependencies.some((dependency) =>
+          dependency?.entityType === entityType && dependency?.access === 'allowed' &&
+          Number(dependency?.invalidationTagCount) > 0 && Number(dependency?.renderedTagIntersectionCount) > 0
+        )) {
+          errors.push(`Passing custom entity-output evidence lacks allowed ${entityType} access and bubbled invalidation tags.`);
+        }
+      }
+      if (runtime?.invalidation?.status !== 'not_run' || runtime?.invalidation?.attempted !== false ||
+        runtime?.invalidation?.seededCount !== 0 || runtime?.invalidation?.invalidatedCount !== 0 ||
+        runtime?.invalidation?.cleanupCompleted !== true) {
+        errors.push('Working-target custom entity-output evidence performed or misstated explicit cache invalidation.');
+      }
+    }
+  } else if (runtime !== null && (
+    runtime?.status !== 'not_applicable' || runtime?.completed !== true ||
+    runtime?.applicableRouteCount !== 0 || runtime?.matchedNodeRouteCount !== 0 ||
+    runtime?.renderedRouteCount !== 0 || runtime?.dependencyCount !== 0 ||
+    runtime?.coveredDeclarationCount !== 0 || runtime?.coveredDeclarationSetSha256 !== '' ||
+    runtime?.coveredCandidateSourceFileCount !== 0 || runtime?.coveredCandidateSourceFileSetSha256 !== '' ||
+    runtime?.coveredCandidateSurfaceCount !== 0 || runtime?.coveredCandidateSurfaceSetSha256 !== '' ||
+    !Array.isArray(runtime?.routes) || runtime.routes.some((route) => route?.applies !== false || route?.matched !== false || route?.rendered !== false) ||
+    !Array.isArray(runtime?.violations) || runtime.violations.length > 0
+  )) {
+    errors.push('Custom entity-output N/A evidence contradicts its live extension applicability.');
+  }
+  return errors;
+}
+
 export function customCodeReconciliationErrors(runtimeInventory, review, packetDir = '') {
   const errors = [];
   const push = (message) => {
@@ -9411,6 +9727,12 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     ? runtimeInventory.routeAudit.violations
     : []) {
     push(`Custom route ${violation?.name || '(unknown route)'} failed runtime audit: ${violation?.reason || 'unknown violation'}.`);
+  }
+  for (const error of customMutableIdentityAuditErrors(runtimeInventory)) {
+    push(error);
+  }
+  for (const error of customEntityOutputAuditErrors(runtimeInventory)) {
+    push(error);
   }
 
   const runtimePhpFileIds = [
@@ -10304,7 +10626,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     projectRoot,
     environment,
     drupalReadback?.implementationQuality?.customCodeInventory ?? {},
-    { baseUrl }
+    { baseUrl, fieldOutputMatrix, routeMatrix }
   );
   const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
@@ -12288,7 +12610,7 @@ export async function verifyLive({
     stateBlockers.push('The current live-derived Drupal public surface is not exactly reconciled to packet declarations or owned exclusions.');
   }
   if (customCodeErrors.length > 0) {
-    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability/test-bound or its quality, focused-test, representative-route, or config-schema checks failed.');
+    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability/test-bound or its AST identity, entity-output, quality, focused-test, representative-route, or config-schema checks failed.');
   }
   if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
     stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
@@ -12662,6 +12984,8 @@ export async function verifyLive({
       passed: liveEditorSurfaceReconciliation.passed
     },
     customCodeInventoryFingerprint: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+    customCodeMutableIdentityResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.mutableIdentityAudit?.resultFingerprint ?? '',
+    customCodeEntityOutputResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.customEntityOutputAudit?.resultFingerprint ?? '',
     customCodeQualityResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
     customCodeTestExecutionResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? ''
   });
@@ -12707,6 +13031,8 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       customCodeInventorySha256: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+      customCodeMutableIdentityResultSha256: inspectedDrupalRuntime.customCodeInventory?.mutableIdentityAudit?.resultFingerprint ?? '',
+      customCodeEntityOutputResultSha256: inspectedDrupalRuntime.customCodeInventory?.customEntityOutputAudit?.resultFingerprint ?? '',
       customCodeQualityResultSha256: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
       customCodeTestExecutionResultSha256: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? '',
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
@@ -12714,7 +13040,7 @@ export async function verifyLive({
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 7
+      targetFingerprintInputVersion: 8
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
