@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -35,7 +36,7 @@ Run non-authoring, pre-baseline diagnostics for the current Drupal/DDEV project.
 
 Options:
   --project <path>       Drupal project root (default: nearest project)
-  --out <path>           JSON report inside the project (default: review-packet/evidence/doctor.json)
+  --out <path>           New JSON report under review-packet/evidence (default: review-packet/evidence/doctor.json)
   --base-url <url>       Current local DDEV web URL when it cannot be discovered
   --route <path>         First route to smoke (default: /)
   --recipe <path>        Inspect this packet-local/project-local Recipe; repeatable
@@ -1054,22 +1055,34 @@ export async function runDoctor({
 }
 
 function assertSafeOutput(projectRoot, outputPath) {
+  const evidenceRoot = resolve(projectRoot, 'review-packet', 'evidence');
   const output = resolve(projectRoot, outputPath);
-  if (!isInside(projectRoot, output) || output === projectRoot) {
-    throw new Error('--out must be a file inside the Drupal project.');
+  if (!isInside(evidenceRoot, output) || output === evidenceRoot) {
+    throw new Error('--out must be a new file under review-packet/evidence.');
   }
   assertNoSymlinkAncestors(projectRoot, output, '--out');
-  if (existsSync(output) && (lstatSync(output).isSymbolicLink() || !statSync(output).isFile())) {
-    throw new Error('--out must be a regular non-symlink file.');
+  if (existsSync(output)) {
+    throw new Error('--out refuses to overwrite an existing file.');
   }
   return output;
 }
 
 function writeReportAtomic(path, report) {
   mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-  renameSync(temporary, path);
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    try {
+      linkSync(temporary, path);
+    } catch (error) {
+      if (error?.code === 'EEXIST') {
+        throw new Error('--out refuses to overwrite an existing file.');
+      }
+      throw error;
+    }
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
 }
 
 async function main() {

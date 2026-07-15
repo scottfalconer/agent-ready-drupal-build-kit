@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -243,15 +243,47 @@ test('doctor rejects Recipe and report paths that traverse symbolic links', asyn
 
   const realEvidence = join(root, 'real-evidence');
   mkdirSync(realEvidence);
-  symlinkSync(realEvidence, join(root, 'linked-evidence'));
+  mkdirSync(join(root, 'review-packet'));
+  symlinkSync(realEvidence, join(root, 'review-packet', 'evidence'));
   const result = spawnSync(process.execPath, [
     join(repoRoot, 'bin', 'doctor.mjs'),
     '--project', root,
-    '--out', 'linked-evidence/doctor.json',
     '--skip-browser'
   ], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /--out must not traverse a symbolic link/);
+});
+
+test('doctor confines new reports to review-packet evidence without overwriting project files', () => {
+  const root = fixtureProject();
+  const composerPath = join(root, 'composer.json');
+  const originalComposer = readFileSync(composerPath, 'utf8');
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'bin', 'doctor.mjs'),
+    '--project', root,
+    '--out', 'composer.json',
+    '--skip-browser'
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--out must be a new file under review-packet\/evidence/);
+  assert.equal(readFileSync(composerPath, 'utf8'), originalComposer);
+});
+
+test('doctor refuses to overwrite an existing evidence report', () => {
+  const root = fixtureProject();
+  const reportPath = join(root, 'review-packet', 'evidence', 'doctor.json');
+  mkdirSync(dirname(reportPath), { recursive: true });
+  writeFileSync(reportPath, 'existing report\n');
+  const result = spawnSync(process.execPath, [
+    join(repoRoot, 'bin', 'doctor.mjs'),
+    '--project', root,
+    '--skip-browser'
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /refuses to overwrite an existing file/);
+  assert.equal(readFileSync(reportPath, 'utf8'), 'existing report\n');
 });
 
 test('doctor rejects a symlinked automatic Recipe root', async () => {
