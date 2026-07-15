@@ -52,10 +52,11 @@
   },
   "implementationQuality": {
     "customCodeInventory": {
-      "schemaVersion": "public-kit.custom-code-review.1",
+      "schemaVersion": "public-kit.custom-code-review.2",
       "applies": false,
       "runtimeFingerprint": "",
       "capabilities": [],
+      "testCoverage": [],
       "routeBindings": [],
       "inventoryComplete": false,
       "blockers": []

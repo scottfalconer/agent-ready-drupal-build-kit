@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inflateSync } from 'node:zlib';
@@ -88,7 +88,17 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
-const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.1';
+const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
+const CUSTOM_CODE_COVERAGE_ROW_LIMIT = 128;
+export const PACKET_JSON_LIMITS = Object.freeze({
+  aggregateBytes: 64 * 1024 * 1024,
+  collectionEntries: 20_000,
+  depth: 64,
+  fileBytes: 8 * 1024 * 1024,
+  nodes: 250_000,
+  stringBytes: 256 * 1024,
+  totalStringBytes: 16 * 1024 * 1024
+});
 const CUSTOM_SOLUTION_LADDER_STAGES = Object.freeze([
   'core',
   'installed_drupal_cms',
@@ -120,7 +130,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
   'G-SURFACE-01': 'liveDrupalSurfaceReconciliation',
-  'G-CODE-01': 'customCodeInventoryRouteSchema',
+  'G-CODE-01': 'customCodeInventoryQualityTestsRouteSchema',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',
@@ -135,6 +145,23 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
 });
 
 class UsageError extends Error {}
+
+function boundedMessageArray(limit, label) {
+  const values = [];
+  Object.defineProperty(values, 'push', {
+    value(...messages) {
+      for (const message of messages) {
+        if (values.length < limit - 1) {
+          Array.prototype.push.call(values, String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, 1_000));
+        } else if (values.length === limit - 1) {
+          Array.prototype.push.call(values, `${label} reached its ${limit}-message reporting cap; remaining messages were bounded.`);
+        }
+      }
+      return values.length;
+    }
+  });
+  return values;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -195,11 +222,112 @@ function isDirectRun() {
   }
 }
 
-async function readJson(path, errors) {
+function assertBoundedJsonStructure(value, label, limits = PACKET_JSON_LIMITS) {
+  const pending = [{ depth: 0, value }];
+  let nodes = 0;
+  let totalStringBytes = 0;
+  const countString = (candidate) => {
+    const bytes = Buffer.byteLength(candidate);
+    if (bytes > limits.stringBytes) {
+      throw new Error(`${label} contains a string larger than ${limits.stringBytes} bytes`);
+    }
+    totalStringBytes += bytes;
+    if (totalStringBytes > limits.totalStringBytes) {
+      throw new Error(`${label} contains more than ${limits.totalStringBytes} bytes of strings`);
+    }
+  };
+  while (pending.length > 0) {
+    const current = pending.pop();
+    nodes += 1;
+    if (nodes > limits.nodes) {
+      throw new Error(`${label} contains more than ${limits.nodes} JSON nodes`);
+    }
+    if (current.depth > limits.depth) {
+      throw new Error(`${label} is nested more than ${limits.depth} levels`);
+    }
+    if (typeof current.value === 'string') {
+      countString(current.value);
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      if (current.value.length > limits.collectionEntries) {
+        throw new Error(`${label} contains an array with more than ${limits.collectionEntries} entries`);
+      }
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        pending.push({ depth: current.depth + 1, value: current.value[index] });
+      }
+      continue;
+    }
+    if (current.value !== null && typeof current.value === 'object') {
+      const entries = Object.entries(current.value);
+      if (entries.length > limits.collectionEntries) {
+        throw new Error(`${label} contains an object with more than ${limits.collectionEntries} entries`);
+      }
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const [key, nested] = entries[index];
+        countString(key);
+        pending.push({ depth: current.depth + 1, value: nested });
+      }
+    }
+  }
+}
+
+export function parseBoundedJsonText(text, label = 'JSON input', limits = PACKET_JSON_LIMITS) {
+  const bytes = Buffer.byteLength(String(text));
+  if (bytes > limits.fileBytes) {
+    throw new Error(`${label} is ${bytes} bytes; limit is ${limits.fileBytes} bytes`);
+  }
+  const value = JSON.parse(String(text));
+  assertBoundedJsonStructure(value, label, limits);
+  return value;
+}
+
+export async function readBoundedJsonFile(path, options = {}) {
+  const limits = options.limits ?? PACKET_JSON_LIMITS;
+  const label = options.label ?? path;
+  const pathMetadata = await lstat(path);
+  if (pathMetadata.isSymbolicLink() || !pathMetadata.isFile()) {
+    throw new Error(`${label} is not a regular non-symlink JSON file`);
+  }
+  const handle = await open(path, 'r');
   try {
-    return JSON.parse(await readFile(path, 'utf8'));
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > limits.fileBytes) {
+      throw new Error(`${label} is not a bounded regular JSON file (limit ${limits.fileBytes} bytes)`);
+    }
+    const buffer = Buffer.allocUnsafe(limits.fileBytes + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const result = await handle.read(buffer, bytes, buffer.length - bytes, bytes);
+      if (result.bytesRead === 0) break;
+      bytes += result.bytesRead;
+    }
+    if (bytes > limits.fileBytes) throw new Error(`${label} exceeds ${limits.fileBytes} bytes`);
+    const budget = options.budget ?? null;
+    if (budget) {
+      budget.bytes = Number(budget.bytes ?? 0) + bytes;
+      if (budget.bytes > limits.aggregateBytes) {
+        throw new Error(`packet JSON exceeds the ${limits.aggregateBytes}-byte aggregate limit`);
+      }
+    }
+    const text = buffer.subarray(0, bytes).toString('utf8');
+    return { bytes, text, value: parseBoundedJsonText(text, label, limits) };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readJson(path, errors, context = null) {
+  if (context?.cache?.has(path)) {
+    return context.cache.get(path);
+  }
+  try {
+    const result = await readBoundedJsonFile(path, { budget: context?.budget });
+    context?.cache?.set(path, result.value);
+    return result.value;
   } catch (error) {
     errors.push(`${path} must be valid JSON: ${error.message}`);
+    context?.cache?.set(path, null);
     return null;
   }
 }
@@ -240,11 +368,15 @@ export function customCodeReviewReasons(drupalReadback) {
   if (review.inventoryComplete !== true || !Array.isArray(review.blockers) || review.blockers.length > 0) {
     reasons.push('Custom-code review must be complete with an explicit empty blockers array.');
   }
+  if (!Array.isArray(review.capabilities) || !Array.isArray(review.routeBindings) || !Array.isArray(review.testCoverage)) {
+    reasons.push('Custom-code review capabilities, routeBindings, and testCoverage must be explicit arrays.');
+  }
   const capabilities = arrayOrEmpty(review.capabilities);
   const routeBindings = arrayOrEmpty(review.routeBindings);
+  const testCoverage = arrayOrEmpty(review.testCoverage);
   if (review.applies === false) {
-    if (capabilities.length > 0 || routeBindings.length > 0) {
-      reasons.push('A not-applicable custom-code review cannot declare capabilities or route bindings.');
+    if (capabilities.length > 0 || routeBindings.length > 0 || testCoverage.length > 0) {
+      reasons.push('A not-applicable custom-code review cannot declare capabilities, route bindings, or test coverage.');
     }
     if (String(review.runtimeFingerprint ?? '') && !HASH_RE.test(String(review.runtimeFingerprint))) {
       reasons.push('Custom-code runtimeFingerprint must be empty until live inventory or a SHA-256 fingerprint.');
@@ -259,6 +391,7 @@ export function customCodeReviewReasons(drupalReadback) {
   }
   const capabilityIds = new Set();
   const acceptanceCriterionIds = new Set();
+  const loadBearingCriterionExtensions = new Map();
   const boundSurfaceIds = new Set();
   for (const [index, capability] of capabilities.entries()) {
     const extension = String(capability?.extension ?? '').trim();
@@ -291,6 +424,9 @@ export function customCodeReviewReasons(drupalReadback) {
     }
     for (const id of criterionIds) {
       acceptanceCriterionIds.add(id);
+      if (capability?.loadBearing === true) {
+        loadBearingCriterionExtensions.set(id, extension);
+      }
     }
     const ladder = arrayOrEmpty(capability?.solutionLadder);
     if (
@@ -326,12 +462,40 @@ export function customCodeReviewReasons(drupalReadback) {
     for (const id of surfaceIds) {
       boundSurfaceIds.add(id);
     }
-    const testFileIds = arrayOrEmpty(capability?.testFileIds).map(String);
+  }
+  if (testCoverage.length > CUSTOM_CODE_COVERAGE_ROW_LIMIT) {
+    reasons.push(`Custom-code testCoverage exceeds the ${CUSTOM_CODE_COVERAGE_ROW_LIMIT}-row execution limit.`);
+  }
+  const coveredCriteria = new Set();
+  const coverageRowBindings = new Set();
+  for (const [index, coverage] of testCoverage.entries()) {
+    const acceptanceCriterionId = String(coverage?.acceptanceCriterionId ?? '').trim();
+    const testFileId = String(coverage?.testFileId ?? '').trim();
+    const className = String(coverage?.className ?? '').trim().replace(/^\\+/, '');
+    const methodName = String(coverage?.methodName ?? '').trim();
+    const testMethodId = String(coverage?.testMethodId ?? '').trim();
+    const methodKey = `${acceptanceCriterionId}\u0000${testFileId}\u0000${className}\u0000${methodName}`;
     if (
-      testFileIds.some((id) => !/^TEST-[a-f0-9]{16}$/.test(id)) ||
-      new Set(testFileIds).size !== testFileIds.length
+      !acceptanceCriterionIds.has(acceptanceCriterionId) ||
+      coverage?.runner !== 'phpunit' ||
+      !/^TEST-[a-f0-9]{16}$/.test(testFileId) ||
+      className.length > 512 || !/^[A-Za-z_][A-Za-z0-9_\\]*$/.test(className) ||
+      methodName.length > 200 || !/^test[A-Za-z0-9_]+$/.test(methodName) ||
+      !/^TESTMETHOD-[a-f0-9]{16}$/.test(testMethodId)
     ) {
-      reasons.push(`Custom capability ${capabilityId || `(row ${index})`} has an invalid or duplicate testFileId.`);
+      reasons.push(`Custom-code testCoverage row ${index} must bind a known AC to an exact phpunit TEST/TESTMETHOD class and method identity.`);
+    }
+    if (coverageRowBindings.has(methodKey)) {
+      reasons.push(`Custom-code testCoverage row ${index} repeats the same acceptance criterion and exact test method binding.`);
+    }
+    coverageRowBindings.add(methodKey);
+    if (acceptanceCriterionId) {
+      coveredCriteria.add(acceptanceCriterionId);
+    }
+  }
+  for (const acceptanceCriterionId of loadBearingCriterionExtensions.keys()) {
+    if (!coveredCriteria.has(acceptanceCriterionId)) {
+      reasons.push(`Load-bearing custom-code acceptance criterion ${acceptanceCriterionId} has no focused PHPUnit testCoverage row.`);
     }
   }
   const routeNames = new Set();
@@ -660,7 +824,7 @@ async function packetEvidenceJson(packetDir, reference, evidenceDir = join(packe
     return null;
   }
   try {
-    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const evidence = (await readBoundedJsonFile(evidencePath)).value;
     return isJsonObject(evidence) ? evidence : null;
   } catch {
     return null;
@@ -677,7 +841,7 @@ async function packetJsonEvidence(packetDir, reference, evidenceDir = join(packe
     if (!evidenceStat.isFile() || evidenceStat.size === 0) {
       return null;
     }
-    const value = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const value = (await readBoundedJsonFile(evidencePath)).value;
     return isJsonObject(value) ? value : null;
   } catch {
     return null;
@@ -702,7 +866,7 @@ async function evidenceBindsClaim(evidencePath, claim, independentTargetUrl) {
     return false;
   }
   try {
-    const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+    const evidence = (await readBoundedJsonFile(evidencePath)).value;
     const candidates = Array.isArray(evidence?.claims) ? evidence.claims : [evidence];
     return candidates.some((candidate) => {
       const evidenceTargetUrl = httpUrl(candidate?.targetBaseUrl ?? evidence?.targetBaseUrl);
@@ -968,7 +1132,7 @@ function validateGateVocabulary(gates, errors) {
   }
 }
 
-async function validateRequiredFiles(packetDir, gates, errors) {
+async function validateRequiredFiles(packetDir, gates, errors, jsonContext) {
   for (const file of gates.reviewPacketFiles ?? []) {
     const path = join(packetDir, file);
     if (!existsSync(path)) {
@@ -977,7 +1141,7 @@ async function validateRequiredFiles(packetDir, gates, errors) {
     }
 
     if (file.endsWith('.json')) {
-      await readJson(path, errors);
+      await readJson(path, errors, jsonContext);
     }
   }
 }
@@ -2599,7 +2763,7 @@ async function validateBlindAdversarialReview(
       }
       if (extname(evidencePath).toLowerCase() === '.json') {
         try {
-          const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+          const evidence = (await readBoundedJsonFile(evidencePath)).value;
           const adminUrl = httpUrl(evidence?.targetAdminUrl);
           const publicUrl = httpUrl(evidence?.resultingPublicUrl);
           if (
@@ -2961,7 +3125,7 @@ async function accessibilityCheckReasons(packetDir, browserEvidenceDir, check, i
   let report = null;
   if (reportPath) {
     try {
-      report = JSON.parse(await readFile(reportPath, 'utf8'));
+      report = (await readBoundedJsonFile(reportPath)).value;
     } catch {
       // The message below covers missing and malformed reports without leaking local paths.
     }
@@ -3852,7 +4016,7 @@ async function negativeRouteConsentReasons(packetDir, record, routeMatrix) {
       continue;
     }
     try {
-      const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
+      const evidence = (await readBoundedJsonFile(evidencePath)).value;
       const target = httpUrl(evidence?.targetBaseUrl);
       const declaredTarget = httpUrl(routeMatrix?.targetBaseUrl);
       if (
@@ -3899,10 +4063,10 @@ async function packetCompletionReadiness(packetDir, gates, records) {
     if (packetFile.endsWith('.json') && existsSync(packetPath)) {
       try {
         const shippedSentinels = templatePath
-          ? templateEnumSentinels(JSON.parse(await readFile(templatePath, 'utf8')))
+          ? templateEnumSentinels((await readBoundedJsonFile(templatePath)).value)
           : new Set();
         const unresolved = unresolvedEnumSentinels(
-          JSON.parse(await readFile(packetPath, 'utf8')),
+          (await readBoundedJsonFile(packetPath)).value,
           shippedSentinels
         );
         if (unresolved.length > 0) {
@@ -5396,28 +5560,29 @@ function sharedPacketMessage(value, packetDir) {
 }
 
 export async function validatePacket({ packetDir = 'review-packet' } = {}) {
-  const errors = [];
-  const warnings = [];
-  const gates = await readJson(join(KIT_ROOT, 'gates.json'), errors);
+  const errors = boundedMessageArray(500, 'Packet validation');
+  const warnings = boundedMessageArray(200, 'Packet validation warnings');
+  const jsonContext = { budget: { bytes: 0 }, cache: new Map() };
+  const gates = await readJson(join(KIT_ROOT, 'gates.json'), errors, jsonContext);
 
   if (gates) {
     validateGateVocabulary(gates, errors);
-    await validateRequiredFiles(packetDir, gates, errors);
+    await validateRequiredFiles(packetDir, gates, errors, jsonContext);
   }
 
-  const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), []);
-  const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), []);
-  const buildInput = await readJson(join(packetDir, 'build-input.json'), []);
-  const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), []);
-  const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), []);
-  const parityReport = await readJson(join(packetDir, 'parity-report.json'), []);
-  const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), []);
-  const drupalReadback = await readJson(join(packetDir, 'drupal-readback.json'), []);
-  const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), []);
-  const nextCycleVerification = await readJson(join(packetDir, 'next-cycle-verification.json'), []);
-  const patternMap = await readJson(join(packetDir, 'pattern-map.json'), []);
-  const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), []);
-  const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), []);
+  const independentVerification = await readJson(join(packetDir, 'independent-verification.json'), errors, jsonContext);
+  const blindAdversarialReview = await readJson(join(packetDir, 'blind-adversarial-review.json'), errors, jsonContext);
+  const buildInput = await readJson(join(packetDir, 'build-input.json'), errors, jsonContext);
+  const briefAcceptance = await readJson(join(packetDir, 'brief-acceptance.json'), errors, jsonContext);
+  const routeMatrix = await readJson(join(packetDir, 'route-matrix.json'), errors, jsonContext);
+  const parityReport = await readJson(join(packetDir, 'parity-report.json'), errors, jsonContext);
+  const browserEvidence = await readJson(join(packetDir, 'browser-evidence.json'), errors, jsonContext);
+  const drupalReadback = await readJson(join(packetDir, 'drupal-readback.json'), errors, jsonContext);
+  const fieldOutputMatrix = await readJson(join(packetDir, 'field-output-matrix.json'), errors, jsonContext);
+  const nextCycleVerification = await readJson(join(packetDir, 'next-cycle-verification.json'), errors, jsonContext);
+  const patternMap = await readJson(join(packetDir, 'pattern-map.json'), errors, jsonContext);
+  const sourceAudit = await readJson(join(packetDir, 'source-audit.json'), errors, jsonContext);
+  const negativeRouteConsent = await readJson(join(packetDir, 'negative-route-consent.json'), errors, jsonContext);
   const briefContext = await validateBuildInput(packetDir, buildInput, routeMatrix, errors);
   const briefMode = briefContext.mode === 'brief';
   rejectAuthoredCompletionClaims(independentVerification, blindAdversarialReview, errors);

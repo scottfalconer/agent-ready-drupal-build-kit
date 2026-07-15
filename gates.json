@@ -312,7 +312,7 @@
     },
     {
       "id": "G-CODE-01",
-      "title": "Custom code inventory, representative routes, and config schema reconcile",
+      "title": "Custom code inventory, quality tools, focused tests, routes, and config schema reconcile",
       "phase": 6,
       "evidenceFile": "drupal-readback.json",
       "checkedBy": "verify-script",
