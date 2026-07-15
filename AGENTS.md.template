@@ -56,7 +56,7 @@ A valid local rebuild uses:
 - Node.js 20 or newer inside DDEV for build-kit initialization and verification.
 - `drupal/cms` as the Composer project.
 - The Drupal CMS setup assistant or a documented non-interactive equivalent.
-- Composer and installed `recipe.yml` files for Recipe discovery, plus Drupal core's `php core/scripts/drupal recipe PATH` runner from the webroot for verified Recipe application. Do not assume a separate `dr` executable exists.
+- Composer and installed `recipe.yml` files for Recipe discovery, plus the Recipe runner exposed by the installed target. Prefer `vendor/bin/dr recipe:apply PATH` when present; otherwise use the legacy `php core/scripts/drupal recipe PATH` runner from the webroot. Record the exact runner selected instead of assuming either command exists.
 - Drush for mature readback, entity inspection, extension lists, config export/status, and scripting evidence.
 - Drupal content/config entities, fields, taxonomy, media, menus, aliases, redirects, Views, form displays, view displays, workflows, themes, modules, and config overlays.
 - Anonymous browser checks against the Drupal-served DDEV URL.
@@ -79,6 +79,14 @@ For a brief-only run, replace the initializer command above with this mutually e
 node .agents/skills/agent-ready-drupal-build-kit/scripts/init-kit.mjs --brief-file "[BRIEF_FILE]"
 ```
 
+Before applying a candidate Recipe, and while the full packet may still be incomplete, run the non-authoring project doctor:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs --recipe recipes/[CANDIDATE]
+```
+
+Pass `--package drupal/[AUDITED_CANDIDATE]` only for candidates derived from the source audit or brief. Treat `review-packet/evidence/doctor.json` as a diagnostic work queue, never completion evidence. The doctor does not apply Recipes, prove compatibility, intentionally change Drupal content or configuration, or write reviewer verdicts. Bootstrap, HTTP, and browser diagnostics may still warm caches or write normal runtime logs. Review every active-config touch point and rollback risk before Recipe application.
+
 From the host, use `ddev exec node ...`, `ddev drush status`, and `ddev exec node --version` instead. The initializer must preserve existing managed `AGENTS.md` regions and existing review-packet work. If Drupal is not installed or the current directory is not the intended target, stop and report that specific blocker; do not silently scaffold another site.
 
 Before creating site-specific structure, point Drupal's config sync directory at a version-controlled project path. For a `web` docroot, the usual target is project-root `config/sync`, referenced from Drupal as `../config/sync`. Never leave the active sync directory at `web/sites/default/files/sync` as the only export location; that path is normally runtime files, not reviewable source. The tracked config directory and the active config sync directory must be the same reviewed path.
@@ -97,7 +105,7 @@ ddev composer show 'drupal/drupal_cms_*'
 ddev exec bash -lc 'find recipes web/core/recipes -name recipe.yml -print 2>/dev/null | sort'
 ```
 
-Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; record it only when it was actually performed. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
+Before site-specific work is complete, prove the exported config is the reviewable source of truth: the active sync directory must resolve to a non-empty tracked project directory and `config:status` must show no active-to-sync drift. A separate clean-install/import reproduction run is stronger maintainer or launch evidence; when it is required and exact-HEAD inputs can be declared, use the typed host-side workflow in `references/disposable-reproduction.md`. Record it only when it actually ran, and keep `snapshot_restore` distinct from `clean_install_config_import`. If launch evidence claims a project-local assembly is idempotent, extension-safe, or recoverable, use the separate pre-assembly workflow in `references/disposable-assembly.md`; a self-reported rerun or browser transcript is not that proof. If any required command cannot run, stop and report the blocker. Do not fall back to a static prototype.
 
 ## Build Input Handling
 
@@ -215,6 +223,7 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 - For every major architectural decision, content type, View, workflow, integration boundary, custom controller, or recipe/overlay decision, append a durable intent record.
 - Include purpose, source evidence, rationale, asserted by, last reviewed date, config hash, status, and stale behavior. For config objects, compute `config_hash` as `sha256:<64 lowercase hex chars>` from the exported config YAML after deleting `uuid:` and `_core:` lines and trimming trailing whitespace. Use `config_hash: "not-applicable"` only for behavior or external decisions with no Drupal config object.
 - A solo-agent run may set durable intent status to `hash-valid` when the hash matches exported config. Only human maintainer review should set status to `accepted`. Blank or `UNKNOWN` hashes are advisory only and fail the packet verifier when paired with `hash-valid` or `accepted`.
+- An empty `intent_records` list is not self-justifying. Record `empty_intent_acceptance` with disposition `accepted_no_durable_intent`, a named accepter, rationale, and non-empty packet-local evidence; otherwise the completion claim remains blocked.
 - Produce `review-packet/durable-intent.yml`.
 
 ### Phase 4: Gap List
@@ -236,7 +245,25 @@ Complete this gate whenever Canvas/Experience Builder is selected as a route own
 
 Before final handoff, run a fresh independent verification pass whose job is to falsify the mechanical completion claims against the live Drupal site and current packet.
 
+Before the preliminary live verifier, bootstrap the exact live Drupal surface into a non-passing worksheet instead of hand-shaping hundreds of census rows:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Edit `review-packet/live-surface-reconciliation-draft.json` and explicitly disposition every row. `recommendedDisposition` and `candidatePacketReferences` are navigation aids only; the command never copies them into claim-bearing fields. Public declarations still require a specific non-empty `file#section` reference. Non-public exclusions still require a named owner, rationale, and real packet-local evidence. New or materially changed surfaces reset to unresolved, and deleted packet rows remain stale until acknowledged. When the worksheet is resolved, run `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --materialize`. Materialization reruns the live census, refuses unresolved or stale rows with exit `2`, and changes only `drupal-readback.json.liveSurfaceReconciliation`. It does not set `readbackComplete`, recreate reviewer evidence, or authorize completion.
+
+Then run the default live verifier once against the finished builder state. Exit `2` is expected while independent and blind review evidence is still pending, but the report must confirm a clean, authoritative target and emit `review-packet/evidence/live-verification.json` with a complete build-state fingerprint. Seed only the original brief, acceptance criteria, and explicit source-of-truth references in the blind-review stub, then create the review handoff:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/review-handoff.mjs --packet review-packet
+```
+
+Add `--independent-credential-label <lowercase-id>` or `--blind-credential-label <lowercase-id>` only for credentials supplied to that reviewer out of band; never pass a password, token, cookie, or other credential value. The command writes one non-authoritative root handoff plus two strict reviewer projections: `review-packet/evidence/review-handoff.json`, `review-packet/evidence/review-handoff-independent.json`, and `review-packet/evidence/review-handoff-blind.json`. The root binds the exact target origin, Drupal site UUID, front-page/config identity, site-state fingerprint, preliminary packet-evidence fingerprint, and reviewer-input fingerprint. The independent projection binds every allowed file by project-relative path, byte size, and SHA-256 digest. The blind projection contains only the original brief, acceptance criteria, explicit source truth, target URLs, restricted primary-route rows, and out-of-band credential labels; packet-local brief and source files are byte-bound too. Target, admin, and primary-route URLs remain bound to the root target origin while explicit source-truth URLs may use the source origin. Secret-like paths, symlinks or realpath escapes, malformed or unknown fields, excessive filesystem entries/files/bytes/depth, and declared input roots outside the bounded packet/evidence contract fail closed before file bytes are read. The files are builder-writable and self-attested, have no completion or reviewer-identity authority, and never contain or write either reviewer artifact, a verdict, a completion claim, credentials, or `drupal-readback.json`.
+
 Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. The verifier should be a context that did not build the site. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence. Record any same-context fallback as degraded independence in `review-packet/independent-verification.json`.
+
+Give the independent verifier only `review-packet/evidence/review-handoff-independent.json` and the files bound in its `allowedInputs`; do not give that reviewer the root handoff, blind projection, unlisted implementation files, prior conversation, summaries, or older reviewer output. The projection carries the root manifest path and exact `handoffDigest`; the verifier must copy that reference into `independent-verification.json.reviewHandoff`. The final verifier re-discovers the complete declared packet/evidence input set, rejects additions or omissions, re-hashes every input, and checks the stable reviewer-input fingerprint before accepting the record. Editor probes must be reversed before the review artifact is finalized so the target returns to the handed-off state. If the target, input membership, or input bytes change after handoff, regenerate the bundle and rerun independent verification.
 
 The verifier must try to break each claimed gate, not confirm it politely. It should inspect the live Drupal site and packet for:
 
@@ -267,11 +294,11 @@ Before claiming a build is complete, run a blind adversarial product review in a
 
 The blind reviewer must receive only:
 
-- the original user brief and acceptance criteria;
-- the target URL or target artifact;
-- the preserved original brief and any explicit source-of-truth materials it names, such as a source site, screenshots, design files, content inventory, brand guide, or written spec;
-- a restricted primary-route list extracted from `route-matrix.json` that contains route paths and source-truth references only, not builder rationale or packet claims;
-- credentials needed for editor/admin checks when the brief requires CMS/editor experience.
+- `review-packet/evidence/review-handoff-blind.json`;
+- any packet-local files named and byte-bound by that projection;
+- any out-of-band credentials named only by the projection's credential labels when the brief requires CMS/editor experience.
+
+That projection contains the original brief and acceptance criteria, target URLs or artifacts, explicit source-of-truth materials, and a restricted primary-route list with route paths and source-truth references only. It carries the root manifest path and exact `handoffDigest` but deliberately omits the root handoff, independent projection and file list, builder rationale, and packet claims. Do not give the blind reviewer either of the independent review inputs.
 
 The blind reviewer must not read these before public/artifact review:
 
@@ -293,13 +320,13 @@ The reviewer's job is to falsify completion against the brief and source-of-trut
 - editor/admin maintainability when the brief requires a CMS/editor experience;
 - accessibility, SEO, console errors, and obvious usability defects.
 
-Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. The review must include desktop and mobile route notes. If a fresh blind reviewer/context is unavailable, record degraded independence honestly and leave the verdict and completion state blocked; the final verifier will not authorize completion. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. A defect may be `accepted_out_of_scope` only when it records an accepter label, specific reason, and evidence. That label is self-attested packet attribution, not authenticated approval. An `external_blocker` always leaves completion blocked.
+Produce `review-packet/blind-adversarial-review.json` and raw evidence under `review-packet/evidence/blind-adversarial-review/`. Copy the projection's root manifest path and exact `handoffDigest` into `blind-adversarial-review.json.reviewHandoff`, and keep `reviewInputs` equal to the projection's blind `allowedInputs`. The final verifier rejects projection drift, unknown fields, changed packet-local brief/source bytes, or inputs outside the projection. The review must include desktop and mobile route notes. Any editor probe must be reversed before finalizing the review so the live target returns to the handed-off state. If a fresh blind reviewer/context is unavailable, record degraded independence honestly and leave the verdict and completion state blocked; the final verifier will not authorize completion. If the blind reviewer verdict is not clearly `good` or `good_enough`, the builder must fix the highest-impact failures and rerun blind review. A defect may be `accepted_out_of_scope` only when it records an accepter label, specific reason, and evidence. That label is self-attested packet attribution, not authenticated approval. An `external_blocker` always leaves completion blocked.
 
 The blind review claim set comes from the brief, source-truth materials, target, and restricted route list, not the builder's preferences. A complete claim must cover every primary route in that restricted route list at desktop and mobile widths. `routeCoverage.omittedPrimaryRoutes` records why coverage is missing; it does not count as coverage. A recorded-attribution, reasoned, evidence-backed `accepted_out_of_scope` entry may remove a route from the machine-evaluated scope; authenticated human approval remains separate. An `external_blocker` leaves the verdict blocked. Each route review must use distinct, credible source and target captures for that viewport; every applicable route check must pass or be explicitly not applicable. Screenshot references must point at real files under `review-packet/evidence/blind-adversarial-review/` or another packet-local evidence path. Every product defect must have a valid severity and status; missing status is treated as open. A fixed defect must name the `reviewPasses` entry that confirmed the fix, so the artifact distinguishes rerun review from a builder-edited status.
 
 Do not claim completion from self-authored assertions. Completion requires a blind public-site or artifact review that compares the live target visually, functionally, and editorially against the brief and source-of-truth materials on desktop and mobile.
 
-After independent verification, run the installed skill's default target-local verifier from the target workspace inside the active DDEV agent. The plain `node` command below assumes that context; from a host terminal, prefix it with `ddev exec`:
+After independent and blind verification, run the installed skill's default target-local verifier from the target workspace inside the active DDEV agent. The plain `node` command below assumes that context; from a host terminal, prefix it with `ddev exec`:
 
 ```bash
 node [KIT_LOCAL_PATH]/scripts/verify.mjs --packet review-packet
@@ -311,7 +338,7 @@ The same live run generates a guaranteed-missing route, verifies declared access
 
 Before target parity can pass, the full verifier creates a separately budgeted source route census directly from `sourceBaseUrl`. It fetches `/` and every declared primary source route, recursively follows same-origin server-rendered document links, reads `robots.txt` Sitemap directives, and traverses bounded sitemap indexes and URL sets. It records source status, final URL, title, H1, canonical, body hash, and discovery provenance without using target aliases as source facts. Every reachable public `2xx` HTML path must be an accepted route-matrix source path. Builder-authored legacy, test, intentionally-drop, or accepted-out-of-scope records cannot waive one; add and implement the route, then rerun. A `401`/`403` or persistent `404`/`410` response is immediately rechecked and may use a matching structured boundary disposition without human review. Source truncation or budget exhaustion fails closed and leaves agent-resolvable work.
 
-Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, `gate`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
+Every passing independent completion claim must reference JSON evidence using `schemaVersion: public-kit.independent-claim-evidence.1`. The evidence may contain one claim or a `claims` array, but each referenced claim must match `claimId`, the completion `gate`, canonical `gateId`, the inspected `targetBaseUrl`, and `checkedAt`, with concrete checks containing `name`, `method`, `result: pass`, and an observation. A shared nonempty file or status-only record is not verifier evidence.
 
 Completion packet readiness is semantic, not a file-presence check. The active build-input contract, pattern map, field-output matrix, target evidence, Drupal readback, recipe decision, scoped gaps, open decisions, off-road inventory, and durable intent must contain run-specific evidence. Source-site mode additionally requires authoritative source audit and parity evidence; brief mode requires a hash-bound original brief and accepted requirement matrix. Referenced browser and blind-review screenshots must be real packet-local images and match desktop/mobile dimensions; source and target captures must be distinct in source-site mode. Operator, maintainer, launch, and production-target records remain required human-facing boundaries, but their pending or recorded choices are self-attested status and do not authorize or block the narrower typed machine claim.
 
@@ -378,7 +405,7 @@ A checkpoint is optional and never replaces the historical initial baseline. Do 
 
 Do not treat the first working pass as final. Work in review loops until the complete local rebuild bar is met or a real blocker prevents further progress.
 
-The default verifier's `live-verification.json` contains `agentContinuation`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Stop only after `requiredAction: handoff`, or when a specific external blocker or genuinely owner-only decision is recorded with the attempted evidence and next action.
+The default verifier's `live-verification.json` contains `agentContinuation` and structured `completionBlockers`. Treat `shouldContinue: true` as a required autonomous repair loop: fix every locally resolvable reason, refresh affected evidence, and rerun the default verifier. Do not hand off, ask for routine human review, or wait for permission merely because the verifier returned exit `1` or `2`. Pause only when `requiredAction` is `pause-and-report` and `agentMayPause` is true; that state requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Only `requiredAction: handoff` authorizes handoff.
 
 If the agent runtime has a goal, plan, review, reflection, or task-loop feature, use it. If it does not, emulate the loop with a visible checklist in the conversation or working notes.
 
@@ -417,7 +444,7 @@ At minimum, browser evidence must cover:
 - any route whose design, behavior, or source intent differs from the dominant template;
 - non-admin editor create/edit workflows for every custom content type and load-bearing workflow.
 
-For each public route check, record target URL/final URL, viewport, target screenshot, title, H1, key visible body intent, section order, header/footer treatment, typography and spacing notes, media placement, functional behavior notes, accepted exceptions, brief requirement IDs when applicable, and pass/fail status. In `source_site` mode, also record source URL/final URL, source screenshot, and optional diff image or score when the tool supports it.
+For each public route check, record target URL/final URL, viewport, target screenshot, title, H1, key visible body intent, section order, header/footer treatment, typography and spacing notes, media placement, functional behavior notes, accepted exceptions, brief requirement IDs when applicable, and pass/fail status. Keep capture-state declarations on that same record: every normalized target request + viewport name + stable state ID tuple is unique, every state row is accepted and passing without blockers, every primary route has a `default` desktop and mobile state, and every state binds one fixture revision plus the exact screenshot and axe-report bytes. State records use the fixed `self_attested_capture_evidence` authority. The packet verifier checks their shape, artifact hashes, dimensions, origin, and cross-state consistency, but does not replay their interactions; they cannot replace live verification or independent/blind review. A default state is non-mutating. If its structured mobile menu state declares a visible toggle, record the exact toggle and controlled-region selectors closed, then add an accepted, passing `mobile-menu-open` record that clicks the toggle or presses it with `Enter`/`Space` and observes the same region open with distinct screenshots and axe evidence. Do not infer the requirement from prose or create a second state manifest. Each state may have at most 12 interaction steps, 16 unique-selector exact-count assertions, and 8 masks using only an element-specific `#id`, `.class`, or `[data-*]` compound selector; universal/functional selectors and common page/global-chrome tokens are rejected, and the observed rectangle union may cover no more than 25% of the viewport. Counts and masks remain self-attested diagnostics tied to the state evidence; masks do not authorize or replace verifier-owned global-chrome anchor masks. In `source_site` mode, also record source URL/final URL, source screenshot, and optional diff image or score when the tool supports it; brief mode remains target-only. Legacy schema v1 remains valid as implicit `default`-only evidence but cannot declare interacted states.
 
 For each editor workflow check, record editor user/role, Drupal route, task performed, screenshots or captured evidence for the form and result, fields/widgets verified, public output affected, failures, accepted exceptions, and pass/fail status.
 
@@ -596,10 +623,14 @@ ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
 Apply a bounded Recipe only after recording why it fits the pattern map. From the host, the Drupal core Recipe runner shape for a standard DDEV `web` docroot is:
 
 ```bash
-ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+if ddev exec test -x vendor/bin/dr; then
+  ddev exec vendor/bin/dr recipe:apply recipes/drupal_cms_media -v
+else
+  ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+fi
 ```
 
-Inside a DDEV agent shell, run the equivalent from the Drupal webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. Do not assume a separate `dr` executable exists. If the core runner or Recipe path is missing, record the candidate as blocked or not applicable instead of inventing a command or silently replacing it with custom config.
+Inside a DDEV agent shell, use `vendor/bin/dr recipe:apply recipes/drupal_cms_media -v` when that executable is present; otherwise run the legacy equivalent from the Drupal webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. If the discovered runner or Recipe path is missing, record the candidate as blocked or not applicable instead of inventing a command or silently replacing it with custom config.
 
 ## Content Modeling Requirements
 

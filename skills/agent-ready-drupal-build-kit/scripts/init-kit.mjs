@@ -248,6 +248,26 @@ function isTemplateBriefAcceptance(record) {
     !String(requirements[0]?.id ?? '').trim();
 }
 
+function briefModeDisposition(packetFile, briefSha256) {
+  const reasons = {
+    'parity-report.json': 'Brief mode has no source site to compare. Completion is measured against the preserved brief and accepted BR requirements.',
+    'source-audit.json': 'Brief mode has no source site to audit. The preserved brief and accepted BR requirements are the source of truth.'
+  };
+  const reason = reasons[packetFile];
+  if (!reason) {
+    throw new Error(`No brief-mode disposition is defined for ${packetFile}`);
+  }
+  return {
+    schemaVersion: 'public-kit.mode-disposition.1',
+    artifact: packetFile,
+    buildMode: 'brief',
+    claimScope: 'complete-local-build-from-brief',
+    briefSha256,
+    status: 'not_applicable',
+    reason
+  };
+}
+
 function mergeManagedBlock(existing, managedBlock) {
   const startCount = countOccurrences(existing, START_MARKER);
   const endCount = countOccurrences(existing, END_MARKER);
@@ -396,6 +416,12 @@ function main() {
     throw new Error(`Review packet paths must be regular non-symlink files: ${invalidExistingTemplates.map(({ packetFile }) => packetFile).join(', ')}`);
   }
   const missingTemplates = plannedTemplates.filter(({ destination }) => !pathEntryExists(destination));
+  const briefModeDispositionPlans = briefBytes
+    ? plannedTemplates.filter(({ destination, packetFile, source }) =>
+        ['source-audit.json', 'parity-report.json'].includes(packetFile) &&
+        (!pathEntryExists(destination) || readFileSync(destination).equals(readFileSync(source)))
+      )
+    : [];
 
   if (briefBytes && pathEntryExists(originalBriefPath)) {
     if (lstatSync(originalBriefPath).isSymbolicLink() || !statSync(originalBriefPath).isFile()) {
@@ -434,6 +460,9 @@ function main() {
     mkdirSync(packetPath, { recursive: true });
     for (const { destination, source } of missingTemplates) {
       copyFileSync(source, destination, constants.COPYFILE_EXCL);
+    }
+    for (const { destination, packetFile } of briefModeDispositionPlans) {
+      writeFileSync(destination, `${JSON.stringify(briefModeDisposition(packetFile, briefSha256), null, 2)}\n`, 'utf8');
     }
     const buildInput = options.sourceUrl
       ? {
@@ -475,6 +504,9 @@ function main() {
   process.stdout.write(`Target evidence: ${target.markers.join('; ')}\n`);
   process.stdout.write(`AGENTS.md: ${nextAgents === existingAgents ? 'unchanged' : options.dryRun ? 'would update kit block' : 'kit block updated'}\n`);
   process.stdout.write(`Review packet: ${missingTemplates.length} ${options.dryRun ? 'missing' : 'created'}, ${plannedTemplates.length - missingTemplates.length} preserved\n`);
+  if (briefBytes) {
+    process.stdout.write(`Brief-only N/A dispositions: ${briefModeDispositionPlans.length} ${options.dryRun ? 'would materialize' : 'materialized'}\n`);
+  }
 }
 
 try {

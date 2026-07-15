@@ -11,4 +11,10 @@ intent_records:
     config_hash: "" # sha256:<64 lowercase hex chars> or not-applicable
     status: "draft" # draft | hash-valid | accepted | superseded
     stale_behavior: "treat_as_no_intent"
+empty_intent_acceptance:
+  disposition: "" # accepted_no_durable_intent when intent_records is []
+  accepted_by: ""
+  rationale: ""
+  evidence:
+    - ""
 evidence_scope: "Durable intent guides review when current and hash-validated. Only human maintainer review should mark intent accepted."
