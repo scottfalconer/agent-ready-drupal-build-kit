@@ -27,7 +27,7 @@ These files must also exist. Early runs should create blocked stubs when accepte
 - `production-target.md`
 - `parity-report.json`
 - `route-matrix.json`
-- `browser-evidence.json`
+- `browser-evidence.json`: schema v2 self-attested route/viewport/state evidence. Each public record owns its stable capture state, fixture revision, and screenshot/axe hash bindings; normalized target request + viewport + state ID tuples are unique. Primary routes require `default` desktop/mobile states, while a structured visible mobile-toggle declaration conditionally requires a distinct `mobile-menu-open` capture tied to exact selectors. Interaction steps, unique count assertions, and observed mask rectangles are bounded here rather than split into a second manifest. The packet verifier checks artifacts and consistency but does not replay interactions. Legacy schema v1 is accepted only as implicit default-only evidence.
 - `next-cycle-verification.json`
 - `independent-verification.json`
 - `blind-adversarial-review.json`
