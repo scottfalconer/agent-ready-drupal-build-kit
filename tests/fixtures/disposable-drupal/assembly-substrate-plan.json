@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "public-kit.reproduction-plan.1",
+  "mode": "snapshot_restore",
+  "dependencies": {
+    "adapter": "ddev_composer_install",
+    "lockFile": {
+      "path": "composer.lock",
+      "sha256": "sha256:26c241146a6c85ec0de062566eafc9a9c8c0d338347431c8f36c47422bf67266"
+    }
+  },
+  "trackedConfig": {
+    "path": "config/sync",
+    "sha256": "sha256:65e103d36304de99b29336b85499c842d0ceae528b0cc1288d21a8b1c820f07d"
+  },
+  "databaseSnapshot": {
+    "adapter": "ddev_import_db_archive",
+    "source": {
+      "path": "artifacts/assembly-substrate.sql.gz",
+      "sha256": "sha256:19612649ad639725147c8ec9918aecc01f8d2e405ab624d9fbf6fd206e676c47"
+    }
+  },
+  "content": {
+    "adapter": "database_snapshot"
+  },
+  "files": {
+    "adapter": "none",
+    "expectedManagedFileCount": 0
+  }
+}

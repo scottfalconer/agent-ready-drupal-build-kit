@@ -1,0 +1,11 @@
+uuid: 53b62a13-7a58-4883-8e38-1cd1ada499db
+langcode: en
+status: true
+dependencies: {  }
+name: 'Proof page'
+type: proof
+description: null
+help: null
+new_revision: true
+preview_mode: 1
+display_submitted: true

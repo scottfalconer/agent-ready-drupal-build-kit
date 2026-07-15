@@ -82,6 +82,7 @@ const FIXED_THRESHOLDS = Object.freeze({
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
+const QUERY_IN_TEXT_RE = /((?:https?:\/\/[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/g;
 
 function connectWebSocket(value, { signal } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('WebSocket connection aborted.'));
@@ -241,12 +242,40 @@ function normalizeRoute(value) {
   return `${url.pathname || '/'}${url.search}`;
 }
 
+function privacyPreservingQuery(value) {
+  const query = String(value ?? '');
+  if (!query) return '';
+  const normalized = query.startsWith('?') ? query : `?${query}`;
+  return `?query-sha256=${sha256(normalized).slice('sha256:'.length)}`;
+}
+
+function privacyPreservingText(value) {
+  return String(value).replace(
+    QUERY_IN_TEXT_RE,
+    (_match, prefix, rawQueryWithPunctuation) => {
+      const [, rawQuery, punctuation = ''] = rawQueryWithPunctuation.match(/^(.*?)([),.;:]*)$/) ?? [];
+      return rawQuery
+        ? `${prefix}${privacyPreservingQuery(rawQuery)}${punctuation}`
+        : _match;
+    }
+  );
+}
+
+function privacyPreservingValue(value) {
+  if (typeof value === 'string') return privacyPreservingText(value);
+  if (Array.isArray(value)) return value.map(privacyPreservingValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, privacyPreservingValue(entry)])
+    );
+  }
+  return value;
+}
+
 function privacyPreservingRoute(value) {
   const route = normalizeRoute(value);
   const url = new URL(route, 'https://before-consent.invalid');
-  return `${url.pathname || '/'}${url.search
-    ? `?query-sha256=${sha256(url.search).slice('sha256:'.length)}`
-    : ''}`;
+  return `${url.pathname || '/'}${privacyPreservingQuery(url.search)}`;
 }
 
 function inside(parent, child) {
@@ -1906,10 +1935,11 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
     ) {
       throw new Error(`Global chrome ${route.path} ${route.viewport?.name} axe-core scope or summary was modified.`);
     }
-    const axeBytes = Buffer.from(`${JSON.stringify(rawAxe.report, null, 2)}\n`, 'utf8');
+    const sharedRoute = privacyPreservingValue(route);
+    const axeBytes = Buffer.from(`${JSON.stringify(sharedRoute.axe.report, null, 2)}\n`, 'utf8');
     const axeDigest = sha256(axeBytes);
     const axePath = join(directory, `axe-${route.viewport.name}-${routeKey}-${axeDigest.slice(7, 23)}.json`);
-    plans.push({ axeBytes, axeDigest, axePath, bytes, digest, directory, path, route });
+    plans.push({ axeBytes, axeDigest, axePath, bytes, digest, directory, path, route: sharedRoute });
   }
   const finalizedRoutes = [];
   for (const plan of plans) {
@@ -1957,8 +1987,14 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
       }
     });
   }
+  const { routes: _rawRoutes, ...captureMetadata } = capture;
   const finalized = {
-    ...capture,
+    ...privacyPreservingValue(captureMetadata),
+    queryPrivacy: {
+      schemaVersion: 'public-kit.query-privacy.1',
+      method: 'sha256',
+      authoritative: true
+    },
     resultStateFingerprint: state,
     routes: finalizedRoutes.sort((left, right) => `${left.path}\0${left.viewport.name}`.localeCompare(`${right.path}\0${right.viewport.name}`))
   };

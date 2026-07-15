@@ -35,12 +35,14 @@ import {
   normalizeGlobalChromeContract,
   openSeleniumCdpBackend,
   validateBeforeConsentNetworkCapture,
+  validateGlobalChromeCapture,
   validateScreenshotArtifacts,
   verifierAxeCompletionErrors
 } from '../bin/global-chrome.mjs';
 import {
   consentNetworkCaptureRequired,
   sharedBeforeConsentNetworkCapture,
+  sharedGlobalChromeCapture,
   verifyConsentReconciliation
 } from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
@@ -1167,6 +1169,72 @@ test('verifier-owned consent capture catches delayed JS requests and proves no-l
   } finally {
     await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
   }
+});
+
+test('shared global chrome evidence redacts every query with provenance-bound identities', () => {
+  const root = mkdtempSync(join(tmpdir(), 'global-chrome-shared-query-'));
+  const packetDir = join(root, 'review-packet');
+  mkdirSync(packetDir, { recursive: true });
+  const literalDigest = 'a'.repeat(64);
+  const privateRoute = '/search?preview=private-value';
+  const digestLikeRoute = `/search?query-sha256=${literalDigest}`;
+  const raw = rawCaptureFixture();
+  raw.primaryRoutes = [privateRoute];
+  raw.routes = raw.routes.map((route) => ({
+    ...route,
+    path: privateRoute,
+    signals: {
+      ...route.signals,
+      finalUrl: `https://fixture.ddev.site${privateRoute}`,
+      meaningfulHrefs: [
+        { href: '/next?token=header-private', scope: 'navigation' },
+        { href: digestLikeRoute, scope: 'footer' }
+      ]
+    },
+    axe: {
+      ...route.axe,
+      report: {
+        ...route.axe.report,
+        url: `https://fixture.ddev.site${privateRoute}`
+      }
+    }
+  }));
+  const capture = finalizeGlobalChromeCapture({ capture: raw, packetDir, stateFingerprint: state('f') });
+  const captureWithLocalPath = {
+    ...capture,
+    warnings: [`Capture artifacts were finalized under ${packetDir}.`]
+  };
+  delete captureWithLocalPath.captureFingerprint;
+  captureWithLocalPath.captureFingerprint = sha256(captureWithLocalPath);
+
+  const shared = sharedGlobalChromeCapture(captureWithLocalPath, packetDir);
+  const expectedPrivateIdentity = sha256('?preview=private-value').slice('sha256:'.length);
+  const expectedLiteralIdentity = sha256(`?query-sha256=${literalDigest}`).slice('sha256:'.length);
+  const expectedHeaderIdentity = sha256('?token=header-private').slice('sha256:'.length);
+  const serialized = JSON.stringify(shared);
+
+  assert.doesNotMatch(serialized, /private-value|header-private/);
+  assert.equal(shared.primaryRoutes[0], `/search?query-sha256=${expectedPrivateIdentity}`);
+  assert.equal(shared.routes[0].signals.meaningfulHrefs[1].href, `/search?query-sha256=${expectedLiteralIdentity}`);
+  assert.notEqual(
+    shared.routes[0].signals.meaningfulHrefs[1].href,
+    digestLikeRoute,
+    'raw digest-like queries must not impersonate redaction output'
+  );
+  assert.equal(shared.routes[0].signals.meaningfulHrefs[0].href, `/next?query-sha256=${expectedHeaderIdentity}`);
+  assert.doesNotMatch(shared.warnings.join('\n'), new RegExp(packetDir));
+  const storedAxeReport = JSON.parse(readFileSync(join(packetDir, shared.routes[0].axe.report.path), 'utf8'));
+  assert.equal(storedAxeReport.url, `https://fixture.ddev.site/search?query-sha256=${expectedPrivateIdentity}`);
+  assert.doesNotMatch(JSON.stringify(storedAxeReport), /private-value|header-private/);
+  const fingerprintInput = { ...shared };
+  delete fingerprintInput.captureFingerprint;
+  assert.equal(shared.captureFingerprint, sha256(fingerprintInput));
+  assert.notEqual(shared.captureFingerprint, captureWithLocalPath.captureFingerprint);
+  assert.equal(
+    validateGlobalChromeCapture(shared, { stateFingerprint: state('f'), requireAuthoritative: false }),
+    shared
+  );
+  assert.equal(validateScreenshotArtifacts(packetDir, shared), true);
 });
 
 test('applicable consent capture fails closed when Chrome is unavailable', async () => {

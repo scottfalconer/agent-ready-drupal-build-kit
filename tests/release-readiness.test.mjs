@@ -181,7 +181,15 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.notEqual(path, 'skills-lock.json');
     assert.doesNotMatch(path, /\.tgz$/);
   }
-  for (const path of ['bin/verify.mjs', 'bin/verify-packet.mjs', 'bin/lifecycle.mjs']) {
+  for (const path of [
+    'bin/doctor.mjs',
+    'bin/reconcile.mjs',
+    'bin/verify.mjs',
+    'bin/verify-packet.mjs',
+    'bin/verify-assembly.mjs',
+    'bin/verify-reproduction.mjs',
+    'bin/lifecycle.mjs'
+  ]) {
     assert.equal(files.has(path), true, `${path} missing from npm package`);
     assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
   }
@@ -321,6 +329,7 @@ test('post-install assembly uses bounded Recipes and the available core runner',
   for (const content of [contract, decision, playbook]) {
     assert.doesNotMatch(content, /ddev exec dr\b/);
     assert.doesNotMatch(content, /High-fit Drupal CMS template or site template/);
+    assert.match(content, /vendor\/bin\/dr recipe:apply/);
     assert.match(content, /php core\/scripts\/drupal recipe/);
   }
   assert.doesNotMatch(contract, /Fresh `drupal\/cms` installs currently resolve/);

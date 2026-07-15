@@ -14,15 +14,29 @@ If a maintainer or agent verifies that current Drupal CMS docs conflict with the
 
 Do not assume a Drupal core minor version or an auxiliary CLI from documentation alone. Record the actual Drupal CMS package, Drupal core, Drush, PHP, and available Recipe runner from the installed target. Composer and `drush status` are the authority for that run.
 
-A clean Drupal CMS 2.1.3 target validated on 2026-07-10 resolved Drupal core 11.3.11 and did not provide a `dr` executable. Its supported core Recipe runner was `php core/scripts/drupal recipe PATH`. This is why the kit uses version-evidenced commands instead of treating a separate `dr` CLI or a specific core minor as universal.
+A clean Drupal CMS 2.1.3 target validated on 2026-07-10 resolved Drupal core 11.3.11 and did not provide a `dr` executable. Its supported core Recipe runner was `php core/scripts/drupal recipe PATH`. Newer targets can expose `vendor/bin/dr` instead. This is why the kit discovers the installed runner instead of treating either CLI or a specific core minor as universal.
 
 Use Drush for status/readback, extension lists, cache rebuilds, config export/status, and `php:script`. Discover Recipes from Composer and `recipe.yml` files. From the host, apply a verified bounded Recipe with:
 
 ```bash
-ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+if ddev exec test -x vendor/bin/dr; then
+  ddev exec vendor/bin/dr recipe:apply recipes/drupal_cms_media -v
+else
+  ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+fi
 ```
 
-Inside the DDEV agent shell, run the equivalent from the webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Verify the path and inspect its `recipe.yml` before applying it.
+Inside the DDEV agent shell, use `vendor/bin/dr recipe:apply recipes/drupal_cms_media -v` when present; otherwise run the legacy equivalent from the webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Verify the path and inspect its `recipe.yml` before applying it.
+
+Before applying any candidate, run the installed non-authoring doctor while the packet can still be incomplete:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs \
+  --recipe recipes/drupal_cms_media \
+  --package drupal/drupal_cms_media
+```
+
+The command checks the Drupal/DDEV substrate, core Recipe runner, first public route, pinned browser runtime, Recipe manifest/config touch points, active-config overlap, and explicit upstream Composer candidates. It retains command exit codes and SHA-256 evidence plus bounded parsed metadata—not raw command output. A diagnostic failure exits `2`; a usage/tool failure exits `1`. The report always has `completionAuthority: false`, never applies or rolls back a Recipe, and never turns package availability into a compatibility claim. It does not intentionally change Drupal content or configuration, but bootstrap, HTTP, and browser checks can still warm caches or write ordinary runtime logs. `--skip-browser` records an explicit skipped stage rather than silently omitting it.
 
 ## Local Runtime
 
@@ -207,7 +221,9 @@ For DDEV Drupal CMS projects with a `web` docroot, set the active config sync di
 
 The local handoff gate independently runs Git against the actual project and proves that Drupal's current active sync directory contains real tracked YAML and that `drush config:status` reports no active-to-sync drift. Packet-authored paths are not sufficient. Also inspect representative YAML for the public theme, custom content types and fields, Views, menus, roles, and workflows expected by the rebuild.
 
-A clean install plus `drush config:import` into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. Record its commands and readbacks when actually run; do not infer it from a clean config status and do not perform a destructive reinstall of the working target merely to satisfy wording.
+A clean install plus tracked config/content/files import into a disposable target is stronger reproducibility evidence, but it is a separate maintainer or launch exercise. When exact-HEAD inputs can be declared, use the typed host-side runner in [disposable-reproduction.md](disposable-reproduction.md); it records verifier-owned commands and portable before/disposable/after readbacks without reinstalling the working target. A database snapshot run remains labeled `snapshot_restore`, not clean-install evidence. Do not infer either result from a clean config status.
+
+Assembly rerun claims are a different launch exercise. When an assembly script is claimed to be idempotent, extension-safe, or recoverable, use [disposable-assembly.md](disposable-assembly.md). Its verifier starts from an exact-HEAD pre-assembly substrate, reconciles the script's dry-run rows to independently read Drupal state, requires an immediate no-op rerun, inserts live-applicable extension fixtures before another rerun, and observes a partial failure followed by exact restoration. Do not use final-state reproduction, builder logs, or screenshots as a substitute.
 
 ## Continue After The Verified Baseline
 
@@ -502,6 +518,10 @@ The target's structure must be reviewable from Drupal artifacts and internally c
 Config that imports but leaves editor forms unusable is not acceptable architecture.
 
 Before accepting the packet's scope, run the default live verifier and reconcile its live-first census in `drupal-readback.json.liveSurfaceReconciliation`. The verifier derives bundle definitions/public editorial roots, Views and displays, published aliases, enabled menu links, redirects, Canvas pages/templates/components, sitemap surfaces, and active custom extensions/routes from Drupal. Every key must appear exactly once as a packet declaration with a specific `file#section` reference or as an exclusion with a named owner, rationale, and non-empty packet-local evidence. A packet cannot make a surface disappear by omitting it, and stale packet-only records also fail.
+
+Use `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --draft` to shape that census into `review-packet/live-surface-reconciliation-draft.json`. The worksheet is an author-editable work queue, not passing evidence. It records machine-observed facts, stable keys, non-authoritative disposition suggestions, and candidate packet sections while leaving every disposition unresolved. On refresh, unchanged disposition-bearing facts preserve authored work; new or materially changed facts become unresolved, and removed rows become stale.
+
+After assigning every declaration or exclusion and supplying its required references/evidence, run `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --materialize`. The command reruns the census, refreshes the worksheet, and writes only `drupal-readback.json.liveSurfaceReconciliation` when the existing strict reconciliation check accepts the result. Exit `2` means the worksheet remains incomplete and leaves the readback untouched. The helper does not set readback completion or replace the default verifier.
 
 The census is metadata-only and bounded at 5,000 records. It must not read or emit private submissions, customer transactions, credentials, broad user rows, or content values. Non-public bundle/View/menu records remain visible and require explicit exclusions. Public-root classification does not narrow exact-state evidence: once a bundle is in scope, drafts and unpublished rows remain part of the entity fingerprint even though the census records `publishedCount` separately.
 
