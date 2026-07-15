@@ -21,6 +21,7 @@ import {
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
+  yamlTreeMatchesHead,
   verifyLive
 } from '../bin/verify.mjs';
 import { MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
@@ -29,6 +30,62 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+
+function committedConfigTree() {
+  const root = mkdtempSync(join(tmpdir(), 'config-head-bytes-'));
+  const configDirectories = ['config/sync', 'config/split/local'];
+  const yamlFiles = [
+    'config/sync/system.site.yml',
+    'config/split/local/system.logging.yml'
+  ];
+  for (const directory of configDirectories) {
+    mkdirSync(join(root, directory), { recursive: true });
+  }
+  writeFileSync(join(root, yamlFiles[0]), 'name: Fixture\n');
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: hide\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['add', '--', ...yamlFiles], { cwd: root });
+  execFileSync('git', [
+    '-c', 'user.name=Fixture Committer',
+    '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false',
+    'commit', '-q', '--no-verify', '-m', 'Export fixture config'
+  ], { cwd: root });
+  return { configDirectories, root, yamlFiles };
+}
+
+function scopedConfigStatus(root, configDirectories) {
+  return execFileSync(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all', '--', ...configDirectories],
+    { cwd: root, encoding: 'utf8' }
+  );
+}
+
+test('config YAML blob comparison accepts an ordinary clean sync and Config Split tree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, [...yamlFiles].reverse(), configDirectories), true);
+});
+
+test('config YAML blob comparison rejects bytes hidden by assume-unchanged', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--assume-unchanged', '--', yamlFiles[0]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[0]), 'name: Changed\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('config YAML blob comparison rejects Config Split bytes hidden by skip-worktree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--skip-worktree', '--', yamlFiles[1]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: verbose\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
 
 test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /ContentEntityTypeInterface/);
