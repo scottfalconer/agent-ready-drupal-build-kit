@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, relative, resolve } from 'node:path';
@@ -17,6 +17,7 @@ import {
   customCodeResultFingerprint,
   customExtensionFiles,
   customTestMethodId,
+  agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
   DRUPAL_ENTITY_INVENTORY_EVAL,
@@ -29,14 +30,176 @@ import {
   inspectCriticalAssets,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
+  yamlTreeMatchesHead,
+  reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
-import { customCodeReviewReasons, MACHINE_GATE_EVALUATORS, validatePacket } from '../bin/verify-packet.mjs';
+import { customCodeReviewReasons, MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  reviewHandoffInputFileBindings,
+  reviewHandoffReference,
+  sealReviewHandoff,
+  sealReviewHandoffBundle
+} from '../bin/review-handoff.mjs';
+import { validatePacket as validateInstalledPacket } from '../skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+
+function committedConfigTree() {
+  const root = mkdtempSync(join(tmpdir(), 'config-head-bytes-'));
+  const configDirectories = ['config/sync', 'config/split/local'];
+  const yamlFiles = [
+    'config/sync/system.site.yml',
+    'config/split/local/system.logging.yml'
+  ];
+  for (const directory of configDirectories) {
+    mkdirSync(join(root, directory), { recursive: true });
+  }
+  writeFileSync(join(root, yamlFiles[0]), 'name: Fixture\n');
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: hide\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['add', '--', ...yamlFiles], { cwd: root });
+  execFileSync('git', [
+    '-c', 'user.name=Fixture Committer',
+    '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false',
+    'commit', '-q', '--no-verify', '-m', 'Export fixture config'
+  ], { cwd: root });
+  return { configDirectories, root, yamlFiles };
+}
+
+function scopedConfigStatus(root, configDirectories) {
+  return execFileSync(
+    'git',
+    ['status', '--porcelain=v1', '--untracked-files=all', '--', ...configDirectories],
+    { cwd: root, encoding: 'utf8' }
+  );
+}
+
+test('config YAML blob comparison accepts an ordinary clean sync and Config Split tree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, [...yamlFiles].reverse(), configDirectories), true);
+});
+
+test('config YAML blob comparison rejects bytes hidden by assume-unchanged', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--assume-unchanged', '--', yamlFiles[0]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[0]), 'name: Changed\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('config YAML blob comparison rejects Config Split bytes hidden by skip-worktree', () => {
+  const { configDirectories, root, yamlFiles } = committedConfigTree();
+  execFileSync('git', ['update-index', '--skip-worktree', '--', yamlFiles[1]], { cwd: root });
+  writeFileSync(join(root, yamlFiles[1]), 'error_level: verbose\n');
+
+  assert.equal(scopedConfigStatus(root, configDirectories), '');
+  assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('agent continuation pauses only for verifier-confirmed external-only blockers', () => {
+  const externalBlocker = {
+    attemptedEvidence: ['evidence/provider-response.json'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable.',
+    missingInput: 'A provider-issued API credential.',
+    nextAction: 'The owner supplies the credential, then the agent reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+  const externalOnly = agentContinuation({ blockers: [externalBlocker] });
+  assert.equal(externalOnly.status, 'externally_blocked');
+  assert.equal(externalOnly.requiredAction, 'pause-and-report');
+  assert.equal(externalOnly.shouldContinue, false);
+  assert.equal(externalOnly.agentMayPause, true);
+  assert.equal(externalOnly.agentMayStop, false);
+  assert.equal(externalOnly.blockers[0].resolutionClass, 'external');
+  assert.deepEqual(externalOnly.blockers[0].attemptedEvidence, externalBlocker.attemptedEvidence);
+
+  const mixed = agentContinuation({
+    blockers: [
+      externalBlocker,
+      {
+        code: 'runtime.config-status',
+        message: 'Current DDEV config status is not clean.',
+        origin: 'live-verifier',
+        resolutionClass: 'agent_resolvable'
+      }
+    ]
+  });
+  assert.equal(mixed.status, 'continue_required');
+  assert.equal(mixed.requiredAction, 'repair-and-reverify');
+  assert.equal(mixed.shouldContinue, true);
+  assert.equal(mixed.agentMayPause, false);
+  assert.match(mixed.instruction, /Do not hand off or pause while any agent-resolvable blocker remains/);
+
+  const unconfirmedAuthoredLabel = agentContinuation({
+    blockers: [{ ...externalBlocker, verifierConfirmedExternal: false }]
+  });
+  assert.equal(unconfirmedAuthoredLabel.status, 'continue_required');
+  assert.equal(unconfirmedAuthoredLabel.blockers[0].resolutionClass, 'agent_resolvable');
+
+  for (const [name, incompleteBlocker] of [
+    ['missing code', { ...externalBlocker, code: '' }],
+    ['non-verifier origin', { ...externalBlocker, origin: 'blind-adversarial-review.productDefects[0]' }],
+    ['missing attempted evidence', { ...externalBlocker, attemptedEvidence: [] }],
+    ['missing input', { ...externalBlocker, missingInput: '' }],
+    ['missing next action', { ...externalBlocker, nextAction: '' }]
+  ]) {
+    const incomplete = agentContinuation({ blockers: [incompleteBlocker] });
+    assert.equal(incomplete.status, 'continue_required', name);
+    assert.equal(incomplete.requiredAction, 'repair-and-reverify', name);
+    assert.equal(incomplete.shouldContinue, true, name);
+    assert.equal(incomplete.agentMayPause, false, name);
+    assert.equal(incomplete.blockers[0].resolutionClass, 'agent_resolvable', name);
+  }
+
+  const complete = agentContinuation({ complete: true, blockers: [externalBlocker] });
+  assert.equal(complete.status, 'complete');
+  assert.equal(complete.requiredAction, 'handoff');
+  assert.equal(complete.agentMayStop, true);
+  assert.equal(complete.agentMayPause, false);
+  assert.deepEqual(complete.blockers, []);
+});
+
+test('lifecycle continuation keeps canonical blockers and compatibility reasons aligned', () => {
+  const report = {
+    agentContinuation: null,
+    claimScope: 'complete-local-rebuild',
+    completionBlockers: [{
+      attemptedEvidence: ['evidence/provider-response.json'],
+      code: 'blind.defect.DEF-EXT-1',
+      message: 'Provider credentials are unavailable.',
+      missingInput: 'A provider-issued API credential.',
+      nextAction: 'Supply the credential and rerun verification.',
+      origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+      resolutionClass: 'external',
+      verifierConfirmedExternal: true
+    }],
+    completionBlockedReasons: ['stale compatibility value'],
+    currentSiteClaimAllowed: false,
+    currentStateBlockedReasons: ['Current lifecycle state is unclassified.']
+  };
+
+  reconcileLifecycleContinuation(report, { baseCompletionAllowed: true });
+
+  assert.deepEqual(
+    report.completionBlockedReasons,
+    report.completionBlockers.map((blocker) => blocker.message)
+  );
+  assert.equal(report.completionBlockers.at(-1).origin, 'lifecycle-verifier');
+  assert.equal(report.agentContinuation.status, 'continue_required');
+  assert.equal(report.agentContinuation.shouldContinue, true);
+  assert.equal(report.agentContinuation.blockers.length, report.completionBlockers.length);
+});
 
 test('Drupal entity state inventory is a batched, revision-bounded public reference closure', () => {
   assert.match(DRUPAL_ENTITY_INVENTORY_EVAL, /ContentEntityTypeInterface/);
@@ -836,6 +999,18 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
   assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryQualityTestsRouteSchema');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
+  assert.deepEqual(
+    gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
+    {
+      id: 'G-REPRO-01',
+      title: 'Exact-HEAD Drupal build reproduced in a verifier-owned disposable DDEV environment',
+      phase: 6,
+      evidenceFile: 'evidence/reproduction-verification.json',
+      checkedBy: 'verify-script',
+      blocking: 'launch'
+    }
+  );
 });
 
 test('gates.json defines checker semantics, including the non-authoritative human-record rule', () => {
@@ -854,6 +1029,25 @@ test('gates.json defines checker semantics, including the non-authoritative huma
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function sha256File(path) {
+  return `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
+}
+
+function refreshCaptureEvidenceBindings(packetDir) {
+  mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+    for (const check of browser.publicRouteChecks) {
+      if (!check.captureState) continue;
+      check.captureState.evidenceBindings = {
+        sourceScreenshotSha256: String(check.sourceScreenshot ?? '').trim()
+          ? sha256File(join(packetDir, check.sourceScreenshot))
+          : 'not_applicable',
+        targetScreenshotSha256: sha256File(join(packetDir, check.targetScreenshot)),
+        accessibilityReportSha256: sha256File(join(packetDir, check.accessibilityCheck.report))
+      };
+    }
+  });
 }
 
 function mutateJson(path, mutate) {
@@ -1370,8 +1564,152 @@ No off-road moves were used in this fixture.
   writeFileSync(join(packetDir, 'durable-intent.yml'), `schema_version: public-kit.1
 site: "${targetBaseUrl}"
 intent_records: []
+empty_intent_acceptance:
+  disposition: "accepted_no_durable_intent"
+  accepted_by: "Fixture Maintainer"
+  rationale: "The reviewed fixture has no durable intent beyond its packet-owned architecture facts."
+  evidence:
+    - "pattern-map.json"
 evidence_scope: "No durable intent records apply to this fixture."
 `);
+}
+
+function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
+  const projectRoot = dirname(packetDir);
+  if (!existsSync(join(projectRoot, 'AGENTS.md'))) writeFileSync(join(projectRoot, 'AGENTS.md'), '# Fixture instructions\n');
+  const routeMatrix = JSON.parse(readFileSync(join(packetDir, 'route-matrix.json'), 'utf8'));
+  const buildInput = JSON.parse(readFileSync(join(packetDir, 'build-input.json'), 'utf8'));
+  const independentPath = join(packetDir, 'independent-verification.json');
+  const blindPath = join(packetDir, 'blind-adversarial-review.json');
+  const independent = JSON.parse(readFileSync(independentPath, 'utf8'));
+  const blind = JSON.parse(readFileSync(blindPath, 'utf8'));
+  const targetOrigin = new URL(targetBaseUrl).origin;
+  const briefReference = String(blind.reviewInputs?.originalBrief ?? 'Rebuild the source site.');
+  const primaryRoutes = routeMatrix.primaryRoutes.map((route) => ({
+    briefRequirementIds: [...(route.briefRequirementIds ?? [])].sort(),
+    sourceTruthReference: buildInput.mode === 'brief'
+      ? briefReference
+      : new URL(route.sourcePath || '/', routeMatrix.sourceBaseUrl).href,
+    targetPath: route.targetPath,
+    targetUrl: new URL(route.targetPath, targetOrigin).href
+  }));
+  const excludedBlindInputs = [
+    'implementation files',
+    'review packet before public or artifact review',
+    'builder notes and scripts',
+    'prior build conversation',
+    'self-authored completion claims',
+    'builder final summary'
+  ];
+  const fileBinding = (reference) => {
+    const path = resolve(projectRoot, reference);
+    const bytes = readFileSync(path);
+    return {
+      path: reference,
+      size: statSync(path).size,
+      sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+    };
+  };
+  const briefPath = briefReference.startsWith('review-packet/') && existsSync(resolve(projectRoot, briefReference))
+    ? resolve(projectRoot, briefReference)
+    : '';
+  const briefBytes = briefPath ? readFileSync(briefPath) : Buffer.from(briefReference);
+  const brief = {
+    kind: briefPath ? 'packet_file' : 'literal',
+    reference: briefReference,
+    size: briefBytes.length,
+    sha256: `sha256:${createHash('sha256').update(briefBytes).digest('hex')}`
+  };
+  const sourceOfTruthMaterials = (blind.reviewInputs?.sourceOfTruthMaterials ?? []).map((material) => {
+    if (/^https?:\/\//i.test(material.reference)) {
+      return { kind: 'url', reference: new URL(material.reference).href, type: material.type };
+    }
+    const binding = fileBinding(material.reference);
+    return {
+      kind: 'packet_file',
+      reference: binding.path,
+      type: material.type,
+      size: binding.size,
+      sha256: binding.sha256
+    };
+  });
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const existingDeclaredPacketFiles = gates.reviewPacketFiles.filter((reference) =>
+    existsSync(join(packetDir, reference))
+  );
+  const extraPacketPaths = [
+    brief.kind === 'packet_file' ? brief.reference : '',
+    ...sourceOfTruthMaterials
+      .filter((material) => material.kind === 'packet_file')
+      .map((material) => material.reference)
+  ].filter(Boolean);
+  const independentFiles = reviewHandoffInputFileBindings(
+    projectRoot,
+    packetDir,
+    existingDeclaredPacketFiles,
+    extraPacketPaths
+  );
+  const { manifest, projections } = sealReviewHandoffBundle({
+    binding: {
+      buildMode: buildInput.mode,
+      configSyncDirectory: '../config/sync',
+      frontPage: '/',
+      packetPath: relative(projectRoot, packetDir),
+      preliminaryPacketEvidenceFingerprint: `sha256:${'6'.repeat(64)}`,
+      siteStateFingerprint: `sha256:${'4'.repeat(64)}`,
+      siteUuid: testSiteUuid,
+      targetIdentityFingerprint: `sha256:${'5'.repeat(64)}`,
+      targetOrigin
+    },
+    blind: {
+      allowedInputs: {
+        acceptanceCriteria: [...(blind.reviewInputs?.acceptanceCriteria ?? [])],
+        brief,
+        credentialLabels: [...(blind.reviewInputs?.credentialsUsed ?? [])],
+        primaryRoutes,
+        sourceOfTruthMaterials,
+        targetUrlsOrArtifacts: [...(blind.reviewInputs?.targetUrlsOrArtifacts ?? [])]
+      },
+      excludedInputs: excludedBlindInputs
+    },
+    independent: {
+      allowedInputs: {
+        credentialLabels: [],
+        files: independentFiles,
+        urls: [...new Set([
+          `${targetOrigin}/`,
+          ...primaryRoutes.map((route) => route.targetUrl),
+          `${targetOrigin}/admin`,
+          ...(buildInput.mode === 'source_site'
+            ? [`${new URL(routeMatrix.sourceBaseUrl).origin}/`]
+            : [])
+        ])].sort()
+      },
+      excludedInputs: [
+        'builder final summary',
+        'prior build conversation',
+        'independent-verification.json from an earlier run',
+        'blind-adversarial-review.json from an earlier run'
+      ]
+    }
+  });
+  independent.artifactsReviewed = projections.independent.allowedInputs.files.map((binding) => binding.path);
+  independent.reviewHandoff = reviewHandoffReference(manifest.handoffDigest);
+  blind.reviewHandoff = reviewHandoffReference(manifest.handoffDigest);
+  blind.reviewInputs = {
+    originalBrief: projections.blind.allowedInputs.brief.reference,
+    acceptanceCriteria: [...projections.blind.allowedInputs.acceptanceCriteria],
+    targetUrlsOrArtifacts: [...projections.blind.allowedInputs.targetUrlsOrArtifacts],
+    sourceOfTruthMaterials: structuredClone(projections.blind.allowedInputs.sourceOfTruthMaterials),
+    credentialsUsed: [...projections.blind.allowedInputs.credentialLabels],
+    excludedInputs: [...projections.blind.excludedInputs]
+  };
+  writeJson(independentPath, independent);
+  writeJson(blindPath, blind);
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeJson(join(packetDir, 'evidence', 'review-handoff.json'), manifest);
+  writeJson(join(packetDir, 'evidence', 'review-handoff-independent.json'), projections.independent);
+  writeJson(join(packetDir, 'evidence', 'review-handoff-blind.json'), projections.blind);
 }
 
 function writeOpenDecisionRow(packetDir, {
@@ -1547,6 +1885,19 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     staleOrMissingEvidence: false,
     status: 'pass'
   }));
+  const completionGateIds = {
+    accessibility: 'G-A11Y-01',
+    architecture: 'G-COMPOSITION-01',
+    behavior: 'G-BROWSER-01',
+    content: 'G-CONTENT-01',
+    editor: 'G-EDITOR-01',
+    media: 'G-PARITY-01',
+    packet: 'G-VERIFY-01',
+    route: 'G-ROUTE-01',
+    security_privacy: 'G-PRIVACY-01',
+    seo: 'G-SEO-01',
+    visual: 'G-BROWSER-02'
+  };
   independent.completionClaims = [
     'content',
     'media',
@@ -1563,6 +1914,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claimId: `${gate}-checked`,
     claim: `The ${gate} completion evidence was independently checked.`,
     gate,
+    gateId: completionGateIds[gate],
     builderEvidence: [],
     falsificationChecks: [`Attempted to falsify the ${gate} evidence against the target and packet.`],
     verifierEvidence: ['claim-evidence.json'],
@@ -1587,6 +1939,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     claims: independent.completionClaims.map((claim) => ({
       claimId: claim.claimId,
       gate: claim.gate,
+      gateId: claim.gateId,
       checks: [
         {
           name: `${claim.gate} falsification`,
@@ -1763,7 +2116,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   patternMap.sectionOwnershipMatrix = [
     {
       sourceRoute: '/',
-      section: 'intro',
+      section: 'other',
       editorFacingName: 'Introduction',
       editorOwnedBy: 'field',
       repeatability: 'singleton',
@@ -1893,6 +2246,29 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       targetUrl: `${targetBaseUrl}/`,
       targetFinalUrl: `${targetBaseUrl}/`,
       viewport: { name: viewport, width: desktop ? 1280 : 390, height: desktop ? 800 : 844 },
+      captureState: {
+        id: 'default',
+        authority: 'self_attested_capture_evidence',
+        fixtureRevision: 'fixture-home-v1',
+        evidenceBindings: {
+          sourceScreenshotSha256: sha256File(join(blindEvidenceDir, `source-${viewport}.png`)),
+          targetScreenshotSha256: sha256File(join(blindEvidenceDir, `target-${viewport}.png`)),
+          accessibilityReportSha256: sha256File(join(browserEvidenceDir, `axe-home-${viewport}.json`))
+        },
+        interactionSteps: [],
+        menuState: {
+          toggleVisible: false,
+          toggleSelector: '',
+          controlledRegionSelector: '',
+          requested: 'not_applicable',
+          observed: 'not_applicable',
+          observedExpanded: false,
+          controlledRegionVisible: false
+        },
+        consentState: { requested: 'not_applicable', observed: 'not_applicable' },
+        contentCountAssertions: [],
+        dynamicMasks: []
+      },
       sourceScreenshot: `evidence/blind-adversarial-review/source-${viewport}.png`,
       targetScreenshot: `evidence/blind-adversarial-review/target-${viewport}.png`,
       visualComparison: { method: 'agent_review', reviewer: '', diffImage: '', diffScore: null, status: 'pass', acceptedExceptions: [] },
@@ -2105,6 +2481,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       writeJson(path, record);
     }
   }
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
@@ -2146,6 +2523,17 @@ function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
     outOfScope: [],
     blockers: []
   });
+  for (const artifact of ['source-audit.json', 'parity-report.json']) {
+    writeJson(join(packetDir, artifact), {
+      schemaVersion: 'public-kit.mode-disposition.1',
+      artifact,
+      buildMode: 'brief',
+      claimScope: 'complete-local-build-from-brief',
+      briefSha256: briefHash,
+      status: 'not_applicable',
+      reason: `Brief mode does not use ${artifact} as completion evidence.`
+    });
+  }
 
   mutateJson(join(packetDir, 'route-matrix.json'), (matrix) => {
     matrix.sourceBaseUrl = '';
@@ -2203,6 +2591,7 @@ function convertQualifyingPacketToBrief(packetDir, targetBaseUrl) {
   mutateText(join(packetDir, 'scoped-gap-list.md'), (text) =>
     text.replace('Overall status: `complete-local-rebuild`', 'Overall status: `complete-local-build-from-brief`')
   );
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode = 'local_mail_capture') {
@@ -2251,7 +2640,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     patternMap.sectionOwnershipMatrix.push({
       ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
       sourceRoute: '/contact',
-      section: 'contact form',
+      section: 'other',
       editorFacingName: 'Contact form',
       dataSource: 'webform.contact',
       expectedEditorAction: 'Edit the Contact Webform.',
@@ -2498,6 +2887,8 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     enforcementVerified: true,
     observation: 'Anonymous submission throttling was read back from Drupal configuration and exercised.'
   });
+  refreshCaptureEvidenceBindings(packetDir);
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
@@ -2653,6 +3044,8 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
     writeFileSync(join(blindEvidenceDir, `source-search-${viewport}.png`), screenshotPng(40 + index, width, height));
     writeFileSync(join(blindEvidenceDir, `target-search-${viewport}.png`), screenshotPng(50 + index, width, height));
   }
+  refreshCaptureEvidenceBindings(packetDir);
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
@@ -2819,6 +3212,7 @@ function addQualifyingNextCycleEvidence(packetDir, targetBaseUrl) {
       blockers: []
     });
   });
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
 }
 
 test('default verifier fetches the declared real target and binds primary-route evidence', async () => {
@@ -2852,16 +3246,18 @@ test('default verifier fetches the declared real target and binds primary-route 
       assert.equal(report.target.resolutionSource, 'explicit');
       assert.equal(report.completeLocalRebuildClaimAllowed, false);
       assert.deepEqual(report.agentContinuation, {
-        schemaVersion: 'public-kit.agent-continuation.1',
+        schemaVersion: 'public-kit.agent-continuation.2',
         status: 'continue_required',
         requiredAction: 'repair-and-reverify',
         shouldContinue: true,
+        agentMayPause: false,
         agentMayStop: false,
         stopConditionMet: false,
         humanReviewRequiredBeforeContinuing: false,
         externalBlockerMayPauseOnlyWhenRecorded: true,
+        blockers: report.completionBlockers.map(({ verifierConfirmedExternal, ...blocker }) => blocker),
         blockedReasons: report.completionBlockedReasons,
-        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+        instruction: 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off or pause while any agent-resolvable blocker remains, even when other blockers are external. Do not wait for routine human review.'
       });
       assert.equal(report.packetVerification.completionEvidence.packetCompletionReady, false);
       assert.match(
@@ -3067,13 +3463,25 @@ test('live verifier blocks an undeclared same-origin detail link even when it re
       const detail = report.serverRenderedResponseSurface.linkChecks.find((check) =>
         new URL(check.requestedUrl).pathname === '/article/undeclared'
       );
+      const expectedQueryDigest = createHash('sha256')
+        .update('?preview=private-value')
+        .digest('hex');
+      const doubleRedactedDigest = createHash('sha256')
+        .update(`?query-sha256=${expectedQueryDigest}`)
+        .digest('hex');
       assert.equal(detail?.finalStatus, 200);
       assert.equal(detail?.passed, false);
+      assert.equal(
+        new URL(detail.requestedUrl).search,
+        `?query-sha256=${expectedQueryDigest}`,
+        'redacted query identities must remain stable across nested report sanitizers'
+      );
       assert.match(
         report.errors.join('\n'),
         /not represented by an accepted routes or targetRequiredRoutes entry.*no exact accepted disposition/
       );
       assert.doesNotMatch(JSON.stringify(report), /private-value/);
+      assert.doesNotMatch(JSON.stringify(report), new RegExp(doubleRedactedDigest));
 
       mkdirSync(join(packetDir, 'evidence'), { recursive: true });
       writeFileSync(join(packetDir, 'evidence', 'unlisted-detail.txt'), 'Approved dynamic detail endpoint.\n');
@@ -4088,6 +4496,7 @@ test('packet evidence can qualify but an injected Drupal runtime cannot authoriz
           '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
           '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
         ));
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const packetOnlyReport = await validatePacket({ packetDir });
       assert.equal(packetOnlyReport.valid, true, packetOnlyReport.errors.join('\n'));
@@ -4162,6 +4571,20 @@ test('brief mode verifies target routes without requiring or implying a source s
         JSON.stringify(packetReport.completionEvidence, null, 2)
       );
 
+      const parityPath = join(packetDir, 'parity-report.json');
+      const parityDisposition = JSON.parse(readFileSync(parityPath, 'utf8'));
+      writeJson(parityPath, { ...parityDisposition, briefSha256: `sha256:${'f'.repeat(64)}` });
+      attachFixtureReviewHandoff(packetDir, baseUrl);
+      const staleDispositionReport = await validatePacket({ packetDir });
+      assert.equal(staleDispositionReport.valid, true, staleDispositionReport.errors.join('\n'));
+      assert.equal(staleDispositionReport.completionEvidence.packetSupportsCompletion, false);
+      assert.match(
+        staleDispositionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+        /parity-report\.json.*not-applicable disposition bound to the preserved brief/i
+      );
+      writeJson(parityPath, parityDisposition);
+      attachFixtureReviewHandoff(packetDir, baseUrl);
+
       const report = await verifyLive({
         packetDir,
         targetUrl: baseUrl,
@@ -4183,6 +4606,588 @@ test('brief mode verifies target routes without requiring or implying a source s
       assert.match(report.completionBlockedReasons.join('\n'), /non-authoritative/i);
     }
   );
+});
+
+test('completed reviewer artifacts fail closed when their review handoff digest drifts', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-digest-drift-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.reviewHandoff.digest = `sha256:${'f'.repeat(64)}`;
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /independent-verification\.json must reference the exact review-handoff\.json digest/);
+});
+
+test('completed reviewer artifacts fail closed when a byte-bound handoff input changes', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-input-drift-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  writeFileSync(join(packetDir, 'maintainer-review.md'), '# Changed after reviewer handoff\n');
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /maintainer-review\.md.*no longer matches.*(?:size|sha256)/i);
+});
+
+test('malformed reviewer projections return structured packet errors instead of throwing', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-malformed-projection-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'evidence', 'review-handoff-independent.json'), (projection) => {
+    projection.allowedInputs = 'malformed';
+  });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /review-handoff-independent\.json\.allowedInputs must be a JSON object/i);
+});
+
+test('deeply nested reviewer projection JSON fails safely without escaping packet validation', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-deep-projection-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const projectionPath = join(packetDir, 'evidence', 'review-handoff-blind.json');
+  const deeplyNestedJson = `${'{"nested":'.repeat(20000)}null${'}'.repeat(20000)}`;
+  const projectionJson = readFileSync(projectionPath, 'utf8').replace(
+    /^\{/,
+    `{"unexpectedDeepValue":${deeplyNestedJson},`
+  );
+  writeFileSync(projectionPath, projectionJson);
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /validation depth limit|cannot be canonically hashed|failed safely/i);
+});
+
+test('packet validation rejects evidence added after the reviewer handoff', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'review-handoff-added-evidence-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  writeJson(join(packetDir, 'evidence', 'post-handoff-builder-claim.json'), { claim: 'not reviewed' });
+
+  const report = await validatePacket({ packetDir });
+  assert.equal(report.valid, false);
+  assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
+  assert.match(report.errors.join('\n'), /input added after handoff.*post-handoff-builder-claim\.json/i);
+});
+
+test('browser capture states bind state-specific artifacts and structured interaction semantics', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'browser-capture-states-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.equal(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    true,
+    canonicalReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  function addOpenMenuState(browser, packetDir, options = {}) {
+    const toggleSelector = '[data-test="mobile-menu-toggle"]';
+    const controlledRegionSelector = '[data-test="mobile-menu-region"]';
+    const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
+    mobile.captureState.menuState = {
+      toggleVisible: true,
+      toggleSelector,
+      controlledRegionSelector,
+      requested: 'closed',
+      observed: 'closed',
+      observedExpanded: false,
+      controlledRegionVisible: false
+    };
+    const open = structuredClone(mobile);
+    const openToggleSelector = options.selectorMismatch ? '[data-test="other-toggle"]' : toggleSelector;
+    open.captureState = {
+      ...open.captureState,
+      id: 'mobile-menu-open',
+      fixtureRevision: options.fixtureRevision ?? mobile.captureState.fixtureRevision,
+      interactionSteps: [{
+        action: options.stepAction ?? 'click',
+        target: openToggleSelector,
+        value: options.stepValue ?? '',
+        expectedState: 'The controlled navigation is visible and the toggle is expanded.'
+      }],
+      menuState: {
+        toggleVisible: true,
+        toggleSelector: openToggleSelector,
+        controlledRegionSelector,
+        requested: 'open',
+        observed: 'open',
+        observedExpanded: true,
+        controlledRegionVisible: true
+      }
+    };
+
+    if (!options.reuseArtifacts) {
+      const blindEvidenceDir = join(packetDir, 'evidence', 'blind-adversarial-review');
+      const browserEvidenceDir = join(packetDir, 'evidence', 'browser');
+      const sourcePath = join(blindEvidenceDir, 'source-mobile-menu-open.png');
+      const targetPath = join(blindEvidenceDir, 'target-mobile-menu-open.png');
+      const axePath = join(browserEvidenceDir, 'axe-home-mobile-menu-open.json');
+      writeFileSync(sourcePath, screenshotPng(70, 390, 844));
+      writeFileSync(targetPath, screenshotPng(71, 390, 844));
+      const axe = JSON.parse(readFileSync(join(browserEvidenceDir, 'axe-home-mobile.json'), 'utf8'));
+      axe.captureStateObservation = 'mobile-menu-open';
+      writeJson(axePath, axe);
+      open.sourceScreenshot = 'evidence/blind-adversarial-review/source-mobile-menu-open.png';
+      open.targetScreenshot = options.missingTarget
+        ? 'evidence/blind-adversarial-review/missing-mobile-menu-open.png'
+        : 'evidence/blind-adversarial-review/target-mobile-menu-open.png';
+      open.accessibilityCheck.report = options.missingAxe
+        ? 'evidence/browser/missing-mobile-menu-open.json'
+        : 'evidence/browser/axe-home-mobile-menu-open.json';
+      open.captureState.evidenceBindings = {
+        sourceScreenshotSha256: sha256File(sourcePath),
+        targetScreenshotSha256: options.missingTarget ? `sha256:${'0'.repeat(64)}` : sha256File(targetPath),
+        accessibilityReportSha256: options.missingAxe ? `sha256:${'0'.repeat(64)}` : sha256File(axePath)
+      };
+    }
+    open.notes = 'Captured after opening the mobile menu.';
+    browser.publicRouteChecks.push(open);
+  }
+
+  const legacyPacket = join(temp, 'legacy-v1-default-only');
+  cpSync(canonicalPacket, legacyPacket, { recursive: true });
+  mutateJson(join(legacyPacket, 'browser-evidence.json'), (browser) => {
+    browser.schemaVersion = 'public-kit.browser-evidence.1';
+    for (const check of browser.publicRouteChecks) delete check.captureState;
+  });
+  attachFixtureReviewHandoff(legacyPacket, 'https://target.example');
+  const legacyReport = await validatePacket({ packetDir: legacyPacket });
+  assert.equal(
+    legacyReport.completionEvidence.packetSupportsCompletion,
+    true,
+    legacyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const legacyScaledPacket = join(temp, 'legacy-v1-device-pixel-screenshots');
+  cpSync(legacyPacket, legacyScaledPacket, { recursive: true });
+  const legacyBrowser = JSON.parse(readFileSync(join(legacyScaledPacket, 'browser-evidence.json'), 'utf8'));
+  const legacyDesktop = legacyBrowser.publicRouteChecks.find((check) => check.viewport.name === 'desktop');
+  writeFileSync(join(legacyScaledPacket, legacyDesktop.sourceScreenshot), screenshotPng(74, 2560, 1600));
+  writeFileSync(join(legacyScaledPacket, legacyDesktop.targetScreenshot), screenshotPng(75, 2560, 1600));
+  attachFixtureReviewHandoff(legacyScaledPacket, 'https://target.example');
+  const legacyScaledReport = await validatePacket({ packetDir: legacyScaledPacket });
+  assert.equal(
+    legacyScaledReport.completionEvidence.packetSupportsCompletion,
+    true,
+    legacyScaledReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const cases = [
+    {
+      name: 'unsupported-browser-evidence-schema',
+      expected: /must use schemaVersion public-kit\.browser-evidence\.1 or public-kit\.browser-evidence\.2/i,
+      mutate(browser) {
+        browser.schemaVersion = 'public-kit.browser-evidence.999';
+      }
+    },
+    {
+      name: 'missing-capture-state',
+      expected: /publicRouteChecks\[0\]\.captureState is required/i,
+      mutate(browser) {
+        delete browser.publicRouteChecks[0].captureState;
+      }
+    },
+    {
+      name: 'missing-self-attested-authority',
+      expected: /authority must be self_attested_capture_evidence/i,
+      mutate(browser) {
+        delete browser.publicRouteChecks[0].captureState.authority;
+      }
+    },
+    {
+      name: 'accessibility-report-is-directory',
+      expected: /report must reference packet-local raw axe-core JSON/i,
+      mutate(browser, packetDir) {
+        mkdirSync(join(packetDir, 'evidence', 'browser', 'report-directory'));
+        browser.publicRouteChecks[0].accessibilityCheck.report = 'evidence/browser/report-directory';
+        browser.publicRouteChecks[0].captureState.evidenceBindings.accessibilityReportSha256 = '';
+      }
+    },
+    {
+      name: 'unstable-fixture-revision',
+      expected: /fixtureRevision must be a non-empty stable revision/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.fixtureRevision = '';
+      }
+    },
+    {
+      name: 'normalized-tuple-duplicate',
+      expected: /unique normalized target request, viewport name, and captureState\.id tuple; duplicate \/ mobile default/i,
+      mutate(browser) {
+        const duplicate = structuredClone(browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile'));
+        duplicate.targetUrl = 'https://target.example/?';
+        duplicate.targetFinalUrl = 'https://target.example/?';
+        browser.publicRouteChecks.push(duplicate);
+      }
+    },
+    {
+      name: 'missing-default-mobile-state',
+      expected: /needs a default captureState for primary route \/ at mobile/i,
+      mutate(browser) {
+        browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile').captureState.id = 'alternate';
+      }
+    },
+    {
+      name: 'too-many-interaction-steps',
+      expected: /interactionSteps must be an array with at most 12 steps/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.interactionSteps = Array.from({ length: 13 }, () => ({
+          action: 'click',
+          target: '[data-test="control"]',
+          value: '',
+          expectedState: 'The control is active.'
+        }));
+      }
+    },
+    {
+      name: 'mutating-default-state',
+      expected: /must be empty or contain one non-mutating wait_for step for the default state/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.interactionSteps = [{
+          action: 'click',
+          target: '[data-test="control"]',
+          value: '',
+          expectedState: 'The control is active.'
+        }];
+      }
+    },
+    {
+      name: 'count-assertion-mismatch',
+      expected: /must use a unique selector and a passing bounded exact-count assertion/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.contentCountAssertions = [{
+          selector: '.card',
+          expectedCount: 4,
+          observedCount: 3,
+          status: 'pass'
+        }];
+      }
+    },
+    {
+      name: 'contradictory-count-assertions',
+      expected: /must use a unique selector/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.contentCountAssertions = [
+          { selector: '.card', expectedCount: 4, observedCount: 4, status: 'pass' },
+          { selector: '.card', expectedCount: 5, observedCount: 5, status: 'pass' }
+        ];
+      }
+    },
+    {
+      name: 'page-wide-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: 'body',
+          reason: 'Invalid page-wide mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'universal-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '*',
+          reason: 'Invalid universal mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'functional-pseudo-dynamic-mask',
+      expected: /unique element-specific/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: ':is(body)',
+          reason: 'Invalid functional selector mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'common-header-class-mask',
+      expected: /common page\/global-chrome tokens/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '.header',
+          reason: 'Invalid global-header mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'common-header-data-value-mask',
+      expected: /common page\/global-chrome tokens/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '[data-region=header]',
+          reason: 'Invalid global-header data region mask.',
+          observedRect: { x: 0, y: 0, width: 100, height: 100 }
+        }];
+      }
+    },
+    {
+      name: 'oversized-mask-union',
+      expected: /observed rectangle union must cover no more than 0\.25/i,
+      mutate(browser) {
+        browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+          selector: '[data-dynamic="weather"]',
+          reason: 'Weather changes between captures.',
+          observedRect: { x: 0, y: 0, width: 1280, height: 300 }
+        }];
+      }
+    },
+    {
+      name: 'structured-visible-toggle-without-open-state',
+      expected: /needs an explicit mobile-menu-open captureState.*declares a visible toggle/i,
+      mutate(browser) {
+        const mobile = browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile');
+        mobile.captureState.menuState = {
+          toggleVisible: true,
+          toggleSelector: '[data-test="mobile-menu-toggle"]',
+          controlledRegionSelector: '[data-test="mobile-menu-region"]',
+          requested: 'closed',
+          observed: 'closed',
+          observedExpanded: false,
+          controlledRegionVisible: false
+        };
+      }
+    },
+    {
+      name: 'reused-state-artifacts',
+      expected: /must use a distinct packet-local target screenshot path and bytes/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { reuseArtifacts: true });
+      }
+    },
+    {
+      name: 'two-interacted-states-reuse-artifacts',
+      expected: /must use a distinct packet-local target screenshot path and bytes from every other state/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir);
+        const open = browser.publicRouteChecks.find((check) => check.captureState.id === 'mobile-menu-open');
+        const alternate = structuredClone(open);
+        alternate.captureState.id = 'alternate-menu-open';
+        browser.publicRouteChecks.push(alternate);
+      }
+    },
+    {
+      name: 'mismatched-state-fixture',
+      expected: /must use the default state's fixtureRevision/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { fixtureRevision: 'fixture-home-v2' });
+      }
+    },
+    {
+      name: 'interacted-state-wrong-final-route',
+      expected: /must keep the default state's targetFinalUrl/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir);
+        const open = browser.publicRouteChecks.find((check) => check.captureState.id === 'mobile-menu-open');
+        open.targetFinalUrl = 'https://target.example/unrelated-state-page';
+        const axePath = join(packetDir, open.accessibilityCheck.report);
+        const axe = JSON.parse(readFileSync(axePath, 'utf8'));
+        axe.url = open.targetFinalUrl;
+        writeJson(axePath, axe);
+        open.captureState.evidenceBindings.accessibilityReportSha256 = sha256File(axePath);
+      }
+    },
+    {
+      name: 'wait-only-menu-activation',
+      expected: /clicks or presses Enter\/Space.*declared toggle selector/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { stepAction: 'wait_for' });
+      }
+    },
+    {
+      name: 'empty-key-menu-press',
+      expected: /interactionSteps\[0\] must name a supported action, bounded target\/value/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { stepAction: 'press' });
+      }
+    },
+    {
+      name: 'mismatched-menu-toggle-selector',
+      expected: /observes the same controlled region open/i,
+      mutate(browser, packetDir) {
+        addOpenMenuState(browser, packetDir, { selectorMismatch: true });
+      }
+    }
+  ];
+
+  for (const fixture of cases) {
+    const packetDir = join(temp, fixture.name);
+    cpSync(canonicalPacket, packetDir, { recursive: true });
+    mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => fixture.mutate(browser, packetDir));
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
+    const report = await validatePacket({ packetDir });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, fixture.name);
+    assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), fixture.expected, fixture.name);
+  }
+
+  const proseOnlyPacket = join(temp, 'prose-only-toggle-claim');
+  cpSync(canonicalPacket, proseOnlyPacket, { recursive: true });
+  mutateJson(join(proseOnlyPacket, 'browser-evidence.json'), (browser) => {
+    browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile').notes =
+      'The mobile layout has a visible menu toggle.';
+  });
+  attachFixtureReviewHandoff(proseOnlyPacket, 'https://target.example');
+  const proseOnlyReport = await validatePacket({ packetDir: proseOnlyPacket });
+  assert.equal(
+    proseOnlyReport.completionEvidence.packetSupportsCompletion,
+    true,
+    proseOnlyReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const boundedMaskPacket = join(temp, 'bounded-element-specific-mask');
+  cpSync(canonicalPacket, boundedMaskPacket, { recursive: true });
+  mutateJson(join(boundedMaskPacket, 'browser-evidence.json'), (browser) => {
+    browser.publicRouteChecks[0].captureState.dynamicMasks = [{
+      selector: '.weather-widget[data-dynamic=weather]',
+      reason: 'The weather observation changes between captures.',
+      observedRect: { x: 980, y: 620, width: 200, height: 100 }
+    }];
+  });
+  attachFixtureReviewHandoff(boundedMaskPacket, 'https://target.example');
+  const boundedMaskReport = await validatePacket({ packetDir: boundedMaskPacket });
+  assert.equal(
+    boundedMaskReport.completionEvidence.packetSupportsCompletion,
+    true,
+    boundedMaskReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const openMenuPacket = join(temp, 'structured-open-menu-state');
+  cpSync(canonicalPacket, openMenuPacket, { recursive: true });
+  mutateJson(
+    join(openMenuPacket, 'browser-evidence.json'),
+    (browser) => addOpenMenuState(browser, openMenuPacket)
+  );
+  attachFixtureReviewHandoff(openMenuPacket, 'https://target.example');
+  const openMenuReport = await validatePacket({ packetDir: openMenuPacket });
+  assert.equal(
+    openMenuReport.completionEvidence.packetSupportsCompletion,
+    true,
+    openMenuReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const keyboardOpenMenuPacket = join(temp, 'structured-keyboard-open-menu-state');
+  cpSync(canonicalPacket, keyboardOpenMenuPacket, { recursive: true });
+  mutateJson(
+    join(keyboardOpenMenuPacket, 'browser-evidence.json'),
+    (browser) => addOpenMenuState(browser, keyboardOpenMenuPacket, { stepAction: 'press', stepValue: 'Enter' })
+  );
+  attachFixtureReviewHandoff(keyboardOpenMenuPacket, 'https://target.example');
+  const keyboardOpenMenuReport = await validatePacket({ packetDir: keyboardOpenMenuPacket });
+  assert.equal(
+    keyboardOpenMenuReport.completionEvidence.packetSupportsCompletion,
+    true,
+    keyboardOpenMenuReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const briefMissingArtifactsRoot = join(temp, 'brief-interacted-state-missing-artifacts');
+  const briefMissingArtifactsPacket = join(briefMissingArtifactsRoot, 'review-packet');
+  mkdirSync(briefMissingArtifactsRoot, { recursive: true });
+  cpSync(canonicalPacket, briefMissingArtifactsPacket, { recursive: true });
+  convertQualifyingPacketToBrief(briefMissingArtifactsPacket, 'https://target.example');
+  mutateJson(join(briefMissingArtifactsPacket, 'browser-evidence.json'), (browser) => {
+    addOpenMenuState(browser, briefMissingArtifactsPacket, { missingTarget: true, missingAxe: true });
+  });
+  attachFixtureReviewHandoff(briefMissingArtifactsPacket, 'https://target.example');
+  const briefMissingArtifactsReport = await validatePacket({ packetDir: briefMissingArtifactsPacket });
+  const briefArtifactReasons = briefMissingArtifactsReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(briefMissingArtifactsReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(briefArtifactReasons, /targetScreenshot must reference a credible packet-local image/i);
+  assert.match(briefArtifactReasons, /accessibilityCheck\.report must reference packet-local raw axe-core JSON/i);
+  assert.doesNotMatch(briefArtifactReasons, /brief\.path|original brief/i);
+
+  const briefFailedStateRoot = join(temp, 'brief-interacted-state-failed');
+  const briefFailedStatePacket = join(briefFailedStateRoot, 'review-packet');
+  mkdirSync(briefFailedStateRoot, { recursive: true });
+  cpSync(canonicalPacket, briefFailedStatePacket, { recursive: true });
+  convertQualifyingPacketToBrief(briefFailedStatePacket, 'https://target.example');
+  mutateJson(join(briefFailedStatePacket, 'browser-evidence.json'), (browser) => {
+    const desktop = browser.publicRouteChecks.find((check) => check.viewport.name === 'desktop');
+    const failed = structuredClone(desktop);
+    const blindEvidenceDir = join(briefFailedStatePacket, 'evidence', 'blind-adversarial-review');
+    const browserEvidenceDir = join(briefFailedStatePacket, 'evidence', 'browser');
+    const sourcePath = join(blindEvidenceDir, 'source-desktop-consent-accepted.png');
+    const targetPath = join(blindEvidenceDir, 'target-desktop-consent-accepted.png');
+    const axePath = join(browserEvidenceDir, 'axe-home-desktop-consent-accepted.json');
+    writeFileSync(sourcePath, screenshotPng(72, 1280, 800));
+    writeFileSync(targetPath, screenshotPng(73, 1280, 800));
+    const axe = JSON.parse(readFileSync(join(browserEvidenceDir, 'axe-home-desktop.json'), 'utf8'));
+    axe.captureStateObservation = 'consent-accepted';
+    writeJson(axePath, axe);
+    failed.captureState = {
+      ...failed.captureState,
+      id: 'consent-accepted',
+      interactionSteps: [{
+        action: 'click',
+        target: '[data-test="accept-consent"]',
+        value: '',
+        expectedState: 'Consent is accepted.'
+      }],
+      consentState: { requested: 'accepted', observed: 'accepted' },
+      evidenceBindings: {
+        sourceScreenshotSha256: sha256File(sourcePath),
+        targetScreenshotSha256: sha256File(targetPath),
+        accessibilityReportSha256: sha256File(axePath)
+      }
+    };
+    failed.sourceScreenshot = 'evidence/blind-adversarial-review/source-desktop-consent-accepted.png';
+    failed.targetScreenshot = 'evidence/blind-adversarial-review/target-desktop-consent-accepted.png';
+    failed.accessibilityCheck.report = 'evidence/browser/axe-home-desktop-consent-accepted.json';
+    failed.accepted = false;
+    failed.blockers = ['Consent interaction failed.'];
+    failed.visualComparison.status = 'fail';
+    browser.publicRouteChecks.push(failed);
+  });
+  attachFixtureReviewHandoff(briefFailedStatePacket, 'https://target.example');
+  const briefFailedStateReport = await validatePacket({ packetDir: briefFailedStatePacket });
+  const briefFailedStateReasons = briefFailedStateReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(briefFailedStateReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(briefFailedStateReasons, /capture state must be accepted and passing.*no blockers/i);
+  assert.doesNotMatch(briefFailedStateReasons, /brief\.path|original brief/i);
+
+  const privateQueryPacket = join(temp, 'private-query-duplicate');
+  cpSync(canonicalPacket, privateQueryPacket, { recursive: true });
+  mutateJson(join(privateQueryPacket, 'browser-evidence.json'), (browser) => {
+    const first = structuredClone(browser.publicRouteChecks.find((check) => check.viewport.name === 'mobile'));
+    first.targetUrl = 'https://target.example/search?preview_token=super-secret-value';
+    first.targetFinalUrl = first.targetUrl;
+    const second = structuredClone(first);
+    browser.publicRouteChecks.push(first, second);
+  });
+  attachFixtureReviewHandoff(privateQueryPacket, 'https://target.example');
+  const privateQueryReport = await validatePacket({ packetDir: privateQueryPacket });
+  const privateQueryReasons = privateQueryReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.equal(privateQueryReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(privateQueryReasons, /\/search\?query-sha256=[a-f0-9]{64}/i);
+  assert.doesNotMatch(privateQueryReasons, /super-secret-value|preview_token/i);
 });
 
 test('live verifier rejects fetched SEO metadata that is missing or differs from packet claims', async () => {
@@ -4534,6 +5539,7 @@ process.stdout.write(outputs.get(command) + '\\n');
           '- [x] I would stake my name on this as a complete local Drupal CMS rebuild.',
           '- [ ] I would stake my name on this as a complete local Drupal CMS rebuild.'
         ));
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const verifierArgs = [join(repoRoot, 'bin', 'verify.mjs'), '--packet', 'review-packet'];
       const cleanEnvironment = {
@@ -4563,6 +5569,7 @@ process.stdout.write(outputs.get(command) + '\\n');
         readback.drupal.trackedConfigYamlFiles.reverse();
         readback.drupal.trackedConfigYamlFiles.push('config/split/local/system.logging.yml');
       });
+      attachFixtureReviewHandoff(packetDir, baseUrl);
 
       const missingRootResult = await runProcess(process.execPath, verifierArgs, targetRoot, {
         env: { ...cleanEnvironment, FAKE_DDEV_MISSING_ROOT: '1' }
@@ -4598,6 +5605,36 @@ process.stdout.write(outputs.get(command) + '\\n');
         { cwd: targetRoot }
       );
 
+      const handoffPrepResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
+      assert.equal(handoffPrepResult.status, 2, handoffPrepResult.stderr);
+      const handoffPrepReport = JSON.parse(
+        readFileSync(join(packetDir, 'evidence', 'live-verification.json'), 'utf8')
+      );
+      const handoffPath = join(packetDir, 'evidence', 'review-handoff.json');
+      const handoff = JSON.parse(readFileSync(handoffPath, 'utf8'));
+      handoff.binding = {
+        ...handoff.binding,
+        buildMode: handoffPrepReport.buildMode,
+        configSyncDirectory: handoffPrepReport.buildState.targetIdentity.configSyncDirectory,
+        frontPage: handoffPrepReport.buildState.targetIdentity.frontPage,
+        siteStateFingerprint: handoffPrepReport.buildState.fingerprint,
+        siteUuid: handoffPrepReport.buildState.targetIdentity.siteUuid,
+        targetIdentityFingerprint: handoffPrepReport.buildState.componentFingerprints.targetIdentity,
+        targetOrigin: new URL(handoffPrepReport.target.resolvedBaseUrl).origin
+      };
+      const stateBoundHandoff = sealReviewHandoff(handoff);
+      writeJson(handoffPath, stateBoundHandoff);
+      for (const projectionFile of ['review-handoff-independent.json', 'review-handoff-blind.json']) {
+        mutateJson(join(packetDir, 'evidence', projectionFile), (projection) => {
+          projection.handoff = reviewHandoffReference(stateBoundHandoff.handoffDigest);
+        });
+      }
+      for (const reviewerFile of ['independent-verification.json', 'blind-adversarial-review.json']) {
+        mutateJson(join(packetDir, reviewerFile), (review) => {
+          review.reviewHandoff = reviewHandoffReference(stateBoundHandoff.handoffDigest);
+        });
+      }
+
       const cleanResult = await runProcess(process.execPath, verifierArgs, targetRoot, { env: cleanEnvironment });
       assert.equal(cleanResult.status, 0, cleanResult.stderr);
       assert.match(cleanResult.stdout, /complete local rebuild machine claim authorized/);
@@ -4617,10 +5654,12 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(cleanReport.agentContinuation.requiredAction, 'handoff');
       assert.equal(cleanReport.agentContinuation.status, 'complete');
       assert.equal(cleanReport.agentContinuation.shouldContinue, false);
+      assert.equal(cleanReport.agentContinuation.agentMayPause, false);
       assert.equal(cleanReport.agentContinuation.agentMayStop, true);
       assert.equal(cleanReport.agentContinuation.stopConditionMet, true);
       assert.equal(cleanReport.agentContinuation.humanReviewRequiredBeforeContinuing, false);
       assert.deepEqual(cleanReport.agentContinuation.blockedReasons, []);
+      assert.deepEqual(cleanReport.agentContinuation.blockers, []);
       assert.equal(cleanReport.recordedHumanGateStatus.affectsMachineCompletion, false);
       assert.equal(cleanReport.recordedHumanGateStatus.localRebuildStatus, 'pending');
       assert.equal(cleanReport.verifierOwnedAccessibility.passed, true);
@@ -5151,6 +6190,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -5242,6 +6282,7 @@ test('self-authored count and exclusion dispositions cannot hide collection shor
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -5348,6 +6389,7 @@ test('human-gate records are reported separately while packet contradictions fai
     const packetDir = join(temp, name);
     cpSync(canonicalPacket, packetDir, { recursive: true });
     mutate(packetDir);
+    attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
     const report = await validatePacket({ packetDir });
 
@@ -5582,6 +6624,7 @@ test('human-gate records are reported separately while packet contradictions fai
     blind.summary.acceptedOutOfScopeIssueCount = 1;
   });
   writeOpenDecisionRow(exactDeviationPacket, { currentEvidence: 'DEF-001' });
+  attachFixtureReviewHandoff(exactDeviationPacket, 'https://target.example');
   const exactDeviationReport = await validatePacket({ packetDir: exactDeviationPacket });
   assert.equal(
     exactDeviationReport.completionEvidence.packetSupportsCompletion,
@@ -5609,6 +6652,7 @@ test('human-gate records are reported separately while packet contradictions fai
       check.visualComparison.diffScore = 0.01;
     }
   });
+  attachFixtureReviewHandoff(pixelDiffPacket, 'https://target.example');
   const pixelDiffReport = await validatePacket({ packetDir: pixelDiffPacket });
   assert.equal(
     pixelDiffReport.completionEvidence.packetSupportsCompletion,
@@ -5624,6 +6668,7 @@ test('human-gate records are reported separately while packet contradictions fai
       check.visualComparison.reviewer = 'Fixture Reviewer';
     }
   });
+  attachFixtureReviewHandoff(namedReviewerPacket, 'https://target.example');
   const namedReviewerReport = await validatePacket({ packetDir: namedReviewerPacket });
   assert.equal(
     namedReviewerReport.completionEvidence.packetSupportsCompletion,
@@ -5803,6 +6848,7 @@ test('next-cycle verification requires discovery, a least-privilege future publi
   mutateJson(join(dateOnlyPacket, 'evidence', 'next-cycle', 'probe.json'), (value) => {
     value.futureDate = futureDateOnly;
   });
+  attachFixtureReviewHandoff(dateOnlyPacket, 'https://target.example');
   const dateOnlyReport = await validatePacket({ packetDir: dateOnlyPacket });
   assert.equal(dateOnlyReport.completionEvidence.packetSupportsCompletion, true, 'Drupal date-only values are valid future dates');
 
@@ -6330,6 +7376,7 @@ test('blanket-filled packet templates remain valid lint but cannot support compl
       `${readFileSync(join(templatesDir, templateName(file)), 'utf8')}\nRun-specific completion evidence recorded.\n`
     );
   }
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -6371,6 +7418,7 @@ test('completed Markdown can retain instructional references to UNKNOWN without 
     .replace(/```text\s*UNKNOWN\s*```/m, '```text\nNo recipe was applied; discovery output reviewed.\n```');
   assert.match(recipe, /Decision values:.*UNKNOWN/);
   writeFileSync(join(packetDir, 'recipe-start-point.md'), recipe);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -6400,6 +7448,7 @@ intent_records:
     stale_behavior: "treat_as_no_intent"
 `;
   writeFileSync(join(packetDir, 'durable-intent.yml'), validRecord);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const currentReport = await validatePacket({ packetDir });
   assert.equal(currentReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(currentReport, null, 2));
 
@@ -6414,10 +7463,138 @@ intent_records:
     status: "draft"
     stale_behavior: "treat_as_no_intent"
 `);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const staleReport = await validatePacket({ packetDir });
   assert.equal(staleReport.valid, true, staleReport.errors.join('\n'));
   assert.equal(staleReport.completionEvidence.packetSupportsCompletion, false);
   assert.match(staleReport.completionEvidence.packetCompletionBlockedReasons.join('\n'), /durable-intent\.yml/);
+});
+
+test('empty durable intent requires a named evidence-backed acceptance', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-empty-acceptance-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+
+  const acceptedReport = await validatePacket({ packetDir });
+  assert.equal(acceptedReport.completionEvidence.packetSupportsCompletion, true, JSON.stringify(acceptedReport, null, 2));
+
+  const path = join(packetDir, 'durable-intent.yml');
+  const withoutAcceptance = readFileSync(path, 'utf8').replace(
+    /^empty_intent_acceptance:\s*$[\s\S]*?(?=^evidence_scope:)/m,
+    ''
+  );
+  writeFileSync(path, withoutAcceptance);
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
+  const rejectedReport = await validatePacket({ packetDir });
+
+  assert.equal(rejectedReport.valid, true, rejectedReport.errors.join('\n'));
+  assert.equal(rejectedReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    rejectedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted_no_durable_intent/
+  );
+});
+
+test('durable intent rejects statuses outside the canonical enum', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'durable-intent-status-enum-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  const path = join(packetDir, 'durable-intent.yml');
+  writeFileSync(path, `schema_version: public-kit.1
+site: "https://target.example"
+intent_records:
+  - id: "homepage-owner"
+    target_config: "system.site"
+    rationale: "Keep the homepage owner explicit."
+    asserted_by: "Fixture Maintainer"
+    last_reviewed: "2026-07-09"
+    config_hash: "not-applicable"
+    status: "looks-good"
+`);
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.match(report.errors.join('\n'), /invalid durable intent status looks-good/);
+});
+
+test('structured artifacts reject unknown gate ids and ad hoc enum values', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'structured-enums-gates-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'independent-verification.json'), (record) => {
+    record.completionClaims[0].gateId = 'G-MADE-UP-99';
+  });
+  mutateJson(join(packetDir, 'browser-evidence.json'), (record) => {
+    record.publicRouteChecks[0].visualComparison.status = 'mostly-pass';
+    record.publicRouteChecks[0].gateIds = 'G-ROUTE-01';
+  });
+
+  const report = await validatePacket({ packetDir });
+  const installedReport = await validateInstalledPacket({ packetDir });
+
+  assert.equal(report.valid, false);
+  assert.equal(installedReport.valid, false);
+  assert.match(report.errors.join('\n'), /canonical gate id from gates\.json/);
+  assert.match(report.errors.join('\n'), /gateIds must be an array of canonical gate ids/);
+  assert.match(report.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+  assert.match(installedReport.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
+});
+
+test('per-gate results distinguish packet execution, live execution, and human review', () => {
+  const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const packetResults = new Map(perGateResults(gates, []).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [packetResults.get('G-ROUTE-01').status, packetResults.get('G-ROUTE-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-CONFIG-01').status, packetResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['not_evaluated', false]
+  );
+  assert.deepEqual(
+    [packetResults.get('G-MAINTAINER-01').status, packetResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+  const packetFailureResults = new Map(
+    perGateResults(gates, ['browser-evidence.json has an invalid status.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.deepEqual(
+    [packetFailureResults.get('G-BROWSER-01').status, packetFailureResults.get('G-BROWSER-01').evaluatorCompleted],
+    ['fail', false]
+  );
+
+  const liveResults = new Map(perGateResults(gates, [], { mode: 'live' }).map((result) => [result.gateId, result]));
+  assert.deepEqual(
+    [liveResults.get('G-CONFIG-01').status, liveResults.get('G-CONFIG-01').evaluatorCompleted],
+    ['pass', true]
+  );
+  assert.deepEqual(
+    [liveResults.get('G-MAINTAINER-01').status, liveResults.get('G-MAINTAINER-01').evaluatorCompleted],
+    ['human_review', false]
+  );
+
+  const failedLiveResults = new Map(
+    perGateResults(gates, ['G-VERIFY-02 Live target route verification failed.'], { mode: 'live' })
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(failedLiveResults.get('G-ROUTE-01').status, 'fail');
+  assert.match(failedLiveResults.get('G-ROUTE-01').errors.join('\n'), /Live target route verification failed/);
+  assert.equal(failedLiveResults.get('G-MAINTAINER-01').status, 'human_review');
+
+  const humanFindingResults = new Map(
+    perGateResults(gates, ['maintainer-review.md is incomplete.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(humanFindingResults.get('G-MAINTAINER-01').status, 'human_review');
+  assert.match(humanFindingResults.get('G-MAINTAINER-01').errors.join('\n'), /is incomplete/);
 });
 
 test('independent completion claims require target-bound concrete check evidence', async () => {
@@ -6435,7 +7612,7 @@ test('independent completion claims require target-bound concrete check evidence
 
   assert.equal(report.valid, false);
   assert.equal(report.completionEvidence.independentVerificationSupportsCompletion, false);
-  assert.match(report.errors.join('\n'), /bound to its claimId, gate, target, checkedAt time, and concrete passing checks/);
+  assert.match(report.errors.join('\n'), /bound to its claimId, gate, gateId, target, checkedAt time, and concrete passing checks/);
 });
 
 test('blind completion evidence fails closed on missing declarations, all-N/A checks, and copied captures', async () => {
@@ -6522,8 +7699,62 @@ test('blind review cannot treat an external blocker as an accepted primary-route
   assert.equal(report.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     report.errors.join('\n'),
-    /external.blocker.*(?:cannot support|blocks).*completion|completion.*blocked.*external/i
+    /external_blocker requires missingInput and nextAction|requires a rationale.*concrete packet-local evidence/i
   );
+});
+
+test('packet verification normalizes evidenced external blockers without authorizing completion', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'blind-external-pause-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  writeJson(join(packetDir, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects = [{
+      id: 'DEF-EXT-1',
+      severity: 'high',
+      title: 'Provider credentials are unavailable',
+      briefExpectation: 'The provider-backed behavior can be exercised.',
+      sourceTruthEvidence: 'source-desktop.png',
+      targetFinding: 'The verifier cannot exercise the provider without an owner-issued credential.',
+      evidence: ['target-desktop.png'],
+      recommendedFix: 'Supply the credential and rerun the provider behavior check.',
+      status: 'external_blocker',
+      resolvedByReviewPassId: '',
+      acceptedBy: '',
+      acceptedReason: 'The credential can be issued only by the external provider account owner.',
+      missingInput: 'An owner-issued provider API credential.',
+      nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.'
+    }];
+    blind.summary.verdict = 'blocked';
+    blind.summary.completionState = 'blocked';
+    blind.summary.externalBlockerIssueCount = 1;
+  });
+
+  const report = await validatePacket({ packetDir });
+
+  assert.equal(report.valid, true, report.errors.join('\n'));
+  assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
+  assert.equal(report.completionEvidence.packetSupportsCompletion, false);
+  assert.equal(report.completionEvidence.externalBlockersOnly, true);
+  assert.equal(report.completionEvidence.externalBlockers.length, 1);
+  assert.deepEqual(report.completionEvidence.externalBlockers[0], {
+    attemptedEvidence: ['target-desktop.png'],
+    code: 'blind.defect.DEF-EXT-1',
+    message: 'Provider credentials are unavailable',
+    missingInput: 'An owner-issued provider API credential.',
+    nextAction: 'The owner supplies the credential; the agent then refreshes evidence and reruns verification.',
+    origin: 'packet-verifier:blind-adversarial-review.productDefects[0]',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  });
+
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    blind.productDefects[0].id = 'unstable id';
+  });
+  const unstableIdReport = await validatePacket({ packetDir });
+  assert.equal(unstableIdReport.valid, false);
+  assert.match(unstableIdReport.errors.join('\n'), /requires a stable alphanumeric id/);
 });
 
 test('blind accepted-out-of-scope dispositions require an owner and reconciled summary counts', async () => {
@@ -6623,6 +7854,7 @@ test('browser completion evidence requires real public and editor screenshots', 
     browser.publicRouteChecks[0].sourceScreenshot = 'evidence/browser/missing-source.png';
     browser.editorWorkflowChecks[0].formScreenshot = 'evidence/browser/missing-editor.png';
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
 
   const report = await validatePacket({ packetDir });
 
@@ -6743,6 +7975,8 @@ test('browser completion evidence requires route-bound in-browser axe results wi
         : { type: 'tag', values: realWcagTags };
     });
   }
+  refreshCaptureEvidenceBindings(realWcagTagsPacket);
+  attachFixtureReviewHandoff(realWcagTagsPacket, 'https://target.example');
   const realWcagTagsReport = await validatePacket({ packetDir: realWcagTagsPacket });
   assert.equal(
     realWcagTagsReport.completionEvidence.packetSupportsCompletion,
@@ -6779,6 +8013,8 @@ test('browser completion evidence requires route-bound in-browser axe results wi
       evidence: 'evidence/browser/axe-incomplete-review.json'
     }];
   });
+  refreshCaptureEvidenceBindings(dispositionedPacket);
+  attachFixtureReviewHandoff(dispositionedPacket, 'https://target.example');
   const dispositioned = await validatePacket({ packetDir: dispositionedPacket });
   assert.equal(
     dispositioned.completionEvidence.packetSupportsCompletion,
@@ -6872,6 +8108,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     mode: 'provider_managed', result: 'pass', provider: 'Fixture provider',
     enforcementVerified: true, observation: 'Provider-managed protection was verified.'
   });
+  attachFixtureReviewHandoff(twoFormsPacket, 'https://target.example');
   const twoForms = await validatePacket({ packetDir: twoFormsPacket });
   assert.equal(
     twoForms.completionEvidence.packetSupportsCompletion,
@@ -6970,6 +8207,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     evidence.mode = 'other';
     evidence.rationale = 'The explicit fixture outcome is intentionally custom.';
   });
+  attachFixtureReviewHandoff(explicitOtherPacket, 'https://target.example');
   const explicitOther = await validatePacket({ packetDir: explicitOtherPacket });
   assert.equal(
     explicitOther.completionEvidence.packetSupportsCompletion,
@@ -7021,6 +8259,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     independent.anonymousFormChecks[0].abuseProtectionRationale = 'This DDEV-only review target remains a launch gap.';
     independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-local-abuse-exception.json';
   });
+  attachFixtureReviewHandoff(localExceptionPacket, 'https://target.example');
   const localException = await validatePacket({ packetDir: localExceptionPacket });
   assert.equal(
     localException.completionEvidence.packetSupportsCompletion,
@@ -7039,6 +8278,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
   mutateJson(join(localDdevExceptionPacket, 'evidence/browser/form-outcome.json'), (evidence) => {
     evidence.targetUrl = 'https://fixture.ddev.site/contact';
   });
+  attachFixtureReviewHandoff(localDdevExceptionPacket, 'https://target.example');
   const localDdevException = await validatePacket({ packetDir: localDdevExceptionPacket });
   assert.equal(
     localDdevException.completionEvidence.packetSupportsCompletion,
@@ -7061,6 +8301,7 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     independent.anonymousFormChecks[0].abuseProtectionRationale = 'Drupal-owned anonymous submission throttling is configured.';
     independent.anonymousFormChecks[0].abuseProtectionEvidence = 'evidence/browser/form-rate-limiting.json';
   });
+  attachFixtureReviewHandoff(rateLimitedPacket, 'https://target.example');
   const rateLimited = await validatePacket({ packetDir: rateLimitedPacket });
   assert.equal(
     rateLimited.completionEvidence.packetSupportsCompletion,
@@ -7652,6 +8893,7 @@ test('imported-body route candidates require exact path-plus-query drift classif
       dispositionEvidence: 'The imported-body legacy link was independently reviewed.'
     }];
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const classified = await validatePacket({ packetDir });
   assert.equal(
     classified.completionEvidence.packetSupportsCompletion,
@@ -7723,6 +8965,7 @@ test('noRedirectDisposition fails closed unless acceptance, owner, rationale, an
       evidence: 'evidence/redirect-approval.txt'
     };
   });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
   const strong = await validatePacket({ packetDir });
   assert.equal(
     strong.completionEvidence.packetSupportsCompletion,

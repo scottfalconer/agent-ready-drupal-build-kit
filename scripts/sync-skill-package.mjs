@@ -66,6 +66,8 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'parity-spec.md'), destination: join(skillRoot, 'references', 'parity-spec.md') },
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
+    { source: join(repoRoot, 'docs', 'disposable-assembly.md'), destination: join(skillRoot, 'references', 'disposable-assembly.md') },
+    { source: join(repoRoot, 'docs', 'disposable-reproduction.md'), destination: join(skillRoot, 'references', 'disposable-reproduction.md') },
     { source: join(repoRoot, 'docs', 'cookbook.md'), destination: join(skillRoot, 'references', 'cookbook.md') },
     ...['runtime.json', 'docker-compose.zz-agent-ready-verifier.yaml'].map((name) => ({
       source: join(repoRoot, 'assets', 'browser-runtime', name),
@@ -87,14 +89,59 @@ function copyPlan(assetsOnly) {
   if (!assetsOnly) {
     plan.push(
       {
+        source: join(repoRoot, 'bin', 'doctor.mjs'),
+        destination: join(skillRoot, 'scripts', 'doctor.mjs'),
+        executable: true
+      },
+      {
         source: join(repoRoot, 'bin', 'verify.mjs'),
         destination: join(skillRoot, 'scripts', 'verify.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'reconcile.mjs'),
+        destination: join(skillRoot, 'scripts', 'reconcile.mjs'),
         executable: true
       },
       {
         source: join(repoRoot, 'bin', 'verify-packet.mjs'),
         destination: join(skillRoot, 'scripts', 'verify-packet.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'review-handoff.mjs'),
+        destination: join(skillRoot, 'scripts', 'review-handoff.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'verify-assembly.mjs'),
+        destination: join(skillRoot, 'scripts', 'verify-assembly.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'verify-reproduction.mjs'),
+        destination: join(skillRoot, 'scripts', 'verify-reproduction.mjs'),
+        executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'assembly-contract.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-contract.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'assembly-fixtures.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-fixtures.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'assembly-persistence.mjs'),
+        destination: join(skillRoot, 'scripts', 'assembly-persistence.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'disposable-ddev.mjs'),
+        destination: join(skillRoot, 'scripts', 'disposable-ddev.mjs')
+      },
+      {
+        source: join(repoRoot, 'bin', 'reproduction-state.mjs'),
+        destination: join(skillRoot, 'scripts', 'reproduction-state.mjs')
       },
       {
         source: join(repoRoot, 'bin', 'state-fingerprint.mjs'),

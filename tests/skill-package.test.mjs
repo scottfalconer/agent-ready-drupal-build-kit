@@ -67,6 +67,7 @@ test('installable skill describes an in-place target and only installed runtime 
   assert.match(content, /^name: agent-ready-drupal-build-kit$/m);
   assert.match(content, /current project is the target/);
   assert.match(content, /scripts\/init-kit\.mjs/);
+  assert.match(content, /scripts\/reconcile\.mjs/);
   assert.match(content, /scripts\/verify\.mjs/);
   assert.match(content, /references\/build-contract\.md/);
   assert.match(content, /references\/output-inventory\.md/);
@@ -341,6 +342,22 @@ test('initializer creates a hash-bound brief packet without inventing a source s
     JSON.parse(readFileSync(join(root, 'review-packet', 'brief-acceptance.json'), 'utf8')).briefSha256,
     expectedHash
   );
+  for (const artifact of ['source-audit.json', 'parity-report.json']) {
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, 'review-packet', artifact), 'utf8')),
+      {
+        schemaVersion: 'public-kit.mode-disposition.1',
+        artifact,
+        buildMode: 'brief',
+        claimScope: 'complete-local-build-from-brief',
+        briefSha256: expectedHash,
+        status: 'not_applicable',
+        reason: artifact === 'source-audit.json'
+          ? 'Brief mode has no source site to audit. The preserved brief and accepted BR requirements are the source of truth.'
+          : 'Brief mode has no source site to compare. Completion is measured against the preserved brief and accepted BR requirements.'
+      }
+    );
+  }
   const agents = readFileSync(join(root, 'AGENTS.md'), 'utf8');
   assert.match(agents, /Build basis: `brief`/);
   assert.match(agents, /Source-site parity is not claimed/);
@@ -350,6 +367,7 @@ test('initializer creates a hash-bound brief packet without inventing a source s
   assert.equal(repeated.status, 0, repeated.stderr);
   assert.match(repeated.stdout, /AGENTS\.md: unchanged/);
   assert.match(repeated.stdout, /0 created, 22 preserved/);
+  assert.match(repeated.stdout, /Brief-only N\/A dispositions: 0 materialized/);
 
   const packetOnly = spawnSync(process.execPath, [
     join(skillRoot, 'scripts', 'verify.mjs'),
@@ -440,7 +458,7 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.doesNotMatch(agents, /\.\.\/.*(?:private\/)?tmp\/.*\.agents\/skills/);
   assert.doesNotMatch(agents, /\/Users\//);
 
-  for (const verifier of ['verify.mjs', 'verify-packet.mjs']) {
+  for (const verifier of ['verify.mjs', 'verify-packet.mjs', 'verify-assembly.mjs', 'verify-reproduction.mjs']) {
     const verifierPath = join(installedSkill, 'scripts', verifier);
     assert.equal(existsSync(verifierPath), true, verifier);
     assert.notEqual(statSync(verifierPath).mode & 0o111, 0, `${verifier} should be executable`);
@@ -482,7 +500,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(48 files\)/);
+  assert.match(result.stdout, /is in sync \(60 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -505,10 +523,17 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
       join(skillRoot, ...relativePath)
     )), `${relativePath.join('/')} drifted from the canonical runtime`);
   }
+  assert.ok(readFileSync(
+    join(repoRoot, 'bin', 'review-handoff.mjs')
+  ).equals(readFileSync(
+    join(skillRoot, 'scripts', 'review-handoff.mjs')
+  )), 'scripts/review-handoff.mjs drifted from the canonical runtime');
   for (const relativePath of [
+    ['scripts', 'reconcile.mjs'],
     ['scripts', 'browser-runtime-smoke.mjs'],
     ['scripts', 'setup-browser-runtime.sh'],
-    ['scripts', 'repair-browser-runtime.sh']
+    ['scripts', 'repair-browser-runtime.sh'],
+    ['scripts', 'review-handoff.mjs']
   ]) {
     assert.notEqual(
       statSync(join(skillRoot, ...relativePath)).mode & 0o111,
@@ -552,7 +577,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(48 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(60 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

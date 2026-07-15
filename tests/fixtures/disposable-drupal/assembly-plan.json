@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "public-kit.assembly-plan.1",
+  "assemblyId": "disposable_assembly_smoke",
+  "substratePlan": {
+    "path": "assembly-substrate-plan.json",
+    "sha256": "sha256:93a43f0d3011a396555a8d08e7b5e46d4a0c21c7e942d66cb119cdfedd38aefb"
+  },
+  "provenance": {
+    "path": "assembly-provenance.json",
+    "sha256": "sha256:570410e15c28efed7c568b61732a098ff6ea6c80953484fd517c7342284b2d1b"
+  },
+  "deletion": {
+    "policy": "provenance_owned_only"
+  },
+  "adapter": {
+    "protocol": "drush_assembly_contract_v2",
+    "source": {
+      "path": "scripts/site-assembly.php",
+      "sha256": "sha256:7ce6015e69b40ad2669e57c977cbbd7290ce16f186aa0ba81161101a549239df"
+    },
+    "failureProof": "verifier_controlled_restoration"
+  },
+  "extensionFixtures": {
+    "node": {
+      "status": "required",
+      "bundle": "proof"
+    },
+    "menu": {
+      "status": "required",
+      "menuName": "main"
+    },
+    "alias": {
+      "status": "required"
+    },
+    "view": {
+      "status": "required"
+    },
+    "canvas": {
+      "status": "required",
+      "pageEntityType": "canvas_page",
+      "pageBundle": "",
+      "componentConfigName": "canvas.component.block.system_branding_block"
+    },
+    "sitemap": {
+      "status": "required",
+      "configName": "simple_sitemap.sitemap.default"
+    }
+  }
+}
