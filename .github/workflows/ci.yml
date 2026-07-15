@@ -25,6 +25,62 @@ jobs:
       - name: Check package contents
         run: npm pack --dry-run --json
 
+  disposable-reproduction:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DDEV_NO_INSTRUMENTATION: "true"
+      DDEV_NO_TUI: "true"
+      DDEV_XDG_CONFIG_HOME: ${{ runner.temp }}/ddev-xdg
+      REPRODUCTION_FIXTURE: ${{ runner.temp }}/agent-ready-disposable-drupal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: ddev/github-action-setup-ddev@fdf2f5c97943bae638f31df6df86f1defa6210c0 # v1
+        with:
+          autostart: false
+          version: 1.25.3
+      - name: Create an independent exact-HEAD Drupal fixture
+        run: |
+          mkdir -p "$REPRODUCTION_FIXTURE"
+          cp -R tests/fixtures/disposable-drupal/. "$REPRODUCTION_FIXTURE/"
+          git -C "$REPRODUCTION_FIXTURE" init --initial-branch=main
+          git -C "$REPRODUCTION_FIXTURE" config user.name "Agent-ready reproduction CI"
+          git -C "$REPRODUCTION_FIXTURE" config user.email "reproduction-ci@example.invalid"
+          git -C "$REPRODUCTION_FIXTURE" add --all
+          git -C "$REPRODUCTION_FIXTURE" commit --message "Pinned Drupal reproduction fixture"
+      - name: Provision the working-target reference from declared inputs
+        run: |
+          cd "$REPRODUCTION_FIXTURE"
+          ddev start
+          ddev composer install --no-interaction --no-progress --prefer-dist
+          ddev drush site:install --existing-config --yes
+          ddev import-files --source=artifacts/canonical-files.tar.gz
+          ddev drush php:script scripts/import-canonical-content.php
+          ddev drush config:import --yes
+          ddev drush cache:rebuild
+      - name: Run the real disposable reproduction verifier
+        run: node bin/verify-reproduction.mjs --project "$REPRODUCTION_FIXTURE"
+      - name: Assert exact clone, state parity, isolation, and cleanup evidence
+        run: node tests/assert-disposable-reproduction-smoke.mjs "$REPRODUCTION_FIXTURE/review-packet/evidence/reproduction-verification.json"
+      - name: Upload the recorded reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: disposable-reproduction-evidence
+          path: ${{ env.REPRODUCTION_FIXTURE }}/review-packet/evidence/reproduction-verification.json
+          if-no-files-found: warn
+      - name: Remove the working-target DDEV project
+        if: always()
+        run: |
+          if [[ -d "$REPRODUCTION_FIXTURE/.ddev" ]]; then
+            cd "$REPRODUCTION_FIXTURE"
+            ddev delete --omit-snapshot --yes agent-ready-reproduction-ci
+          fi
+
   browser-runtime:
     needs: test
     runs-on: ubuntu-24.04

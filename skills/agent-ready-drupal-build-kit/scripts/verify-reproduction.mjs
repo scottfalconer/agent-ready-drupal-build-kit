@@ -107,6 +107,12 @@ function sourceSnapshot(execute, projectRoot, phase) {
     target: 'working'
   });
   if (!/^[a-f0-9]{40}$/i.test(head)) throw new Error('Working target HEAD is not a full Git object ID.');
+  const tree = commandOutput(execute, 'git', ['rev-parse', 'HEAD^{tree}'], {
+    cwd: projectRoot,
+    phase: `${phase}:tree`,
+    target: 'working'
+  });
+  if (!/^[a-f0-9]{40}$/i.test(tree)) throw new Error('Working target HEAD tree is not a full Git object ID.');
   const status = commandOutput(execute, 'git', ['status', '--porcelain=v1', '--untracked-files=all'], {
     cwd: projectRoot,
     phase: `${phase}:status`,
@@ -126,6 +132,7 @@ function sourceSnapshot(execute, projectRoot, phase) {
   const untrackedManifest = collectFileManifest(projectRoot, untrackedPaths);
   return {
     head: head.toLowerCase(),
+    tree: tree.toLowerCase(),
     statusSha256: sha256(status),
     dirty: Boolean(status),
     trackedWorktreeSha256: sha256(trackedDiff),
@@ -201,6 +208,7 @@ export function runDisposableReproduction({
   let reproductionComparison = emptyComparison();
   let workingTargetComparison = emptyComparison();
   let exactHeadClone = false;
+  let exactHeadRuntime = null;
   let completedRun = false;
 
   try {
@@ -235,9 +243,20 @@ export function runDisposableReproduction({
       planPath: validated.planPath,
       projectRoot: disposable.root
     });
-    const clonedRuntime = disposable.exactHeadRuntime;
+    const clonedHead = commandOutput(run, 'git', ['rev-parse', 'HEAD'], {
+      cwd: disposable.root,
+      phase: 'confirm-exact-head-clone',
+      target: 'disposable'
+    }).toLowerCase();
+    const clonedTree = commandOutput(run, 'git', ['rev-parse', 'HEAD^{tree}'], {
+      cwd: disposable.root,
+      phase: 'confirm-exact-tree-clone',
+      target: 'disposable'
+    }).toLowerCase();
+    exactHeadRuntime = disposable.exactHeadRuntime;
     exactHeadClone = (
-      sourceBefore.runtimeCode.fingerprint === clonedRuntime.fingerprint &&
+      sourceBefore.head === clonedHead &&
+      sourceBefore.tree === clonedTree &&
       sha256(validated.plan) === sha256(cloned.plan) &&
       sha256(validated.inputs) === sha256(cloned.inputs) &&
       canonicalJson(validated.routes) === canonicalJson(cloned.routes)
@@ -288,6 +307,7 @@ export function runDisposableReproduction({
 
   const sourceUnchanged = Boolean(sourceBefore && sourceAfter && (
     sourceBefore.head === sourceAfter.head &&
+    sourceBefore.tree === sourceAfter.tree &&
     sourceBefore.statusSha256 === sourceAfter.statusSha256 &&
     sourceBefore.trackedWorktreeSha256 === sourceAfter.trackedWorktreeSha256 &&
     sourceBefore.untrackedWorktree.fingerprint === sourceAfter.untrackedWorktree.fingerprint &&
@@ -317,10 +337,11 @@ export function runDisposableReproduction({
     runStatus: errors.length > 0 ? 'operational_failure' : completedRun ? (valid ? 'pass' : 'mismatch') : 'operational_failure',
     source: {
       head: sourceBefore?.head ?? '',
+      tree: sourceBefore?.tree ?? '',
       planPath: validated?.planPath ?? safeProjectRelativePath(planPath, 'Reproduction plan path'),
       planSha256: validated ? sha256(validated.plan) : '',
       exactHeadClone,
-      runtimeCodeFingerprint: sourceBefore?.runtimeCode?.fingerprint ?? ''
+      runtimeCodeFingerprint: exactHeadRuntime?.fingerprint ?? ''
     },
     declaredInputs: validated?.inputs ?? [],
     declaredPrimaryRouteCount: validated?.routes?.length ?? 0,
@@ -331,6 +352,8 @@ export function runDisposableReproduction({
       sourceUnchanged,
       headBefore: sourceBefore?.head ?? '',
       headAfter: sourceAfter?.head ?? '',
+      treeBefore: sourceBefore?.tree ?? '',
+      treeAfter: sourceAfter?.tree ?? '',
       gitStatusBeforeSha256: sourceBefore?.statusSha256 ?? '',
       gitStatusAfterSha256: sourceAfter?.statusSha256 ?? '',
       trackedWorktreeBeforeSha256: sourceBefore?.trackedWorktreeSha256 ?? '',

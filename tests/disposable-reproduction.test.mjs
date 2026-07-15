@@ -454,6 +454,48 @@ test('mocked end-to-end run proves exact-HEAD reproduction and working-target be
   }
 });
 
+test('generated working DDEV runtime stays outside exact HEAD but inside untouched proof', () => {
+  const { root } = fixture();
+  const generated = join(root, 'web', 'sites', 'default', 'settings.ddev.php');
+  mkdirSync(join(generated, '..'), { recursive: true });
+  writeFileSync(generated, '<?php // generated locally\n');
+  const spawn = (command, args, options) => {
+    if (command === 'git') return spawnSync(command, args, options);
+    if (command === 'ddev' && args[0] === 'describe') {
+      const name = generatedDdevName(options.cwd);
+      return { status: 0, stdout: JSON.stringify({ raw: { name, approot: options.cwd } }), stderr: '', signal: null };
+    }
+    if (command === 'ddev') return { status: 0, stdout: 'ok', stderr: '', signal: null };
+    throw new Error(`Unexpected mocked command: ${command}`);
+  };
+  try {
+    const stable = runDisposableReproduction({
+      captureState: () => emptyState(),
+      execute: createRecordedExecutor({ commandLog: [], spawn }),
+      projectRoot: root
+    });
+    assert.equal(stable.valid, true, JSON.stringify(stable.errors));
+    assert.equal(stable.source.exactHeadClone, true);
+    assert.equal(stable.source.head, git(root, ['rev-parse', 'HEAD']));
+    assert.equal(stable.source.tree, git(root, ['rev-parse', 'HEAD^{tree}']));
+
+    const changed = runDisposableReproduction({
+      captureState({ target }) {
+        if (target === 'disposable' && existsSync(generated)) rmSync(generated);
+        return emptyState();
+      },
+      execute: createRecordedExecutor({ commandLog: [], spawn }),
+      projectRoot: root
+    });
+    assert.equal(changed.valid, false);
+    assert.equal(changed.source.exactHeadClone, true);
+    assert.equal(changed.workingTargetProof.sourceUnchanged, false);
+    assert.equal(changed.workingTargetProof.untouched, false);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
 test('working-target proof binds dirty file bytes even when porcelain status text is unchanged', () => {
   const { root } = fixture();
   const note = join(root, 'maintainer-notes.txt');
