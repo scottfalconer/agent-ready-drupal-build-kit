@@ -176,18 +176,19 @@ function collectTemplateEnumRules(value, path = [], rules = new Map()) {
   return rules;
 }
 
-function structuredEnumRules(gates) {
+function structuredEnumRules(gates, errors) {
   const byFile = new Map();
   for (const file of arrayOrEmpty(gates?.reviewPacketFiles).filter((name) => name.endsWith('.json'))) {
     const templatePath = installedTemplatePath(file);
     if (!templatePath) {
+      errors.push(`${file} has no installed JSON template for structured enum validation.`);
       continue;
     }
     try {
       const template = JSON.parse(readFileSync(templatePath, 'utf8'));
       byFile.set(file, [...collectTemplateEnumRules(template).values()]);
     } catch {
-      // Template readability and JSON validity are covered by release-readiness tests.
+      errors.push(`${file} installed template must be readable valid JSON for structured enum validation.`);
     }
   }
   return byFile;
@@ -214,7 +215,7 @@ function valuesAtStructuredPath(value, path, index = 0, display = '') {
 }
 
 function validateStructuredEnums(gates, records, errors) {
-  for (const [file, rules] of structuredEnumRules(gates)) {
+  for (const [file, rules] of structuredEnumRules(gates, errors)) {
     const record = records[file];
     if (!isJsonObject(record)) {
       continue;
@@ -247,9 +248,13 @@ function visitArtifactGateIds(value, visit, path = '') {
   for (const [key, child] of Object.entries(value)) {
     const childPath = path ? `${path}.${key}` : key;
     if (key === 'gateId') {
-      visit(child, childPath);
-    } else if (key === 'gateIds' && Array.isArray(child)) {
-      child.forEach((gateId, index) => visit(gateId, `${childPath}[${index}]`));
+      visit(child, childPath, false);
+    } else if (key === 'gateIds') {
+      if (!Array.isArray(child)) {
+        visit(child, childPath, true);
+      } else {
+        child.forEach((gateId, index) => visit(gateId, `${childPath}[${index}]`, false));
+      }
     } else {
       visitArtifactGateIds(child, visit, childPath);
     }
@@ -259,7 +264,11 @@ function visitArtifactGateIds(value, visit, path = '') {
 function validateArtifactGateIds(gates, records, errors) {
   const knownGateIds = new Set(arrayOrEmpty(gates?.gates).map((gate) => gate?.id).filter(Boolean));
   for (const [file, record] of Object.entries(records)) {
-    visitArtifactGateIds(record, (value, path) => {
+    visitArtifactGateIds(record, (value, path, requiresArray) => {
+      if (requiresArray) {
+        errors.push(`${file} ${path} must be an array of canonical gate ids from gates.json.`);
+        return;
+      }
       if (typeof value === 'string' && value.trim() === '') {
         return;
       }
@@ -309,17 +318,21 @@ function gateFindingMap(gates, messages) {
 
 export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
   const findings = gateFindingMap(gates, messages);
+  const liveRunErrors = mode === 'live' ? (findings.get('G-VERIFY-02') ?? []) : [];
   return arrayOrEmpty(gates?.gates)
     .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
     .map((gate) => {
-      const errors = findings.get(gate.id) ?? [];
+      const gateErrors = findings.get(gate.id) ?? [];
+      const errors = gate.checkedBy === 'human' || liveRunErrors.length === 0
+        ? gateErrors
+        : [...new Set([...gateErrors, ...liveRunErrors])];
       const evaluated = mode === 'live'
         ? gate.checkedBy !== 'human'
         : PACKET_EXECUTED_GATE_IDS.has(gate.id);
-      const status = errors.length > 0
-        ? 'fail'
-        : gate.checkedBy === 'human'
-          ? 'human_review'
+      const status = gate.checkedBy === 'human'
+        ? 'human_review'
+        : errors.length > 0
+          ? 'fail'
           : evaluated
             ? 'pass'
             : 'not_evaluated';

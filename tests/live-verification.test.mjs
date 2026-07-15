@@ -6080,6 +6080,7 @@ test('structured artifacts reject unknown gate ids and ad hoc enum values', asyn
   });
   mutateJson(join(packetDir, 'browser-evidence.json'), (record) => {
     record.publicRouteChecks[0].visualComparison.status = 'mostly-pass';
+    record.publicRouteChecks[0].gateIds = 'G-ROUTE-01';
   });
 
   const report = await validatePacket({ packetDir });
@@ -6088,6 +6089,7 @@ test('structured artifacts reject unknown gate ids and ad hoc enum values', asyn
   assert.equal(report.valid, false);
   assert.equal(installedReport.valid, false);
   assert.match(report.errors.join('\n'), /canonical gate id from gates\.json/);
+  assert.match(report.errors.join('\n'), /gateIds must be an array of canonical gate ids/);
   assert.match(report.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
   assert.match(installedReport.errors.join('\n'), /visualComparison\.status must be one of: pass, needs-review, fail, blocked/);
 });
@@ -6125,6 +6127,21 @@ test('per-gate results distinguish packet execution, live execution, and human r
     [liveResults.get('G-MAINTAINER-01').status, liveResults.get('G-MAINTAINER-01').evaluatorCompleted],
     ['human_review', false]
   );
+
+  const failedLiveResults = new Map(
+    perGateResults(gates, ['G-VERIFY-02 Live target route verification failed.'], { mode: 'live' })
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(failedLiveResults.get('G-ROUTE-01').status, 'fail');
+  assert.match(failedLiveResults.get('G-ROUTE-01').errors.join('\n'), /Live target route verification failed/);
+  assert.equal(failedLiveResults.get('G-MAINTAINER-01').status, 'human_review');
+
+  const humanFindingResults = new Map(
+    perGateResults(gates, ['maintainer-review.md is incomplete.'])
+      .map((result) => [result.gateId, result])
+  );
+  assert.equal(humanFindingResults.get('G-MAINTAINER-01').status, 'human_review');
+  assert.match(humanFindingResults.get('G-MAINTAINER-01').errors.join('\n'), /is incomplete/);
 });
 
 test('independent completion claims require target-bound concrete check evidence', async () => {
