@@ -41,6 +41,16 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/init-kit.mjs --brief-fi
 
 If the skill is installed at another location, invoke `scripts/init-kit.mjs` from that skill directory. The initializer is idempotent: it refreshes only the kit's marked `AGENTS.md` block and creates only missing packet files. It preserves a brief as `review-packet/original-brief.md`, records its hash in `build-input.json`, and refuses to switch an existing packet between source and brief modes.
 
+Before applying a candidate Recipe or waiting for a complete packet, run the non-authoring doctor from the active DDEV agent:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs \
+  --recipe recipes/<candidate> \
+  --package drupal/<audited-candidate>
+```
+
+Repeat `--recipe` and `--package` only for candidates derived from the source audit or brief. The doctor records the installed substrate, first-route smoke, pinned browser runtime, Recipe manifest/config touch points, active-config overlap, and kit-executed Composer discovery in `review-packet/evidence/doctor.json`. It is diagnostic-only: it never applies a Recipe, intentionally changes Drupal content or configuration, writes a reviewer verdict, or authorizes completion. Bootstrap, HTTP, and browser checks may still warm caches or write ordinary runtime logs. Resolve failed stages and manually review every active-config touch point before applying a Recipe.
+
 Before changing the site, read these installed references completely:
 
 1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
@@ -74,8 +84,22 @@ Completion authority comes from the final verifier, not builder-authored `comple
 - The default verifier uses the setup-provisioned DDEV browser service, injects its pinned axe-core source into every primary route at desktop and mobile widths before other collector mutations, preserves the raw route-bound results plus managed runtime identity and execution boundary in its state-bound Chrome capture, and blocks on missing coverage, failed execution, or WCAG 2.2 A/AA violations regardless of packet-authored axe passes. Also retain structured dispositions for WCAG-tagged incomplete nodes and manual keyboard/focus/name checks for browser-reviewed routes. For anonymous source forms, preserve purpose/owner/outcome across audit, model, and browser evidence; exercise invalid and valid synthetic submissions; prove an outcome-appropriate handler; and record a vendor-neutral abuse-protection disposition. For collections with separate public details, verify a representative detail route renders its load-bearing fields and matches its declared owner or carries an evidenced deviation. Reject literal local-environment URLs in exported SEO defaults.
 - Store real packet-local evidence under `review-packet/evidence/`. A filename or authored boolean is not proof.
 - Fix agent-resolvable failures and repeat. Put only genuinely human-owned decisions in `open-decisions.md`.
-- A failing default verifier is a continuation signal, not a handoff condition. Read `agentContinuation` from `live-verification.json`; while `shouldContinue` is `true`, repair the listed agent-resolvable failures, refresh affected evidence, and rerun the verifier without waiting for human review. Pause only for a recorded external blocker or a genuinely owner-only decision. Human review is never required merely to let the agent continue.
+- A failing default verifier is a continuation signal, not a handoff condition. Read `agentContinuation` from `live-verification.json`; while `shouldContinue` is `true`, repair the listed agent-resolvable failures, refresh affected evidence, and rerun the verifier without waiting for human review. Pause only when the verifier emits `requiredAction: pause-and-report` and `agentMayPause: true`, which requires every remaining blocker to be verifier-confirmed external with attempted evidence, missing input, and a next action. Human review is never required merely to let the agent continue.
 - Treat every verifier-discovered reachable public source path as agent-resolvable work: declare it, implement it, and rerun. Builder-authored legacy, test/staging, or intentionally-drop records cannot waive a public route. A matching private or persistently unreachable boundary may clear after the verifier confirms the same boundary response twice; do not pause for human review of that machine-evidenced boundary.
+
+Before manually shaping a large live-surface reconciliation block, refresh the non-passing worksheet:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Explicitly disposition every row in `review-packet/live-surface-reconciliation-draft.json`. The suggested direction and candidate packet sections never count as authored evidence. Then materialize the resolved rows:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/reconcile.mjs --packet review-packet --materialize
+```
+
+Materialization reruns the live census and exits `2` without changing `drupal-readback.json` if any row is unresolved, invalidated, stale, or lacks the references/evidence required by the full verifier. It writes only the resolved `liveSurfaceReconciliation` block and never creates reviewer verdicts or completion authority.
 
 Run the live-target verifier by default:
 
@@ -85,7 +109,7 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet rev
 
 In source-site mode, this command first performs a verifier-owned source census from `sourceBaseUrl` under a source-only request budget and reconciles every discovered public path with the route matrix. In brief mode, source discovery is explicitly not applicable; the command instead validates the preserved brief hash, accepted `BR-###` requirements, target-route bindings, and independent requirement checks. In both modes it detects the current DDEV target; binds the packet to the target origin, Drupal `system.site` UUID, front-page setting, config-sync directory, and clean config status read from that runtime through Drush; independently requires real Git-tracked YAML; fetches accepted target routes; and derives completion from the live runtime plus underlying review evidence. Packet-only data and injected test runtimes cannot authorize completion. Exit `0` authorizes the typed claim (`complete-local-rebuild` or `complete-local-build-from-brief`), exit `2` means valid but incomplete, and exit `1` means packet or live-target validation failed.
 
-The live report always includes `agentContinuation`. Exit `1` or `2` produces `requiredAction: repair-and-reverify`, `shouldContinue: true`, and a concrete blocker list. Exit `0` on the lifecycle-verified current state produces `requiredAction: handoff`. Do not reinterpret an incomplete or invalid run as a reason to stop when the listed work is locally resolvable.
+The live report always includes `agentContinuation` and structured `completionBlockers`. Exit `1` or `2` produces `requiredAction: repair-and-reverify`, `shouldContinue: true`, and a concrete blocker list while any blocker remains agent-resolvable. An external-only result produces `status: externally_blocked`, `requiredAction: pause-and-report`, `agentMayPause: true`, and `shouldContinue: false`; it still blocks completion and handoff. Exit `0` on the lifecycle-verified current state produces `requiredAction: handoff`. Do not reinterpret an incomplete or invalid run as a reason to stop when the listed work is locally resolvable.
 
 The generated missing route, access walls, and rendered legal/privacy links use the verifier-wide HTTP request/task/deadline budget. Every application with controlled resources—including selector-only and attachment-only declarations—requires verifier-owned CDP capture in a fresh isolated context for every primary route under the browser route ceiling and aggregate deadline, regardless of enabled or `required` status. Packet-authored before-consent URLs remain diagnostic and cannot satisfy that machine gate.
 
@@ -132,6 +156,7 @@ This lifecycle does not require a Git commit, Canvas, a checkpoint after every e
 
 Everything required at runtime is inside this skill directory:
 
+- `scripts/doctor.mjs` performs non-authoring pre-baseline substrate, route, browser, Recipe, and explicit package-candidate diagnostics.
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
 - `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
 - `scripts/review-handoff.mjs` generates the deterministic, state- and byte-bound root handoff plus isolated independent/blind reviewer projections without writing reviewer output.
@@ -139,8 +164,10 @@ Everything required at runtime is inside this skill directory:
 - `scripts/repair-browser-runtime.sh` is the only supported host repair entrypoint and recreates only the browser service.
 - `scripts/verify.mjs` performs default live-target verification.
 - `scripts/verify-packet.mjs` performs structural packet linting only.
+- `scripts/verify-assembly.mjs` performs optional launch-only assembly convergence, extension-survival, and restoration proof in an exact-HEAD disposable DDEV clone; use `references/disposable-assembly.md` and never treat it as default handoff authority or a substitute for final-state reproduction.
+- `scripts/verify-reproduction.mjs` performs optional exact-HEAD disposable DDEV reproduction from a typed, digest-bound plan; run it from the DDEV host and treat its result as maintainer/launch evidence, not default handoff authority.
 - `gates.json` defines the stable gate and packet-file vocabulary.
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
 - `assets/browser-runtime/` contains the pinned add-on/image manifest and the narrow last-sorting DDEV override template.
-- `references/` contains the complete build contract, output inventory, parity specification, playbook, command cookbook, and companion-skill guidance.
+- `references/` contains the complete build contract, output inventory, parity specification, playbook, disposable assembly and reproduction contracts, command cookbook, and companion-skill guidance.

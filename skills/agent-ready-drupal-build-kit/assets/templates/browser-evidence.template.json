@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "public-kit.browser-evidence.1",
+  "schemaVersion": "public-kit.browser-evidence.2",
   "site": "",
   "checkedAt": "",
   "toolOrMethod": "",
@@ -20,6 +20,57 @@
         "name": "desktop | mobile | tablet | custom",
         "width": 0,
         "height": 0
+      },
+      "captureState": {
+        "id": "default",
+        "authority": "self_attested_capture_evidence",
+        "fixtureRevision": "",
+        "evidenceBindings": {
+          "sourceScreenshotSha256": "",
+          "targetScreenshotSha256": "",
+          "accessibilityReportSha256": ""
+        },
+        "interactionSteps": [
+          {
+            "action": "click | press | fill | select | scroll | wait_for",
+            "target": "",
+            "value": "",
+            "expectedState": ""
+          }
+        ],
+        "menuState": {
+          "toggleVisible": false,
+          "toggleSelector": "",
+          "controlledRegionSelector": "",
+          "requested": "not_applicable | closed | open",
+          "observed": "not_applicable | closed | open",
+          "observedExpanded": false,
+          "controlledRegionVisible": false
+        },
+        "consentState": {
+          "requested": "not_applicable | before_consent | accepted | rejected",
+          "observed": "not_applicable | before_consent | accepted | rejected"
+        },
+        "contentCountAssertions": [
+          {
+            "selector": "",
+            "expectedCount": 0,
+            "observedCount": 0,
+            "status": "pass | fail"
+          }
+        ],
+        "dynamicMasks": [
+          {
+            "selector": "",
+            "reason": "",
+            "observedRect": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            }
+          }
+        ]
       },
       "sourceScreenshot": "",
       "targetScreenshot": "",

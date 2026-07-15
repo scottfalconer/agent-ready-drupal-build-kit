@@ -8,7 +8,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validatePacket } from './verify-packet.mjs';
+import { perGateResults, validatePacket } from './verify-packet.mjs';
 import { reviewHandoffStateErrors } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
@@ -201,6 +201,7 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
   const files = [
     scriptPath,
     join(scriptDirectory, 'verify-packet.mjs'),
+    join(scriptDirectory, 'review-handoff.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
@@ -214,16 +215,42 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
   return collectFileManifest(kitRoot, files).fingerprint;
 }
 
+const REDACTED_QUERY_TOKEN_RE = /^\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000$/;
+const REDACTED_QUERY_TOKEN_GLOBAL_RE = /\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000/g;
+
+function redactedQuery(value) {
+  const query = String(value ?? '');
+  if (!query) return '';
+  const normalized = query.startsWith('?') ? query : `?${query}`;
+  return REDACTED_QUERY_TOKEN_RE.test(normalized)
+    ? normalized
+    : `?\u0000agent-ready-query-sha256:${sha256(normalized)}\u0000`;
+}
+
+function publicRedactedValue(value) {
+  if (typeof value === 'string') {
+    return value.replace(REDACTED_QUERY_TOKEN_GLOBAL_RE, '?query-sha256=$1');
+  }
+  if (Array.isArray(value)) {
+    return value.map(publicRedactedValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, publicRedactedValue(entry)])
+    );
+  }
+  return value;
+}
+
 function redactedUrl(value, baseUrl = undefined) {
   try {
     const url = baseUrl ? new URL(value, baseUrl) : new URL(value);
     url.username = '';
     url.password = '';
     url.hash = '';
-    if (url.search) {
-      url.search = `?query-sha256=${sha256(url.search)}`;
-    }
-    return url.href;
+    const search = redactedQuery(url.search);
+    url.search = '';
+    return `${url.href}${search}`;
   } catch {
     return '[invalid-url]';
   }
@@ -232,7 +259,7 @@ function redactedUrl(value, baseUrl = undefined) {
 function redactedPath(value, baseUrl) {
   try {
     const url = new URL(value, baseUrl);
-    return `${url.pathname}${url.search ? `?query-sha256=${sha256(url.search)}` : ''}`;
+    return `${url.pathname}${redactedQuery(url.search)}`;
   } catch {
     return '[invalid-path]';
   }
@@ -244,7 +271,7 @@ function redactQueryValuesInMessage(value) {
     (_match, prefix, rawQueryWithPunctuation) => {
       const [, rawQuery, punctuation = ''] = rawQueryWithPunctuation.match(/^(.*?)([),.;:]*)$/) ?? [];
       return rawQuery
-        ? `${prefix}?query-sha256=${sha256(`?${rawQuery}`)}${punctuation}`
+        ? `${prefix}${redactedQuery(rawQuery)}${punctuation}`
         : _match;
     }
   );
@@ -255,29 +282,28 @@ function sharedPacketDirName(absolutePacketDir) {
   const queryIndex = name.indexOf('?');
   return queryIndex === -1
     ? name
-    : `${name.slice(0, queryIndex)}?query-sha256=${sha256(name.slice(queryIndex))}`;
+    : `${name.slice(0, queryIndex)}${redactedQuery(name.slice(queryIndex))}`;
 }
 
-function sharedMessage(value, absolutePacketDir) {
+function sharedMessage(value, absolutePacketDir, { redactQueries = true } = {}) {
   const rawName = basename(absolutePacketDir);
   const sharedName = sharedPacketDirName(absolutePacketDir);
-  return redactQueryValuesInMessage(
-    String(value)
-      .replaceAll(absolutePacketDir, sharedName)
-      .replaceAll(rawName, sharedName)
-  );
+  const shared = String(value)
+    .replaceAll(absolutePacketDir, sharedName)
+    .replaceAll(rawName, sharedName);
+  return redactQueries ? redactQueryValuesInMessage(shared) : shared;
 }
 
-function sharedValue(value, absolutePacketDir) {
+function sharedValue(value, absolutePacketDir, options = {}) {
   if (typeof value === 'string') {
-    return sharedMessage(value, absolutePacketDir);
+    return sharedMessage(value, absolutePacketDir, options);
   }
   if (Array.isArray(value)) {
-    return value.map((entry) => sharedValue(entry, absolutePacketDir));
+    return value.map((entry) => sharedValue(entry, absolutePacketDir, options));
   }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, sharedValue(entry, absolutePacketDir)])
+      Object.entries(value).map(([key, entry]) => [key, sharedValue(entry, absolutePacketDir, options)])
     );
   }
   return value;
@@ -336,7 +362,7 @@ function sharedRouteCheck(route, absolutePacketDir) {
 }
 
 export function sharedBeforeConsentNetworkCapture(capture, absolutePacketDir) {
-  const shared = sharedValue(capture, absolutePacketDir);
+  const shared = publicRedactedValue(sharedValue(capture, absolutePacketDir));
   if (!capture?.captureFingerprint) {
     return shared;
   }
@@ -345,6 +371,21 @@ export function sharedBeforeConsentNetworkCapture(capture, absolutePacketDir) {
     targetOrigin: capture.targetOrigin,
     primaryRoutes: capture.primaryRoutes
   });
+  const fingerprintInput = { ...shared };
+  delete fingerprintInput.captureFingerprint;
+  return { ...shared, captureFingerprint: stateSha256(fingerprintInput) };
+}
+
+export function sharedGlobalChromeCapture(capture, absolutePacketDir) {
+  const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
+    capture?.queryPrivacy?.method === 'sha256' &&
+    capture?.queryPrivacy?.authoritative === true;
+  const shared = publicRedactedValue(sharedValue(capture, absolutePacketDir, {
+    redactQueries: !privacyBound
+  }));
+  if (!capture?.captureFingerprint) {
+    return shared;
+  }
   const fingerprintInput = { ...shared };
   delete fingerprintInput.captureFingerprint;
   return { ...shared, captureFingerprint: stateSha256(fingerprintInput) };
@@ -2370,7 +2411,7 @@ function ddevTargetUrl(cwd, environment = process.env) {
   return ddevTargetDescription(cwd, environment).primaryUrl;
 }
 
-function findDrupalDdevRoot(cwd) {
+export function findDrupalDdevRoot(cwd) {
   let candidate = resolve(cwd);
   while (true) {
     const configPath = join(candidate, '.ddev', 'config.yaml');
@@ -3553,7 +3594,7 @@ export function stateBoundRuntimeFacts(facts = {}) {
   };
 }
 
-function inspectDrupalLiveSurface(projectRoot, environment) {
+export function inspectDrupalLiveSurface(projectRoot, environment) {
   const result = runDrushResult(
     projectRoot,
     environment,
@@ -4431,28 +4472,115 @@ function sharedConfigSyncDirectory(value) {
   return path.split(/[/\\]+/).filter(Boolean).slice(-2).join('/');
 }
 
-function agentContinuation({
+function normalizedAgentBlocker(blocker, index) {
+  const value = typeof blocker === 'string' ? { message: blocker } : (blocker ?? {});
+  const message = String(value.message ?? '').trim();
+  if (!message) {
+    return null;
+  }
+  const requestedCode = String(value.code ?? '').trim();
+  const requestedOrigin = String(value.origin ?? '').trim();
+  const attemptedEvidence = [...new Set((Array.isArray(value.attemptedEvidence)
+    ? value.attemptedEvidence
+    : [])
+    .map((reference) => String(reference ?? '').trim())
+    .filter(Boolean))];
+  const missingInput = String(value.missingInput ?? '').trim();
+  const requestedNextAction = String(value.nextAction ?? '').trim();
+  const verifierOwnedOrigin =
+    requestedOrigin === 'live-verifier' ||
+    requestedOrigin === 'lifecycle-verifier' ||
+    requestedOrigin.startsWith('packet-verifier:') ||
+    requestedOrigin.startsWith('source-census-verifier:');
+  const verifierConfirmedExternal =
+    value.resolutionClass === 'external' &&
+    value.verifierConfirmedExternal === true &&
+    Boolean(requestedCode) &&
+    verifierOwnedOrigin &&
+    attemptedEvidence.length > 0 &&
+    Boolean(missingInput) &&
+    Boolean(requestedNextAction);
+  const resolutionClass = verifierConfirmedExternal ? 'external' : 'agent_resolvable';
+  return {
+    code: requestedCode || `unclassified.${index + 1}`,
+    origin: requestedOrigin || 'live-verifier',
+    resolutionClass,
+    message,
+    attemptedEvidence,
+    missingInput,
+    nextAction: requestedNextAction || (
+      resolutionClass === 'external'
+        ? 'Supply the missing external input, refresh affected evidence, and rerun the default live verifier.'
+        : 'Repair the failing check, refresh affected evidence, and rerun the default live verifier.'
+    )
+  };
+}
+
+export function agentContinuation({
   complete = false,
+  blockers = [],
   blockedReasons = [],
   claimLabel = 'complete-local-rebuild'
 } = {}) {
-  const reasons = [...new Set((Array.isArray(blockedReasons) ? blockedReasons : [])
-    .map((reason) => String(reason ?? '').trim())
-    .filter(Boolean))];
+  const normalized = [...(Array.isArray(blockers) ? blockers : []),
+    ...(Array.isArray(blockedReasons) ? blockedReasons : [])]
+    .map(normalizedAgentBlocker)
+    .filter(Boolean);
+  const unique = [];
+  const seen = new Set();
+  for (const blocker of normalized) {
+    const key = `${blocker.code}\u0000${blocker.message}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(blocker);
+    }
+  }
+  const externalOnly = !complete && unique.length > 0 &&
+    unique.every((blocker) => blocker.resolutionClass === 'external');
   return {
-    schemaVersion: 'public-kit.agent-continuation.1',
-    status: complete ? 'complete' : 'continue_required',
-    requiredAction: complete ? 'handoff' : 'repair-and-reverify',
-    shouldContinue: !complete,
+    schemaVersion: 'public-kit.agent-continuation.2',
+    status: complete ? 'complete' : externalOnly ? 'externally_blocked' : 'continue_required',
+    requiredAction: complete ? 'handoff' : externalOnly ? 'pause-and-report' : 'repair-and-reverify',
+    shouldContinue: !complete && !externalOnly,
+    agentMayPause: externalOnly,
     agentMayStop: complete,
     stopConditionMet: complete,
     humanReviewRequiredBeforeContinuing: false,
     externalBlockerMayPauseOnlyWhenRecorded: true,
-    blockedReasons: complete ? [] : reasons,
+    blockers: complete ? [] : unique,
+    blockedReasons: complete ? [] : unique.map((blocker) => blocker.message),
     instruction: complete
       ? `The lifecycle-verified ${claimLabel} machine bar passed; handoff may proceed.`
-      : 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off a partial build or wait for human review. Pause only for a recorded external blocker or a genuinely owner-only decision.'
+      : externalOnly
+        ? 'Pause and report the verifier-confirmed external blockers and their next actions. Do not claim completion or handoff. Resume the repair-and-reverify loop when the missing external input is available.'
+      : 'Continue autonomously: repair every agent-resolvable failure, refresh the evidence it affects, and rerun the default live verifier. Do not hand off or pause while any agent-resolvable blocker remains, even when other blockers are external. Do not wait for routine human review.'
   };
+}
+
+export function reconcileLifecycleContinuation(report, { baseCompletionAllowed = false } = {}) {
+  const lifecycleBlockers = baseCompletionAllowed
+    ? (Array.isArray(report?.currentStateBlockedReasons) ? report.currentStateBlockedReasons : [])
+      .map((message) => ({
+        code: 'lifecycle.current-state',
+        message,
+        nextAction: 'Classify, repair, or revert the current lifecycle state, then rerun the default live verifier.',
+        origin: 'lifecycle-verifier',
+        resolutionClass: 'agent_resolvable'
+      }))
+    : [];
+  report.completionBlockers = [
+    ...(Array.isArray(report?.completionBlockers) ? report.completionBlockers : []),
+    ...lifecycleBlockers
+  ];
+  report.completionBlockedReasons = report.completionBlockers
+    .map((blocker) => String(blocker?.message ?? '').trim())
+    .filter(Boolean);
+  report.agentContinuation = agentContinuation({
+    complete: report.currentSiteClaimAllowed === true,
+    claimLabel: report.claimScope,
+    blockers: report.completionBlockers
+  });
+  return report;
 }
 
 function pathIsInside(parent, child) {
@@ -4517,6 +4645,9 @@ function nonEmptyPacketFile(packetDir, reference, { requireFragment = false, evi
     return false;
   }
   try {
+    if (!safeExistingProjectDirectory(packetRoot, dirname(candidate)) || lstatSync(candidate).isSymbolicLink()) {
+      return false;
+    }
     const realPacketRoot = realpathSync(packetRoot);
     const realCandidate = realpathSync(candidate);
     return pathIsInside(realPacketRoot, realCandidate) && statSync(realCandidate).isFile() && statSync(realCandidate).size > 0;
@@ -4694,6 +4825,81 @@ function yamlFilesOnDisk(projectRoot, roots) {
   return [...files].sort(comparePortable);
 }
 
+const REGULAR_GIT_FILE_MODES = new Set(['100644', '100755']);
+
+function gitBlobObjectId(bytes, objectFormat) {
+  const context = createHash(objectFormat);
+  context.update(`blob ${bytes.length}\0`);
+  context.update(bytes);
+  return context.digest('hex');
+}
+
+export function yamlTreeMatchesHead(projectRoot, yamlFiles, relativeDirectories) {
+  if (!Array.isArray(yamlFiles) || !Array.isArray(relativeDirectories)) {
+    throw new TypeError('YAML files and config directories must be arrays.');
+  }
+  const normalizedYamlFiles = yamlFiles.map((path) => String(path).replaceAll('\\', '/'));
+  if (new Set(normalizedYamlFiles).size !== normalizedYamlFiles.length) {
+    return false;
+  }
+
+  const headOutput = execFileSync(
+    'git',
+    ['ls-tree', '-r', '-z', '--full-tree', 'HEAD', '--', ...relativeDirectories],
+    {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000
+    }
+  );
+  const headYamlEntries = headOutput
+    .split('\0')
+    .filter(Boolean)
+    .map((record) => {
+      const separator = record.indexOf('\t');
+      if (separator === -1) {
+        throw new Error('HEAD config tree returned malformed Git metadata.');
+      }
+      const [mode, type, objectId] = record.slice(0, separator).split(' ');
+      return {
+        mode,
+        objectId,
+        path: record.slice(separator + 1).replaceAll('\\', '/'),
+        type
+      };
+    })
+    .filter((entry) => /\.ya?ml$/i.test(entry.path))
+    .sort((left, right) => comparePortable(left.path, right.path));
+
+  const sortedYamlFiles = [...normalizedYamlFiles].sort(comparePortable);
+  if (
+    headYamlEntries.length !== sortedYamlFiles.length ||
+    headYamlEntries.some((entry, index) =>
+      entry.path !== sortedYamlFiles[index] ||
+      entry.type !== 'blob' ||
+      !REGULAR_GIT_FILE_MODES.has(entry.mode)
+    )
+  ) {
+    return false;
+  }
+
+  const objectFormat = execFileSync('git', ['rev-parse', '--show-object-format=storage'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000
+  }).trim();
+  if (!['sha1', 'sha256'].includes(objectFormat)) {
+    throw new Error(`Unsupported Git object format: ${objectFormat || '(missing)'}.`);
+  }
+
+  return headYamlEntries.every((entry) => {
+    const bytes = readFileSync(join(projectRoot, entry.path));
+    return gitBlobObjectId(bytes, objectFormat) === entry.objectId;
+  });
+}
+
 function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, configSplitDirectories = []) {
   const hostPath = hostConfigSyncPath(projectRoot, configSyncDirectory, drupalRoot);
   const splitPaths = [];
@@ -4741,17 +4947,6 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, con
     let matchesHead = false;
     if (yamlFiles.length > 0) {
       try {
-        const headOutput = execFileSync('git', ['ls-tree', '-r', '--name-only', 'HEAD', '--', ...relativeDirectories], {
-          cwd: projectRoot,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 10_000
-        });
-        const headYamlFiles = headOutput
-          .split(/\r?\n/)
-          .map((path) => path.trim())
-          .filter((path) => /\.ya?ml$/i.test(path))
-          .sort(comparePortable);
         const status = execFileSync(
           'git',
           ['status', '--porcelain=v1', '--untracked-files=all', '--', ...relativeDirectories],
@@ -4764,8 +4959,7 @@ function trackedConfigEvidence(projectRoot, configSyncDirectory, drupalRoot, con
         );
         matchesHead =
           status.length === 0 &&
-          allYamlFiles.length === headYamlFiles.length &&
-          allYamlFiles.every((path, index) => path === headYamlFiles[index]);
+          yamlTreeMatchesHead(projectRoot, allYamlFiles, relativeDirectories);
       } catch {
         matchesHead = false;
       }
@@ -5613,7 +5807,14 @@ function completionEvidenceTargetErrors({
     requiredOriginMatch(errors, 'pattern-map.json sourceSite', patternMap?.sourceSite, sourceOrigin);
   }
   requiredOriginMatch(errors, 'field-output-matrix.json site', fieldOutputMatrix?.site, targetOrigin);
-  requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
+  const briefParityNotApplicable = !sourceOrigin &&
+    parityReport?.schemaVersion === 'public-kit.mode-disposition.1' &&
+    parityReport?.artifact === 'parity-report.json' &&
+    parityReport?.buildMode === 'brief' &&
+    parityReport?.status === 'not_applicable';
+  if (!briefParityNotApplicable) {
+    requiredOriginMatch(errors, 'parity-report.json targetUrl', parityReport?.targetUrl, targetOrigin);
+  }
   requiredOriginMatch(errors, 'browser-evidence.json site', browserEvidence?.site, targetOrigin);
   requiredOriginMatch(errors, 'drupal-readback.json site', drupalReadback?.site, targetOrigin);
   requiredOriginMatch(errors, 'negative-route-consent.json site', negativeRouteConsent?.site, targetOrigin);
@@ -6476,6 +6677,7 @@ export async function verifyLive({
   assertVerificationPacketInputs(absolutePacketDir);
   const routeMatrixPath = join(absolutePacketDir, 'route-matrix.json');
   const packetReport = await validatePacket({ packetDir: absolutePacketDir });
+  const gates = JSON.parse(readFileSync(join(KIT_ROOT, 'gates.json'), 'utf8'));
   const briefMode = packetReport.buildMode === 'brief';
   const claimScope = briefMode ? 'complete-local-build-from-brief' : 'complete-local-rebuild';
   let routeMatrixText = '';
@@ -7074,17 +7276,17 @@ export async function verifyLive({
     ));
   const routeStateManifest = [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]
     .map((route) => ({
-      canonicalPath: normalizeRouteKey(route.actualMetadata?.canonicalUrl),
+      canonicalPath: normalizeRouteKey(publicRedactedValue(route.actualMetadata?.canonicalUrl)),
       criticalAssetManifest: route.criticalAssets?.manifest ?? [],
       criticalAssetManifestSha256: route.criticalAssets?.fingerprint ?? '',
-      finalPath: normalizeRouteKey(route.finalUrl),
+      finalPath: normalizeRouteKey(publicRedactedValue(route.finalUrl)),
       h1: route.actualH1 ?? '',
       initialStatus: route.initialStatus ?? 0,
       intrinsicSemanticsSha256: route.intrinsicSemantics?.fingerprint ?? '',
       metaDescriptionSha256: stateSha256(route.actualMetadata?.metaDescription ?? ''),
       noindex: route.actualMetadata?.noindex === true,
-      openGraphImagePath: normalizePath(route.actualMetadata?.openGraphImage),
-      path: normalizeRouteKey(route.requestTarget || route.targetPath),
+      openGraphImagePath: normalizePath(publicRedactedValue(route.actualMetadata?.openGraphImage)),
+      path: normalizeRouteKey(publicRedactedValue(route.requestTarget || route.targetPath)),
       routeKind: route.routeKind ?? '',
       status: route.finalStatus ?? 0,
       title: route.actualTitle ?? ''
@@ -7287,77 +7489,143 @@ export async function verifyLive({
     reviewHandoffStateValid;
   const completeLocalRebuildClaimAllowed = !briefMode && completionClaimAllowed;
   const completeLocalBuildFromBriefClaimAllowed = briefMode && completionClaimAllowed;
-  const completionBlockedReasons = [];
+  const completionBlockers = [];
+  const addCompletionBlocker = (code, message, options = {}) => {
+    completionBlockers.push({
+      attemptedEvidence: [],
+      missingInput: '',
+      nextAction: 'Repair the failing check, refresh affected evidence, and rerun the default live verifier.',
+      origin: 'live-verifier',
+      resolutionClass: 'agent_resolvable',
+      ...options,
+      code,
+      message
+    });
+  };
   if (!packetReport.valid) {
-    completionBlockedReasons.push('Packet validation failed.');
+    addCompletionBlocker('packet.validation', 'Packet validation failed.');
   }
   if (!liveTargetValid) {
-    completionBlockedReasons.push('Live target identity or route verification failed.');
+    addCompletionBlocker('target.validation', 'Live target identity or route verification failed.');
   }
   if (!briefMode && runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
-    completionBlockedReasons.push('Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.');
+    addCompletionBlocker(
+      'source.census',
+      'Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.'
+    );
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
-    completionBlockedReasons.push('Independent verification evidence does not support completion.');
+    addCompletionBlocker(
+      'packet.independent-verification',
+      'Independent verification evidence does not support completion.'
+    );
   }
   if (!packetReport.completionEvidence?.blindAdversarialReviewSupportsCompletion) {
-    completionBlockedReasons.push('Blind adversarial review evidence does not support completion.');
+    const externalBlockers = Array.isArray(packetReport.completionEvidence?.externalBlockers)
+      ? packetReport.completionEvidence.externalBlockers
+      : [];
+    if (packetReport.completionEvidence?.externalBlockersOnly === true && externalBlockers.length > 0) {
+      completionBlockers.push(...externalBlockers);
+    } else {
+      addCompletionBlocker(
+        'packet.blind-adversarial-review',
+        'Blind adversarial review evidence does not support completion.'
+      );
+      completionBlockers.push(...externalBlockers);
+    }
   }
   if (!packetReport.completionEvidence?.packetCompletionReady) {
-    completionBlockedReasons.push('Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.');
+    addCompletionBlocker(
+      'packet.completion-evidence',
+      'Required machine-checkable packet evidence is still template-like, unresolved, or incomplete.'
+    );
+  }
+  for (const error of verifierOwnedAxeErrors) {
+    addCompletionBlocker('accessibility.axe', error);
   }
   if (!reviewHandoffStateValid) {
-    completionBlockedReasons.push(...(
-      reviewHandoffBindingErrors.length > 0
-        ? reviewHandoffBindingErrors
-        : ['A state-bound review handoff has not been completed.']
-    ));
+    const handoffBlockers = reviewHandoffBindingErrors.length > 0
+      ? reviewHandoffBindingErrors
+      : ['A state-bound review handoff has not been completed.'];
+    for (const error of handoffBlockers) {
+      addCompletionBlocker('review-handoff.state', error);
+    }
   }
-  completionBlockedReasons.push(...verifierOwnedAxeErrors);
   const runtimeDrushCommandFailures = Array.isArray(inspectedDrupalRuntime.drushCommandFailures)
     ? inspectedDrupalRuntime.drushCommandFailures.filter(Boolean)
     : [];
   for (const failure of runtimeDrushCommandFailures) {
-    completionBlockedReasons.push(`Drush runtime inspection command failed: ${failure}`);
+    addCompletionBlocker('runtime.drush', `Drush runtime inspection command failed: ${failure}`);
   }
   if (inspectedDrupalRuntime.confirmed !== true || !drupalRuntimeSiteUuidMatches) {
     // A failed identity readback command must never be reported as an identity mismatch.
     if (inspectedDrupalRuntime.identityReadbackFailed !== true) {
-      completionBlockedReasons.push('Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.');
+      addCompletionBlocker(
+        'runtime.site-uuid',
+        'Current DDEV Drupal runtime identity does not match drupal-readback.json siteUuid.'
+      );
     }
   }
   if (!drupalRuntimeTargetMatches) {
-    completionBlockedReasons.push('Current DDEV runtime base URL does not match the live target origin.');
+    addCompletionBlocker(
+      'runtime.target-origin',
+      'Current DDEV runtime base URL does not match the live target origin.'
+    );
   }
   if (!drupalRuntimeFrontPageMatches) {
-    completionBlockedReasons.push('Current DDEV front-page setting does not match drupal-readback.json.');
+    addCompletionBlocker(
+      'runtime.front-page',
+      'Current DDEV front-page setting does not match drupal-readback.json.'
+    );
   }
   if (!drupalRuntimeConfigSyncMatches) {
-    completionBlockedReasons.push('Current DDEV config-sync directory does not match drupal-readback.json.');
+    addCompletionBlocker(
+      'runtime.config-sync-directory',
+      'Current DDEV config-sync directory does not match drupal-readback.json.'
+    );
   }
   if (!drupalRuntimeConfigStatusClean) {
-    completionBlockedReasons.push('Current DDEV config status is not clean or could not be verified.');
+    addCompletionBlocker(
+      'runtime.config-status',
+      'Current DDEV config status is not clean or could not be verified.'
+    );
   }
   if (!drupalRuntimeConfigSyncTracked) {
-    completionBlockedReasons.push('Current DDEV config-sync and configured Config Split directories do not contain complete Git-tracked YAML evidence.');
+    addCompletionBlocker(
+      'runtime.config-tracking',
+      'Current DDEV config-sync and configured Config Split directories do not contain complete Git-tracked YAML evidence.'
+    );
   }
   if (!drupalRuntimeConfigSyncMatchesHead) {
-    completionBlockedReasons.push(
+    addCompletionBlocker(
+      'runtime.config-head',
       'Current DDEV config-sync YAML does not match HEAD; commit or remove staged, modified, deleted, untracked, or ignored sync YAML before completion.'
     );
   }
   if (!drupalRuntimeTrackedConfigReadbackMatches) {
-    completionBlockedReasons.push('Current Git-tracked config evidence does not match drupal-readback.json.');
+    addCompletionBlocker(
+      'runtime.config-readback',
+      'Current Git-tracked config evidence does not match drupal-readback.json.'
+    );
   }
   if (!buildStateReady) {
-    completionBlockedReasons.push(...stateBlockers);
+    for (const blocker of stateBlockers) {
+      addCompletionBlocker('state.fingerprint', blocker);
+    }
   }
   if (!drupalRuntimeSeoUrlsPortable) {
-    completionBlockedReasons.push('Exported SEO configuration contains literal local-environment URLs; use request-aware Drupal tokens or managed media tokens.');
+    addCompletionBlocker(
+      'runtime.seo-portability',
+      'Exported SEO configuration contains literal local-environment URLs; use request-aware Drupal tokens or managed media tokens.'
+    );
   }
   if (!runtimeAuthoritativeForCompletion) {
-    completionBlockedReasons.push('Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.');
+    addCompletionBlocker(
+      'runtime.non-authoritative',
+      'Injected Drupal runtime evidence is non-authoritative and cannot authorize completion.'
+    );
   }
+  const completionBlockedReasons = completionBlockers.map((blocker) => blocker.message);
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
@@ -7421,20 +7689,28 @@ export async function verifyLive({
     beforeConsentNetworkCapture,
     absolutePacketDir
   );
-  const globalChromeCaptureSummary = captureSummary(globalChromeCapture);
+  const sharedGlobalChrome = sharedGlobalChromeCapture(globalChromeCapture, absolutePacketDir);
+  const globalChromeCaptureSummary = captureSummary(sharedGlobalChrome);
   const sharedConsentReconciliation = sharedValue(consentReconciliation, absolutePacketDir);
   if (sharedConsentReconciliation.authoritativeBeforeConsentCapture === true) {
     sharedConsentReconciliation.beforeConsentCaptureFingerprint = sharedBeforeConsentCapture.captureFingerprint;
   }
+  const liveGateFindings = [
+    ...sharedPacketReport.errors,
+    ...(sharedPacketReport.completionEvidence?.packetCompletionBlockedReasons ?? []),
+    ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
+    ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
+  ];
 
-  return {
-    schemaVersion: 'public-kit.live-verification.1',
+  return publicRedactedValue({
+    schemaVersion: 'public-kit.live-verification.2',
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope,
     productionReadinessEvaluated: false,
     launchReady: false,
     verificationMode: 'live-target-and-packet',
+    gateResults: perGateResults(gates, liveGateFindings, { mode: 'live' }),
     packetDir: sharedPacketDirName(absolutePacketDir),
     target: target
       ? {
@@ -7468,7 +7744,7 @@ export async function verifyLive({
     routeChecks: routeChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     sourceSurfaceCensus: sharedValue(sourceSurfaceCensus, absolutePacketDir),
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
-    globalChromeCapture,
+    globalChromeCapture: sharedGlobalChrome,
     globalChromeCaptureSummary,
     verifierOwnedAccessibility: {
       authority: 'verifier-owned-global-chrome',
@@ -7534,13 +7810,14 @@ export async function verifyLive({
     agentContinuation: agentContinuation({
       complete: completionClaimAllowed,
       claimLabel: claimScope,
-      blockedReasons: completionBlockedReasons
+      blockers: completionBlockers
     }),
+    completionBlockers,
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
     errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
     warnings: sharedPacketReport.warnings
-  };
+  });
 }
 
 async function main() {
@@ -7591,14 +7868,7 @@ async function main() {
           report.lifecycle.currentStateClassification?.kind === 'unclassified'
         ? ['Current state differs from the latest lifecycle anchor and has no classified repair or extension; revert it or begin with explicit --adopt-current classification.']
         : ['Current derived state is not yet verified against its lifecycle baseline or checkpoint.'];
-    report.agentContinuation = agentContinuation({
-      complete: report.currentSiteClaimAllowed === true,
-      claimLabel: report.claimScope,
-      blockedReasons: [
-        ...report.completionBlockedReasons,
-        ...report.currentStateBlockedReasons
-      ]
-    });
+    reconcileLifecycleContinuation(report, { baseCompletionAllowed: completionClaimAllowed });
   }
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);

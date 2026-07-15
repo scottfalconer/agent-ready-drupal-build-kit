@@ -52,7 +52,9 @@
         "disposition": "accepted_out_of_scope | external_blocker",
         "rationale": "",
         "acceptedBy": "",
-        "evidence": []
+        "evidence": [],
+        "missingInput": "",
+        "nextAction": ""
       }
     ],
     "notes": ""
@@ -108,7 +110,9 @@
       "status": "open | fixed | accepted_out_of_scope | external_blocker",
       "resolvedByReviewPassId": "",
       "acceptedBy": "",
-      "acceptedReason": ""
+      "acceptedReason": "",
+      "missingInput": "",
+      "nextAction": ""
     }
   ],
   "reviewPasses": [

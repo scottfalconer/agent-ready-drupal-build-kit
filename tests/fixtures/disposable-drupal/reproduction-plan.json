@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "public-kit.reproduction-plan.1",
+  "mode": "clean_install_config_import",
+  "dependencies": {
+    "adapter": "ddev_composer_install",
+    "lockFile": {
+      "path": "composer.lock",
+      "sha256": "sha256:26c241146a6c85ec0de062566eafc9a9c8c0d338347431c8f36c47422bf67266"
+    }
+  },
+  "trackedConfig": {
+    "path": "config/sync",
+    "sha256": "sha256:65e103d36304de99b29336b85499c842d0ceae528b0cc1288d21a8b1c820f07d"
+  },
+  "content": {
+    "adapter": "drush_php_script",
+    "source": {
+      "path": "scripts/import-canonical-content.php",
+      "sha256": "sha256:0b662ca3db7398b727101e3aec1d32b301f36d8edbd29c6d3e8cfa9c62728b54"
+    }
+  },
+  "files": {
+    "adapter": "ddev_import_files_archive",
+    "source": {
+      "path": "artifacts/canonical-files.tar.gz",
+      "sha256": "sha256:472974ed204a4165d8aba50c20a1950aa7cd8b2860082e2e534f22e171872859"
+    }
+  }
+}

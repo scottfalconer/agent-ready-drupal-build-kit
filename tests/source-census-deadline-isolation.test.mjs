@@ -15,20 +15,25 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 
-test('verifier fingerprint binds the executable vendored WebSocket transport and its integrity record', () => {
+test('verifier fingerprint binds handoff validation and the executable vendored WebSocket transport', () => {
   const kitRoot = mkdtempSync(join(tmpdir(), 'verifier-fingerprint-'));
   const scriptPath = join(kitRoot, 'bin', 'verify.mjs');
   const vendorRoot = join(kitRoot, 'vendor', 'ws', '8.21.0');
   mkdirSync(dirname(scriptPath), { recursive: true });
   mkdirSync(vendorRoot, { recursive: true });
   writeFileSync(scriptPath, 'fixture verifier');
+  writeFileSync(join(dirname(scriptPath), 'review-handoff.mjs'), 'export const handoff = "first";\n');
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
   writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "first";\n');
 
   const before = verifierFingerprint({ kitRoot, scriptPath });
+  writeFileSync(join(dirname(scriptPath), 'review-handoff.mjs'), 'export const handoff = "second";\n');
+  const afterHandoffChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterHandoffChange, before);
+
   writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "second";\n');
   const afterBundleChange = verifierFingerprint({ kitRoot, scriptPath });
-  assert.notEqual(afterBundleChange, before);
+  assert.notEqual(afterBundleChange, afterHandoffChange);
 
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
   assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterBundleChange);
