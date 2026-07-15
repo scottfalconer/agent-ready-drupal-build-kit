@@ -1068,7 +1068,14 @@ function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
       allowedInputs: {
         credentialLabels: [],
         files: independentFiles,
-        urls: [targetBaseUrl, `${targetOrigin}/admin`, routeMatrix.sourceBaseUrl].filter(Boolean)
+        urls: [...new Set([
+          `${targetOrigin}/`,
+          ...primaryRoutes.map((route) => route.targetUrl),
+          `${targetOrigin}/admin`,
+          ...(buildInput.mode === 'source_site'
+            ? [`${new URL(routeMatrix.sourceBaseUrl).origin}/`]
+            : [])
+        ])].sort()
       },
       excludedInputs: [
         'builder final summary',

@@ -10,10 +10,12 @@ import {
   reviewHandoffManifestErrors,
   reviewHandoffInputFileBindings,
   reviewHandoffPreliminaryPacketFingerprint,
+  reviewHandoffProjectionDigest,
   reviewHandoffProjectionErrors,
   reviewHandoffReference,
   reviewHandoffReviewerErrors,
   reviewHandoffStateErrors,
+  sealReviewHandoff,
   sealReviewHandoffBundle,
   writeReviewHandoff
 } from '../bin/review-handoff.mjs';
@@ -148,6 +150,18 @@ function reviewerRecords(manifest, projections) {
     }))
   };
   return { blind, independent };
+}
+
+function resealProjectionBundle(bundle, kind) {
+  const projections = structuredClone(bundle.projections);
+  let manifest = structuredClone(bundle.manifest);
+  projections[kind].projectionDigest = reviewHandoffProjectionDigest(projections[kind]);
+  manifest.reviewerProjections[kind].digest = projections[kind].projectionDigest;
+  manifest = sealReviewHandoff(manifest);
+  for (const projection of Object.values(projections)) {
+    projection.handoff = reviewHandoffReference(manifest.handoffDigest);
+  }
+  return { manifest, projections };
 }
 
 function allKeys(value, result = []) {
@@ -313,6 +327,61 @@ test('final reviewer validation rediscovers the complete input membership as wel
     declaredPacketFiles
   });
   assert.match(omittedErrors.independent.join('\n'), new RegExp(`input added after handoff.*${omittedPath.replaceAll('.', '\\.')}`, 'i'));
+});
+
+test('independent handoff rejects duplicate bindings, widened URLs, and incomplete reviewed membership', () => {
+  const duplicateFixture = fixtureProject();
+  const duplicateComplete = writeReviewHandoff({ project: duplicateFixture.projectRoot });
+  const duplicateBinding = duplicateComplete.projections.independent.allowedInputs.files[0];
+  duplicateComplete.projections.independent.allowedInputs.files.unshift({
+    ...duplicateBinding,
+    size: duplicateBinding.size + 1,
+    sha256: `sha256:${'f'.repeat(64)}`
+  });
+  const duplicate = resealProjectionBundle(duplicateComplete, 'independent');
+  const duplicateRecords = reviewerRecords(duplicate.manifest, duplicate.projections);
+  const declaredPacketFiles = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8')).reviewPacketFiles;
+  const duplicateErrors = reviewHandoffReviewerErrors({
+    manifest: duplicate.manifest,
+    projections: duplicate.projections,
+    independentVerification: duplicateRecords.independent,
+    blindReview: duplicateRecords.blind,
+    packetDir: duplicateFixture.packetDir,
+    declaredPacketFiles
+  });
+  assert.match(duplicateErrors.independent.join('\n'), /unique paths|reviewerInputFingerprint|canonical allowed input list/i);
+
+  const widenedFixture = fixtureProject();
+  const widenedComplete = writeReviewHandoff({ project: widenedFixture.projectRoot });
+  widenedComplete.projections.independent.allowedInputs.urls = [
+    ...widenedComplete.projections.independent.allowedInputs.urls,
+    'https://builder-summary.example/'
+  ].sort();
+  const widened = resealProjectionBundle(widenedComplete, 'independent');
+  const widenedRecords = reviewerRecords(widened.manifest, widened.projections);
+  const widenedErrors = reviewHandoffReviewerErrors({
+    manifest: widened.manifest,
+    projections: widened.projections,
+    independentVerification: widenedRecords.independent,
+    blindReview: widenedRecords.blind,
+    packetDir: widenedFixture.packetDir,
+    declaredPacketFiles
+  });
+  assert.match(widenedErrors.independent.join('\n'), /URLs do not exactly match/i);
+
+  const incompleteFixture = fixtureProject();
+  const incomplete = writeReviewHandoff({ project: incompleteFixture.projectRoot });
+  const incompleteRecords = reviewerRecords(incomplete.manifest, incomplete.projections);
+  incompleteRecords.independent.artifactsReviewed = [];
+  const incompleteErrors = reviewHandoffReviewerErrors({
+    manifest: incomplete.manifest,
+    projections: incomplete.projections,
+    independentVerification: incompleteRecords.independent,
+    blindReview: incompleteRecords.blind,
+    packetDir: incompleteFixture.packetDir,
+    declaredPacketFiles
+  });
+  assert.match(incompleteErrors.independent.join('\n'), /artifactsReviewed must exactly match every file/i);
 });
 
 test('reviewer target and primary-route URLs stay bound to the root target origin', () => {

@@ -1018,6 +1018,18 @@ function allowedInputErrors(value, kind, path, manifest) {
       errors.push(`${path}.files must be an array.`);
     } else {
       allowed.files.forEach((binding, index) => errors.push(...fileBindingErrors(binding, `${path}.files[${index}]`)));
+      const filePaths = allowed.files.map((binding) => String(binding?.path ?? ''));
+      if (new Set(filePaths).size !== filePaths.length) {
+        errors.push(`${path}.files must use unique paths.`);
+      }
+      const sortedFiles = [...allowed.files].sort((left, right) => comparePortable(left?.path, right?.path));
+      try {
+        if (canonicalJson(allowed.files) !== canonicalJson(sortedFiles)) {
+          errors.push(`${path}.files must use canonical path order.`);
+        }
+      } catch (error) {
+        errors.push(`${path}.files cannot be canonically validated: ${error.message}`);
+      }
       if (allowed.files.length > MAX_HANDOFF_FILES) errors.push(`${path}.files exceeds the ${MAX_HANDOFF_FILES}-file limit.`);
       const total = allowed.files.reduce((sum, binding) => sum + (Number.isSafeInteger(binding?.size) ? binding.size : 0), 0);
       if (total > MAX_HANDOFF_TOTAL_BYTES) errors.push(`${path}.files exceeds the ${MAX_HANDOFF_TOTAL_BYTES}-byte aggregate limit.`);
@@ -1028,6 +1040,12 @@ function allowedInputErrors(value, kind, path, manifest) {
       const normalized = new Set();
       for (const [index, url] of allowed.urls.entries()) {
         try { normalized.add(normalizedUrl(url, `${path}.urls[${index}]`)); } catch (error) { errors.push(error.message); }
+      }
+      if (
+        normalized.size !== allowed.urls.length ||
+        canonicalJson(allowed.urls) !== canonicalJson([...normalized].sort(comparePortable))
+      ) {
+        errors.push(`${path}.urls must be unique canonical URLs in stable order.`);
       }
       if (boundTargetOrigin) {
         for (const required of [`${boundTargetOrigin}/`, `${boundTargetOrigin}/admin`]) {
@@ -1125,6 +1143,15 @@ export function reviewHandoffProjectionErrors(projection, kind, manifest) {
   ) {
     errors.push(`${path} does not match its review-handoff.json projection reference.`);
   }
+  if (kind === 'independent' && Array.isArray(projection?.allowedInputs?.files)) {
+    try {
+      if (reviewerInputFingerprint(projection.allowedInputs.files) !== manifest?.binding?.reviewerInputFingerprint) {
+        errors.push(`${path}.allowedInputs.files reviewerInputFingerprint does not match review-handoff.json.`);
+      }
+    } catch (error) {
+      errors.push(`${path}.allowedInputs.files reviewerInputFingerprint cannot be validated: ${error.message}`);
+    }
+  }
   return uniqueStrings(errors);
 }
 
@@ -1208,9 +1235,51 @@ function revalidateIndependentFiles({ manifest, projections, packetDir, declared
       errors.push(`Independent review-handoff projection contains an input no longer present in the declared roots: ${binding.path}.`);
     }
   }
+  if (canonicalJson(files) !== canonicalJson(current)) {
+    errors.push('Independent review-handoff projection files do not exactly match the current canonical allowed input list.');
+  }
   const currentFingerprint = reviewerInputFingerprint(current);
   if (currentFingerprint !== manifest.binding.reviewerInputFingerprint) {
     errors.push('Review handoff reviewerInputFingerprint no longer matches the current complete allowed input set and bytes.');
+  }
+  return uniqueStrings(errors);
+}
+
+function revalidateIndependentUrls({ manifest, projection, packetDir }) {
+  const errors = [];
+  let roots;
+  try {
+    roots = projectRootForPacket(manifest, packetDir);
+  } catch (error) {
+    return [error.message];
+  }
+  try {
+    const routeMatrix = readJson(join(roots.absolutePacketDir, 'route-matrix.json'), 'route-matrix.json');
+    const targetOrigin = exactOrigin(routeMatrix.targetBaseUrl, 'route-matrix.json targetBaseUrl');
+    if (targetOrigin !== manifest.binding.targetOrigin) {
+      errors.push('route-matrix.json targetBaseUrl no longer matches the review-handoff target origin.');
+    }
+    const targetUrls = (Array.isArray(routeMatrix.primaryRoutes) ? routeMatrix.primaryRoutes : [])
+      .map((route, index) => {
+        const targetPath = String(route?.targetPath ?? '').trim();
+        if (!targetPath.startsWith('/')) {
+          throw new Error(`route-matrix.json primaryRoutes[${index}].targetPath must start with /.`);
+        }
+        return new URL(targetPath, targetOrigin).href;
+      });
+    const expected = uniqueStrings([
+      `${targetOrigin}/`,
+      ...targetUrls,
+      `${targetOrigin}/admin`,
+      ...(manifest.binding.buildMode === 'source_site'
+        ? [`${exactOrigin(routeMatrix.sourceBaseUrl, 'route-matrix.json sourceBaseUrl')}/`]
+        : [])
+    ]);
+    if (canonicalJson(projection?.allowedInputs?.urls) !== canonicalJson(expected)) {
+      errors.push('Independent review-handoff projection URLs do not exactly match the current target, admin, primary-route, and source input set.');
+    }
+  } catch (error) {
+    errors.push(error.message);
   }
   return uniqueStrings(errors);
 }
@@ -1270,6 +1339,13 @@ export function reviewHandoffReviewerErrors({
       declaredPacketFiles
     }));
   }
+  if (independent.length === 0) {
+    independent.push(...revalidateIndependentUrls({
+      manifest,
+      projection: projections.independent,
+      packetDir
+    }));
+  }
   if (blind.length === 0) {
     blind.push(...revalidateBlindFiles({
       manifest,
@@ -1282,12 +1358,20 @@ export function reviewHandoffReviewerErrors({
     independent.push(...referenceErrors(independentVerification, manifest, 'independent-verification.json'));
     const independentInputs = projections.independent.allowedInputs;
     const allowedIndependentFiles = new Set(independentInputs.files.map((binding) => binding.path));
-    for (const file of Array.isArray(independentVerification?.artifactsReviewed)
-      ? independentVerification.artifactsReviewed
-      : []) {
-      if (!allowedIndependentFiles.has(String(file))) {
-        independent.push(`independent-verification.json reviewed disallowed input ${String(file)}.`);
+    const artifactsReviewed = Array.isArray(independentVerification?.artifactsReviewed)
+      ? independentVerification.artifactsReviewed.map((file) => String(file).trim())
+      : null;
+    for (const file of artifactsReviewed ?? []) {
+      if (!allowedIndependentFiles.has(file)) {
+        independent.push(`independent-verification.json reviewed disallowed input ${file}.`);
       }
+    }
+    if (
+      !artifactsReviewed ||
+      artifactsReviewed.length !== allowedIndependentFiles.size ||
+      !sameStringSet(artifactsReviewed, [...allowedIndependentFiles])
+    ) {
+      independent.push('independent-verification.json artifactsReviewed must exactly match every file in the independent review-handoff projection.');
     }
     const allowedIndependentUrls = new Set();
     for (const url of independentInputs.urls) {
