@@ -27,6 +27,8 @@ const FILE_ARCHIVE_RE = /\.(?:zip|tgz|tar|tar\.gz|tar\.bz2|tar\.xz)$/i;
 const OWNERSHIP_MARKER = '.agent-ready-disposable-owner.json';
 const MAX_REPRODUCTION_ROUTES = 256;
 const MAX_DDEV_CONFIG_BYTES = 1024 * 1024;
+const MAX_FAILURE_DETAIL_CHARACTERS = 240;
+const DDEV_UPGRADE_NOTICE_LINE = /^(?:Upgraded DDEV v\d+(?:\.\d+)+ is available!|Please visit https:\/\/github\.com\/ddev\/ddev\/releases\/\S*|to get the upgrade\.|For upgrade help see|https:\/\/docs\.ddev\.com\/.*\/ddev-upgrade\/?)$/i;
 const SOURCE_DDEV_ROOT_FIELDS = new Set([
   'additional_fqdns',
   'additional_hostnames',
@@ -47,6 +49,41 @@ function comparePortable(left, right) {
   const a = String(left);
   const b = String(right);
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Select one useful, bounded, secret-redacted command failure line. */
+export function boundedFailureDetail(result) {
+  const stderr = String(result?.stderr || '');
+  const errorMessage = String(result?.error?.message || '');
+  if (!stderr.trim() && !errorMessage.trim()) return '';
+  const normalizeLines = (value) => value.split(/\r?\n/)
+    .map((line) => line
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .trim())
+    .filter(Boolean);
+  const stderrLines = normalizeLines(stderr)
+    .filter((line) => !DDEV_UPGRADE_NOTICE_LINE.test(line))
+    .filter((line) => !/Permission to beam up\?/i.test(line));
+  if (/Permission to beam up\?/i.test(stderr)) {
+    stderrLines.push('DDEV required a noninteractive usage-statistics choice.');
+  }
+  const candidates = [...stderrLines, ...normalizeLines(errorMessage)];
+  if (candidates.length === 0) return '';
+  const decisive = candidates.filter((line) => /\b(?:cannot|denied|e(?:acces|connrefused|noent|timedout)|error|fail(?:ed|ure)?|fatal|invalid|refused|timed out|unable)\b/i.test(line));
+  let detail = decisive.at(-1) ?? candidates.at(-1) ?? '';
+  detail = detail
+    .replace(/https?:\/\/\S+/gi, '<url>')
+    .replace(/\b(authorization)(\s*[:=]\s*)(?:(?:Basic|Bearer)\s+)?\S+/gi, '$1$2<redacted>')
+    .replace(/\b(password|passwd|token|secret|api[_-]?key)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, '$1$2<redacted>')
+    .replace(/\b(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]{8,}\b/g, '<redacted>')
+    .replace(/\b[a-f0-9]{48,}\b/gi, '<redacted>')
+    .replace(/\b[A-Za-z0-9+/_=-]{64,}\b/g, '<redacted>');
+  const characters = Array.from(detail);
+  if (characters.length > MAX_FAILURE_DETAIL_CHARACTERS) {
+    detail = `${characters.slice(0, MAX_FAILURE_DETAIL_CHARACTERS - 1).join('')}…`;
+  }
+  return detail;
 }
 
 function normalizedHash(value, label) {
@@ -254,6 +291,7 @@ function establishVerifierOwnedDdevConfig(projectRoot, name, facts) {
     `type: ${JSON.stringify(facts.type)}`,
     `docroot: ${JSON.stringify(facts.docroot)}`,
     'project_tld: "ddev.site"',
+    'performance_mode: "none"',
     'xdebug_enabled: false'
   ];
   if (facts.phpVersion) lines.push(`php_version: ${JSON.stringify(facts.phpVersion)}`);
@@ -394,7 +432,7 @@ function machineLocalInputPath(path) {
 function checkedResult(execute, command, args, options, label) {
   const result = execute(command, args, options);
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`${label}${detail ? `: ${detail}` : ''}`);
   }
   return result;
@@ -651,12 +689,14 @@ export function createRecordedExecutor({ commandLog, environment = process.env, 
       const requestedConfigHome = resolve(String(options.ddevXdgConfigHome));
       const metadata = lstatSync(requestedConfigHome);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-        throw new Error('Verifier-owned DDEV_XDG_CONFIG_HOME must be a regular directory.');
+        throw new Error('Verifier-owned XDG_CONFIG_HOME must be a regular directory.');
       }
       const configHome = realpathSync(requestedConfigHome);
       commandEnvironment = Object.fromEntries(Object.entries(environment)
         .filter(([key]) => !/^(?:DDEV|COMPOSE)_/i.test(key)));
-      commandEnvironment.DDEV_XDG_CONFIG_HOME = configHome;
+      commandEnvironment.DDEV_NO_INSTRUMENTATION = 'true';
+      commandEnvironment.DDEV_NO_TUI = 'true';
+      commandEnvironment.XDG_CONFIG_HOME = configHome;
     }
     const result = spawn(command, args, {
       cwd: options.cwd,

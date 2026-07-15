@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assertDeclaredEmptyAdapters,
+  boundedFailureDetail,
   cleanupDisposable,
   confirmDisposableDdevIdentity,
   createDisposableClone,
@@ -93,7 +94,7 @@ function ddevDrupalRoot(cwd) {
 function commandOutput(execute, command, args, options, { trim = true } = {}) {
   const result = execute(command, args, options);
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`${options.phase} failed${detail ? `: ${detail}` : ''}`);
   }
   const output = String(result.stdout ?? '');
@@ -157,7 +158,7 @@ function runStep(execute, disposable, step) {
     timeout: step.timeout
   });
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`Typed adapter ${step.adapter} failed${detail ? `: ${detail}` : ''}`);
   }
 }

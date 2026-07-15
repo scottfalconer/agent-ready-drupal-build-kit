@@ -24,6 +24,7 @@ import {
   assertDryRunSurfacesAvailable,
   assertFixturePlanAgainstCapabilities,
   captureAssemblyFixtureIdentity,
+  discoverAssemblyCapabilities,
   parseAssemblyCapabilities
 } from '../bin/assembly-fixtures.mjs';
 import { createRecordedExecutor } from '../bin/disposable-ddev.mjs';
@@ -43,6 +44,25 @@ const TARGET_UUID = '22222222-2222-4222-8222-222222222222';
 const TARGET_UUID_2 = '33333333-3333-4333-8333-333333333333';
 const TARGET_UUID_3 = '44444444-4444-4444-8444-444444444444';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
+
+test('assembly capability failures use bounded redacted diagnostics', () => {
+  assert.throws(() => discoverAssemblyCapabilities({
+    execute: () => ({
+      status: null,
+      stderr: 'Upgraded DDEV v1.25.3 is available!\nPlease visit https://github.com/ddev/ddev/releases/tag/v1.25.3',
+      error: { message: 'spawnSync ddev ETIMEDOUT Authorization: Bearer exposed-token' }
+    }),
+    projectRoot: '/tmp',
+    target: 'disposable'
+  }), (error) => {
+    assert.equal(
+      error.message,
+      'assembly-capability-readback failed: spawnSync ddev ETIMEDOUT Authorization: <redacted>'
+    );
+    assert.equal(error.message.includes('exposed-token'), false);
+    return true;
+  });
+});
 
 function git(root, args) {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -768,9 +788,17 @@ test('disposable runner rejects an interrupted delete prefix before invoking the
 test('mocked disposable run proves two verifier-selected interruptions, exact restoration, no-op rerun, and fixture survival', () => {
   const { root } = repositoryFixture();
   const commandLog = [];
+  const spawnCalls = [];
   let planCall = 0;
   const spawn = (command, args, options) => {
+    spawnCalls.push({ command, args, options });
     if (command === 'git') return spawnSync(command, args, options);
+    if (command === 'ddev' && args[0] === 'start') {
+      const config = readFileSync(join(options.cwd, '.ddev', 'config.yaml'), 'utf8');
+      assert.match(config, /^performance_mode: "none"$/m);
+      assert.doesNotMatch(config, /performance_mode: "mutagen"/);
+      return { status: 0, stdout: 'started', stderr: '', signal: null };
+    }
     if (command === 'ddev' && args[0] === 'describe') {
       const config = readFileSync(join(options.cwd, '.ddev', 'config.yaml'), 'utf8');
       const name = JSON.parse(config.match(/^name:\s*(.+)$/m)[1]);
@@ -798,7 +826,18 @@ test('mocked disposable run proves two verifier-selected interruptions, exact re
     if (command === 'ddev') return { status: 0, stdout: 'ok', stderr: '', signal: null };
     throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
   };
-  const execute = createRecordedExecutor({ commandLog, spawn });
+  const execute = createRecordedExecutor({
+    commandLog,
+    environment: {
+      ...process.env,
+      COMPOSE_FILE: '/tmp/ambient-compose.yaml',
+      COMPOSE_PROJECT_NAME: 'ambient-project',
+      DDEV_NO_TUI: 'false',
+      DDEV_XDG_CONFIG_HOME: '/tmp/ambient-ddev-home',
+      XDG_CONFIG_HOME: '/tmp/ambient-xdg-home'
+    },
+    spawn
+  });
   execute.commandLog = commandLog;
   const createdHashes = [sha256('created-1'), sha256('created-2'), sha256('created-3')];
   const states = [
@@ -876,6 +915,23 @@ test('mocked disposable run proves two verifier-selected interruptions, exact re
     assert.equal(report.workingTargetProof.untouched, true);
     assert.equal(report.disposable.cleanup.removedClone, true);
     assert.equal(report.evidenceScope.authoritativeForDefaultHandoff, false);
+    const ddevCalls = spawnCalls.filter((call) => call.command === 'ddev');
+    assert.ok(ddevCalls.length > 0);
+    assert.equal(new Set(ddevCalls.map((call) => call.options.env.XDG_CONFIG_HOME)).size, 1);
+    assert.equal(ddevCalls[0].options.env.XDG_CONFIG_HOME.endsWith('/xdg'), true);
+    assert.notEqual(ddevCalls[0].options.env.XDG_CONFIG_HOME, '/tmp/ambient-xdg-home');
+    for (const call of ddevCalls) {
+      assert.deepEqual(
+        Object.keys(call.options.env).filter((key) => /^(?:DDEV|COMPOSE)_/i.test(key)).sort(),
+        ['DDEV_NO_INSTRUMENTATION', 'DDEV_NO_TUI']
+      );
+      assert.equal(call.options.env.DDEV_NO_INSTRUMENTATION, 'true');
+      assert.equal(call.options.env.DDEV_NO_TUI, 'true');
+    }
+    const identityAndCleanupCalls = ddevCalls.filter((call) => ['describe', 'delete'].includes(call.args[0]));
+    assert.ok(identityAndCleanupCalls.some((call) => call.args[0] === 'describe'));
+    assert.ok(identityAndCleanupCalls.some((call) => call.args[0] === 'delete'));
+    assert.ok(identityAndCleanupCalls.every((call) => call.options.env.XDG_CONFIG_HOME === ddevCalls[0].options.env.XDG_CONFIG_HOME));
     assert.equal(states.length, 0);
   } finally {
     rmSync(root, { force: true, recursive: true });

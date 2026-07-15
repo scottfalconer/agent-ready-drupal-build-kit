@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { assemblyTargetKey, parseAssemblyTarget } from './assembly-contract.mjs';
+import { boundedFailureDetail } from './disposable-ddev.mjs';
 import { sha256 } from './state-fingerprint.mjs';
 
 export const ASSEMBLY_CAPABILITIES_SCHEMA = 'public-kit.assembly-capabilities.1';
@@ -153,7 +154,7 @@ function runEval(execute, projectRoot, target, phase, source, timeout = 120_000)
     recordedArgs: ['drush', 'php:eval', `<verifier-owned:${sha256(source)}>`]
   });
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`${phase} failed${detail ? `: ${detail}` : ''}`);
   }
   return String(result.stdout ?? '');

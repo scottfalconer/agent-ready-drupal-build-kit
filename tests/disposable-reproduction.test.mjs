@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  boundedFailureDetail,
   cleanupDisposable,
   createDisposableClone,
   createRecordedExecutor,
@@ -21,11 +22,77 @@ import {
   parseReproductionPlan,
   provisioningSteps
 } from '../bin/disposable-ddev.mjs';
-import { buildPortableReproductionState } from '../bin/reproduction-state.mjs';
+import { buildPortableReproductionState, capturePortableDrupalState } from '../bin/reproduction-state.mjs';
 import { collectFileManifest, sha256 } from '../bin/state-fingerprint.mjs';
 import { runDisposableReproduction } from '../bin/verify-reproduction.mjs';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
+
+function assertTrustedDisposableDdevEnvironment(ddevCalls) {
+  assert.ok(ddevCalls.length > 0);
+  assert.equal(new Set(ddevCalls.map((call) => call.options.env.XDG_CONFIG_HOME)).size, 1);
+  assert.equal(ddevCalls[0].options.env.XDG_CONFIG_HOME.endsWith('/xdg'), true);
+  assert.notEqual(ddevCalls[0].options.env.XDG_CONFIG_HOME, '/tmp/ambient-xdg-home');
+  for (const call of ddevCalls) {
+    assert.deepEqual(
+      Object.keys(call.options.env).filter((key) => /^(?:DDEV|COMPOSE)_/i.test(key)).sort(),
+      ['DDEV_NO_INSTRUMENTATION', 'DDEV_NO_TUI']
+    );
+    assert.equal(call.options.env.DDEV_NO_INSTRUMENTATION, 'true');
+    assert.equal(call.options.env.DDEV_NO_TUI, 'true');
+  }
+}
+
+test('failure details skip DDEV notices, select the decisive line, redact secrets, and stay bounded', () => {
+  const detail = boundedFailureDetail({
+    stderr: [
+      'Upgraded DDEV v1.25.3 is available!',
+      'Please visit https://github.com/ddev/ddev/releases/tag/v1.25.3',
+      `fatal: database password=super-secret rejected ${'context '.repeat(100)}`
+    ].join('\n')
+  });
+  assert.match(detail, /^fatal: database password=<redacted> rejected /);
+  assert.equal(detail.includes('super-secret'), false);
+  assert.equal(Array.from(detail).length, 240);
+  assert.equal(detail.endsWith('…'), true);
+  assert.equal(boundedFailureDetail({
+    stderr: 'Permission to beam up? [Y/n] (yes): '
+  }), 'DDEV required a noninteractive usage-statistics choice.');
+  const timeout = boundedFailureDetail({
+    stderr: [
+      'Upgraded DDEV v1.25.3 is available!',
+      'Please visit https://github.com/ddev/ddev/releases/tag/v1.25.3',
+      'For upgrade help see',
+      'https://docs.ddev.com/en/stable/users/install/ddev-upgrade/'
+    ].join('\n'),
+    error: { message: 'spawnSync ddev ETIMEDOUT Authorization: Bearer exposed-token' }
+  });
+  assert.equal(timeout, 'spawnSync ddev ETIMEDOUT Authorization: <redacted>');
+  assert.equal(timeout.includes('exposed-token'), false);
+  assert.equal(boundedFailureDetail({
+    stderr: 'fatal Authorization=Basic dXNlcjpwYXNzd29yZA=='
+  }), 'fatal Authorization=<redacted>');
+});
+
+test('portable Drupal readback failures use bounded redacted diagnostics', () => {
+  assert.throws(() => capturePortableDrupalState({
+    execute: () => ({
+      status: null,
+      stderr: 'Upgraded DDEV v1.25.3 is available!\nPlease visit https://github.com/ddev/ddev/releases/tag/v1.25.3',
+      error: { message: 'spawnSync ddev ETIMEDOUT Authorization=Basic dXNlcjpwYXNzd29yZA==' }
+    }),
+    projectRoot: '/tmp',
+    routes: [],
+    target: 'disposable'
+  }), (error) => {
+    assert.equal(
+      error.message,
+      'portable-drupal-readback: ddev failed: spawnSync ddev ETIMEDOUT Authorization=<redacted>'
+    );
+    assert.equal(error.message.includes('dXNlcjpwYXNzd29yZA'), false);
+    return true;
+  });
+});
 
 function git(root, args) {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -208,6 +275,8 @@ test('independent clone replaces project DDEV config with a minimal typed runtim
     assert.equal(generatedDdevName(disposable.root), disposable.name);
     assert.match(generatedConfig, /^type: "drupal11"$/m);
     assert.match(generatedConfig, /^docroot: "web"$/m);
+    assert.match(generatedConfig, /^performance_mode: "none"$/m);
+    assert.doesNotMatch(generatedConfig, /performance_mode: "mutagen"/);
     assert.match(generatedConfig, /^php_version: "8\.4"$/m);
     assert.match(generatedConfig, /^webserver_type: "nginx-fpm"$/m);
     assert.match(generatedConfig, /^database:\n  type: "mariadb"\n  version: "11\.8"$/m);
@@ -240,6 +309,10 @@ test('typed DDEV projection rejects PATH injection, extra daemons, custom images
     [
       (config) => `${config}webimage: attacker.example.invalid/forged:latest\n`,
       /unsupported field webimage/
+    ],
+    [
+      (config) => `${config}performance_mode: "mutagen"\n`,
+      /unsupported field performance_mode/
     ],
     [
       (config) => `${config}"web_\\u0065nvironment": ["PATH=/tmp/project-controlled"]\n`,
@@ -356,7 +429,12 @@ test('a partial failed DDEV start still uses isolated state and identity-checks 
     spawnCalls.push({ command, args, options });
     if (command === 'git') return spawnSync(command, args, options);
     if (command === 'ddev' && args[0] === 'start') {
-      return { status: 1, stdout: '', stderr: 'simulated partial start', signal: null };
+      return {
+        status: 1,
+        stdout: '',
+        stderr: 'Upgraded DDEV v1.25.3 is available!\nsimulated partial start',
+        signal: null
+      };
     }
     if (command === 'ddev' && args[0] === 'describe') {
       const name = generatedDdevName(options.cwd);
@@ -377,7 +455,8 @@ test('a partial failed DDEV start still uses isolated state and identity-checks 
     environment: {
       ...process.env,
       COMPOSE_FILE: '/tmp/ambient-compose.yaml',
-      DDEV_XDG_CONFIG_HOME: '/tmp/ambient-ddev-home'
+      DDEV_XDG_CONFIG_HOME: '/tmp/ambient-ddev-home',
+      XDG_CONFIG_HOME: '/tmp/ambient-xdg-home'
     },
     spawn
   });
@@ -395,8 +474,11 @@ test('a partial failed DDEV start still uses isolated state and identity-checks 
     assert.equal(commandLog.some((record) => record.phase === 'confirm-disposable-ddev-identity-before-delete'), true);
     assert.equal(commandLog.some((record) => record.phase === 'delete-owned-disposable-ddev'), true);
     const ddevCalls = spawnCalls.filter((call) => call.command === 'ddev');
-    assert.equal(new Set(ddevCalls.map((call) => call.options.env.DDEV_XDG_CONFIG_HOME)).size, 1);
-    assert.equal(ddevCalls.every((call) => !Object.hasOwn(call.options.env, 'COMPOSE_FILE')), true);
+    assertTrustedDisposableDdevEnvironment(ddevCalls);
+    const cleanupCalls = ddevCalls.filter((call) => ['describe', 'delete'].includes(call.args[0]));
+    assert.ok(cleanupCalls.some((call) => call.args[0] === 'describe'));
+    assert.ok(cleanupCalls.some((call) => call.args[0] === 'delete'));
+    assert.ok(cleanupCalls.every((call) => call.options.env.XDG_CONFIG_HOME === ddevCalls[0].options.env.XDG_CONFIG_HOME));
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
@@ -423,7 +505,8 @@ test('mocked end-to-end run proves exact-HEAD reproduction and working-target be
       COMPOSE_FILE: '/tmp/ambient-compose.yaml',
       COMPOSE_PROJECT_NAME: 'ambient-project',
       DDEV_NO_TUI: 'false',
-      DDEV_XDG_CONFIG_HOME: '/tmp/ambient-ddev-home'
+      DDEV_XDG_CONFIG_HOME: '/tmp/ambient-ddev-home',
+      XDG_CONFIG_HOME: '/tmp/ambient-xdg-home'
     },
     spawn
   });
@@ -444,11 +527,11 @@ test('mocked end-to-end run proves exact-HEAD reproduction and working-target be
     assert.equal(report.evidenceScope.authoritativeForDefaultHandoff, false);
     assert.equal(report.commands.every((command) => !command.argv.includes('sh') && !command.argv.includes('bash')), true);
     const ddevCalls = spawnCalls.filter((call) => call.command === 'ddev');
-    assert.ok(ddevCalls.length > 0);
-    assert.equal(new Set(ddevCalls.map((call) => call.options.env.DDEV_XDG_CONFIG_HOME)).size, 1);
-    assert.equal(ddevCalls[0].options.env.DDEV_XDG_CONFIG_HOME.endsWith('/xdg'), true);
-    assert.notEqual(ddevCalls[0].options.env.DDEV_XDG_CONFIG_HOME, '/tmp/ambient-ddev-home');
-    assert.equal(ddevCalls.every((call) => Object.keys(call.options.env).filter((key) => /^(?:DDEV|COMPOSE)_/i.test(key)).join(',') === 'DDEV_XDG_CONFIG_HOME'), true);
+    assertTrustedDisposableDdevEnvironment(ddevCalls);
+    const identityAndCleanupCalls = ddevCalls.filter((call) => ['describe', 'delete'].includes(call.args[0]));
+    assert.ok(identityAndCleanupCalls.some((call) => call.args[0] === 'describe'));
+    assert.ok(identityAndCleanupCalls.some((call) => call.args[0] === 'delete'));
+    assert.ok(identityAndCleanupCalls.every((call) => call.options.env.XDG_CONFIG_HOME === ddevCalls[0].options.env.XDG_CONFIG_HOME));
   } finally {
     rmSync(root, { force: true, recursive: true });
   }

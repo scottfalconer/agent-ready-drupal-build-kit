@@ -55,6 +55,7 @@ import {
 } from './assembly-persistence.mjs';
 import {
   assertDeclaredEmptyAdapters,
+  boundedFailureDetail,
   cleanupDisposable,
   confirmDisposableDdevIdentity,
   createDisposableClone,
@@ -151,7 +152,7 @@ function firstError(error) {
 function checkedOutput(execute, command, args, options, { trim = true } = {}) {
   const result = execute(command, args, options);
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`${options.phase} failed${detail ? `: ${detail}` : ''}`);
   }
   const output = String(result.stdout ?? '');
@@ -258,7 +259,7 @@ function runProvisioningStep(execute, disposable, step) {
     timeout: step.timeout
   });
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`Typed substrate adapter ${step.adapter} failed${detail ? `: ${detail}` : ''}`);
   }
 }
@@ -288,7 +289,7 @@ function invokeAdapter(execute, disposable, sourcePath, mode, options = {}) {
     timeout: 600_000
   });
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`Fixed assembly adapter mode ${mode} failed${detail ? `: ${detail}` : ''}`);
   }
   return result;
@@ -598,7 +599,11 @@ export function runDisposableAssembly({
       projectRoot,
       ...(tempParent ? { tempParent } : {})
     });
-    const disposableRun = (command, args, options = {}) => run(command, args, { ...options, target: 'disposable' });
+    const disposableRun = (command, args, options = {}) => run(command, args, {
+      ...options,
+      ...(command === 'ddev' ? { ddevXdgConfigHome: disposable.ddevXdgConfigHome } : {}),
+      target: 'disposable'
+    });
     disposableRun.snapshot = run.snapshot;
     const cloned = loadValidatedAssemblyInputs({
       execute: disposableRun,
@@ -638,7 +643,7 @@ export function runDisposableAssembly({
 
     for (const step of provisioningSteps(cloned.substrate.plan)) {
       if (step.adapter === 'ddev_start') ddevStartAttempted = true;
-      runProvisioningStep(run, disposable, step);
+      runProvisioningStep(disposableRun, disposable, step);
       if (step.adapter === 'ddev_start') confirmDisposableDdevIdentity({ disposable, execute: run });
     }
     baseline = captureState({
@@ -675,7 +680,7 @@ export function runDisposableAssembly({
       target: 'assembly-substrate',
       baseline: fileSurfaceBaseline
     });
-    databaseBackup = createVerifierDatabaseBackup(run, disposable);
+    databaseBackup = createVerifierDatabaseBackup(disposableRun, disposable);
     databaseSourceExclusion = registerDatabaseSourceExclusion({
       projectRoot: disposable.root,
       relativePath: databaseBackup.relativePath,
@@ -684,12 +689,12 @@ export function runDisposableAssembly({
     disposableSourceOptions = {
       captureSource,
       databaseSourceExclusion,
-      execute: run,
+      execute: disposableRun,
       fileBackup,
       projectRoot: disposable.root
     };
     disposableSourceBeforeAssembly = captureOwnedDisposableSource(disposableSourceOptions);
-    firstDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
+    firstDryRun = dryRun(disposableRun, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(firstDryRun, capabilities);
     assertInitialMutation(firstDryRun);
     firstPlanState = captureState({
@@ -717,7 +722,7 @@ export function runDisposableAssembly({
         `assembly-before-interrupted-prefix-${prefixCount}`
       );
       const deleteCount = invokeAdapterPrefix(
-        run,
+        disposableRun,
         disposable,
         cloned.plan.adapter.source.path,
         firstDryRun,
@@ -776,7 +781,7 @@ export function runDisposableAssembly({
         disposableSourceBeforeAssembly,
         `Interrupted prefix ${prefixCount} source bytes`
       );
-      restoreVerifierDatabaseBackup(run, disposable, databaseBackup);
+      restoreVerifierDatabaseBackup(disposableRun, disposable, databaseBackup);
       const restoredFileSurfaces = restoreFileBackup({
         execute: disposableRun,
         projectRoot: disposable.root,
@@ -808,7 +813,7 @@ export function runDisposableAssembly({
         disposableSourceBeforeAssembly,
         `Restored prefix ${prefixCount} source bytes`
       );
-      restoredDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
+      restoredDryRun = dryRun(disposableRun, disposable, cloned.plan.adapter.source.path, cloned.provenance);
       if (restoredDryRun.fingerprint !== firstDryRun.fingerprint) {
         throw new Error(`Verifier-owned restoration after prefix ${prefixCount} did not restore the exact first-run plan.`);
       }
@@ -880,7 +885,7 @@ export function runDisposableAssembly({
       prefixCount: firstDryRun.operations.length
     });
     invokeAdapterPrefix(
-      run,
+      disposableRun,
       disposable,
       cloned.plan.adapter.source.path,
       firstDryRun,
@@ -917,7 +922,7 @@ export function runDisposableAssembly({
     );
     requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'First assembly source bytes');
 
-    secondDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
+    secondDryRun = dryRun(disposableRun, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(secondDryRun, capabilities);
     assertNoOpDryRun(secondDryRun, 'Second assembly dry-run');
     requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Second assembly plan source bytes');
@@ -942,7 +947,7 @@ export function runDisposableAssembly({
       'Second assembly plan source bytes after readback'
     );
     invokeAdapterPrefix(
-      run,
+      disposableRun,
       disposable,
       cloned.plan.adapter.source.path,
       secondDryRun,
@@ -1005,7 +1010,7 @@ export function runDisposableAssembly({
     );
     requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Extension fixture source bytes');
 
-    extensionDryRun = dryRun(run, disposable, cloned.plan.adapter.source.path, cloned.provenance);
+    extensionDryRun = dryRun(disposableRun, disposable, cloned.plan.adapter.source.path, cloned.provenance);
     assertDryRunSurfacesAvailable(extensionDryRun, capabilities);
     assertNoOpDryRun(extensionDryRun, 'Post-extension assembly dry-run');
     extensionPlanState = captureState({
@@ -1029,7 +1034,7 @@ export function runDisposableAssembly({
     );
     requireDisposableSourceUnchanged(disposableSourceOptions, disposableSourceBeforeAssembly, 'Extension plan source bytes');
     invokeAdapterPrefix(
-      run,
+      disposableRun,
       disposable,
       cloned.plan.adapter.source.path,
       extensionDryRun,
