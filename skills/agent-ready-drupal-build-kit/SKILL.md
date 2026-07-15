@@ -41,6 +41,16 @@ node .agents/skills/agent-ready-drupal-build-kit/scripts/init-kit.mjs --brief-fi
 
 If the skill is installed at another location, invoke `scripts/init-kit.mjs` from that skill directory. The initializer is idempotent: it refreshes only the kit's marked `AGENTS.md` block and creates only missing packet files. It preserves a brief as `review-packet/original-brief.md`, records its hash in `build-input.json`, and refuses to switch an existing packet between source and brief modes.
 
+Before applying a candidate Recipe or waiting for a complete packet, run the non-authoring doctor from the active DDEV agent:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs \
+  --recipe recipes/<candidate> \
+  --package drupal/<audited-candidate>
+```
+
+Repeat `--recipe` and `--package` only for candidates derived from the source audit or brief. The doctor records the installed substrate, first-route smoke, pinned browser runtime, Recipe manifest/config touch points, active-config overlap, and kit-executed Composer discovery in `review-packet/evidence/doctor.json`. It is diagnostic-only: it never applies a Recipe, intentionally changes Drupal content or configuration, writes a reviewer verdict, or authorizes completion. Bootstrap, HTTP, and browser checks may still warm caches or write ordinary runtime logs. Resolve failed stages and manually review every active-config touch point before applying a Recipe.
+
 Before changing the site, read these installed references completely:
 
 1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
@@ -145,6 +155,7 @@ This lifecycle does not require a Git commit, Canvas, a checkpoint after every e
 
 Everything required at runtime is inside this skill directory:
 
+- `scripts/doctor.mjs` performs non-authoring pre-baseline substrate, route, browser, Recipe, and explicit package-candidate diagnostics.
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
 - `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
 - `scripts/setup-browser-runtime.sh` is the pre-agent host entrypoint that pins, starts, and smokes the supported DDEV browser add-on.

@@ -56,7 +56,7 @@ A valid local rebuild uses:
 - Node.js 20 or newer inside DDEV for build-kit initialization and verification.
 - `drupal/cms` as the Composer project.
 - The Drupal CMS setup assistant or a documented non-interactive equivalent.
-- Composer and installed `recipe.yml` files for Recipe discovery, plus Drupal core's `php core/scripts/drupal recipe PATH` runner from the webroot for verified Recipe application. Do not assume a separate `dr` executable exists.
+- Composer and installed `recipe.yml` files for Recipe discovery, plus the Recipe runner exposed by the installed target. Prefer `vendor/bin/dr recipe:apply PATH` when present; otherwise use the legacy `php core/scripts/drupal recipe PATH` runner from the webroot. Record the exact runner selected instead of assuming either command exists.
 - Drush for mature readback, entity inspection, extension lists, config export/status, and scripting evidence.
 - Drupal content/config entities, fields, taxonomy, media, menus, aliases, redirects, Views, form displays, view displays, workflows, themes, modules, and config overlays.
 - Anonymous browser checks against the Drupal-served DDEV URL.
@@ -78,6 +78,14 @@ For a brief-only run, replace the initializer command above with this mutually e
 ```bash
 node .agents/skills/agent-ready-drupal-build-kit/scripts/init-kit.mjs --brief-file "[BRIEF_FILE]"
 ```
+
+Before applying a candidate Recipe, and while the full packet may still be incomplete, run the non-authoring project doctor:
+
+```bash
+node .agents/skills/agent-ready-drupal-build-kit/scripts/doctor.mjs --recipe recipes/[CANDIDATE]
+```
+
+Pass `--package drupal/[AUDITED_CANDIDATE]` only for candidates derived from the source audit or brief. Treat `review-packet/evidence/doctor.json` as a diagnostic work queue, never completion evidence. The doctor does not apply Recipes, prove compatibility, intentionally change Drupal content or configuration, or write reviewer verdicts. Bootstrap, HTTP, and browser diagnostics may still warm caches or write normal runtime logs. Review every active-config touch point and rollback risk before Recipe application.
 
 From the host, use `ddev exec node ...`, `ddev drush status`, and `ddev exec node --version` instead. The initializer must preserve existing managed `AGENTS.md` regions and existing review-packet work. If Drupal is not installed or the current directory is not the intended target, stop and report that specific blocker; do not silently scaffold another site.
 
@@ -605,10 +613,14 @@ ddev exec sed -n '1,220p' recipes/drupal_cms_media/recipe.yml
 Apply a bounded Recipe only after recording why it fits the pattern map. From the host, the Drupal core Recipe runner shape for a standard DDEV `web` docroot is:
 
 ```bash
-ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+if ddev exec test -x vendor/bin/dr; then
+  ddev exec vendor/bin/dr recipe:apply recipes/drupal_cms_media -v
+else
+  ddev exec -d /var/www/html/web php core/scripts/drupal recipe ../recipes/drupal_cms_media -v
+fi
 ```
 
-Inside a DDEV agent shell, run the equivalent from the Drupal webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. Do not assume a separate `dr` executable exists. If the core runner or Recipe path is missing, record the candidate as blocked or not applicable instead of inventing a command or silently replacing it with custom config.
+Inside a DDEV agent shell, use `vendor/bin/dr recipe:apply recipes/drupal_cms_media -v` when that executable is present; otherwise run the legacy equivalent from the Drupal webroot: `cd web && php core/scripts/drupal recipe ../recipes/drupal_cms_media -v`. Replace the example with the verified Recipe path. If the discovered runner or Recipe path is missing, record the candidate as blocked or not applicable instead of inventing a command or silently replacing it with custom config.
 
 ## Content Modeling Requirements
 
