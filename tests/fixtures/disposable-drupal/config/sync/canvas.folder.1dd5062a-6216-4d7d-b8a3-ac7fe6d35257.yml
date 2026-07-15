@@ -1,0 +1,19 @@
+uuid: 1dd5062a-6216-4d7d-b8a3-ac7fe6d35257
+langcode: en
+status: true
+dependencies:
+  config:
+    - canvas.component.block.system_menu_block.account
+    - canvas.component.block.system_menu_block.admin
+    - canvas.component.block.system_menu_block.footer
+    - canvas.component.block.system_menu_block.main
+    - canvas.component.block.system_menu_block.tools
+name: Menus
+configEntityTypeId: component
+weight: 0
+items:
+  - block.system_menu_block.account
+  - block.system_menu_block.admin
+  - block.system_menu_block.footer
+  - block.system_menu_block.main
+  - block.system_menu_block.tools

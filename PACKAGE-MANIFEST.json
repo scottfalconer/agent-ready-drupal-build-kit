@@ -37,6 +37,7 @@
     "Verifier-owned axe-core 4.10.3 execution on every primary-route desktop/mobile capture, with pinned licensed source, raw state-bound results, and fail-closed WCAG 2.2 A/AA coverage",
     "Exact state binding across tracked config, runtime facts, declared editorial revisions, managed public assets, stable routes, and recursively manifested packet evidence",
     "Optional verifier-owned disposable DDEV reproduction from an independent exact-HEAD clone, typed digest-bound adapters, portable config/entity/file/route comparison, working-target before/after proof, and explicit clean-install versus snapshot modes",
+    "Launch-only verifier-owned assembly rerun proof from an exact-HEAD pre-assembly substrate: typed dry-run reconciliation, provenance-bounded deletes with per-prefix dual opt-in, verifier-selected interrupted prefixes, verifier-owned database/file restoration, durable persistence and opaque entity-identity guards, exact no-op reruns, live-applicable extension fixtures, aggregate budgets, and zero working-target Drupal commands",
     "docs/site-lifecycle.md guidance for continuing from a verified Drupal foundation without mandating full source review, Git commits, Canvas, or launch gates for every change",
     "Self-contained installable Agent Skill with project-local runtime assets, target initializer, and verifiers",
     "Marker-managed AGENTS.md integration that preserves One Line Installer, Drupal AI best-practices, and user-authored instructions",

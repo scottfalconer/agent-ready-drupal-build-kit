@@ -146,6 +146,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-SEO-01': 'renderedSeo',
   'G-EDITOR-02': 'nextCycleEditorWorkflow',
   'G-PRIVACY-01': 'negativeRouteConsent',
+  'G-ASSEMBLY-01': 'disposableAssemblyRerun',
   'G-REPRO-01': 'disposableReproduction'
 });
 

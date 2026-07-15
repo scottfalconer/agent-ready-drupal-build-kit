@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   assertDeclaredEmptyAdapters,
+  boundedFailureDetail,
   cleanupDisposable,
   confirmDisposableDdevIdentity,
   createDisposableClone,
@@ -93,7 +94,7 @@ function ddevDrupalRoot(cwd) {
 function commandOutput(execute, command, args, options, { trim = true } = {}) {
   const result = execute(command, args, options);
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`${options.phase} failed${detail ? `: ${detail}` : ''}`);
   }
   const output = String(result.stdout ?? '');
@@ -148,10 +149,6 @@ function firstError(error) {
   return String(error?.message ?? error ?? 'Unknown error').trim().split(/\r?\n/)[0];
 }
 
-function confirmDisposableIdentity(execute, disposable) {
-  confirmDisposableDdevIdentity({ disposable, execute });
-}
-
 function runStep(execute, disposable, step) {
   const result = execute(step.command, step.args, {
     cwd: disposable.root,
@@ -161,7 +158,7 @@ function runStep(execute, disposable, step) {
     timeout: step.timeout
   });
   if (!result || result.status !== 0) {
-    const detail = String(result?.stderr ?? result?.error?.message ?? '').trim().split(/\r?\n/)[0];
+    const detail = boundedFailureDetail(result);
     throw new Error(`Typed adapter ${step.adapter} failed${detail ? `: ${detail}` : ''}`);
   }
 }
@@ -266,7 +263,7 @@ export function runDisposableReproduction({
     for (const step of provisioningSteps(validated.plan)) {
       if (step.adapter === 'ddev_start') ddevStartAttempted = true;
       runStep(run, disposable, step);
-      if (step.adapter === 'ddev_start') confirmDisposableIdentity(run, disposable);
+      if (step.adapter === 'ddev_start') confirmDisposableDdevIdentity({ disposable, execute: run });
     }
     disposableState = captureState({
       execute: disposableRun,

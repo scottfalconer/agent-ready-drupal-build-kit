@@ -33,6 +33,7 @@
   "generatedEvidenceFiles": [
     "evidence/live-verification.json",
     "evidence/packet-verification.json",
+    "evidence/assembly-verification.json",
     "evidence/reproduction-verification.json",
     "evidence/lifecycle/initial-baseline.json",
     "evidence/lifecycle/current-state.json"
@@ -398,6 +399,14 @@
       "evidenceFile": "negative-route-consent.json",
       "checkedBy": "verify-script",
       "blocking": "handoff"
+    },
+    {
+      "id": "G-ASSEMBLY-01",
+      "title": "Assembly converges, reruns as a no-op, preserves extensions, and restores after a partial failure in a verifier-owned disposable DDEV environment",
+      "phase": 6,
+      "evidenceFile": "evidence/assembly-verification.json",
+      "checkedBy": "verify-script",
+      "blocking": "launch"
     },
     {
       "id": "G-REPRO-01",

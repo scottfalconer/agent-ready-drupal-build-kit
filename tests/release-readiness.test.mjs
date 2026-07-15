@@ -184,6 +184,7 @@ test('npm package excludes local agent state and keeps verifier bins executable'
   for (const path of [
     'bin/verify.mjs',
     'bin/verify-packet.mjs',
+    'bin/verify-assembly.mjs',
     'bin/verify-reproduction.mjs',
     'bin/lifecycle.mjs'
   ]) {

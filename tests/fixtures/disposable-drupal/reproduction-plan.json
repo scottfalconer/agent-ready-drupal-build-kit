@@ -5,12 +5,12 @@
     "adapter": "ddev_composer_install",
     "lockFile": {
       "path": "composer.lock",
-      "sha256": "sha256:30e23b2118d1ffc3948eb33d7f6c7ac5dd015f85453e7ea5a7e56aee9a335902"
+      "sha256": "sha256:26c241146a6c85ec0de062566eafc9a9c8c0d338347431c8f36c47422bf67266"
     }
   },
   "trackedConfig": {
     "path": "config/sync",
-    "sha256": "sha256:04eb0063ec00fdbefd3c2d3d2f5387a44802cc4fc93e28ab6eb73dfe75aa6c5d"
+    "sha256": "sha256:65e103d36304de99b29336b85499c842d0ceae528b0cc1288d21a8b1c820f07d"
   },
   "content": {
     "adapter": "drush_php_script",

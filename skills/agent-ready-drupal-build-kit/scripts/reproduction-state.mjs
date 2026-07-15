@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
 
+import { boundedFailureDetail } from './disposable-ddev.mjs';
 import { canonicalJson, sha256 } from './state-fingerprint.mjs';
 
 export const REPRODUCTION_READBACK_SCHEMA = 'public-kit.reproduction-readback.1';
@@ -553,8 +554,8 @@ print json_encode([
 function runChecked(execute, command, args, options) {
   const result = execute(command, args, options);
   if (!result || result.status !== 0) {
-    const summary = String(result?.stderr ?? result?.error?.message ?? 'command failed').trim().split(/\r?\n/)[0];
-    throw new Error(`${options.phase}: ${command} ${args.join(' ')} failed${summary ? `: ${summary}` : ''}`);
+    const summary = boundedFailureDetail(result);
+    throw new Error(`${options.phase}: ${command} failed${summary ? `: ${summary}` : ''}`);
   }
   return String(result.stdout ?? '');
 }
