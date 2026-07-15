@@ -67,6 +67,7 @@ test('installable skill describes an in-place target and only installed runtime 
   assert.match(content, /^name: agent-ready-drupal-build-kit$/m);
   assert.match(content, /current project is the target/);
   assert.match(content, /scripts\/init-kit\.mjs/);
+  assert.match(content, /scripts\/reconcile\.mjs/);
   assert.match(content, /scripts\/verify\.mjs/);
   assert.match(content, /references\/build-contract\.md/);
   assert.match(content, /references\/output-inventory\.md/);
@@ -499,7 +500,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(57 files\)/);
+  assert.match(result.stdout, /is in sync \(58 files\)/);
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -523,6 +524,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
     )), `${relativePath.join('/')} drifted from the canonical runtime`);
   }
   for (const relativePath of [
+    ['scripts', 'reconcile.mjs'],
     ['scripts', 'browser-runtime-smoke.mjs'],
     ['scripts', 'setup-browser-runtime.sh'],
     ['scripts', 'repair-browser-runtime.sh']
@@ -569,7 +571,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(57 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(58 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
 });

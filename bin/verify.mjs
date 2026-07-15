@@ -2366,7 +2366,7 @@ function ddevTargetUrl(cwd, environment = process.env) {
   return ddevTargetDescription(cwd, environment).primaryUrl;
 }
 
-function findDrupalDdevRoot(cwd) {
+export function findDrupalDdevRoot(cwd) {
   let candidate = resolve(cwd);
   while (true) {
     const configPath = join(candidate, '.ddev', 'config.yaml');
@@ -3549,7 +3549,7 @@ export function stateBoundRuntimeFacts(facts = {}) {
   };
 }
 
-function inspectDrupalLiveSurface(projectRoot, environment) {
+export function inspectDrupalLiveSurface(projectRoot, environment) {
   const result = runDrushResult(
     projectRoot,
     environment,
@@ -4600,6 +4600,9 @@ function nonEmptyPacketFile(packetDir, reference, { requireFragment = false, evi
     return false;
   }
   try {
+    if (!safeExistingProjectDirectory(packetRoot, dirname(candidate)) || lstatSync(candidate).isSymbolicLink()) {
+      return false;
+    }
     const realPacketRoot = realpathSync(packetRoot);
     const realCandidate = realpathSync(candidate);
     return pathIsInside(realPacketRoot, realCandidate) && statSync(realCandidate).isFile() && statSync(realCandidate).size > 0;
