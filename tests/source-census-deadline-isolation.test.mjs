@@ -105,58 +105,75 @@ test('browser preflight distinguishes runtime failure from route/site capture fa
   assert.equal(browserRuntimePreflightUnavailable(null, { attempted: false }), false);
 });
 
-// Structural guard on verifyLive's scheduling: browser/CDP/axe capture is the
-// early runtime preflight. Only after it succeeds may the verifier start either
-// the source census or target HTTP work. Once started, the source census may run
-// concurrently, but it must be awaited only AFTER every target-side
-// liveHttpContext check has run so source cost cannot consume the target
-// context's wall-clock. bin/ and skills/ copies are kept byte-identical by the
-// skill-package sync test, so checking bin/ suffices.
-test('verifyLive preflights browser capture before source/target work and awaits source census after target checks', () => {
+// Structural guard on verifyLive's delivery order: browser/CDP/axe capture is
+// the early runtime preflight, target routes and editor/runtime evidence finish
+// next, and only then may the expensive source crawl start. bin/ and skills/
+// copies are kept byte-identical by the skill-package sync test, so checking
+// bin/ suffices.
+test('verifyLive preflights the browser and completes target delivery checks before starting source census', () => {
   const source = readFileSync(join(repoRoot, 'bin', 'verify.mjs'), 'utf8');
   const start = source.indexOf('export async function verifyLive');
   assert.ok(start >= 0, 'verifyLive must exist');
   const body = source.slice(start);
 
   const browserCapture = body.indexOf('const rawGlobalChromeCapture = browserCaptureAttempted');
-  const censusStart = body.indexOf('const sourceSurfaceCensusPromise = briefMode');
+  const censusDefinition = body.indexOf('const runSourceSurfaceCensus = async () => briefMode');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
   const accessWallCheck = body.indexOf('Access-wall verification could not complete');
   const legalPrivacyCheck = body.indexOf('Legal/privacy-link verification could not complete');
-  const censusAwait = body.indexOf('await sourceSurfaceCensusPromise');
+  const consentReconciliation = body.indexOf('const consentReconciliation = verifyConsentReconciliation(');
+  const axeEvaluation = body.indexOf('const verifierOwnedAxeErrors = verifierAxeCompletionErrors(');
+  const censusEligibility = body.indexOf('const lateSourceCensusEligible =');
+  const censusStart = body.indexOf('await runSourceSurfaceCensus()');
+  const targetVerdict = body.indexOf('const liveTargetValid = Boolean(target)');
 
   assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
-  assert.ok(censusStart >= 0, 'source census scheduling must exist');
+  assert.ok(censusDefinition >= 0, 'deferred source census definition must exist');
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
   assert.ok(accessWallCheck >= 0, 'access-wall target-side check must exist');
   assert.ok(legalPrivacyCheck >= 0, 'legal/privacy target-side check must exist');
-  assert.ok(censusAwait >= 0, 'source census must be awaited');
+  assert.ok(consentReconciliation >= 0, 'target consent reconciliation must exist');
+  assert.ok(axeEvaluation >= 0, 'verifier-owned accessibility evaluation must exist');
+  assert.ok(censusEligibility >= 0, 'late source-census eligibility gate must exist');
+  assert.ok(censusStart >= 0, 'source census must be invoked');
+  assert.ok(targetVerdict >= 0, 'target verdict must exist');
 
   assert.ok(
-    browserCapture < censusStart,
-    'browser capture must finish before source census scheduling'
+    browserCapture < censusDefinition,
+    'browser capture must finish before defining the deferred source census'
   );
   assert.ok(
-    censusStart < contextCreation,
-    'source census scheduling must stay before target context creation after the browser preflight'
+    censusDefinition < contextCreation,
+    'the deferred source census must be available before target work without starting it'
   );
   assert.ok(
-    censusAwait > contextCreation,
-    'source census must be awaited after the target liveHttpContext is created'
+    censusStart > contextCreation,
+    'source census must start after the target liveHttpContext work'
   );
   assert.ok(
-    censusAwait > accessWallCheck,
-    'source census must be awaited after the access-wall target-side check'
+    censusStart > accessWallCheck,
+    'source census must start after the access-wall target-side check'
   );
   assert.ok(
-    censusAwait > legalPrivacyCheck,
-    'source census must be awaited after the legal/privacy target-side check (the last one)'
+    censusStart > legalPrivacyCheck,
+    'source census must start after the legal/privacy target-side check'
+  );
+  assert.ok(
+    censusStart > consentReconciliation,
+    'source census must start after browser/consent reconciliation'
+  );
+  assert.ok(censusStart > axeEvaluation, 'source census must start after verifier-owned accessibility evaluation');
+  assert.ok(censusStart > censusEligibility, 'source census must start only through its late eligibility gate');
+  assert.ok(
+    censusStart > targetVerdict,
+    'the core target verdict must be established before the late source census starts'
   );
 
-  const awaitCount = body.split('await sourceSurfaceCensusPromise').length - 1;
+  const awaitCount = body.split('await runSourceSurfaceCensus()').length - 1;
   assert.equal(
     awaitCount,
     1,
-    'the source census must be awaited exactly once, after all target-side checks (no earlier serialization point)'
+    'the source census must start exactly once, after all target delivery checks'
   );
+  assert.equal(body.includes('liveErrors.push(...sourceSurfaceCensus.errors)'), false);
 });

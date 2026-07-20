@@ -25,9 +25,13 @@ import {
   DRUPAL_LIVE_SURFACE_EVAL,
   DRUPAL_RUNTIME_FACTS_EVAL,
   exportedSeoUrlPortabilityFindings,
+  formatSourceSurfaceProgress,
   inspectCustomCodeFilesystem,
   inspectSourceSurface,
   inspectCriticalAssets,
+  SOURCE_SURFACE_LIMITS,
+  sourceSurfaceCompletionBlocker,
+  sourceSurfaceLimitsForRouteCount,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
@@ -876,8 +880,11 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     assert.match(projects.bodySha256, /^sha256:[a-f0-9]{64}$/);
     assert.ok(projects.provenance.some((record) => record.kind === 'rendered-link'));
     assert.ok(projects.provenance.some((record) => record.kind === 'sitemap-url'));
-    assert.equal(incomplete.budget.maxRoutes, 512);
+    assert.equal(incomplete.budget.deadlineMs, 180_000);
+    assert.equal(incomplete.budget.maxRequests, 2_048);
+    assert.equal(incomplete.budget.maxRoutes, 1_024);
     assert.equal(incomplete.budget.maxSitemaps, 24);
+    assert.equal(incomplete.budget.maxTasks, 2_048);
 
     const locallyExcludedMatrix = structuredClone(matrix);
     locallyExcludedMatrix.routes.push(
@@ -925,6 +932,128 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     assert.equal(bounded.budget.maxRoutes, 2);
     assert.ok(bounded.budget.droppedRouteCount > 0);
     assert.match(bounded.errors.join('\n'), /exceeded its 2 route limit/i);
+  }, { defaultVerificationRoutes: false });
+});
+
+test('source crawl expansion couples every hard budget and gives an exact owner-authorized continuation', () => {
+  const doubled = sourceSurfaceLimitsForRouteCount(2_048);
+  assert.deepEqual(
+    {
+      deadlineMs: doubled.deadlineMs,
+      maxRequests: doubled.maxRequests,
+      maxRoutes: doubled.maxRoutes,
+      maxSitemapLocs: doubled.maxSitemapLocs,
+      maxSitemaps: doubled.maxSitemaps,
+      maxTasks: doubled.maxTasks
+    },
+    {
+      deadlineMs: 360_000,
+      maxRequests: 4_096,
+      maxRoutes: 2_048,
+      maxSitemapLocs: 10_000,
+      maxSitemaps: 48,
+      maxTasks: 4_096
+    }
+  );
+  const maximum = sourceSurfaceLimitsForRouteCount(8_192);
+  assert.equal(maximum.maxSitemapLocs, 40_000);
+  assert.equal(maximum.maxSitemaps, 192);
+  assert.throws(() => sourceSurfaceLimitsForRouteCount(8_193), /through 8192/i);
+
+  const blocker = sourceSurfaceCompletionBlocker({
+    status: 'blocked',
+    budget: {
+      droppedRouteCount: 241,
+      maxRequests: 2_048,
+      maxRoutes: 1_024,
+      requestCount: 1_026,
+      routeCount: 1_024
+    }
+  });
+  assert.equal(blocker.code, 'source.census-budget');
+  assert.equal(blocker.resolutionClass, 'external');
+  assert.match(blocker.message, /core target delivery checks completed/i);
+  assert.match(blocker.nextAction, /--source-max-routes 2048/);
+  assert.match(blocker.nextAction, /do not combine or accept partial crawl results/i);
+
+  const maximumBlocker = sourceSurfaceCompletionBlocker({
+    status: 'blocked',
+    budget: { droppedRouteCount: 1, maxRoutes: 8_192, routeCount: 8_192 }
+  });
+  assert.doesNotMatch(maximumBlocker.nextAction, /16384/);
+  assert.match(maximumBlocker.nextAction, /route-matrix treatment/i);
+
+  const status = formatSourceSurfaceProgress({
+    phase: 'discovery',
+    status: 'progress',
+    discoveredRoutes: 520,
+    inspectedRoutes: 256,
+    queuedRoutes: 264,
+    requestCount: 258,
+    elapsedMs: 12_300,
+    limits: { maxRequests: 2_048 },
+    sourceUrl: 'https://source.example/private?token=secret'
+  });
+  assert.match(status, /256 inspected, 520 discovered, 264 queued/);
+  assert.doesNotMatch(status, /source\.example|token|secret/);
+});
+
+test('large source census checks primary delivery routes before a visible late crawl', async () => {
+  // Issue #76 observed 512 inspected routes plus 241 discoveries beyond the old cap.
+  const commentPaths = Array.from({ length: 751 }, (_value, index) => `/comment/${index + 1}`);
+  const requestedPaths = [];
+  const progress = [];
+
+  await withHttpServer((request, response) => {
+    const origin = `http://${request.headers.host}`;
+    const path = String(request.url ?? '').split('?')[0];
+    requestedPaths.push(path);
+    if (path === '/robots.txt') {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end(`User-agent: *\nSitemap: ${origin}/sitemap.xml\n`);
+      return;
+    }
+    if (path === '/sitemap.xml') {
+      response.writeHead(200, { 'content-type': 'application/xml' });
+      response.end(`<?xml version="1.0"?><urlset>${commentPaths
+        .map((commentPath) => `<url><loc>${origin}${commentPath}</loc></url>`)
+        .join('')}</urlset>`);
+      return;
+    }
+    if (path === '/' || path === '/landing' || commentPaths.includes(path)) {
+      const canonical = path.startsWith('/comment/') ? '/landing' : path;
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`<!doctype html><title>${path}</title><link rel="canonical" href="${canonical}"><h1>${path}</h1>`);
+      return;
+    }
+    response.writeHead(404, { 'content-type': 'text/html' });
+    response.end('<title>Not found</title><h1>Not found</h1>');
+  }, async (sourceBaseUrl) => {
+    const routeMatrix = {
+      sourceBaseUrl,
+      primaryRoutes: [
+        { sourcePath: '/', targetPath: '/', accepted: true },
+        { sourcePath: '/landing', targetPath: '/landing', accepted: true }
+      ],
+      routes: ['/', '/landing', ...commentPaths].map((sourcePath) => ({ sourcePath, accepted: true })),
+      sourceRouteDriftClassification: []
+    };
+
+    const census = await inspectSourceSurface({
+      onProgress: (event) => progress.push(event),
+      routeMatrix
+    });
+
+    assert.equal(SOURCE_SURFACE_LIMITS.maxRoutes, 1_024);
+    assert.equal(census.status, 'passed', census.errors.join('\n'));
+    assert.equal(census.budget.routeCount, 753);
+    assert.equal(census.budget.droppedRouteCount, 0);
+    assert.ok(requestedPaths.indexOf('/') < requestedPaths.indexOf('/sitemap.xml'));
+    assert.ok(requestedPaths.indexOf('/landing') < requestedPaths.indexOf('/sitemap.xml'));
+    assert.ok(progress.some((event) => event.phase === 'primary' && event.status === 'completed'));
+    assert.ok(progress.some((event) => event.phase === 'discovery' && event.status === 'progress'));
+    assert.equal(progress.at(-1)?.status, 'completed');
+    assert.equal(progress.at(-1)?.inspectedRoutes, 753);
   }, { defaultVerificationRoutes: false });
 });
 
@@ -5308,8 +5437,17 @@ test('live verifier rejects fetched SEO metadata that is missing or differs from
 test('CLI discovers the DDEV Drupal runtime and requires clean status plus HEAD-matching tracked config YAML', async () => {
   let liveBaseUrl = '';
   let verifierAxeViolation = false;
+  let sourceDiscoveryPaths = [];
   await withHttpServer(
     (request, response) => {
+      if (request.url === '/sitemap.xml' && sourceDiscoveryPaths.length > 0) {
+        const origin = `http://${request.headers.host}`;
+        response.writeHead(200, { 'content-type': 'application/xml; charset=utf-8' });
+        response.end(`<?xml version="1.0"?><urlset>${sourceDiscoveryPaths
+          .map((path) => `<url><loc>${origin}${path}</loc></url>`)
+          .join('')}</urlset>`);
+        return;
+      }
       if (request.url === '/robots.txt' || request.url === '/sitemap.xml') {
         response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
         response.end('Not found');
@@ -5679,6 +5817,48 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(baseline.status, 'passed');
       assert.equal(baseline.siteStateFingerprint, cleanReport.buildState.fingerprint);
 
+      sourceDiscoveryPaths = ['/archive/1', '/archive/2'];
+      const sourceProgress = [];
+      const originalPath = process.env.PATH;
+      const originalFakeDdevUrl = process.env.FAKE_DDEV_URL;
+      process.env.PATH = cleanEnvironment.PATH;
+      process.env.FAKE_DDEV_URL = cleanEnvironment.FAKE_DDEV_URL;
+      let cappedSourceReport;
+      try {
+        cappedSourceReport = await verifyLive({
+          packetDir,
+          cwd: targetRoot,
+          environment: cleanEnvironment,
+          sourceSurfaceLimits: { maxRoutes: 1 },
+          onSourceProgress: (event) => sourceProgress.push(event)
+        });
+      } finally {
+        process.env.PATH = originalPath;
+        if (originalFakeDdevUrl === undefined) {
+          delete process.env.FAKE_DDEV_URL;
+        } else {
+          process.env.FAKE_DDEV_URL = originalFakeDdevUrl;
+        }
+        sourceDiscoveryPaths = [];
+      }
+      assert.equal(cappedSourceReport.valid, true, cappedSourceReport.errors.join('\n'));
+      assert.equal(cappedSourceReport.liveTargetValid, true);
+      assert.equal(cappedSourceReport.sourceSurfaceSupportsCompletion, false);
+      assert.equal(cappedSourceReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(cappedSourceReport.verdict, 'machine-incomplete');
+      assert.equal(cappedSourceReport.sourceSurfaceCensus.budget.maxRoutes, 1);
+      assert.equal(cappedSourceReport.sourceSurfaceCensus.budget.droppedRouteCount, 2);
+      assert.ok(sourceProgress.some((event) => event.phase === 'primary' && event.status === 'completed'));
+      assert.equal(sourceProgress.at(-1)?.status, 'blocked');
+      assert.equal(sourceProgress.at(-1)?.droppedRoutes, 2);
+      assert.ok(cappedSourceReport.completionBlockers.some((blocker) => blocker.code === 'source.census-budget'));
+      assert.equal(cappedSourceReport.completionBlockers.some((blocker) => blocker.code === 'target.validation'), false);
+      assert.equal(cappedSourceReport.agentContinuation.status, 'externally_blocked');
+      assert.match(
+        cappedSourceReport.agentContinuation.blockers[0].nextAction,
+        /--source-max-routes 2048/
+      );
+
       // The packet still contains its authored passing axe reports. A fresh
       // verifier-owned browser violation must independently block completion.
       verifierAxeViolation = true;
@@ -5690,6 +5870,11 @@ process.stdout.write(outputs.get(command) + '\\n');
       assert.equal(axeViolationReport.packetVerification.completionEvidence.packetSupportsCompletion, true);
       assert.equal(axeViolationReport.verifierOwnedAccessibility.passed, false);
       assert.equal(axeViolationReport.completeLocalRebuildClaimAllowed, false);
+      assert.equal(axeViolationReport.sourceSurfaceCensus.status, 'not_run');
+      assert.match(
+        axeViolationReport.sourceSurfaceCensus.warnings.join('\n'),
+        /deferred until every higher-priority.*accessibility/i
+      );
       assert.match(
         axeViolationReport.completionBlockedReasons.join('\n'),
         /unresolved WCAG 2\.2 A\/AA.*color-contrast/i

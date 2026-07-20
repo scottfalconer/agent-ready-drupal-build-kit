@@ -54,6 +54,8 @@ Options:
   --packet <path>      Review packet directory (default: review-packet)
   --target-url <url>   Explicit target URL (otherwise detect current DDEV target)
   --out <path>         Report path (default: review-packet/evidence/live-verification.json)
+  --source-max-routes <count>
+                       Expand the late source crawl after owner approval (default: 1024; max: 8192)
   --change <id>        Bind a passing full run to an evidence-recorded repair or extension
   --checkpoint <id>    Create a create-only checkpoint for the passing change
   --packet-only        Run structural packet lint only; never authorizes completion
@@ -71,14 +73,17 @@ const MAX_LIVE_HTTP_TASKS = 20_000;
 const LIVE_ROUTE_DEADLINE_MS = 90_000;
 export const SOURCE_SURFACE_LIMITS = Object.freeze({
   concurrency: 8,
-  deadlineMs: 90_000,
+  deadlineMs: 180_000,
   maxBodyBytes: 2 * 1024 * 1024,
-  maxRequests: 768,
-  maxRoutes: 512,
+  maxRequests: 2_048,
+  maxRoutes: 1_024,
   maxSitemapLocs: 5_000,
   maxSitemaps: 24,
-  maxTasks: 1_024
+  maxTasks: 2_048
 });
+const MAX_SOURCE_SURFACE_ROUTES = 8_192;
+const MAX_SOURCE_CLI_FINDINGS = 20;
+const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 
@@ -109,12 +114,14 @@ function parseArgs(argv) {
     packet: 'review-packet',
     out: '',
     packetOnly: false,
+    sourceMaxRoutes: 0,
     targetUrl: ''
   };
   const valueOptions = new Map([
     ['--change', 'changeId'],
     ['--checkpoint', 'checkpointId'],
     ['--packet', 'packet'],
+    ['--source-max-routes', 'sourceMaxRoutes'],
     ['--out', 'out'],
     ['--target-url', 'targetUrl']
   ]);
@@ -149,6 +156,22 @@ function parseArgs(argv) {
   if (args.packetOnly && args.targetUrl) {
     throw new UsageError('--target-url cannot be combined with --packet-only.');
   }
+  if (args.packetOnly && args.sourceMaxRoutes) {
+    throw new UsageError('--source-max-routes cannot be combined with --packet-only.');
+  }
+  if (args.sourceMaxRoutes) {
+    const value = Number(args.sourceMaxRoutes);
+    if (
+      !Number.isSafeInteger(value) ||
+      value < SOURCE_SURFACE_LIMITS.maxRoutes ||
+      value > MAX_SOURCE_SURFACE_ROUTES
+    ) {
+      throw new UsageError(
+        `--source-max-routes must be an integer from ${SOURCE_SURFACE_LIMITS.maxRoutes} through ${MAX_SOURCE_SURFACE_ROUTES}.`
+      );
+    }
+    args.sourceMaxRoutes = value;
+  }
   if (args.packetOnly && (args.changeId || args.checkpointId)) {
     throw new UsageError('Lifecycle change/checkpoint options cannot be combined with --packet-only.');
   }
@@ -160,6 +183,28 @@ function parseArgs(argv) {
     args.out = join(args.packet, 'evidence', filename);
   }
   return args;
+}
+
+export function sourceSurfaceLimitsForRouteCount(maxRoutes = SOURCE_SURFACE_LIMITS.maxRoutes) {
+  if (
+    !Number.isSafeInteger(maxRoutes) ||
+    maxRoutes < SOURCE_SURFACE_LIMITS.maxRoutes ||
+    maxRoutes > MAX_SOURCE_SURFACE_ROUTES
+  ) {
+    throw new UsageError(
+      `Source max routes must be an integer from ${SOURCE_SURFACE_LIMITS.maxRoutes} through ${MAX_SOURCE_SURFACE_ROUTES}.`
+    );
+  }
+  const scale = Math.ceil(maxRoutes / SOURCE_SURFACE_LIMITS.maxRoutes);
+  return {
+    ...SOURCE_SURFACE_LIMITS,
+    deadlineMs: SOURCE_SURFACE_LIMITS.deadlineMs * scale,
+    maxRequests: SOURCE_SURFACE_LIMITS.maxRequests * scale,
+    maxRoutes,
+    maxSitemapLocs: SOURCE_SURFACE_LIMITS.maxSitemapLocs * scale,
+    maxSitemaps: SOURCE_SURFACE_LIMITS.maxSitemaps * scale,
+    maxTasks: SOURCE_SURFACE_LIMITS.maxTasks * scale
+  };
 }
 
 function isDirectRun() {
@@ -1290,10 +1335,84 @@ function sourceSurfaceNotRun(reason, { status = 'not_run', authoritative = false
   };
 }
 
+export function sourceSurfaceCompletionBlocker(sourceSurfaceCensus) {
+  if (sourceSurfaceCensus?.status === 'passed') {
+    return null;
+  }
+  const budget = sourceSurfaceCensus?.budget ?? {};
+  const budgetLimited =
+    Number(budget.droppedRouteCount ?? 0) > 0 ||
+    Number(budget.droppedSitemapCount ?? 0) > 0 ||
+    Number(budget.sitemapLocCount ?? 0) > Number(budget.maxSitemapLocs ?? Number.POSITIVE_INFINITY) ||
+    budget.deadlineExceeded === true ||
+    budget.requestCapExhausted === true ||
+    budget.taskCapExhausted === true;
+  if (!budgetLimited) {
+    return {
+      code: 'source.census',
+      message: 'Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.',
+      nextAction: 'Repair the source route matrix or source response failure, refresh affected evidence, and rerun the default live verifier.',
+      origin: 'source-census-verifier:reconciliation',
+      resolutionClass: 'agent_resolvable'
+    };
+  }
+
+  const currentMaxRoutes = Math.max(
+    SOURCE_SURFACE_LIMITS.maxRoutes,
+    Number.isSafeInteger(Number(budget.maxRoutes)) ? Number(budget.maxRoutes) : SOURCE_SURFACE_LIMITS.maxRoutes
+  );
+  const canExpand = currentMaxRoutes < MAX_SOURCE_SURFACE_ROUTES;
+  const nextMaxRoutes = Math.min(MAX_SOURCE_SURFACE_ROUTES, currentMaxRoutes * 2);
+  const attemptedEvidence = [
+    `The bounded crawl attempt inspected ${Number(budget.routeCount ?? 0)} route(s), found ${Number(budget.droppedRouteCount ?? 0)} route discovery event(s) and ${Number(budget.droppedSitemapCount ?? 0)} sitemap discovery event(s) beyond their caps, parsed ${Number(budget.sitemapLocCount ?? 0)} of ${Number(budget.maxSitemapLocs ?? 0)} allowed sitemap locations, and used ${Number(budget.requestCount ?? 0)} of ${Number(budget.maxRequests ?? 0)} HTTP request(s).`
+  ];
+  return {
+    code: 'source.census-budget',
+    message: canExpand
+      ? `Core target delivery checks completed, but the verifier-owned source census exhausted a coupled crawl bound with a ${currentMaxRoutes}-route ceiling; final completion remains blocked.`
+      : `Core target delivery checks completed, but the verifier-owned source census still exhausted a coupled crawl bound at the maximum supported ${MAX_SOURCE_SURFACE_ROUTES}-route ceiling; final completion remains blocked.`,
+    attemptedEvidence,
+    missingInput: canExpand
+      ? `Owner authorization for one larger, complete ${nextMaxRoutes}-route source crawl.`
+      : 'Owner direction on a complete route-matrix treatment or a build-kit maintainer decision to extend the bounded census.',
+    nextAction: canExpand
+      ? `After owner authorization, restart the complete verifier once with: node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --source-max-routes ${nextMaxRoutes}. This expands only the verifier budget; it does not accept missing route-matrix rows. Do not combine or accept partial crawl results.`
+      : 'Record an owner-approved complete route-matrix treatment or ask a build-kit maintainer to extend the bounded census. Do not exclude reachable public routes or combine partial crawl results.',
+    origin: 'source-census-verifier:budget',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+}
+
+function sourceSurfaceNonBudgetErrors(sourceSurfaceCensus) {
+  return (Array.isArray(sourceSurfaceCensus?.errors) ? sourceSurfaceCensus.errors : [])
+    .filter((error) => !/(?:exceeded its \d+ (?:route|sitemap|URL) limit|HTTP (?:request )?budget|task budget|wall-clock deadline)/i.test(String(error)));
+}
+
+export function formatSourceSurfaceProgress(event = {}) {
+  const phase = event.phase === 'primary' ? 'primary routes' : 'deep discovery';
+  const elapsedSeconds = (Math.max(0, Number(event.elapsedMs ?? 0)) / 1_000).toFixed(1);
+  const parts = [
+    `Source census ${phase} ${String(event.status ?? 'progress')}:`,
+    `${Number(event.inspectedRoutes ?? 0)} inspected,`,
+    `${Number(event.discoveredRoutes ?? 0)} discovered,`,
+    `${Number(event.queuedRoutes ?? 0)} queued,`
+  ];
+  if (Number(event.droppedRoutes ?? 0) > 0) {
+    parts.push(`${Number(event.droppedRoutes)} beyond cap (not inspected),`);
+  }
+  parts.push(
+    `${Number(event.requestCount ?? 0)}/${Number(event.limits?.maxRequests ?? 0)} requests;`,
+    `${elapsedSeconds}s elapsed.`
+  );
+  return parts.join(' ');
+}
+
 export async function inspectSourceSurface({
   independentVerification = {},
   limits = {},
   liveHttpContext = null,
+  onProgress = null,
   routeMatrix = {}
 } = {}) {
   const checkedAt = new Date().toISOString();
@@ -1347,9 +1466,54 @@ export async function inspectSourceSurface({
   const sitemapProvenance = new Map();
   const routes = new Map();
   const sitemaps = [];
+  let routeCursor = 0;
   let droppedRouteCount = 0;
   let droppedSitemapCount = 0;
   let sitemapLocCount = 0;
+  let lastProgressRouteCount = 0;
+  let lastProgressAt = Date.now();
+  let progressReporterActive = typeof onProgress === 'function';
+
+  const emitProgress = (phase, status, { force = false } = {}) => {
+    if (!progressReporterActive) return;
+    const now = Date.now();
+    const inspectedRoutes = routes.size;
+    if (
+      status === 'progress' &&
+      !force &&
+      inspectedRoutes - lastProgressRouteCount < SOURCE_PROGRESS_ROUTE_INTERVAL &&
+      now - lastProgressAt < 10_000
+    ) {
+      return;
+    }
+    lastProgressAt = now;
+    lastProgressRouteCount = inspectedRoutes;
+    const metrics = context.metrics();
+    try {
+      onProgress({
+        schemaVersion: 'public-kit.source-surface-progress.1',
+        phase,
+        status,
+        discoveredRoutes: routeQueue.length,
+        inspectedRoutes,
+        queuedRoutes: Math.max(0, routeQueue.length - routeCursor),
+        droppedRoutes: droppedRouteCount,
+        discoveredSitemaps: sitemapQueue.length,
+        inspectedSitemaps: sitemaps.length,
+        requestCount: metrics.requestCount,
+        taskCount: metrics.taskCount,
+        elapsedMs: metrics.elapsedMs,
+        limits: {
+          maxRequests: effectiveLimits.maxRequests,
+          maxRoutes: effectiveLimits.maxRoutes,
+          maxTasks: effectiveLimits.maxTasks
+        }
+      });
+    } catch {
+      progressReporterActive = false;
+      warnings.push('Source census progress reporting failed; verification continued without status updates.');
+    }
+  };
 
   const addProvenance = (map, key, provenance) => {
     const records = map.get(key) ?? new Map();
@@ -1394,6 +1558,107 @@ export async function inspectSourceSurface({
   for (const route of Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []) {
     enqueueRoute(route?.sourcePath, { kind: 'declared-primary', referrer: 'route-matrix.json#primaryRoutes' });
   }
+
+  const drainRouteQueue = async (phase, { throughIndex = Number.POSITIVE_INFINITY } = {}) => {
+    while (routeCursor < routeQueue.length && routeCursor < throughIndex) {
+      const batchEnd = Math.min(
+        routeCursor + effectiveLimits.concurrency,
+        routeQueue.length,
+        throughIndex
+      );
+      const batch = routeQueue.slice(routeCursor, batchEnd);
+      routeCursor += batch.length;
+      let results;
+      try {
+        results = await context.runTasks('source-route', batch, async (path) => {
+          const url = new URL(path, sourceBaseUrl);
+          const routeErrors = [];
+          try {
+            const response = await requestFollowingRedirects(url, {
+              liveHttpContext: context,
+              maxBodyBytes: effectiveLimits.maxBodyBytes
+            });
+            const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
+            const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
+              (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
+            const metadata = isHtml ? renderedMetadata(response.body, response.finalUrl) : {};
+            const extracted = isHtml
+              ? sourceRenderedRouteLinks(response.body, response.finalUrl, sourceBaseUrl.origin)
+              : { paths: [], warnings: [] };
+            warnings.push(...extracted.warnings);
+            const boundary = sourceBoundaryKind(response.status);
+            let boundaryConfirmationStatus = 0;
+            let boundaryConfirmed = false;
+            if (boundary) {
+              try {
+                const confirmation = await requestFollowingRedirects(url, {
+                  captureBody: 'never',
+                  liveHttpContext: context,
+                  maxBodyBytes: effectiveLimits.maxBodyBytes
+                });
+                boundaryConfirmationStatus = confirmation.status;
+                boundaryConfirmed = confirmation.status === response.status;
+                if (!boundaryConfirmed) {
+                  routeErrors.push(`Source boundary ${path} changed from HTTP ${response.status} to ${confirmation.status} on immediate verifier recheck.`);
+                }
+              } catch (error) {
+                routeErrors.push(`Source boundary ${path} could not be confirmed by a second verifier request: ${error.message}`);
+              }
+            }
+            if (response.status >= 500 || response.status === 429) {
+              routeErrors.push(`Source route ${path} returned HTTP ${response.status}; public reachability cannot be established.`);
+            }
+            return {
+              bodySha256: `sha256:${sha256(response.body)}`,
+              boundaryConfirmationStatus,
+              boundaryConfirmed,
+              canonical: metadata.canonicalUrl ?? '',
+              discoveredLinks: extracted.paths,
+              errors: routeErrors,
+              finalUrl: response.finalUrl,
+              h1: isHtml ? elementText(response.body, 'h1') : '',
+              initialStatus: response.initialStatus,
+              isHtml,
+              path,
+              status: response.status,
+              title: isHtml ? elementText(response.body, 'title') : ''
+            };
+          } catch (error) {
+            return {
+              bodySha256: '', canonical: '', discoveredLinks: [],
+              boundaryConfirmationStatus: 0, boundaryConfirmed: false,
+              errors: [`Source route ${path} could not be inspected: ${error.message}`],
+              finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
+            };
+          }
+        });
+      } catch (error) {
+        errors.push(`Verifier-owned source route census could not complete within its HTTP budget: ${error.message}`);
+        return false;
+      }
+      for (const record of results) {
+        routes.set(record.path, record);
+        errors.push(...record.errors);
+        for (const linkedPath of record.discoveredLinks) {
+          enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
+        }
+        if (record.finalUrl) {
+          const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
+          if (finalPath && finalPath !== record.path) {
+            enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
+          }
+        }
+      }
+      emitProgress(phase, 'progress');
+    }
+    return true;
+  };
+
+  const primaryRouteCount = routeQueue.length;
+  emitProgress('primary', 'started', { force: true });
+  const primaryPhaseCompleted = await drainRouteQueue('primary', { throughIndex: primaryRouteCount });
+  emitProgress('primary', primaryPhaseCompleted ? 'completed' : 'blocked', { force: true });
+  emitProgress('discovery', primaryPhaseCompleted ? 'started' : 'blocked', { force: true });
 
   let robots = null;
   try {
@@ -1469,6 +1734,7 @@ export async function inspectSourceSurface({
         };
       });
       sitemaps.push(record);
+      emitProgress('discovery', 'progress', { force: true });
     } catch (error) {
       const onlyDefaultProbe = [...(sitemapProvenance.get(sitemapUrl)?.values() ?? [])]
         .every((record) => record.kind === 'default-sitemap-probe');
@@ -1478,92 +1744,7 @@ export async function inspectSourceSurface({
     }
   }
 
-  let routeCursor = 0;
-  while (routeCursor < routeQueue.length) {
-    const batch = routeQueue.slice(routeCursor, routeCursor + effectiveLimits.concurrency);
-    routeCursor += batch.length;
-    let results;
-    try {
-      results = await context.runTasks('source-route', batch, async (path) => {
-      const url = new URL(path, sourceBaseUrl);
-      const routeErrors = [];
-      try {
-        const response = await requestFollowingRedirects(url, {
-          liveHttpContext: context,
-          maxBodyBytes: effectiveLimits.maxBodyBytes
-        });
-        const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
-        const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
-          (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
-        const metadata = isHtml ? renderedMetadata(response.body, response.finalUrl) : {};
-        const extracted = isHtml
-          ? sourceRenderedRouteLinks(response.body, response.finalUrl, sourceBaseUrl.origin)
-          : { paths: [], warnings: [] };
-        warnings.push(...extracted.warnings);
-        const boundary = sourceBoundaryKind(response.status);
-        let boundaryConfirmationStatus = 0;
-        let boundaryConfirmed = false;
-        if (boundary) {
-          try {
-            const confirmation = await requestFollowingRedirects(url, {
-              captureBody: 'never',
-              liveHttpContext: context,
-              maxBodyBytes: effectiveLimits.maxBodyBytes
-            });
-            boundaryConfirmationStatus = confirmation.status;
-            boundaryConfirmed = confirmation.status === response.status;
-            if (!boundaryConfirmed) {
-              routeErrors.push(`Source boundary ${path} changed from HTTP ${response.status} to ${confirmation.status} on immediate verifier recheck.`);
-            }
-          } catch (error) {
-            routeErrors.push(`Source boundary ${path} could not be confirmed by a second verifier request: ${error.message}`);
-          }
-        }
-        if (response.status >= 500 || response.status === 429) {
-          routeErrors.push(`Source route ${path} returned HTTP ${response.status}; public reachability cannot be established.`);
-        }
-        return {
-          bodySha256: `sha256:${sha256(response.body)}`,
-          boundaryConfirmationStatus,
-          boundaryConfirmed,
-          canonical: metadata.canonicalUrl ?? '',
-          discoveredLinks: extracted.paths,
-          errors: routeErrors,
-          finalUrl: response.finalUrl,
-          h1: isHtml ? elementText(response.body, 'h1') : '',
-          initialStatus: response.initialStatus,
-          isHtml,
-          path,
-          status: response.status,
-          title: isHtml ? elementText(response.body, 'title') : ''
-        };
-      } catch (error) {
-        return {
-          bodySha256: '', canonical: '', discoveredLinks: [],
-          boundaryConfirmationStatus: 0, boundaryConfirmed: false,
-          errors: [`Source route ${path} could not be inspected: ${error.message}`],
-          finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
-        };
-      }
-      });
-    } catch (error) {
-      errors.push(`Verifier-owned source route census could not complete within its HTTP budget: ${error.message}`);
-      break;
-    }
-    for (const record of results) {
-      routes.set(record.path, record);
-      errors.push(...record.errors);
-      for (const linkedPath of record.discoveredLinks) {
-        enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
-      }
-      if (record.finalUrl) {
-        const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
-        if (finalPath && finalPath !== record.path) {
-          enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
-        }
-      }
-    }
-  }
+  await drainRouteQueue('discovery');
 
   if (droppedRouteCount > 0) {
     errors.push(`Verifier-owned source route discovery exceeded its ${effectiveLimits.maxRoutes} route limit; ${droppedRouteCount} additional discoveries were not inspected.`);
@@ -1650,6 +1831,7 @@ export async function inspectSourceSurface({
     sitemaps: sitemapRecords,
     robots
   };
+  emitProgress('discovery', errors.length === 0 ? 'completed' : 'blocked', { force: true });
   return {
     schemaVersion: 'public-kit.source-surface-census.1',
     checkedAt,
@@ -11652,7 +11834,9 @@ export async function verifyLive({
   cwd = process.cwd(),
   environment = process.env,
   drupalRuntime = null,
-  liveHttpLimits = {}
+  liveHttpLimits = {},
+  sourceSurfaceLimits = {},
+  onSourceProgress = null
 } = {}) {
   const absolutePacketDir = resolve(cwd, packetDir);
   assertVerificationPacketInputs(absolutePacketDir);
@@ -11881,22 +12065,27 @@ export async function verifyLive({
       : 'Verifier-owned browser preflight failed before source or target HTTP verification. Use the canonical DDEV agent workflow, or set CHROME_PATH for an explicit host-side maintainer run.');
   }
 
-  const sourceSurfaceCensusPromise = briefMode
-    ? Promise.resolve(sourceSurfaceNotRun(
+  const runSourceSurfaceCensus = async () => briefMode
+    ? sourceSurfaceNotRun(
         'Source-site discovery does not apply to a brief-based build.',
         { status: 'not_applicable', authoritative: true }
-      ))
+      )
     : browserRuntimeUnavailable
-    ? Promise.resolve(sourceSurfaceNotRun(
+    ? sourceSurfaceNotRun(
         'Browser runtime preflight failed; expensive verification was not started.'
-      ))
+      )
     : runtimeAuthoritativeForCompletion && declaredSource
-    ? inspectSourceSurface({ independentVerification, routeMatrix })
-    : Promise.resolve(sourceSurfaceNotRun(
+    ? inspectSourceSurface({
+        independentVerification,
+        limits: sourceSurfaceLimits,
+        onProgress: onSourceProgress,
+        routeMatrix
+      })
+    : sourceSurfaceNotRun(
         runtimeWasInjected
           ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
           : 'Verifier-owned source census could not start without sourceBaseUrl.'
-      ));
+      );
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
@@ -12097,19 +12286,6 @@ export async function verifyLive({
   for (const check of legalPrivacyLinkChecks) {
     liveErrors.push(...check.errors);
   }
-  // Await the verifier-owned source census only AFTER every target-side
-  // liveHttpContext check has completed. The census is started concurrently
-  // above (sourceSurfaceCensusPromise) but crawls a slow / large / CDN-gated
-  // SOURCE origin; awaiting it earlier let it consume the target context's
-  // fixed wall-clock deadline (deadlineAt = startedAt + deadlineMs), which then
-  // failed unrelated target-side checks (server-rendered surface, redirect
-  // materialization, next-cycle cleanup, generated missing-route, access-wall,
-  // legal/privacy) with false "exceeded its total wall-clock deadline" errors.
-  // The census result is only consumed by completion logic below, so deferring
-  // the await keeps the target-side verdict independent of source-census cost
-  // without changing any source-census behavior or enforcement.
-  const sourceSurfaceCensus = await sourceSurfaceCensusPromise;
-  liveErrors.push(...sourceSurfaceCensus.errors);
   for (const error of liveHttpContext.errors) {
     if (!liveErrors.includes(error)) {
       liveErrors.push(error);
@@ -12461,9 +12637,32 @@ export async function verifyLive({
       })
     : [];
   const reviewHandoffStateValid = reviewHandoffRequired && reviewHandoffBindingErrors.length === 0;
+  const lateSourceCensusEligible =
+    !briefMode &&
+    packetReport.valid &&
+    liveTargetValid &&
+    packetSupportsCompletion &&
+    verifierOwnedAxeSupportsCompletion &&
+    drupalRuntimeSupportsCompletion &&
+    reviewHandoffStateValid;
+  // Source discovery is deliberately the last expensive verification phase.
+  // Primary target routes, representative routes, browser/editor workflows,
+  // accessibility, consent, and build-state checks therefore produce useful
+  // delivery feedback before a very large source inventory consumes time.
+  const sourceSurfaceCensus = briefMode || lateSourceCensusEligible
+    ? await runSourceSurfaceCensus()
+    : sourceSurfaceNotRun(
+        'The late source census was deferred until every higher-priority packet, target, accessibility, runtime, and review-handoff check passes.'
+      );
+  const sourceSurfaceErrors = boundedReportMessages(sourceSurfaceCensus.errors);
+  const sourceSurfaceSupportsCompletion =
+    briefMode ||
+    !runtimeAuthoritativeForCompletion ||
+    sourceSurfaceCensus.status === 'passed';
   const completionClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
+    sourceSurfaceSupportsCompletion &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
@@ -12489,11 +12688,25 @@ export async function verifyLive({
   if (!liveTargetValid) {
     addCompletionBlocker('target.validation', 'Live target identity or route verification failed.');
   }
-  if (!briefMode && runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
-    addCompletionBlocker(
-      'source.census',
-      'Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.'
-    );
+  if (
+    lateSourceCensusEligible &&
+    sourceSurfaceCensus.status !== 'passed'
+  ) {
+    const sourceSurfaceBlocker = sourceSurfaceCompletionBlocker(sourceSurfaceCensus);
+    completionBlockers.push(sourceSurfaceBlocker);
+    if (
+      sourceSurfaceBlocker.code === 'source.census-budget' &&
+      sourceSurfaceNonBudgetErrors(sourceSurfaceCensus).length > 0
+    ) {
+      addCompletionBlocker(
+        'source.census',
+        'Source route-matrix or response reconciliation still requires agent repair independently of the larger crawl authorization.',
+        {
+          nextAction: 'Repair every non-budget source census error first; a larger crawl changes only verifier bounds and does not accept missing route-matrix rows.',
+          origin: 'source-census-verifier:reconciliation'
+        }
+      );
+    }
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
     addCompletionBlocker(
@@ -12683,6 +12896,7 @@ export async function verifyLive({
     ...sharedPacketReport.errors,
     ...(sharedPacketReport.completionEvidence?.packetCompletionBlockedReasons ?? []),
     ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
+    ...sourceSurfaceErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
   ];
 
@@ -12754,6 +12968,7 @@ export async function verifyLive({
     liveEditorSurfaceReconciliation,
     liveNextCycleReconciliation,
     liveTargetValid,
+    sourceSurfaceSupportsCompletion,
     buildState,
     reviewHandoffBinding: {
       attribution: 'builder-writable-self-attested-non-authoritative',
@@ -12802,7 +13017,10 @@ export async function verifyLive({
     completionBlockers,
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
-    errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
+    errors: [
+      ...sharedPacketReport.errors,
+      ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))
+    ],
     warnings: sharedPacketReport.warnings
   });
 }
@@ -12820,9 +13038,15 @@ async function main() {
   const report = args.packetOnly
     ? await validatePacket({ packetDir: resolve(args.packet) })
     : await verifyLive({
-      packetDir: args.packet,
+        packetDir: args.packet,
         targetUrl: args.targetUrl,
-        outPath: args.out
+        outPath: args.out,
+        sourceSurfaceLimits: sourceSurfaceLimitsForRouteCount(
+          args.sourceMaxRoutes || SOURCE_SURFACE_LIMITS.maxRoutes
+        ),
+        onSourceProgress: (event) => {
+          process.stderr.write(`${formatSourceSurfaceProgress(event)}\n`);
+        }
       });
   if (!args.packetOnly) {
     const completionClaimAllowed =
@@ -12908,6 +13132,21 @@ async function main() {
       : `Live target checks passed, but ${claimDescription} machine authorization remains blocked by required machine evidence.`;
     process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
     process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
+    const sourceFindings = Array.isArray(report.sourceSurfaceCensus?.errors)
+      ? report.sourceSurfaceCensus.errors
+      : [];
+    if (sourceFindings.length > 0) {
+      process.stderr.write(`Source census findings (showing ${Math.min(sourceFindings.length, MAX_SOURCE_CLI_FINDINGS)} of ${sourceFindings.length}):\n`);
+      for (const finding of sourceFindings.slice(0, MAX_SOURCE_CLI_FINDINGS)) {
+        process.stderr.write(`- ${finding}\n`);
+      }
+    }
+    const sourceNextActions = new Set(report.agentContinuation.blockers
+      .filter((candidate) => candidate.code.startsWith('source.census'))
+      .map((blocker) => blocker.nextAction));
+    for (const nextAction of sourceNextActions) {
+      process.stderr.write(`Source census next action: ${nextAction}\n`);
+    }
     process.exitCode = 2;
   }
 }
