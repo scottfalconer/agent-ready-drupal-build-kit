@@ -466,6 +466,9 @@ test('initializer runs from a copy containing only the installed skill directory
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /<path-to-skill>\/scripts\/verify/);
     assert.doesNotMatch(help.stdout, /node bin\/verify/);
+    if (verifier === 'verify.mjs') {
+      assert.match(help.stdout, /--source-max-routes <count>/);
+    }
   }
 
   const lifecyclePath = join(installedSkill, 'scripts', 'lifecycle.mjs');
@@ -477,6 +480,23 @@ test('initializer runs from a copy containing only the installed skill directory
   });
   assert.equal(lifecycleHelp.status, 0, lifecycleHelp.stderr);
   assert.match(lifecycleHelp.stdout, /lifecycle\.mjs/);
+
+  const packetOnlySourceExpansion = spawnSync(process.execPath, [
+    join(installedSkill, 'scripts', 'verify.mjs'),
+    '--packet-only',
+    '--source-max-routes',
+    '2048'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(packetOnlySourceExpansion.status, 0);
+  assert.match(packetOnlySourceExpansion.stderr, /--source-max-routes cannot be combined with --packet-only/);
+
+  const excessiveSourceExpansion = spawnSync(process.execPath, [
+    join(installedSkill, 'scripts', 'verify.mjs'),
+    '--source-max-routes',
+    '8193'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(excessiveSourceExpansion.status, 0);
+  assert.match(excessiveSourceExpansion.stderr, /integer from 1024 through 8192/);
 
   const packetOnly = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
