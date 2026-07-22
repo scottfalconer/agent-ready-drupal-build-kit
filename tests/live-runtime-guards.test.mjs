@@ -8,6 +8,7 @@ import {
   ddevProjectWebUrls,
   exportedSeoUrlPortabilityFindings,
   isLocalEnvironmentHost,
+  liveTargetLimitsForRouteCount,
   localOnlyFormExceptionsBoundToRuntime,
   scheduleLiveRouteChecks
 } from '../bin/verify.mjs';
@@ -241,4 +242,53 @@ test('scheduler enforces one HTTP request budget across redirects and route clas
       /exhausted its 1 HTTP request budget/i
     );
   });
+});
+
+test('live target limits default to the exact bounded constants', () => {
+  assert.deepEqual(liveTargetLimitsForRouteCount(), {
+    concurrency: 12,
+    deadlineMs: 90_000,
+    maxRequests: 2_000,
+    maxRoutes: 1_000,
+    maxTasks: 20_000
+  });
+});
+
+test('live target limits scale coupled budgets with the authorized route ceiling', () => {
+  const limits = liveTargetLimitsForRouteCount(4_096);
+  assert.equal(limits.maxRoutes, 4_096);
+  assert.equal(limits.maxRequests, 10_000);
+  assert.equal(limits.maxTasks, 100_000);
+  assert.equal(limits.deadlineMs, 450_000);
+  assert.equal(limits.concurrency, 12, 'concurrency stays fixed for politeness');
+});
+
+test('live target limits reject counts outside the supported range', () => {
+  assert.throws(() => liveTargetLimitsForRouteCount(999), /from 1000 through 8192/);
+  assert.throws(() => liveTargetLimitsForRouteCount(8_193), /from 1000 through 8192/);
+  assert.throws(() => liveTargetLimitsForRouteCount(1.5), /from 1000 through 8192/);
+});
+
+test('scheduler route ceiling honors an authorized larger maxRoutes without fetching on overflow', async () => {
+  const tasks = Array.from({ length: 1_500 }, (_value, index) => routeTask('primary', `/route-${index}`));
+  const defaultResult = await scheduleLiveRouteChecks({
+    baseUrl: new URL('http://127.0.0.1:1'),
+    tasks
+  });
+  assert.equal(defaultResult.budget.attempted, false);
+  assert.match(
+    defaultResult.errors.join('\n'),
+    /1500 checks, exceeding the 1000 route limit; no routes were fetched/i
+  );
+  const raisedOverflow = await scheduleLiveRouteChecks({
+    baseUrl: new URL('http://127.0.0.1:1'),
+    maxRoutes: 1_200,
+    tasks
+  });
+  assert.equal(raisedOverflow.budget.attempted, false);
+  assert.equal(raisedOverflow.budget.maxRoutes, 1_200);
+  assert.match(
+    raisedOverflow.errors.join('\n'),
+    /1500 checks, exceeding the 1200 route limit; no routes were fetched/i
+  );
 });
