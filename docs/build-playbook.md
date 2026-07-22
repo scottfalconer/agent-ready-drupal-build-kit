@@ -448,6 +448,8 @@ Flexible landing-like pages need explicit authoring ownership before implementat
 
 Valid owners include Canvas/Experience Builder, a structured Landing Page content type with typed fields and media references, Layout Builder or block layout, a View page, an entity display, Utility Page for simple low-design informational routes, or a documented exception. The packet should record the editor mental model: arrange sections, fill structured fields, manage a list, update a menu/block, or maintain a simple page.
 
+Every primary flexible route must reconcile exactly once across the route matrix, `compositionModel.flexibleLandingRoutes`, `pageCompositionOwnership`, and independent composition-fidelity checks. Every declared editor-facing section must also reconcile exactly once with `sectionOwnershipMatrix`; a single global section example is not enough. `buildTypeDeclaration` summarizes these route-level decisions and independently observed owners. It cannot enable or suppress Canvas evidence by itself, and its supported type, Canvas-availability evidence, source fit, editor implications, and acceptance must all be complete.
+
 Use this decision procedure:
 
 - composition itself is the editorial surface -> Canvas/Experience Builder;
@@ -456,6 +458,8 @@ Use this decision procedure:
 - repeatable detail page -> entity display and view modes;
 - simple standalone informational page -> Utility Page or plain node with evidence;
 - unavailable or blocked owner -> deviation record and reviewer-visible fallback.
+
+When Canvas/Experience Builder is available but a composed homepage, landing, campaign, or marketing route selects another owner, the packet needs an outcome comparison, not a free-text opt-out: why the selected primitive better fits the source and editor task, why Canvas is worse, packet-local source/editor evidence, and an explicit statement that verification burden did not affect the choice. A fresh blind reviewer must prosecute and accept that exact route decision. This still permits a genuinely simple low-design node when the evidence supports it.
 
 The hybrid rule is strict: Canvas can arrange a page, but repeatable collections stay Drupal-owned. Sponsors, videos, cards, events, galleries, people, products, locations, articles, and resources should not be serialized into Canvas text props or Twig arrays. Use entities, media, entity references, Views, slots, or child components backed by Drupal data.
 

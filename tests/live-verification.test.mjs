@@ -38,7 +38,15 @@ import {
   reconcileLifecycleContinuation,
   verifyLive
 } from '../bin/verify.mjs';
-import { customCodeReviewReasons, MACHINE_GATE_EVALUATORS, perGateResults, validatePacket } from '../bin/verify-packet.mjs';
+import {
+  BUILD_TYPES,
+  buildTypeRequiresCanvasEvidence,
+  compositionOwnerUsesCanvas,
+  customCodeReviewReasons,
+  MACHINE_GATE_EVALUATORS,
+  perGateResults,
+  validatePacket
+} from '../bin/verify-packet.mjs';
 import {
   reviewHandoffInputFileBindings,
   reviewHandoffReference,
@@ -107,6 +115,18 @@ test('config YAML blob comparison rejects Config Split bytes hidden by skip-work
 
   assert.equal(scopedConfigStatus(root, configDirectories), '');
   assert.equal(yamlTreeMatchesHead(root, yamlFiles, configDirectories), false);
+});
+
+test('composition evidence classification uses exact build types and owner identities', () => {
+  assert.equal(buildTypeRequiresCanvasEvidence(BUILD_TYPES.structured), false);
+  assert.equal(buildTypeRequiresCanvasEvidence(BUILD_TYPES.fallback), false);
+  assert.equal(buildTypeRequiresCanvasEvidence(BUILD_TYPES.hybrid), true);
+  assert.equal(buildTypeRequiresCanvasEvidence(BUILD_TYPES.canvasHeavy), true);
+  assert.equal(buildTypeRequiresCanvasEvidence('canvas_unused_but_mentions_canvas'), false);
+  assert.equal(compositionOwnerUsesCanvas('canvas_page'), true);
+  assert.equal(compositionOwnerUsesCanvas('experience_builder_page'), true);
+  assert.equal(compositionOwnerUsesCanvas('node'), false);
+  assert.equal(compositionOwnerUsesCanvas('canvas_page_fallback'), false);
 });
 
 test('agent continuation pauses only for verifier-confirmed external-only blockers', () => {
@@ -1964,8 +1984,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     {
       sourceRoute: '/',
       targetRoute: '/',
-      declaredCompositionOwner: 'entity_display',
-      actualCompositionOwner: 'entity_display',
+      declaredCompositionOwner: 'node',
+      actualCompositionOwner: 'node',
       routeRationalePresent: true,
       sectionOwnershipDeclared: true,
       sectionsChecked: ['Introduction'],
@@ -2168,6 +2188,21 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
       evidence: ['editor-task.json']
     }
   ];
+  blind.compositionOwnerDecisionReviews = [
+    {
+      decisionId: 'composition-home',
+      sourceRoute: '/',
+      targetRoute: '/',
+      selectedOwner: 'node',
+      outcomeBasis: 'simple_low_design',
+      canvasComparedToSelectedOwner: true,
+      sourceCompositionInspected: true,
+      editorOutcomeInspected: true,
+      prosecution: 'Challenged whether the one-section homepage needed rearrangeable Canvas composition; the source capture and editor task support a simple Page node.',
+      verdict: 'accepted',
+      evidence: ['source-desktop.png', 'editor-task.json']
+    }
+  ];
   blind.productDefects = [];
   blind.reviewPasses = [
     { id: 'pass-1', checkedAt: testCheckedAt, reviewer: 'fresh reviewer', verdict: 'good', notes: '' }
@@ -2222,7 +2257,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   patternMap.structuredContentModel.collectionOwnershipLedger = [];
   patternMap.forms = [];
   patternMap.buildTypeDeclaration = {
-    type: 'structured_drupal_native_canvas_unused',
+    type: BUILD_TYPES.structured,
     canvasAvailabilityEvidence: 'Canvas was inspected and is not needed for this one-route fixture.',
     whyThisTypeFitsSource: 'The fixture is a structured homepage.',
     editorOwnershipImplications: 'Editors maintain the page through fields.',
@@ -2230,18 +2265,53 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     notes: ''
   };
   patternMap.compositionModel.completedBeforeImplementation = true;
+  patternMap.compositionModel.flexibleLandingRoutes = [
+    {
+      sourceRoute: '/',
+      targetRoute: '/',
+      pageType: 'homepage',
+      compositionOwner: 'node',
+      ownerRationale: 'A simple low-design Page node owns the one-section homepage.',
+      editorMentalModel: 'maintain_simple_page',
+      canvasIsNotMandatoryRouteRule: true,
+      sections: [
+        {
+          section: 'other',
+          editorFacingName: 'Introduction',
+          owner: 'field',
+          repeatability: 'singleton',
+          dataSource: 'node.page.body',
+          expectedEditorAction: 'Edit the Introduction field.',
+          acceptanceProof: 'evidence/blind-adversarial-review/editor-task.json'
+        }
+      ],
+      accepted: true,
+      notes: ''
+    }
+  ];
   patternMap.pageCompositionOwnership = [
     {
       sourceRoute: '/',
+      targetRoute: '/',
       routeRole: 'homepage',
       selectedOwner: 'node',
-      ownerRationale: 'A structured Page entity owns the homepage.',
+      ownerRationale: 'A simple low-design Page node owns the one-section homepage.',
       canvasOrExperienceBuilderAvailable: true,
       canvasOwnsPublicRoute: false,
       editorCanOpenSelectedOwner: true,
       themeOwnsOnlyPresentation: true,
       starterCanvasPlaceholderDisconnected: true,
       editorVerificationEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      ownerDecision: {
+        decisionId: 'composition-home',
+        outcomeBasis: 'simple_low_design',
+        canvasFit: 'worse_fit',
+        selectedOwnerFit: 'best_fit',
+        sourceEvidence: 'evidence/blind-adversarial-review/source-desktop.png',
+        editorOutcomeEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+        verificationBurdenExcluded: true,
+        blindReviewDecisionId: 'composition-home'
+      },
       accepted: true,
       notes: ''
     }
@@ -2249,6 +2319,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   patternMap.sectionOwnershipMatrix = [
     {
       sourceRoute: '/',
+      targetRoute: '/',
       section: 'other',
       editorFacingName: 'Introduction',
       editorOwnedBy: 'field',
@@ -6230,6 +6301,115 @@ test('completion fails closed when structured gate evidence or applicability dis
   }
 });
 
+test('composition ownership is route-reconciled and Canvas opt-out requires an outcome decision', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'composition-owner-regressions-'));
+  const canonicalPacket = join(temp, 'canonical');
+  copyTemplatePacket(canonicalPacket);
+  writeJson(join(canonicalPacket, 'route-matrix.json'), liveRouteMatrix('https://target.example'));
+  addQualifyingReviewEvidence(canonicalPacket, 'https://target.example');
+
+  const canonicalReport = await validatePacket({ packetDir: canonicalPacket });
+  assert.ok(
+    canonicalReport.completionEvidence.packetSupportsCompletion,
+    JSON.stringify(canonicalReport, null, 2)
+  );
+
+  const currentSelfAttestation = join(temp, 'current-self-attestation');
+  cpSync(canonicalPacket, currentSelfAttestation, { recursive: true });
+  mutateJson(join(currentSelfAttestation, 'pattern-map.json'), (patternMap) => {
+    patternMap.compositionModel.flexibleLandingRoutes = [];
+    delete patternMap.pageCompositionOwnership[0].ownerDecision;
+  });
+  const currentReport = await validatePacket({ packetDir: currentSelfAttestation });
+  assert.equal(currentReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    currentReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /primary flexible route .* exactly one matching compositionModel\.flexibleLandingRoutes record/i
+  );
+
+  const unprosecutedOptOut = join(temp, 'unprosecuted-opt-out');
+  cpSync(canonicalPacket, unprosecutedOptOut, { recursive: true });
+  mutateJson(join(unprosecutedOptOut, 'blind-adversarial-review.json'), (blind) => {
+    blind.compositionOwnerDecisionReviews = [];
+  });
+  const unprosecutedReport = await validatePacket({ packetDir: unprosecutedOptOut });
+  assert.equal(unprosecutedReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    unprosecutedReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /non-Canvas owner for composed route .* prosecuted and accepted by the fresh blind reviewer/i
+  );
+
+  const burdenDrivenOptOut = join(temp, 'burden-driven-opt-out');
+  cpSync(canonicalPacket, burdenDrivenOptOut, { recursive: true });
+  mutateJson(join(burdenDrivenOptOut, 'pattern-map.json'), (patternMap) => {
+    patternMap.pageCompositionOwnership[0].ownerDecision.verificationBurdenExcluded = false;
+  });
+  const burdenReport = await validatePacket({ packetDir: burdenDrivenOptOut });
+  assert.equal(burdenReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    burdenReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /explicitly exclude verification burden/i
+  );
+
+  const sectionMismatch = join(temp, 'section-mismatch');
+  cpSync(canonicalPacket, sectionMismatch, { recursive: true });
+  mutateJson(join(sectionMismatch, 'pattern-map.json'), (patternMap) => {
+    patternMap.sectionOwnershipMatrix.push({
+      ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
+      section: 'cta',
+      editorFacingName: 'Call to action'
+    });
+  });
+  const sectionReport = await validatePacket({ packetDir: sectionMismatch });
+  assert.equal(sectionReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    sectionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /reconcile every declared section one-to-one with sectionOwnershipMatrix/i
+  );
+
+  const fallbackPacket = join(temp, 'fallback');
+  cpSync(canonicalPacket, fallbackPacket, { recursive: true });
+  mutateJson(join(fallbackPacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.buildTypeDeclaration.type = BUILD_TYPES.fallback;
+    patternMap.buildTypeDeclaration.canvasAvailabilityEvidence = 'Canvas is unavailable in the inspected target runtime.';
+    const owner = patternMap.pageCompositionOwnership[0];
+    owner.canvasOrExperienceBuilderAvailable = false;
+    owner.ownerDecision.outcomeBasis = 'unavailable_or_blocked';
+    owner.ownerDecision.canvasFit = 'unavailable_or_blocked';
+    owner.ownerDecision.selectedOwnerFit = 'accepted_fallback';
+    owner.ownerDecision.blindReviewDecisionId = '';
+  });
+  mutateJson(join(fallbackPacket, 'blind-adversarial-review.json'), (blind) => {
+    blind.compositionOwnerDecisionReviews = [];
+  });
+  attachFixtureReviewHandoff(fallbackPacket, 'https://target.example');
+  const fallbackReport = await validatePacket({ packetDir: fallbackPacket });
+  assert.ok(
+    fallbackReport.completionEvidence.packetSupportsCompletion,
+    JSON.stringify(fallbackReport.completionEvidence, null, 2)
+  );
+  assert.doesNotMatch(
+    fallbackReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /Canvas component-model checks/i
+  );
+
+  const observedCanvasPacket = join(temp, 'observed-canvas-despite-unused-summary');
+  cpSync(canonicalPacket, observedCanvasPacket, { recursive: true });
+  mutateJson(join(observedCanvasPacket, 'independent-verification.json'), (independent) => {
+    independent.compositionModelFidelityChecks[0].actualCompositionOwner = 'canvas_page';
+  });
+  const observedCanvasReport = await validatePacket({ packetDir: observedCanvasPacket });
+  assert.equal(observedCanvasReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    observedCanvasReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /build type must summarize the declared and independently observed route owners/i
+  );
+  assert.match(
+    observedCanvasReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /Canvas component-model checks must pass/i
+  );
+});
+
 test('conditionally applicable hard gates fail closed when their verifier evidence is missing or blocked', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'conditional-gate-regressions-'));
   const canonicalPacket = join(temp, 'canonical');
@@ -6316,7 +6496,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       expected: [/Canvas component-model checks must pass/i],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
-          value.buildTypeDeclaration.type = 'structured_drupal_native_canvas';
+          value.buildTypeDeclaration.type = BUILD_TYPES.hybrid;
         });
         mutateJson(join(packetDir, 'independent-verification.json'), (value) => {
           value.canvasComponentModelChecks = [];

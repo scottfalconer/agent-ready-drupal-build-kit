@@ -258,8 +258,8 @@
     {
       "sourceRoute": "",
       "targetRoute": "",
-      "declaredCompositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | documented_exception",
-      "actualCompositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | documented_exception",
+      "declaredCompositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | node | documented_exception",
+      "actualCompositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | node | documented_exception",
       "routeRationalePresent": false,
       "sectionOwnershipDeclared": false,
       "sectionsChecked": [],

@@ -84,6 +84,31 @@ const ROUTE_ROLES = new Set([
   'media',
   'other'
 ]);
+export const BUILD_TYPES = Object.freeze({
+  structured: 'structured_drupal_native_canvas_unused',
+  hybrid: 'hybrid_structured_content_plus_canvas',
+  canvasHeavy: 'canvas_heavy_with_structured_data',
+  fallback: 'constrained_fallback_canvas_unavailable_or_blocked'
+});
+const BUILD_TYPE_VALUES = new Set(Object.values(BUILD_TYPES));
+const CANVAS_BUILD_TYPES = new Set([BUILD_TYPES.hybrid, BUILD_TYPES.canvasHeavy]);
+const CANVAS_COMPOSITION_OWNERS = new Set(['canvas_page', 'experience_builder_page']);
+const COMPOSED_OWNER_DECISION_ROLES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
+const COMPOSED_OWNER_DECISION_PAGE_TYPES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
+const OWNER_DECISION_OUTCOME_BASES = new Set([
+  'arrange_sections',
+  'stable_reusable_schema',
+  'collection_or_listing',
+  'simple_low_design',
+  'unavailable_or_blocked'
+]);
+const NON_CANVAS_COMPOSED_OUTCOME_BASES = new Set([
+  'stable_reusable_schema',
+  'collection_or_listing',
+  'simple_low_design'
+]);
+const CANVAS_FIT_ASSESSMENTS = new Set(['best_fit', 'viable', 'worse_fit', 'unavailable_or_blocked']);
+const SELECTED_OWNER_FIT_ASSESSMENTS = new Set(['best_fit', 'accepted_fallback']);
 const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'intentional_unlisted_route',
   'dynamic_endpoint',
@@ -907,6 +932,322 @@ function exactIdentityMatch(left, right) {
 
 function compositionOwnersMatch(declared, actual) {
   return exactIdentityMatch(declared, actual);
+}
+
+export function buildTypeRequiresCanvasEvidence(value) {
+  return CANVAS_BUILD_TYPES.has(String(value ?? '').trim());
+}
+
+export function compositionOwnerUsesCanvas(value) {
+  return CANVAS_COMPOSITION_OWNERS.has(String(value ?? '').trim());
+}
+
+function compositionHasCanvasOwner(patternMap, independentVerification) {
+  return arrayOrEmpty(patternMap?.compositionModel?.flexibleLandingRoutes).some((route) =>
+    compositionOwnerUsesCanvas(route?.compositionOwner)
+  ) ||
+    arrayOrEmpty(patternMap?.pageCompositionOwnership).some((owner) =>
+      owner?.accepted === true && compositionOwnerUsesCanvas(owner?.selectedOwner)
+    ) ||
+    arrayOrEmpty(independentVerification?.compositionModelFidelityChecks).some((check) =>
+      compositionOwnerUsesCanvas(check?.actualCompositionOwner) ||
+      compositionOwnerUsesCanvas(check?.declaredCompositionOwner)
+    );
+}
+
+function compositionCanvasEvidenceRequired(patternMap, independentVerification) {
+  return buildTypeRequiresCanvasEvidence(patternMap?.buildTypeDeclaration?.type) ||
+    compositionHasCanvasOwner(patternMap, independentVerification);
+}
+
+function freshBlindReviewer(reviewer) {
+  return Boolean(
+    String(reviewer?.nameOrRole ?? '').trim() &&
+    String(reviewer?.runtimeOrTool ?? '').trim() &&
+    reviewer?.freshContextUsed === true &&
+    reviewer?.sameContextAsBuilder === false &&
+    reviewer?.didNotBuildTarget === true &&
+    reviewer?.inputsRestrictedToBriefTargetAndSourceTruth === true &&
+    reviewer?.implementationFilesReadBeforePublicReview === false &&
+    reviewer?.reviewPacketReadBeforePublicReview === false &&
+    reviewer?.priorBuildConversationRead === false &&
+    reviewer?.builderSummaryExcluded === true
+  );
+}
+
+function compositionRoutePair(record) {
+  return {
+    source: normalizeRouteRequestKey(record?.sourceRoute ?? record?.sourcePath),
+    target: normalizeRouteRequestKey(record?.targetRoute ?? record?.targetPath)
+  };
+}
+
+function compositionRoutePairsMatch(left, right) {
+  const leftPair = compositionRoutePair(left);
+  const rightPair = compositionRoutePair(right);
+  return Boolean(
+    leftPair.source &&
+    leftPair.target &&
+    leftPair.source === rightPair.source &&
+    leftPair.target === rightPair.target
+  );
+}
+
+function exactStringSet(actual, expected) {
+  const normalize = (values) => arrayOrEmpty(values)
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+    .sort();
+  const left = normalize(actual);
+  const right = normalize(expected);
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function compositionSectionKey(section) {
+  const type = String(section?.section ?? '').trim();
+  const label = String(section?.editorFacingName ?? '').trim();
+  return type && label ? `${type}\u0000${label}` : '';
+}
+
+async function compositionDecisionReasons({
+  blindAdversarialReview,
+  independentVerification,
+  packetDir,
+  patternMap,
+  routeMatrix
+}) {
+  const reasons = [];
+  const declaration = patternMap?.buildTypeDeclaration ?? {};
+  const buildType = String(declaration.type ?? '').trim();
+  if (
+    !BUILD_TYPE_VALUES.has(buildType) ||
+    declaration.accepted !== true ||
+    !String(declaration.canvasAvailabilityEvidence ?? '').trim() ||
+    !String(declaration.whyThisTypeFitsSource ?? '').trim() ||
+    !String(declaration.editorOwnershipImplications ?? '').trim()
+  ) {
+    reasons.push('G-COMPOSITION-01 pattern-map.json buildTypeDeclaration must use a supported build type and record Canvas availability, source fit, editor implications, and acceptance.');
+  }
+
+  const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes)
+    .filter((route) => {
+      const pair = compositionRoutePair(route);
+      return pair.source || pair.target;
+    });
+  const flexibleRoutes = arrayOrEmpty(patternMap?.compositionModel?.flexibleLandingRoutes)
+    .filter((route) => {
+      const pair = compositionRoutePair(route);
+      return pair.source || pair.target;
+    });
+  const pageOwners = arrayOrEmpty(patternMap?.pageCompositionOwnership)
+    .filter((owner) => {
+      const pair = compositionRoutePair(owner);
+      return pair.source || pair.target;
+    });
+  const fidelityChecks = arrayOrEmpty(independentVerification?.compositionModelFidelityChecks)
+    .filter((check) => {
+      const pair = compositionRoutePair(check);
+      return pair.source || pair.target;
+    });
+  const sectionRecords = arrayOrEmpty(patternMap?.sectionOwnershipMatrix)
+    .filter((section) => {
+      const pair = compositionRoutePair(section);
+      return pair.source || pair.target;
+    });
+  const blindDecisionReviews = arrayOrEmpty(blindAdversarialReview?.compositionOwnerDecisionReviews)
+    .filter((review) => String(review?.decisionId ?? '').trim());
+
+  if (buildTypeRequiresCanvasEvidence(buildType) !== compositionHasCanvasOwner(patternMap, independentVerification)) {
+    reasons.push('G-COMPOSITION-01 pattern-map.json build type must summarize the declared and independently observed route owners; it cannot enable or suppress Canvas evidence by itself.');
+  }
+
+  for (const primaryRoute of primaryRoutes.filter((route) =>
+    ['homepage', 'landing'].includes(String(route?.routeRole ?? '').trim()) ||
+    pageOwners.some((owner) =>
+      compositionRoutePairsMatch(owner, route) &&
+      COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim())
+    )
+  )) {
+    if (flexibleRoutes.filter((route) => compositionRoutePairsMatch(route, primaryRoute)).length !== 1) {
+      const pair = compositionRoutePair(primaryRoute);
+      reasons.push(`G-COMPOSITION-01 primary flexible route ${pair.target || pair.source || '(unknown)'} needs exactly one matching compositionModel.flexibleLandingRoutes record.`);
+    }
+  }
+
+  const decisionIds = new Set();
+  for (const [index, flexibleRoute] of flexibleRoutes.entries()) {
+    const pair = compositionRoutePair(flexibleRoute);
+    const routeLabel = pair.target || pair.source || `(row ${index})`;
+    const sections = arrayOrEmpty(flexibleRoute?.sections).filter((section) =>
+      String(section?.section ?? '').trim() || String(section?.editorFacingName ?? '').trim()
+    );
+    const validFlexibleRoute =
+      pair.source &&
+      pair.target &&
+      String(flexibleRoute?.pageType ?? '').trim() &&
+      String(flexibleRoute?.compositionOwner ?? '').trim() &&
+      String(flexibleRoute?.ownerRationale ?? '').trim() &&
+      String(flexibleRoute?.editorMentalModel ?? '').trim() &&
+      flexibleRoute?.canvasIsNotMandatoryRouteRule === true &&
+      flexibleRoute?.accepted === true &&
+      sections.length > 0 &&
+      sections.every((section) =>
+        compositionSectionKey(section) &&
+        String(section?.owner ?? '').trim() &&
+        String(section?.repeatability ?? '').trim() &&
+        String(section?.dataSource ?? '').trim() &&
+        String(section?.expectedEditorAction ?? '').trim() &&
+        String(section?.acceptanceProof ?? '').trim()
+      );
+    if (!validFlexibleRoute) {
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must be accepted with a complete owner rationale, editor model, and every declared section fully owned.`);
+    }
+    const primaryMatches = primaryRoutes.filter((route) => compositionRoutePairsMatch(route, flexibleRoute));
+    const ownerMatches = pageOwners.filter((owner) => compositionRoutePairsMatch(owner, flexibleRoute));
+    const fidelityMatches = fidelityChecks.filter((check) => compositionRoutePairsMatch(check, flexibleRoute));
+    if (primaryMatches.length !== 1 || ownerMatches.length !== 1 || fidelityMatches.length !== 1) {
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile one-to-one across primaryRoutes, flexibleLandingRoutes, pageCompositionOwnership, and independent composition fidelity.`);
+      continue;
+    }
+
+    const owner = ownerMatches[0];
+    const fidelity = fidelityMatches[0];
+    const selectedOwner = String(owner?.selectedOwner ?? '').trim();
+    const selectedOwnerUsesCanvas = compositionOwnerUsesCanvas(selectedOwner);
+    if (
+      owner?.accepted !== true ||
+      !String(owner?.routeRole ?? '').trim() ||
+      !selectedOwner ||
+      !String(owner?.ownerRationale ?? '').trim() ||
+      typeof owner?.canvasOrExperienceBuilderAvailable !== 'boolean' ||
+      owner?.canvasOwnsPublicRoute !== selectedOwnerUsesCanvas ||
+      owner?.editorCanOpenSelectedOwner !== true ||
+      owner?.themeOwnsOnlyPresentation !== true ||
+      owner?.starterCanvasPlaceholderDisconnected !== true ||
+      !String(owner?.editorVerificationEvidence ?? '').trim() ||
+      !compositionOwnersMatch(flexibleRoute?.compositionOwner, selectedOwner)
+    ) {
+      reasons.push(`G-COMPOSITION-01 pageCompositionOwnership for ${routeLabel} must match the flexible-route owner and prove its editor/public ownership boundary.`);
+    }
+    if (
+      !compositionOwnersMatch(fidelity?.declaredCompositionOwner, selectedOwner) ||
+      !compositionOwnersMatch(fidelity?.actualCompositionOwner, selectedOwner) ||
+      !exactStringSet(fidelity?.sectionsChecked, sections.map((section) => section.editorFacingName))
+    ) {
+      reasons.push(`G-COMPOSITION-01 independent composition fidelity for ${routeLabel} must observe the selected owner and check exactly the declared editor-facing sections.`);
+    }
+
+    const routeSections = sectionRecords.filter((section) => compositionRoutePairsMatch(section, flexibleRoute));
+    const sectionKeys = sections.map(compositionSectionKey);
+    const routeSectionKeys = routeSections.map(compositionSectionKey);
+    if (
+      routeSections.length !== sections.length ||
+      sectionKeys.some((key) => !key || sectionKeys.filter((candidate) => candidate === key).length !== 1) ||
+      routeSectionKeys.some((key) => !key || routeSectionKeys.filter((candidate) => candidate === key).length !== 1) ||
+      !exactStringSet(routeSectionKeys, sectionKeys)
+    ) {
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile every declared section one-to-one with sectionOwnershipMatrix.`);
+    }
+
+    const decision = owner?.ownerDecision ?? {};
+    const decisionId = String(decision.decisionId ?? '').trim();
+    const outcomeBasis = String(decision.outcomeBasis ?? '').trim();
+    const canvasFit = String(decision.canvasFit ?? '').trim();
+    const selectedOwnerFit = String(decision.selectedOwnerFit ?? '').trim();
+    const [sourceEvidencePresent, editorEvidencePresent] = await Promise.all([
+      nonEmptyPacketEvidence(packetDir, decision.sourceEvidence),
+      nonEmptyPacketEvidence(packetDir, decision.editorOutcomeEvidence)
+    ]);
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(decisionId) ||
+      decisionIds.has(decisionId) ||
+      !OWNER_DECISION_OUTCOME_BASES.has(outcomeBasis) ||
+      !CANVAS_FIT_ASSESSMENTS.has(canvasFit) ||
+      !SELECTED_OWNER_FIT_ASSESSMENTS.has(selectedOwnerFit) ||
+      decision.verificationBurdenExcluded !== true ||
+      !sourceEvidencePresent ||
+      !editorEvidencePresent
+    ) {
+      reasons.push(`G-COMPOSITION-01 owner decision for ${routeLabel} must have a unique ID, outcome-based Canvas/selected-owner comparison, packet evidence, and explicitly exclude verification burden.`);
+    }
+    if (decisionId) {
+      decisionIds.add(decisionId);
+    }
+
+    if (selectedOwnerUsesCanvas) {
+      if (
+        owner?.canvasOrExperienceBuilderAvailable !== true ||
+        outcomeBasis !== 'arrange_sections' ||
+        canvasFit !== 'best_fit' ||
+        selectedOwnerFit !== 'best_fit'
+      ) {
+        reasons.push(`G-COMPOSITION-01 Canvas-owned route ${routeLabel} must be selected because section arrangement is the best editor fit.`);
+      }
+      continue;
+    }
+
+    if (owner?.canvasOrExperienceBuilderAvailable === false) {
+      if (outcomeBasis !== 'unavailable_or_blocked' || canvasFit !== 'unavailable_or_blocked') {
+        reasons.push(`G-COMPOSITION-01 non-Canvas route ${routeLabel} with unavailable Canvas must use the unavailable_or_blocked outcome and evidence.`);
+      }
+      continue;
+    }
+
+    const composedRoute = COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim()) ||
+      COMPOSED_OWNER_DECISION_PAGE_TYPES.has(String(flexibleRoute?.pageType ?? '').trim());
+    if (!composedRoute) {
+      continue;
+    }
+    const blindReviewDecisionId = String(decision.blindReviewDecisionId ?? '').trim();
+    const matchingBlindReviews = blindDecisionReviews.filter((review) =>
+      review?.decisionId === blindReviewDecisionId
+    );
+    const blindReview = matchingBlindReviews[0];
+    const blindEvidenceResults = blindReview
+      ? await Promise.all(arrayOrEmpty(blindReview.evidence).map((reference) =>
+          nonEmptyPacketEvidence(packetDir, reference, join(packetDir, 'evidence', 'blind-adversarial-review'))
+        ))
+      : [];
+    if (
+      !NON_CANVAS_COMPOSED_OUTCOME_BASES.has(outcomeBasis) ||
+      canvasFit !== 'worse_fit' ||
+      selectedOwnerFit !== 'best_fit' ||
+      !freshBlindReviewer(blindAdversarialReview?.reviewer) ||
+      !blindReviewDecisionId ||
+      matchingBlindReviews.length !== 1 ||
+      !compositionRoutePairsMatch(blindReview, flexibleRoute) ||
+      !compositionOwnersMatch(blindReview?.selectedOwner, selectedOwner) ||
+      blindReview?.outcomeBasis !== outcomeBasis ||
+      blindReview?.canvasComparedToSelectedOwner !== true ||
+      blindReview?.sourceCompositionInspected !== true ||
+      blindReview?.editorOutcomeInspected !== true ||
+      !String(blindReview?.prosecution ?? '').trim() ||
+      blindReview?.verdict !== 'accepted' ||
+      !blindEvidenceResults.some(Boolean)
+    ) {
+      reasons.push(`G-COMPOSITION-01 non-Canvas owner for composed route ${routeLabel} requires an outcome-based comparison prosecuted and accepted by the fresh blind reviewer.`);
+    }
+  }
+
+  if (
+    sectionRecords.length === 0 ||
+    sectionRecords.some((section) =>
+      !compositionSectionKey(section) ||
+      !compositionRoutePair(section).source ||
+      !compositionRoutePair(section).target ||
+      section?.accepted !== true ||
+      !String(section?.drupalOwner ?? '').trim() ||
+      !String(section?.dataSource ?? '').trim() ||
+      !String(section?.expectedEditorAction ?? '').trim() ||
+      !String(section?.acceptanceProof ?? '').trim() ||
+      section?.nonAdminEditorCanChange !== true ||
+      section?.themeOwnsOnlyPresentation !== true
+    )
+  ) {
+    reasons.push('G-COMPOSITION-01 pattern-map.json must validate every declared section ownership record, not only one global example.');
+  }
+
+  return reasons;
 }
 
 function authoredCompletionClaim(record) {
@@ -1848,6 +2189,7 @@ async function nextCycleStructuredGateReasons({
 }
 
 async function independentStructuredGateReasons({
+  blindAdversarialReview,
   browserEvidence,
   drupalReadback,
   fieldOutputMatrix,
@@ -1860,6 +2202,13 @@ async function independentStructuredGateReasons({
   sourceAudit
 }) {
   const reasons = [];
+  reasons.push(...await compositionDecisionReasons({
+    blindAdversarialReview,
+    independentVerification,
+    packetDir,
+    patternMap,
+    routeMatrix
+  }));
   reasons.push(...await nextCycleStructuredGateReasons({
     browserEvidence,
     fieldOutputMatrix,
@@ -1897,12 +2246,7 @@ async function independentStructuredGateReasons({
   }
   const driftRecords = substantiveObjects(routeMatrix?.sourceRouteDriftClassification);
   const targetRequiredRoutes = substantiveObjects(routeMatrix?.targetRequiredRoutes);
-  const canvasBuild = /canvas|experience_builder/.test(String(patternMap?.buildTypeDeclaration?.type ?? '')) &&
-    !/canvas_unused/.test(String(patternMap?.buildTypeDeclaration?.type ?? ''));
-  const publicCanvasOwner = arrayOrEmpty(patternMap?.pageCompositionOwnership).some((owner) =>
-    owner?.accepted === true && /canvas|experience_builder/.test(String(owner?.selectedOwner ?? ''))
-  );
-  const canvasEvidenceRequired = canvasBuild || publicCanvasOwner;
+  const canvasEvidenceRequired = compositionCanvasEvidenceRequired(patternMap, independentVerification);
   if (
     privilegedEditorIdentity(independentVerification?.target?.editorUser) ||
     privilegedEditorIdentity(independentVerification?.target?.editorRole)
@@ -2762,17 +3106,7 @@ async function validateBlindAdversarialReview(
     errors.push('blind-adversarial-review.json completion evidence requires valid route-matrix sourceBaseUrl and targetBaseUrl values.');
   }
 
-  const degraded =
-    !String(reviewer.nameOrRole ?? '').trim() ||
-    !String(reviewer.runtimeOrTool ?? '').trim() ||
-    reviewer.freshContextUsed !== true ||
-    reviewer.sameContextAsBuilder !== false ||
-    reviewer.didNotBuildTarget !== true ||
-    reviewer.inputsRestrictedToBriefTargetAndSourceTruth !== true ||
-    reviewer.implementationFilesReadBeforePublicReview !== false ||
-    reviewer.reviewPacketReadBeforePublicReview !== false ||
-    reviewer.priorBuildConversationRead !== false ||
-    reviewer.builderSummaryExcluded !== true;
+  const degraded = !freshBlindReviewer(reviewer);
 
   if (degraded) {
     errors.push(
@@ -2821,6 +3155,39 @@ async function validateBlindAdversarialReview(
 
   if (reviewPasses.length === 0) {
     errors.push('blind-adversarial-review.json complete claims require at least one reviewPasses entry.');
+  }
+
+  const compositionDecisionReviews = arrayOrEmpty(blindReview.compositionOwnerDecisionReviews)
+    .filter((review) => String(review?.decisionId ?? '').trim() || compositionRoutePair(review).source || compositionRoutePair(review).target);
+  const compositionDecisionIds = new Set();
+  for (const [index, review] of compositionDecisionReviews.entries()) {
+    if (!isJsonObject(review)) {
+      errors.push(`blind-adversarial-review.json compositionOwnerDecisionReviews[${index}] must be an object.`);
+      continue;
+    }
+    const decisionId = String(review.decisionId ?? '').trim();
+    const evidenceResults = await Promise.all(arrayOrEmpty(review.evidence).map((reference) =>
+      nonEmptyPacketEvidence(packetDir, reference, evidenceDir)
+    ));
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(decisionId) ||
+      compositionDecisionIds.has(decisionId) ||
+      !compositionRoutePair(review).source ||
+      !compositionRoutePair(review).target ||
+      !String(review.selectedOwner ?? '').trim() ||
+      !OWNER_DECISION_OUTCOME_BASES.has(String(review.outcomeBasis ?? '').trim()) ||
+      review.canvasComparedToSelectedOwner !== true ||
+      review.sourceCompositionInspected !== true ||
+      review.editorOutcomeInspected !== true ||
+      !String(review.prosecution ?? '').trim() ||
+      review.verdict !== 'accepted' ||
+      !evidenceResults.some(Boolean)
+    ) {
+      errors.push(`blind-adversarial-review.json compositionOwnerDecisionReviews[${index}] must uniquely prosecute and accept an outcome-based owner comparison with packet-local evidence.`);
+    }
+    if (decisionId) {
+      compositionDecisionIds.add(decisionId);
+    }
   }
 
   for (const [index, defect] of defects.entries()) {
@@ -5024,6 +5391,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     jsonContext
   ));
   reasons.push(...await independentStructuredGateReasons({
+    blindAdversarialReview,
     browserEvidence,
     drupalReadback,
     fieldOutputMatrix,
@@ -5556,8 +5924,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     record?.editorVerification?.appearsInPublicListingOrDetailWithoutCodeChange === true &&
     String(record?.editorVerification?.evidence ?? '').trim()
   );
-  const buildType = String(patternMap?.buildTypeDeclaration?.type ?? '');
-  const canvasEvidenceRequired = /canvas|experience_builder/.test(buildType) && !/canvas_unused/.test(buildType);
+  const canvasEvidenceRequired = compositionCanvasEvidenceRequired(patternMap, independentVerification);
   const canvasModels = substantiveObjects(patternMap?.compositionModel?.canvasComponentModel);
   if (
     isoTimestamp(patternMap?.checkedAt) === null ||
@@ -5565,7 +5932,10 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     !hasMeaningfulEntry(patternMap?.contentTypes) ||
     !hasMeaningfulEntry(patternMap?.fields) ||
     patternMap?.buildTypeDeclaration?.accepted !== true ||
-    !String(patternMap?.buildTypeDeclaration?.type ?? '').trim() ||
+    !BUILD_TYPE_VALUES.has(String(patternMap?.buildTypeDeclaration?.type ?? '').trim()) ||
+    !String(patternMap?.buildTypeDeclaration?.canvasAvailabilityEvidence ?? '').trim() ||
+    !String(patternMap?.buildTypeDeclaration?.whyThisTypeFitsSource ?? '').trim() ||
+    !String(patternMap?.buildTypeDeclaration?.editorOwnershipImplications ?? '').trim() ||
     patternMap?.compositionModel?.completedBeforeImplementation !== true ||
     patternMap?.contentTypeLabelPolicy?.accepted !== true ||
     patternMap?.reviewStatus !== 'reviewed' ||
@@ -5595,15 +5965,17 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
         normalizeRouteRequestKey(owner.sourceRoute) === normalizeRouteRequestKey(route.sourcePath)
       )
     ) ||
-    !arrayOrEmpty(patternMap?.sectionOwnershipMatrix).some(
-      (section) =>
-        section?.accepted === true &&
-        normalizeRouteKey(section?.sourceRoute) &&
-        String(section?.section ?? '').trim() &&
-        String(section?.drupalOwner ?? '').trim() &&
-        String(section?.expectedEditorAction ?? '').trim() &&
-        String(section?.acceptanceProof ?? '').trim()
-    )
+    arrayOrEmpty(patternMap?.sectionOwnershipMatrix)
+      .filter((section) => compositionRoutePair(section).source || compositionRoutePair(section).target)
+      .some((section) =>
+        section?.accepted !== true ||
+        !compositionRoutePair(section).source ||
+        !compositionRoutePair(section).target ||
+        !compositionSectionKey(section) ||
+        !String(section?.drupalOwner ?? '').trim() ||
+        !String(section?.expectedEditorAction ?? '').trim() ||
+        !String(section?.acceptanceProof ?? '').trim()
+      )
   ) {
     reasons.push('pattern-map.json must record reviewed Drupal structures plus accepted route composition and section ownership with editor proof.');
   }
@@ -6247,6 +6619,13 @@ async function briefPacketCompletionReadiness(
     routeMatrix,
     jsonContext
   ));
+  reasons.push(...await compositionDecisionReasons({
+    blindAdversarialReview,
+    independentVerification,
+    packetDir,
+    patternMap,
+    routeMatrix
+  }));
 
   if (briefContext?.mode !== 'brief' || !briefContext?.briefPath || !briefContext?.briefSha256) {
     reasons.push('build-input.json must bind brief mode to a preserved packet-local original brief.');
@@ -6586,6 +6965,7 @@ export async function validatePacket({ packetDir = 'review-packet' } = {}) {
     packetDir,
     independentVerification,
     {
+      blindAdversarialReview,
       browserEvidence,
       drupalReadback,
       fieldOutputMatrix,

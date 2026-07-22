@@ -81,7 +81,7 @@
         "sourceRoute": "",
         "targetRoute": "",
         "pageType": "homepage | landing | campaign | splash | section_landing | about | marketing | product_launch | donor_appeal | event_splash | partner_page | utility | other",
-        "compositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | documented_exception",
+        "compositionOwner": "canvas_page | experience_builder_page | landing_page_content_type | layout_builder | block_layout | view_page | entity_display | utility_page | node | documented_exception",
         "ownerRationale": "",
         "editorMentalModel": "arrange_sections | fill_structured_fields | manage_list | update_menu_or_block | maintain_simple_page | other",
         "canvasIsNotMandatoryRouteRule": true,
@@ -152,6 +152,16 @@
       "themeOwnsOnlyPresentation": false,
       "starterCanvasPlaceholderDisconnected": false,
       "editorVerificationEvidence": "",
+      "ownerDecision": {
+        "decisionId": "",
+        "outcomeBasis": "arrange_sections | stable_reusable_schema | collection_or_listing | simple_low_design | unavailable_or_blocked",
+        "canvasFit": "best_fit | viable | worse_fit | unavailable_or_blocked",
+        "selectedOwnerFit": "best_fit | accepted_fallback",
+        "sourceEvidence": "",
+        "editorOutcomeEvidence": "",
+        "verificationBurdenExcluded": false,
+        "blindReviewDecisionId": ""
+      },
       "accepted": false,
       "notes": ""
     }
