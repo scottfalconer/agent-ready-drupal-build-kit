@@ -815,16 +815,16 @@ test('computed global chrome comparison catches missing chrome, links, mobile be
   assert.match(comparison.errors.join('\n'), /material normalized page-height change/i);
 });
 
-function visualFloorCapture({ origin, hashSeed, structure, protectedSource = false }) {
+function visualFloorCapture({ origin, hashSeed, structure, protectedSource = false, path = '/' }) {
   const routes = ['desktop', 'mobile'].map((viewport, index) => ({
-    path: '/',
+    path,
     viewport: {
       name: viewport,
       width: viewport === 'desktop' ? 1280 : 390,
       height: viewport === 'desktop' ? 800 : 844
     },
     signals: {
-      finalUrl: `${origin}/`,
+      finalUrl: `${origin}${path}`,
       roles: {
         header: { present: true, visible: true },
         navigation: { present: true, visible: true },
@@ -861,7 +861,7 @@ function visualFloorCapture({ origin, hashSeed, structure, protectedSource = fal
     targetOrigin: origin,
     resultStateFingerprint: state('f'),
     contract: normalizeGlobalChromeContract(),
-    primaryRoutes: ['/'],
+    primaryRoutes: [path],
     routes,
     captureFingerprint: state(hashSeed),
     errors: []
@@ -873,7 +873,8 @@ const composedStructure = {
   headingCount: 4,
   layoutBandCount: 4,
   mediaCount: 3,
-  actionCount: 4
+  actionCount: 4,
+  prominentActionCount: 2
 };
 
 test('verifier-owned visual floor passes comparable composed routes at identical desktop/mobile viewports', () => {
@@ -891,7 +892,8 @@ test('verifier-owned visual floor passes comparable composed routes at identical
         headingCount: 4,
         layoutBandCount: 4,
         mediaCount: 2,
-        actionCount: 4
+        actionCount: 4,
+        prominentActionCount: 2
       }
     }),
     primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
@@ -904,6 +906,28 @@ test('verifier-owned visual floor passes comparable composed routes at identical
   assert.equal(floor.verifierOwned, true);
   assert.equal(floor.findings.length, 2);
   assert.ok(floor.findings.every((finding) => finding.composedSource && finding.imageIdentityDistinct));
+  assert.ok(floor.findings.every((finding) => finding.designLedComposition));
+});
+
+test('long article structure does not become a design-led Canvas candidate from headings alone', () => {
+  const articleStructure = {
+    headingOrder: ['Article title', 'Context', 'Evidence', 'Analysis', 'Conclusion'],
+    headingCount: 5,
+    layoutBandCount: 5,
+    mediaCount: 1,
+    actionCount: 8,
+    prominentActionCount: 0
+  };
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: articleStructure, path: '/article/example' }),
+    targetCapture: visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: articleStructure, path: '/article/example' }),
+    primaryRoutes: [{ sourcePath: '/article/example', targetPath: '/article/example', routeRole: 'other' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.composedSource));
+  assert.ok(floor.findings.every((finding) => finding.designLedComposition === false));
 });
 
 test('verifier-owned visual floor blocks gross composed-route omissions without a pixel threshold', () => {
@@ -1035,8 +1059,9 @@ test('positive source protection is review-required and never described as verif
 
   assert.equal(floor.status, 'review_required');
   assert.equal(floor.completionSupported, false);
-  assert.equal(floor.reviewFallbackEligible, true);
-  assert.match(floor.errors.join('\n'), /fresh handoff reviewer/i);
+  assert.equal(floor.reviewFallbackEligible, false);
+  assert.equal(floor.diagnosticReviewEligible, true);
+  assert.match(floor.errors.join('\n'), /verifier-owned source access is restored/i);
 });
 
 test('ordinary source capture failure stays blocked and cannot use the protected-source review fallback', () => {
@@ -1065,7 +1090,7 @@ test('ordinary source capture failure stays blocked and cannot use the protected
   assert.match(floor.errors.join('\n'), /DNS lookup failed/i);
 });
 
-test('protected-source fallback requires a fresh blind reviewer over the exact handoff-bound builder captures', () => {
+test('protected-source builder captures remain diagnostic even after strict handoff review', () => {
   const browserEvidence = {
     publicRouteChecks: ['desktop', 'mobile'].map((viewport) => ({
       sourceUrl: 'https://source.example/',
@@ -1157,7 +1182,7 @@ test('protected-source fallback requires a fresh blind reviewer over the exact h
     sourceProtectionDegradation: true,
     verifierCapture: { status: 'review_required', completionSupported: false },
     reviewedBuilderFallback: fallback
-  }), true);
+  }), false);
 
   const agentReviewOnly = buildReviewedBuilderVisualFallback({
     ...input,

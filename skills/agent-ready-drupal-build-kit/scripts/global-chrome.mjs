@@ -1046,6 +1046,21 @@ function collectorExpression(contract, mobile) {
           return true;
         })
       : [];
+    const prominentActions = actions.filter((element) => {
+      const computed = getComputedStyle(element);
+      const value = element.getBoundingClientRect();
+      const horizontalPadding = parseFloat(computed.paddingLeft || '0') + parseFloat(computed.paddingRight || '0');
+      const verticalPadding = parseFloat(computed.paddingTop || '0') + parseFloat(computed.paddingBottom || '0');
+      return element.tagName === 'BUTTON' ||
+        element.getAttribute('role') === 'button' ||
+        (
+          ['inline-block', 'flex', 'inline-flex', 'grid'].includes(computed.display) &&
+          horizontalPadding >= 12 &&
+          verticalPadding >= 6 &&
+          value.width >= 70 &&
+          value.height >= 28
+        );
+    });
     let bandCandidates = contentRoot instanceof Element
       ? [...contentRoot.querySelectorAll('section,[role="region"]')].filter((element) => {
           if (!visible(element)) return false;
@@ -1113,7 +1128,8 @@ function collectorExpression(contract, mobile) {
         layoutBandCount: layoutBands.length,
         layoutBands,
         mediaCount: media.length,
-        actionCount: actions.length
+        actionCount: actions.length,
+        prominentActionCount: prominentActions.length
       },
       layout: {
         viewportWidth: innerWidth,
@@ -1597,17 +1613,32 @@ function visualStructureSummary(signals) {
     layoutBandCount: nonNegative(structure.layoutBandCount),
     mediaCount: nonNegative(structure.mediaCount),
     actionCount: nonNegative(structure.actionCount),
+    prominentActionCount: nonNegative(structure.prominentActionCount),
     normalizedPageHeight: nonNegative(signals?.layout?.normalizedPageHeight)
   };
 }
 
-function composedSourceRoute(routeRole, structure) {
-  if (!['homepage', 'landing'].includes(String(routeRole ?? '').trim())) return false;
+function composedSourceRoute(_routeRole, structure) {
+  // Route roles are packet-authored labels. Composition detection must use
+  // verifier-observed source structure so relabeling a landing page as
+  // "other" cannot suppress the visual or ownership burden.
   return structure.layoutBandCount >= 3 ||
     structure.headingCount >= 3 ||
     (structure.headingCount >= 2 && (structure.mediaCount >= 1 || structure.actionCount >= 2)) ||
     (structure.mediaCount >= 3 && structure.actionCount >= 2) ||
     (structure.actionCount >= 4 && structure.normalizedPageHeight >= 1600);
+}
+
+function designLedComposition(structure) {
+  // This deliberately excludes heading count alone: a long article can have
+  // many headings without being a section-composed marketing page.
+  return structure.layoutBandCount >= 3 &&
+    structure.headingCount >= 2 &&
+    (
+      (structure.mediaCount >= 2 && structure.prominentActionCount >= 1) ||
+      structure.prominentActionCount >= 2 ||
+      (structure.mediaCount >= 4 && structure.actionCount >= 2)
+    );
 }
 
 function captureRouteIndex(capture) {
@@ -1686,6 +1717,7 @@ export function compareVerifierOwnedVisualFloor({
       const sourceStructure = visualStructureSummary(source?.signals);
       const targetStructure = visualStructureSummary(target?.signals);
       const composedSource = composedSourceRoute(route?.routeRole, sourceStructure);
+      const sourceDesignLedComposition = designLedComposition(sourceStructure);
       const sourceProtection = source?.signals?.protection ?? {};
       const protectedSource = sourceProtection.detected === true;
       if (!source || !target) {
@@ -1785,6 +1817,7 @@ export function compareVerifierOwnedVisualFloor({
         routeRole: String(route?.routeRole ?? ''),
         viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
         composedSource,
+        designLedComposition: sourceDesignLedComposition,
         protectedSource,
         protectionReasonCodes: Array.isArray(sourceProtection.reasonCodes) ? sourceProtection.reasonCodes : [],
         sourceScreenshotSha256: screenshotSha256(source),
@@ -1814,10 +1847,11 @@ export function compareVerifierOwnedVisualFloor({
     status,
     completionSupported: status === 'passed',
     protectedFindingCount,
-    reviewFallbackEligible: status === 'review_required' && protectedFindingCount > 0,
+    diagnosticReviewEligible: status === 'review_required' && protectedFindingCount > 0,
+    reviewFallbackEligible: false,
     findings,
     errors: status === 'review_required'
-      ? ['Source protection prevented verifier-owned structural comparison; a fresh handoff reviewer must adjudicate the exact bound builder captures.']
+      ? ['Source protection prevented verifier-owned structural comparison; machine completion remains blocked until verifier-owned source access is restored.']
       : errors
   });
 }

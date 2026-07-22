@@ -2690,26 +2690,102 @@ async function independentStructuredGateReasons({
 
   if (canvasEvidenceRequired) {
     const canvasChecks = substantiveObjects(independentVerification?.canvasComponentModelChecks);
+    const canvasOwnedRoutes = arrayOrEmpty(patternMap?.pageCompositionOwnership)
+      .filter((owner) => owner?.accepted === true && compositionOwnerUsesCanvas(owner?.selectedOwner))
+      .map((owner) => compositionRoutePair(owner))
+      .filter((route) => route.source && route.target);
+    const canvasCheckPasses = (check) =>
+      check?.status === 'pass' &&
+      check?.canvasPagePublicOrPartOfRebuild === true &&
+      Number.isSafeInteger(check?.declaredComponentCount) &&
+      check.declaredComponentCount > 0 &&
+      Number.isSafeInteger(check?.actualComponentCount) &&
+      check.actualComponentCount === check.declaredComponentCount &&
+      Number.isSafeInteger(check?.actualTopLevelComponentCount) &&
+      check.actualTopLevelComponentCount > 0 &&
+      check.actualTopLevelComponentCount <= check.actualComponentCount &&
+      HASH_RE.test(String(check?.actualComponentTopologySha256 ?? '')) &&
+      check?.componentInventoryMatchesDeclaration === true &&
+      check?.singleMonolithComponentDetected === false &&
+      check?.declaredSlotsActuallySlots === true &&
+      check?.entityReferencePropsActuallyReferences === true &&
+      check?.declaredRepeatableSectionsBackedByDrupalData === true &&
+      check?.sectionOrderEditableWhenCanvasOwnsComposition === true &&
+      arrayOrEmpty(check?.stringBlobProps).length === 0 &&
+      arrayOrEmpty(check?.jsonPropsDetected).length === 0 &&
+      arrayOrEmpty(check?.newlineUrlListPropsDetected).length === 0 &&
+      arrayOrEmpty(check?.multiUrlStringPropsDetected).length === 0 &&
+      arrayOrEmpty(check?.hardcodedTwigLiteralFindings).length === 0 &&
+      String(check?.evidence ?? '').trim();
     if (
-      canvasChecks.length === 0 ||
-      canvasChecks.some((check) =>
-        check.status !== 'pass' ||
-        check.canvasPagePublicOrPartOfRebuild !== true ||
-        check.componentInventoryMatchesDeclaration !== true ||
-        check.singleMonolithComponentDetected !== false ||
-        check.declaredSlotsActuallySlots !== true ||
-        check.entityReferencePropsActuallyReferences !== true ||
-        check.declaredRepeatableSectionsBackedByDrupalData !== true ||
-        check.sectionOrderEditableWhenCanvasOwnsComposition !== true ||
-        arrayOrEmpty(check.stringBlobProps).length > 0 ||
-        arrayOrEmpty(check.jsonPropsDetected).length > 0 ||
-        arrayOrEmpty(check.newlineUrlListPropsDetected).length > 0 ||
-        arrayOrEmpty(check.multiUrlStringPropsDetected).length > 0 ||
-        arrayOrEmpty(check.hardcodedTwigLiteralFindings).length > 0 ||
-        !String(check.evidence ?? '').trim()
+      canvasOwnedRoutes.length === 0 ||
+      canvasChecks.length !== canvasOwnedRoutes.length ||
+      canvasChecks.some((check) => !canvasCheckPasses(check)) ||
+      canvasOwnedRoutes.some((route) =>
+        canvasChecks.filter((check) => recordMatchesRoute(check, route.source, route.target)).length !== 1
       )
     ) {
-      reasons.push('independent-verification.json Canvas component-model checks must pass when Canvas owns rebuild output.');
+      reasons.push('independent-verification.json needs exactly one passing, route-bound Canvas component-model check for every Canvas-owned rebuild route.');
+    }
+
+    const authoringChecks = substantiveObjects(browserEvidence?.canvasAuthoringChecks);
+    if (authoringChecks.length !== canvasOwnedRoutes.length) {
+      reasons.push('browser-evidence.json needs exactly one route-bound Canvas authoring check for every Canvas-owned rebuild route.');
+    }
+    for (const route of canvasOwnedRoutes) {
+      const matchingAuthoringChecks = authoringChecks.filter((check) =>
+        normalizeRouteRequestKey(check?.publicRoute) === route.target
+      );
+      const check = matchingAuthoringChecks[0];
+      const flexibleRoute = arrayOrEmpty(patternMap?.compositionModel?.flexibleLandingRoutes)
+        .find((candidate) => recordMatchesRoute(candidate, route.source, route.target));
+      const expectedSectionKeys = arrayOrEmpty(flexibleRoute?.sections).map(compositionSectionKey).filter(Boolean);
+      const sectionChecks = arrayOrEmpty(check?.declaredSectionEditChecks);
+      const actualSectionKeys = sectionChecks.map(compositionSectionKey).filter(Boolean);
+      const sectionEvidence = await Promise.all(sectionChecks.map((section) =>
+        nonEmptyPacketEvidence(packetDir, section?.evidence, join(packetDir, 'evidence', 'browser'))
+      ));
+      const imageReferences = [
+        check?.editorScreenshot,
+        check?.publicRouteBeforeEditScreenshot,
+        check?.publicRouteAfterEditScreenshot
+      ];
+      const imageMetadata = await Promise.all(imageReferences.map(async (reference) => {
+        const path = resolveReviewEvidencePath(packetDir, join(packetDir, 'evidence', 'browser'), reference);
+        return path ? evidenceImageMetadata(path) : null;
+      }));
+      if (
+        matchingAuthoringChecks.length !== 1 ||
+        !check ||
+        !compositionOwnerUsesCanvas(check?.selectedOwner) ||
+        check?.canvasOwnsPublicRoute !== true ||
+        !String(check?.canvasEditorUrl ?? '').trim() ||
+        !String(check?.editorUser ?? '').trim() ||
+        !String(check?.editorRole ?? '').trim() ||
+        privilegedEditorIdentity(check?.editorUser) ||
+        privilegedEditorIdentity(check?.editorRole) ||
+        !String(check?.declaredComponentModel ?? '').trim() ||
+        check?.componentInventoryMatchesDeclaration !== true ||
+        check?.singleMonolithComponentDetected !== false ||
+        arrayOrEmpty(check?.stringBlobPropsDetected).length > 0 ||
+        check?.starterCanvasPlaceholderPresent !== false ||
+        !String(check?.representativeEditPerformed ?? '').trim() ||
+        check?.status !== 'pass' ||
+        check?.accepted !== true ||
+        arrayOrEmpty(check?.blockers).length > 0 ||
+        !String(check?.publicOutputAffected ?? '').trim() ||
+        !exactStringSet(actualSectionKeys, expectedSectionKeys) ||
+        sectionChecks.some((section, index) =>
+          !String(section?.expectedEditorAction ?? '').trim() ||
+          !String(section?.actualEditorAction ?? '').trim() ||
+          section?.publicOutputChanged !== true ||
+          section?.status !== 'pass' ||
+          sectionEvidence[index] !== true
+        ) ||
+        !canvasAuthoringScreenshotSetCredible(imageMetadata)
+      ) {
+        reasons.push(`browser-evidence.json Canvas authoring check for ${route.target} must prove a non-admin section edit with exact section coverage, credible screenshots, and distinct same-size before/after public output.`);
+      }
     }
   }
 
@@ -3852,6 +3928,27 @@ function credibleCaptureScreenshot(metadata, viewport) {
     metadata.size >= MIN_SCREENSHOT_BYTES &&
     metadata.width === Number(viewport?.width) &&
     metadata.height >= Number(viewport?.height)
+  );
+}
+
+export function canvasAuthoringScreenshotSetCredible(imageMetadata) {
+  if (!Array.isArray(imageMetadata) || imageMetadata.length !== 3) {
+    return false;
+  }
+  if (imageMetadata.some((metadata) =>
+    !metadata ||
+    metadata.size < MIN_SCREENSHOT_BYTES ||
+    metadata.width < MIN_SCREENSHOT_DIMENSION ||
+    metadata.height < MIN_SCREENSHOT_DIMENSION ||
+    !String(metadata.contentSha256 ?? '').trim()
+  )) {
+    return false;
+  }
+  const [editor, before, after] = imageMetadata;
+  return (
+    new Set([editor.contentSha256, before.contentSha256, after.contentSha256]).size === 3 &&
+    before.width === after.width &&
+    before.height === after.height
   );
 }
 

@@ -20,6 +20,9 @@ import {
   agentContinuation,
   createCriticalAssetContext,
   createLiveHttpContext,
+  canvasAvailabilityFromLiveSurface,
+  canvasAvailabilityReconciliationErrors,
+  canvasRouteOwnershipReconciliationErrors,
   DRUPAL_ENTITY_INVENTORY_EVAL,
   DRUPAL_LIVE_EDITOR_SURFACE_EVAL,
   DRUPAL_LIVE_SURFACE_EVAL,
@@ -29,6 +32,7 @@ import {
   inspectCustomCodeFilesystem,
   inspectSourceSurface,
   inspectCriticalAssets,
+  observedComposedRouteReconciliationErrors,
   SOURCE_SURFACE_LIMITS,
   sourceSurfaceCompletionBlocker,
   sourceSurfaceLimitsForRouteCount,
@@ -41,6 +45,7 @@ import {
 import {
   BUILD_TYPES,
   buildTypeRequiresCanvasEvidence,
+  canvasAuthoringScreenshotSetCredible,
   compositionOwnerUsesCanvas,
   customCodeReviewReasons,
   MACHINE_GATE_EVALUATORS,
@@ -60,6 +65,227 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
+const canvasDigest = (seed) => `sha256:${seed.repeat(64)}`;
+
+function canvasCapabilityInventory({
+  status = 'available',
+  items = [],
+  confirmed = true,
+  overrides = {}
+} = {}) {
+  const capability = {
+    key: 'canvas_capability:runtime',
+    kind: 'canvas_capability',
+    available: status === 'available',
+    componentConfigCount: status === 'available' ? 4 : 0,
+    editorRoutes: status === 'available' || status === 'broken'
+      ? ['canvas.boot.empty', 'canvas.boot.entity']
+      : [],
+    enabledModules: status === 'unavailable' ? [] : ['canvas'],
+    enabledComponentCount: status === 'available' ? 4 : 0,
+    frontPage: '/page/7',
+    mapping: 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity',
+    pageEntityTypeAvailable: status !== 'unavailable',
+    reasonCodes: status === 'broken' ? ['no-enabled-canvas-components'] : [],
+    status,
+    ...overrides
+  };
+  return {
+    confirmed,
+    fingerprint: canvasDigest('a'),
+    items: [capability, ...items]
+  };
+}
+
+test('live Canvas capability distinguishes authorable, absent, broken, and unknown runtimes', () => {
+  const available = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory());
+  assert.equal(available.confirmed, true);
+  assert.equal(available.status, 'available');
+  assert.equal(available.available, true);
+
+  const unavailable = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory({ status: 'unavailable' }));
+  assert.equal(unavailable.confirmed, true);
+  assert.equal(unavailable.status, 'unavailable');
+  assert.equal(unavailable.available, false);
+
+  const broken = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory({ status: 'broken' }));
+  assert.equal(broken.confirmed, true);
+  assert.equal(broken.status, 'broken');
+  assert.equal(broken.available, false);
+
+  const unknown = canvasAvailabilityFromLiveSurface({
+    confirmed: true,
+    fingerprint: canvasDigest('b'),
+    items: []
+  });
+  assert.equal(unknown.confirmed, false);
+  assert.equal(unknown.status, 'unknown');
+});
+
+test('live Canvas availability rejects authored opt-outs and permits fallback only for confirmed absence', () => {
+  const fallbackPattern = {
+    buildTypeDeclaration: { type: BUILD_TYPES.fallback },
+    pageCompositionOwnership: [{ canvasOrExperienceBuilderAvailable: false }]
+  };
+  const available = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory());
+  assert.match(
+    canvasAvailabilityReconciliationErrors(fallbackPattern, available).join('\n'),
+    /does not match|fallback is invalid/i
+  );
+
+  const unavailable = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory({ status: 'unavailable' }));
+  assert.deepEqual(canvasAvailabilityReconciliationErrors(fallbackPattern, unavailable), []);
+
+  const broken = canvasAvailabilityFromLiveSurface(canvasCapabilityInventory({ status: 'broken' }));
+  assert.match(canvasAvailabilityReconciliationErrors(fallbackPattern, broken).join('\n'), /only confirmed module absence/i);
+
+  const structuredFalse = {
+    buildTypeDeclaration: { type: BUILD_TYPES.structured },
+    pageCompositionOwnership: [{ canvasOrExperienceBuilderAvailable: false }]
+  };
+  assert.match(
+    canvasAvailabilityReconciliationErrors(structuredFalse, unavailable).join('\n'),
+    /requires a confirmed authorable Canvas runtime/i
+  );
+
+  const mixed = structuredClone(fallbackPattern);
+  mixed.pageCompositionOwnership.push({ canvasOrExperienceBuilderAvailable: true });
+  assert.match(canvasAvailabilityReconciliationErrors(mixed, unavailable).join('\n'), /mixed Canvas availability claims/i);
+});
+
+test('live Canvas route ownership binds front page, entity editor URL, count, and topology', () => {
+  const topology = canvasDigest('c');
+  const inventory = canvasCapabilityInventory({
+    items: [
+      {
+        key: 'canvas_page:page-uuid',
+        kind: 'canvas_page',
+        componentCount: 3,
+        componentTopologySha256: topology,
+        editorPath: '/canvas/editor/canvas_page/7',
+        entityId: '7',
+        internalPath: '/page/7',
+        path: '/campaign',
+        topLevelComponentCount: 2,
+        uuid: 'page-uuid'
+      },
+      {
+        key: 'alias:en:/campaign:/page/7',
+        kind: 'alias',
+        alias: '/campaign',
+        internalPath: '/page/7'
+      }
+    ]
+  });
+  const patternMap = {
+    pageCompositionOwnership: [{
+      sourceRoute: '/',
+      targetRoute: '/',
+      selectedOwner: 'canvas_page'
+    }]
+  };
+  const independentVerification = {
+    canvasComponentModelChecks: [{
+      sourceRoute: '/',
+      publicRoute: '/',
+      actualComponentCount: 3,
+      actualTopLevelComponentCount: 2,
+      actualComponentTopologySha256: topology
+    }]
+  };
+  const browserEvidence = {
+    canvasAuthoringChecks: [{
+      publicRoute: '/',
+      canvasEditorUrl: 'https://target.example/canvas/editor/canvas_page/7'
+    }]
+  };
+  assert.deepEqual(
+    canvasRouteOwnershipReconciliationErrors(
+      patternMap,
+      inventory,
+      independentVerification,
+      browserEvidence,
+      'https://target.example'
+    ),
+    []
+  );
+
+  independentVerification.canvasComponentModelChecks[0].actualComponentCount = 2;
+  browserEvidence.canvasAuthoringChecks[0].canvasEditorUrl = 'https://target.example/canvas/editor/canvas_page/page-uuid';
+  assert.match(
+    canvasRouteOwnershipReconciliationErrors(
+      patternMap,
+      inventory,
+      independentVerification,
+      browserEvidence,
+      'https://target.example'
+    ).join('\n'),
+    /live count and topology digest.*exact live Canvas entity editor URL/is
+  );
+});
+
+test('Canvas authoring screenshots must be credible, distinct, and same-size before and after', () => {
+  const image = (seed, overrides = {}) => ({
+    contentSha256: seed.repeat(64),
+    height: 800,
+    size: 4096,
+    width: 1280,
+    ...overrides
+  });
+  assert.equal(canvasAuthoringScreenshotSetCredible([image('a'), image('b'), image('c')]), true);
+  assert.equal(
+    canvasAuthoringScreenshotSetCredible([image('a'), image('b', { width: 1 }), image('c', { width: 1 })]),
+    false
+  );
+  assert.equal(canvasAuthoringScreenshotSetCredible([image('a'), image('b'), image('b')]), false);
+  assert.equal(
+    canvasAuthoringScreenshotSetCredible([image('a', { width: 1440 }), image('b'), image('c', { height: 844 })]),
+    false
+  );
+});
+
+test('verifier-observed design-led routes cannot evade Canvas by relabeling the route', () => {
+  const patternMap = {
+    compositionModel: {
+      flexibleLandingRoutes: [{ sourceRoute: '/campaign', targetRoute: '/campaign', pageType: 'other' }]
+    },
+    pageCompositionOwnership: [{
+      sourceRoute: '/campaign',
+      targetRoute: '/campaign',
+      routeRole: 'other',
+      selectedOwner: 'node'
+    }]
+  };
+  const errors = observedComposedRouteReconciliationErrors({
+    patternMap,
+    runtimeAvailability: { status: 'available' },
+    visualParityFloor: {
+      findings: [{
+        sourcePath: '/campaign',
+        targetPath: '/campaign',
+        routeRole: 'other',
+        composedSource: true,
+        designLedComposition: true
+      }]
+    }
+  });
+  assert.match(errors.join('\n'), /requires Canvas or an externally authenticated owner exception/i);
+
+  const articleErrors = observedComposedRouteReconciliationErrors({
+    patternMap,
+    runtimeAvailability: { status: 'available' },
+    visualParityFloor: {
+      findings: [{
+        sourcePath: '/campaign',
+        targetPath: '/campaign',
+        routeRole: 'other',
+        composedSource: true,
+        designLedComposition: false
+      }]
+    }
+  });
+  assert.deepEqual(articleErrors, []);
+});
 
 function committedConfigTree() {
   const root = mkdtempSync(join(tmpdir(), 'config-head-bytes-'));
@@ -771,16 +997,21 @@ test('live-derived surfaces reconcile bidirectionally and non-public items requi
     schemaVersion: 'public-kit.drupal-live-surface.1',
     confirmed: true,
     fingerprint: `sha256:${'a'.repeat(64)}`,
-    countsByKind: { bundle: 1, view_display: 1 },
+    countsByKind: { bundle: 1, canvas_capability: 1, view_display: 1 },
     items: [
       { key: 'bundle:node:page', kind: 'bundle', publicEditorialRoot: true, publicSurface: true },
+      {
+        key: 'canvas_capability:runtime',
+        kind: 'canvas_capability',
+        status: 'available'
+      },
       { key: 'view_display:content:page_admin', kind: 'view_display', publicSurface: false }
     ]
   };
   const reconciliation = {
     schemaVersion: 'public-kit.live-surface-reconciliation.1',
     inventoryFingerprint: inventory.fingerprint,
-    countsByKind: inventory.countsByKind,
+    countsByKind: { bundle: 1, view_display: 1 },
     declarations: [
       {
         key: 'bundle:node:page',
@@ -5610,8 +5841,8 @@ if (args[1] === 'php:eval') {
       bounded: true,
       limit: 5000,
       truncated: false,
-      itemCount: 1,
-      countsByKind: { bundle: 1 },
+      itemCount: 2,
+      countsByKind: { bundle: 1, canvas_capability: 1 },
       items: [
         {
           key: 'bundle:node:page',
@@ -5621,6 +5852,20 @@ if (args[1] === 'php:eval') {
           publicEditorialRoot: true,
           publicSurface: true,
           publishedCount: 1
+        },
+        {
+          key: 'canvas_capability:runtime',
+          kind: 'canvas_capability',
+          available: true,
+          componentConfigCount: 17,
+          editorRoutes: ['canvas.boot.empty', 'canvas.boot.entity'],
+          enabledComponentCount: 6,
+          enabledModules: ['canvas'],
+          frontPage: '/',
+          mapping: 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity',
+          pageEntityTypeAvailable: true,
+          reasonCodes: [],
+          status: 'available'
         }
       ],
       publicEditorialRoots: { node: ['page'] },
@@ -6406,7 +6651,7 @@ test('composition ownership is route-reconciled and Canvas opt-out requires an o
   );
   assert.match(
     observedCanvasReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /Canvas component-model checks must pass/i
+    /route-bound Canvas component-model check/i
   );
 });
 
@@ -6493,7 +6738,7 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
     },
     {
       name: 'canvas',
-      expected: [/Canvas component-model checks must pass/i],
+      expected: [/route-bound Canvas component-model check/i],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
           value.buildTypeDeclaration.type = BUILD_TYPES.hybrid;

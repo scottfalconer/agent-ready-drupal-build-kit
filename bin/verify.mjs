@@ -974,16 +974,7 @@ export function visualParityCompletionSupport(record, { briefMode = false } = {}
     record?.authority === 'verifier-owned-managed-browser-structural-floor' &&
     record?.verifierOwned === true &&
     record?.completionSupported === true;
-  const reviewedProtectedSourcePass =
-    record?.status === 'passed_with_handoff_review' &&
-    record?.authority === 'handoff-reviewed-builder-captures' &&
-    record?.verifierOwned === false &&
-    record?.completionSupported === true &&
-    record?.sourceProtectionDegradation === true &&
-    record?.verifierCapture?.status === 'review_required' &&
-    record?.verifierCapture?.completionSupported === false &&
-    record?.reviewedBuilderFallback?.completionSupported === true;
-  return verifierOwnedPass || reviewedProtectedSourcePass;
+  return verifierOwnedPass;
 }
 
 function normalizeRouteKey(value) {
@@ -2995,6 +2986,79 @@ $add_surface = function (string $kind, string $identity, array $metadata = []) u
   ksort($metadata, SORT_STRING);
   $items[$key] = ['key' => $key, 'kind' => $kind] + $metadata;
 };
+
+// Canvas availability is a live Drupal fact, not a builder-authored opt-out.
+// Always include one capability record so absence, availability, and a broken
+// partial installation are distinct, fingerprint-bound outcomes.
+$canvas_enabled_modules = [];
+foreach (['canvas', 'experience_builder'] as $canvas_module) {
+  if (\Drupal::moduleHandler()->moduleExists($canvas_module)) {
+    $canvas_enabled_modules[] = $canvas_module;
+  }
+}
+sort($canvas_enabled_modules, SORT_STRING);
+$canvas_page_entity_type_available = isset($definitions['canvas_page']);
+$canvas_component_config_names = $config_factory->listAll('canvas.component.');
+sort($canvas_component_config_names, SORT_STRING);
+$canvas_enabled_component_count = 0;
+foreach ($canvas_component_config_names as $component_config_name) {
+  $component_config = $config_factory->get($component_config_name)->getRawData();
+  if (($component_config['status'] ?? TRUE) === TRUE) {
+    $canvas_enabled_component_count++;
+  }
+}
+$canvas_editor_routes = [];
+if (in_array('canvas', $canvas_enabled_modules, TRUE)) {
+  try {
+    $route_provider = \Drupal::service('router.route_provider');
+    foreach (['canvas.boot.empty', 'canvas.boot.entity'] as $route_name) {
+      $route_provider->getRouteByName($route_name);
+      $canvas_editor_routes[] = $route_name;
+    }
+  }
+  catch (\Throwable) {
+    // A partial route set is recorded as a broken capability below.
+  }
+}
+sort($canvas_editor_routes, SORT_STRING);
+$canvas_capability_status = 'unavailable';
+$canvas_capability_reason_codes = [];
+if ($canvas_enabled_modules !== []) {
+  $canvas_capability_status = 'broken';
+  if (!in_array('canvas', $canvas_enabled_modules, TRUE)) {
+    $canvas_capability_reason_codes[] = 'unsupported-experience-builder-mapping';
+  }
+  if (!$canvas_page_entity_type_available) {
+    $canvas_capability_reason_codes[] = 'canvas-page-entity-type-missing';
+  }
+  if ($canvas_enabled_component_count === 0) {
+    $canvas_capability_reason_codes[] = 'no-enabled-canvas-components';
+  }
+  if (count($canvas_editor_routes) !== 2) {
+    $canvas_capability_reason_codes[] = 'canvas-editor-routes-missing';
+  }
+  if (
+    in_array('canvas', $canvas_enabled_modules, TRUE) &&
+    $canvas_page_entity_type_available &&
+    $canvas_enabled_component_count > 0 &&
+    count($canvas_editor_routes) === 2
+  ) {
+    $canvas_capability_status = 'available';
+    $canvas_capability_reason_codes = [];
+  }
+}
+$add_surface('canvas_capability', 'runtime', [
+  'available' => $canvas_capability_status === 'available',
+  'componentConfigCount' => count($canvas_component_config_names),
+  'editorRoutes' => $canvas_editor_routes,
+  'enabledModules' => $canvas_enabled_modules,
+  'enabledComponentCount' => $canvas_enabled_component_count,
+  'frontPage' => $normalize_path($config_factory->get('system.site')->get('page.front') ?? ''),
+  'mapping' => 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity',
+  'pageEntityTypeAvailable' => $canvas_page_entity_type_available,
+  'reasonCodes' => $canvas_capability_reason_codes,
+  'status' => $canvas_capability_status,
+]);
 $bounded_ids = function ($query, string $context) use (&$truncated, &$errors, $surface_limit): array {
   try {
     $ids = array_values($query->range(0, $surface_limit + 1)->execute());
@@ -3217,14 +3281,58 @@ if (isset($definitions['canvas_page']) && $definitions['canvas_page'] instanceof
   }
   foreach ($manager->getStorage('canvas_page')->loadMultiple($bounded_ids($query, 'Published Canvas page')) as $page) {
     $uuid = method_exists($page, 'uuid') ? (string) $page->uuid() : (string) $page->id();
+    $entity_id = (string) $page->id();
     $path = '';
+    $internal_path = '';
+    $editor_path = '';
+    $component_count = 0;
+    $top_level_component_count = 0;
+    $component_topology_sha256 = '';
     try {
-      $path = $page->toUrl('canonical')->toString();
+      $url = $page->toUrl('canonical');
+      $path = $url->toString();
+      $internal_path = $normalize_path($url->getInternalPath());
+      $editor_path = $normalize_path($page->toUrl('edit-form')->getInternalPath());
     }
     catch (\Throwable) {
       // A missing canonical link remains visible as a page with an empty path.
     }
-    $add_surface('canvas_page', $uuid, ['path' => $normalize_path($path)]);
+    try {
+      $component_values = $page->hasField('components') ? $page->get('components')->getValue() : [];
+      $component_count = count($component_values);
+      $component_topology = [];
+      foreach ($component_values as $component_value) {
+        $parent_uuid = trim((string) ($component_value['parent_uuid'] ?? ''));
+        if ($parent_uuid === '') {
+          $top_level_component_count++;
+        }
+        $component_topology[] = [
+          'componentId' => (string) ($component_value['component_id'] ?? ''),
+          'componentVersion' => (string) ($component_value['component_version'] ?? ''),
+          'parentUuid' => $parent_uuid,
+          'slot' => (string) ($component_value['slot'] ?? ''),
+          'uuid' => (string) ($component_value['uuid'] ?? ''),
+        ];
+      }
+      $encoded_topology = json_encode($component_topology, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+      $component_topology_sha256 = 'sha256:' . hash(
+        'sha256',
+        $encoded_topology === FALSE ? serialize($component_topology) : $encoded_topology
+      );
+    }
+    catch (\Throwable) {
+      $errors[] = 'Published Canvas page component count failed for ' . $uuid . '.';
+    }
+    $add_surface('canvas_page', $uuid, [
+      'componentCount' => $component_count,
+      'componentTopologySha256' => $component_topology_sha256,
+      'editorPath' => $editor_path,
+      'entityId' => $entity_id,
+      'internalPath' => $internal_path,
+      'path' => $normalize_path($path),
+      'topLevelComponentCount' => $top_level_component_count,
+      'uuid' => $uuid,
+    ]);
   }
 }
 
@@ -4066,6 +4174,263 @@ export function inspectDrupalLiveSurface(projectRoot, environment) {
       truncated: false
     };
   }
+}
+
+const CANVAS_AVAILABILITY_SCHEMA = 'public-kit.canvas-runtime-availability.1';
+const CANVAS_MODULES = new Set(['canvas', 'experience_builder']);
+const CANVAS_CAPABILITY_STATUSES = new Set(['available', 'broken', 'unavailable']);
+const CANVAS_OWNER_IDS = new Set(['canvas_page', 'experience_builder_page']);
+const CANVAS_RUNTIME_MAPPING = 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity';
+
+export function canvasAvailabilityFromLiveSurface(inventory = {}) {
+  const capabilityRecords = (Array.isArray(inventory?.items) ? inventory.items : [])
+    .filter((item) => item?.kind === 'canvas_capability' && item?.key === 'canvas_capability:runtime');
+  const capability = capabilityRecords[0] ?? {};
+  const enabledModules = Array.isArray(capability?.enabledModules)
+    ? capability.enabledModules.map((module) => String(module ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const editorRoutes = Array.isArray(capability?.editorRoutes)
+    ? capability.editorRoutes.map((route) => String(route ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const reasonCodes = Array.isArray(capability?.reasonCodes)
+    ? capability.reasonCodes.map((reason) => String(reason ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const status = String(capability?.status ?? '');
+  const frontPage = normalizePath(capability?.frontPage);
+  const componentConfigCount = Number(capability?.componentConfigCount);
+  const enabledComponentCount = Number(capability?.enabledComponentCount);
+  const structurallyValid =
+    inventory?.confirmed === true &&
+    capabilityRecords.length === 1 &&
+    enabledModules.every((module) => CANVAS_MODULES.has(module)) &&
+    new Set(enabledModules).size === enabledModules.length &&
+    new Set(editorRoutes).size === editorRoutes.length &&
+    new Set(reasonCodes).size === reasonCodes.length &&
+    CANVAS_CAPABILITY_STATUSES.has(status) &&
+    capability?.mapping === CANVAS_RUNTIME_MAPPING &&
+    Number.isSafeInteger(componentConfigCount) && componentConfigCount >= 0 &&
+    Number.isSafeInteger(enabledComponentCount) && enabledComponentCount >= 0 &&
+    enabledComponentCount <= componentConfigCount &&
+    typeof capability?.pageEntityTypeAvailable === 'boolean' &&
+    typeof capability?.available === 'boolean' &&
+    capability.available === (status === 'available') &&
+    (status !== 'unavailable' || enabledModules.length === 0) &&
+    (status !== 'broken' || reasonCodes.length > 0) &&
+    (status !== 'available' || (
+      enabledModules.includes('canvas') &&
+      capability.pageEntityTypeAvailable === true &&
+      enabledComponentCount > 0 &&
+      ['canvas.boot.empty', 'canvas.boot.entity'].every((route) => editorRoutes.includes(route)) &&
+      reasonCodes.length === 0
+    ));
+  const value = {
+    schemaVersion: CANVAS_AVAILABILITY_SCHEMA,
+    authority: 'verifier-owned-live-drupal-inventory',
+    confirmed: structurallyValid,
+    status: structurallyValid ? status : 'unknown',
+    available: structurallyValid && status === 'available',
+    componentConfigCount: Number.isSafeInteger(componentConfigCount) ? componentConfigCount : 0,
+    editorRoutes,
+    enabledModules,
+    enabledComponentCount: Number.isSafeInteger(enabledComponentCount) ? enabledComponentCount : 0,
+    frontPage,
+    mapping: String(capability?.mapping ?? ''),
+    pageEntityTypeAvailable: capability?.pageEntityTypeAvailable === true,
+    reasonCodes,
+    liveSurfaceFingerprint: String(inventory?.fingerprint ?? ''),
+    reason: structurallyValid
+      ? ''
+      : inventory?.confirmed !== true
+        ? String(inventory?.reason ?? 'Drupal live public-surface inventory is unavailable.')
+        : 'Drupal live public-surface inventory did not contain one valid Canvas capability record.'
+  };
+  return { ...value, fingerprint: stateSha256(value) };
+}
+
+export function canvasAvailabilityReconciliationErrors(patternMap = {}, runtimeAvailability = {}) {
+  const errors = [];
+  if (
+    runtimeAvailability?.schemaVersion !== CANVAS_AVAILABILITY_SCHEMA ||
+    runtimeAvailability?.authority !== 'verifier-owned-live-drupal-inventory' ||
+    runtimeAvailability?.confirmed !== true ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(runtimeAvailability?.liveSurfaceFingerprint ?? ''))
+  ) {
+    return [
+      `Canvas availability could not be confirmed from the verifier-owned live Drupal inventory${runtimeAvailability?.reason ? `: ${runtimeAvailability.reason}` : '.'}`
+    ];
+  }
+
+  const buildType = String(patternMap?.buildTypeDeclaration?.type ?? '').trim();
+  const owners = Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : [];
+  const availabilityClaims = owners
+    .filter((owner) => typeof owner?.canvasOrExperienceBuilderAvailable === 'boolean')
+    .map((owner) => owner.canvasOrExperienceBuilderAvailable);
+  if (new Set(availabilityClaims).size > 1) {
+    errors.push('pageCompositionOwnership contains mixed Canvas availability claims for one live Drupal runtime.');
+  }
+  if (availabilityClaims.some((claim) => claim !== runtimeAvailability.available)) {
+    errors.push(
+      `Authored Canvas availability does not match the verifier-owned live Drupal runtime: runtime available=${runtimeAvailability.available}.`
+    );
+  }
+  if (
+    buildType === 'constrained_fallback_canvas_unavailable_or_blocked' &&
+    runtimeAvailability.status !== 'unavailable'
+  ) {
+    errors.push(
+      `The constrained Canvas-unavailable fallback is invalid because the verifier-owned live Drupal capability status is ${runtimeAvailability.status}; only confirmed module absence permits this fallback.`
+    );
+  }
+  if (
+    [
+      'structured_drupal_native_canvas_unused',
+      'hybrid_structured_content_plus_canvas',
+      'canvas_heavy_with_structured_data'
+    ].includes(buildType) &&
+    runtimeAvailability.status !== 'available'
+  ) {
+    errors.push(
+      `Build type ${buildType} requires a confirmed authorable Canvas runtime; use the constrained fallback only when the verifier confirms Canvas is absent.`
+    );
+  }
+  return errors;
+}
+
+export function canvasRouteOwnershipReconciliationErrors(
+  patternMap = {},
+  liveSurfaceInventory = {},
+  independentVerification = {},
+  browserEvidence = {},
+  targetOrigin = ''
+) {
+  if (liveSurfaceInventory?.confirmed !== true) {
+    return ['Canvas route ownership could not be reconciled because the live Drupal surface inventory is unavailable.'];
+  }
+  const items = Array.isArray(liveSurfaceInventory?.items) ? liveSurfaceInventory.items : [];
+  const capability = items.find((item) =>
+    item?.kind === 'canvas_capability' && item?.key === 'canvas_capability:runtime'
+  );
+  const frontPage = normalizePath(capability?.frontPage);
+  const aliases = items.filter((item) => item?.kind === 'alias');
+  const canvasPages = items.filter((item) => item?.kind === 'canvas_page').map((item) => {
+    const paths = new Set([normalizePath(item?.path), normalizePath(item?.internalPath)].filter(Boolean));
+    for (const alias of aliases) {
+      if (paths.has(normalizePath(alias?.internalPath))) {
+        const publicAlias = normalizePath(alias?.alias);
+        if (publicAlias) paths.add(publicAlias);
+      }
+    }
+    if (frontPage && paths.has(frontPage)) paths.add('/');
+    return { item, paths };
+  });
+  const componentChecks = Array.isArray(independentVerification?.canvasComponentModelChecks)
+    ? independentVerification.canvasComponentModelChecks
+    : [];
+  const authoringChecks = Array.isArray(browserEvidence?.canvasAuthoringChecks)
+    ? browserEvidence.canvasAuthoringChecks
+    : [];
+  const errors = [];
+  for (const owner of Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : []) {
+    const targetPath = normalizePath(owner?.targetRoute ?? owner?.sourceRoute);
+    if (!targetPath) continue;
+    const liveCanvasPages = canvasPages.filter((page) => page.paths.has(targetPath));
+    const liveCanvasMatches = liveCanvasPages.length;
+    const selectedCanvas = CANVAS_OWNER_IDS.has(String(owner?.selectedOwner ?? '').trim());
+    if (selectedCanvas && liveCanvasMatches !== 1) {
+      errors.push(`Canvas-selected route ${targetPath} must resolve to exactly one published canvas_page in the live Drupal inventory; found ${liveCanvasMatches}.`);
+    }
+    if (!selectedCanvas && liveCanvasMatches > 0) {
+      errors.push(`Route ${targetPath} is declared as non-Canvas but resolves to a published canvas_page in the live Drupal inventory.`);
+    }
+    if (selectedCanvas && liveCanvasMatches === 1) {
+      const sourcePath = normalizePath(owner?.sourceRoute ?? owner?.sourcePath);
+      const matchingChecks = componentChecks.filter((check) =>
+        normalizePath(check?.sourceRoute ?? check?.sourcePath) === sourcePath &&
+        normalizePath(check?.publicRoute ?? check?.targetRoute ?? check?.targetPath) === targetPath
+      );
+      const liveCount = Number(liveCanvasPages[0].item?.componentCount);
+      const liveTopLevelCount = Number(liveCanvasPages[0].item?.topLevelComponentCount);
+      const liveTopology = String(liveCanvasPages[0].item?.componentTopologySha256 ?? '');
+      if (
+        matchingChecks.length !== 1 ||
+        !Number.isSafeInteger(liveCount) ||
+        liveCount <= 0 ||
+        !Number.isSafeInteger(liveTopLevelCount) ||
+        liveTopLevelCount <= 0 ||
+        matchingChecks[0]?.actualComponentCount !== liveCount ||
+        matchingChecks[0]?.actualTopLevelComponentCount !== liveTopLevelCount ||
+        matchingChecks[0]?.actualComponentTopologySha256 !== liveTopology ||
+        !/^sha256:[a-f0-9]{64}$/.test(liveTopology)
+      ) {
+        errors.push(`Canvas-selected route ${targetPath} must bind its independent component inventory to the verifier-observed live count and topology digest.`);
+      }
+      const matchingAuthoringChecks = authoringChecks.filter((check) =>
+        normalizePath(check?.publicRoute) === targetPath
+      );
+      const canvasPageId = String(liveCanvasPages[0].item?.entityId ?? '').trim();
+      const expectedEditorPath = normalizePath(liveCanvasPages[0].item?.editorPath);
+      let editorUrlMatches = false;
+      try {
+        const editorUrl = new URL(String(matchingAuthoringChecks[0]?.canvasEditorUrl ?? ''));
+        editorUrlMatches =
+          Boolean(targetOrigin) &&
+          editorUrl.origin === targetOrigin &&
+          normalizePath(editorUrl.pathname) === normalizePath(expectedEditorPath);
+      } catch {
+        editorUrlMatches = false;
+      }
+      if (matchingAuthoringChecks.length !== 1 || !canvasPageId || !expectedEditorPath || !editorUrlMatches) {
+        errors.push(`Canvas-selected route ${targetPath} must bind its authoring check to the exact live Canvas entity editor URL.`);
+      }
+    }
+  }
+  return errors;
+}
+
+export function observedComposedRouteReconciliationErrors({
+  patternMap = {},
+  runtimeAvailability = {},
+  visualParityFloor = {}
+} = {}) {
+  const observedRoutes = new Map();
+  for (const finding of Array.isArray(visualParityFloor?.findings) ? visualParityFloor.findings : []) {
+    if (finding?.designLedComposition !== true) continue;
+    const targetPath = normalizePath(finding?.targetPath);
+    const sourcePath = normalizePath(finding?.sourcePath);
+    if (targetPath) observedRoutes.set(`${sourcePath}\0${targetPath}`, { sourcePath, targetPath });
+  }
+  const flexibleRoutes = Array.isArray(patternMap?.compositionModel?.flexibleLandingRoutes)
+    ? patternMap.compositionModel.flexibleLandingRoutes
+    : [];
+  const owners = Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : [];
+  const errors = [];
+  for (const { sourcePath, targetPath } of observedRoutes.values()) {
+    const matchesPair = (record) =>
+      normalizePath(record?.sourceRoute ?? record?.sourcePath) === sourcePath &&
+      normalizePath(record?.targetRoute ?? record?.targetPath ?? record?.publicRoute) === targetPath;
+    const routeMatches = flexibleRoutes.filter(matchesPair);
+    const ownerMatches = owners.filter(matchesPair);
+    if (routeMatches.length !== 1 || ownerMatches.length !== 1) {
+      errors.push(`Verifier-observed composed route ${targetPath} must have exactly one flexible-route and page-owner declaration, regardless of builder-selected routeRole/pageType labels.`);
+      continue;
+    }
+    const owner = ownerMatches[0];
+    if (
+      runtimeAvailability?.status === 'available' &&
+      !CANVAS_OWNER_IDS.has(String(owner?.selectedOwner ?? '').trim())
+    ) {
+      errors.push(
+        `Verifier-observed design-led route ${targetPath} requires Canvas or an externally authenticated owner exception while the live runtime is authorable; packet-local reviewer declarations cannot authorize the exception.`
+      );
+    }
+  }
+  return errors;
 }
 
 function declaredPublicReferenceFields(fieldOutputMatrix) {
@@ -5084,8 +5449,12 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
   if (String(reconciliation.inventoryFingerprint ?? '') !== String(liveInventory.fingerprint ?? '')) {
     push('drupal-readback.json liveSurfaceReconciliation inventoryFingerprint does not match the current live-derived Drupal surface.');
   }
+  const reconciliationControlKinds = new Set(['canvas_capability']);
   const expectedCounts = liveInventory?.countsByKind && typeof liveInventory.countsByKind === 'object'
-    ? liveInventory.countsByKind
+    ? Object.fromEntries(
+        Object.entries(liveInventory.countsByKind)
+          .filter(([kind]) => !reconciliationControlKinds.has(String(kind)))
+      )
     : {};
   const recordedCounts = reconciliation?.countsByKind && typeof reconciliation.countsByKind === 'object'
     ? reconciliation.countsByKind
@@ -5101,7 +5470,8 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
 
   const declarations = Array.isArray(reconciliation.declarations) ? reconciliation.declarations : [];
   const exclusions = Array.isArray(reconciliation.exclusions) ? reconciliation.exclusions : [];
-  const liveItems = Array.isArray(liveInventory.items) ? liveInventory.items : [];
+  const liveItems = (Array.isArray(liveInventory.items) ? liveInventory.items : [])
+    .filter((item) => !reconciliationControlKinds.has(String(item?.kind ?? '')));
   const liveByKey = new Map(liveItems.map((item) => [String(item?.key ?? ''), item]));
   const declaredByKey = new Map();
   const excludedByKey = new Map();
@@ -12558,6 +12928,24 @@ export async function verifyLive({
     )
     : [];
   liveErrors.push(...surfaceReconciliationErrors);
+  const runtimeCanvasAvailability = canvasAvailabilityFromLiveSurface(
+    inspectedDrupalRuntime.liveSurfaceInventory
+  );
+  const canvasRuntimeEvidenceRequired =
+    !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'liveSurfaceInventory');
+  const canvasAvailabilityErrors = canvasRuntimeEvidenceRequired
+    ? canvasAvailabilityReconciliationErrors(patternMap, runtimeCanvasAvailability)
+    : [];
+  const canvasRouteOwnershipErrors = canvasRuntimeEvidenceRequired
+    ? canvasRouteOwnershipReconciliationErrors(
+        patternMap,
+        inspectedDrupalRuntime.liveSurfaceInventory,
+        independentVerification,
+        browserEvidence,
+        target?.url?.origin ?? ''
+      )
+    : [];
+  liveErrors.push(...canvasAvailabilityErrors, ...canvasRouteOwnershipErrors);
   const customCodeErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'customCodeInventory')
     ? customCodeReconciliationErrors(
       inspectedDrupalRuntime.customCodeInventory,
@@ -12810,7 +13198,7 @@ export async function verifyLive({
   liveErrors.push(...consentReconciliation.errors);
   const verifierOwnedAxeErrors = verifierAxeCompletionErrors(globalChromeCapture);
   const verifierOwnedAxeSupportsCompletion = verifierOwnedAxeErrors.length === 0;
-  const liveTargetValid = Boolean(target) && liveErrors.length === 0;
+  let liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -12895,7 +13283,7 @@ export async function verifyLive({
       primaryRoutes,
       stateFingerprint: buildState.fingerprint
     });
-    if (verifierFloor.status === 'review_required' && verifierFloor.reviewFallbackEligible === true) {
+    if (verifierFloor.status === 'review_required' && verifierFloor.diagnosticReviewEligible === true) {
       const reviewedBuilderFallback = buildReviewedBuilderVisualFallback({
         browserEvidence,
         blindReview,
@@ -12909,34 +13297,16 @@ export async function verifyLive({
         independentVerificationSupportsCompletion:
           packetReport.completionEvidence?.independentVerificationSupportsCompletion === true
       });
-      const value = reviewedBuilderFallback.completionSupported === true
-        ? {
-            schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
-            checkedAt: verifierFloor.checkedAt,
-            status: 'passed_with_handoff_review',
-            authority: 'handoff-reviewed-builder-captures',
-            verifierOwned: false,
-            completionSupported: true,
-            sourceOrigin: verifierFloor.sourceOrigin,
-            targetOrigin: verifierFloor.targetOrigin,
-            resultStateFingerprint: verifierFloor.resultStateFingerprint,
-            sourceProtectionDegradation: true,
-            verifierCapture: {
-              authority: verifierFloor.authority,
-              fingerprint: verifierFloor.fingerprint,
-              status: verifierFloor.status,
-              completionSupported: false
-            },
-            reviewedBuilderFallback,
-            findings: reviewedBuilderFallback.findings,
-            errors: []
-          }
-        : {
-            ...verifierFloor,
-            completionSupported: false,
-            reviewedBuilderFallback,
-            errors: [...verifierFloor.errors, ...reviewedBuilderFallback.errors]
-          };
+      const value = {
+        ...verifierFloor,
+        completionSupported: false,
+        reviewedBuilderFallback,
+        errors: [
+          ...verifierFloor.errors,
+          ...reviewedBuilderFallback.errors,
+          'Builder-writable screenshots and self-attested reviewer identity are diagnostic only; they cannot replace verifier-owned source capture.'
+        ]
+      };
       const { fingerprint: _fingerprint, ...unfingerprinted } = value;
       visualParityFloor = { ...unfingerprinted, fingerprint: stateSha256(unfingerprinted) };
     } else {
@@ -12956,6 +13326,15 @@ export async function verifyLive({
     visualParityFloor = { ...value, fingerprint: stateSha256(value) };
   }
   const visualParityFloorSupportsCompletion = visualParityCompletionSupport(visualParityFloor, { briefMode });
+  const observedCompositionErrors = !briefMode
+    ? observedComposedRouteReconciliationErrors({
+        patternMap,
+        runtimeAvailability: runtimeCanvasAvailability,
+        visualParityFloor
+      })
+    : [];
+  liveErrors.push(...observedCompositionErrors);
+  liveTargetValid = liveTargetValid && observedCompositionErrors.length === 0;
   const lateSourceCensusEligible =
     !briefMode &&
     packetReport.valid &&
@@ -13008,6 +13387,21 @@ export async function verifyLive({
   }
   if (!liveTargetValid) {
     addCompletionBlocker('target.validation', 'Live target identity or route verification failed.');
+  }
+  for (const error of canvasAvailabilityErrors) {
+    addCompletionBlocker('canvas.runtime-availability', error, {
+      nextAction: 'Repair the Canvas runtime or align the build type and every route-level availability declaration with verifier-observed runtime facts, then rerun the live verifier.'
+    });
+  }
+  for (const error of canvasRouteOwnershipErrors) {
+    addCompletionBlocker('canvas.route-ownership', error, {
+      nextAction: 'Bind each Canvas-owned public route to exactly one published live Canvas page, its component topology, and its exact entity editor URL, then refresh evidence.'
+    });
+  }
+  for (const error of observedCompositionErrors) {
+    addCompletionBlocker('canvas.observed-composition', error, {
+      nextAction: 'Use Canvas for the verifier-observed design-led route or provide a future externally authenticated owner exception; packet-local self-attestation cannot waive this check.'
+    });
   }
   if (
     lateSourceCensusEligible &&
@@ -13065,7 +13459,7 @@ export async function verifyLive({
     for (const error of visualErrors) {
       addCompletionBlocker('visual.parity-floor', error, {
         nextAction: visualParityFloor?.status === 'review_required'
-          ? 'Use fresh blind-review context to adjudicate the exact builder source/target screenshots sealed into the current handoff, then rerun the live verifier.'
+          ? 'Restore verifier-owned access to the source route (or use a future externally authenticated review authority); packet-authored reviewer claims cannot authorize completion.'
           : 'Repair the gross source/target structural omissions or browser-capture failure, refresh affected evidence, and rerun the live verifier.'
       });
     }
@@ -13156,6 +13550,7 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
+    canvasRuntimeAvailabilityFingerprint: runtimeCanvasAvailability.fingerprint ?? '',
     sourceSurfaceFingerprint: sourceSurfaceCensus.fingerprint ?? '',
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
     visualParityFloorFingerprint: visualParityFloor?.fingerprint ?? '',
@@ -13336,6 +13731,7 @@ export async function verifyLive({
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,
       trackedConfigDirectory: runtimeTrackedConfigDirectory,
       trackedConfigReadbackMatches: drupalRuntimeTrackedConfigReadbackMatches,
+      canvasAvailability: runtimeCanvasAvailability,
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,

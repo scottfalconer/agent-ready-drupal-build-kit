@@ -281,6 +281,8 @@
       "canvasPagePublicOrPartOfRebuild": false,
       "declaredComponentCount": null,
       "actualComponentCount": null,
+      "actualTopLevelComponentCount": null,
+      "actualComponentTopologySha256": "",
       "componentInventoryMatchesDeclaration": false,
       "singleMonolithComponentDetected": false,
       "declaredSlotsActuallySlots": false,
