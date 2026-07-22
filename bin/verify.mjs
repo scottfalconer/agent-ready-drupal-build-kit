@@ -62,6 +62,8 @@ Options:
   --out <path>         Report path (default: review-packet/evidence/live-verification.json)
   --source-max-routes <count>
                        Expand the late source crawl after owner approval (default: 1024; max: 8192)
+  --target-max-routes <count>
+                       Expand the live target route/link budget after owner approval (default: 1000; max: 8192)
   --change <id>        Bind a passing full run to an evidence-recorded repair or extension
   --checkpoint <id>    Create a create-only checkpoint for the passing change
   --packet-only        Run structural packet lint only; never authorizes completion
@@ -77,6 +79,9 @@ const MAX_LIVE_ROUTE_CONCURRENCY = 12;
 const MAX_LIVE_HTTP_REQUESTS = 2_000;
 const MAX_LIVE_HTTP_TASKS = 20_000;
 const LIVE_ROUTE_DEADLINE_MS = 90_000;
+const MAX_LIVE_TARGET_ROUTES = 8_192;
+const LIVE_TARGET_BUDGET_ERROR_PATTERN =
+  /Live route verification (?:exhausted its \d+ (?:HTTP request|task) budget|exceeded its total wall-clock deadline|requires \d+ checks, exceeding the \d+ route limit)/i;
 export const SOURCE_SURFACE_LIMITS = Object.freeze({
   concurrency: 8,
   deadlineMs: 180_000,
@@ -121,6 +126,7 @@ function parseArgs(argv) {
     out: '',
     packetOnly: false,
     sourceMaxRoutes: 0,
+    targetMaxRoutes: 0,
     targetUrl: ''
   };
   const valueOptions = new Map([
@@ -128,6 +134,7 @@ function parseArgs(argv) {
     ['--checkpoint', 'checkpointId'],
     ['--packet', 'packet'],
     ['--source-max-routes', 'sourceMaxRoutes'],
+    ['--target-max-routes', 'targetMaxRoutes'],
     ['--out', 'out'],
     ['--target-url', 'targetUrl']
   ]);
@@ -178,6 +185,22 @@ function parseArgs(argv) {
     }
     args.sourceMaxRoutes = value;
   }
+  if (args.packetOnly && args.targetMaxRoutes) {
+    throw new UsageError('--target-max-routes cannot be combined with --packet-only.');
+  }
+  if (args.targetMaxRoutes) {
+    const value = Number(args.targetMaxRoutes);
+    if (
+      !Number.isSafeInteger(value) ||
+      value < MAX_LIVE_ROUTE_CHECKS ||
+      value > MAX_LIVE_TARGET_ROUTES
+    ) {
+      throw new UsageError(
+        `--target-max-routes must be an integer from ${MAX_LIVE_ROUTE_CHECKS} through ${MAX_LIVE_TARGET_ROUTES}.`
+      );
+    }
+    args.targetMaxRoutes = value;
+  }
   if (args.packetOnly && (args.changeId || args.checkpointId)) {
     throw new UsageError('Lifecycle change/checkpoint options cannot be combined with --packet-only.');
   }
@@ -210,6 +233,26 @@ export function sourceSurfaceLimitsForRouteCount(maxRoutes = SOURCE_SURFACE_LIMI
     maxSitemapLocs: SOURCE_SURFACE_LIMITS.maxSitemapLocs * scale,
     maxSitemaps: SOURCE_SURFACE_LIMITS.maxSitemaps * scale,
     maxTasks: SOURCE_SURFACE_LIMITS.maxTasks * scale
+  };
+}
+
+export function liveTargetLimitsForRouteCount(maxRoutes = MAX_LIVE_ROUTE_CHECKS) {
+  if (
+    !Number.isSafeInteger(maxRoutes) ||
+    maxRoutes < MAX_LIVE_ROUTE_CHECKS ||
+    maxRoutes > MAX_LIVE_TARGET_ROUTES
+  ) {
+    throw new UsageError(
+      `Live target max routes must be an integer from ${MAX_LIVE_ROUTE_CHECKS} through ${MAX_LIVE_TARGET_ROUTES}.`
+    );
+  }
+  const scale = Math.ceil(maxRoutes / MAX_LIVE_ROUTE_CHECKS);
+  return {
+    concurrency: MAX_LIVE_ROUTE_CONCURRENCY,
+    deadlineMs: LIVE_ROUTE_DEADLINE_MS * scale,
+    maxRequests: MAX_LIVE_HTTP_REQUESTS * scale,
+    maxRoutes,
+    maxTasks: MAX_LIVE_HTTP_TASKS * scale
   };
 }
 
@@ -1563,6 +1606,48 @@ export function sourceSurfaceCompletionBlocker(sourceSurfaceCensus) {
 function sourceSurfaceNonBudgetErrors(sourceSurfaceCensus) {
   return (Array.isArray(sourceSurfaceCensus?.errors) ? sourceSurfaceCensus.errors : [])
     .filter((error) => !/(?:exceeded its \d+ (?:route|sitemap|URL) limit|HTTP (?:request )?budget|task budget|wall-clock deadline)/i.test(String(error)));
+}
+
+export function liveTargetBudgetCompletionBlocker(
+  metrics = {},
+  routeBudget = {},
+  currentMaxRoutes = MAX_LIVE_ROUTE_CHECKS,
+  suppressedErrorCount = 0
+) {
+  const effectiveMaxRoutes = Math.max(
+    MAX_LIVE_ROUTE_CHECKS,
+    Number.isSafeInteger(Number(currentMaxRoutes)) ? Number(currentMaxRoutes) : MAX_LIVE_ROUTE_CHECKS
+  );
+  const observedRouteCount = Number(routeBudget.routeCount ?? 0);
+  const requiredRouteCount = Number.isSafeInteger(observedRouteCount) && observedRouteCount > 0
+    ? observedRouteCount
+    : 0;
+  const canExpand = effectiveMaxRoutes < MAX_LIVE_TARGET_ROUTES
+    && requiredRouteCount <= MAX_LIVE_TARGET_ROUTES;
+  const nextMaxRoutes = Math.min(
+    MAX_LIVE_TARGET_ROUTES,
+    Math.max(effectiveMaxRoutes * 2, requiredRouteCount)
+  );
+  const attemptedEvidence = [
+    `The bounded live run scheduled ${Number(routeBudget.routeCount ?? 0)} declared route check(s) under a ${effectiveMaxRoutes}-route ceiling and used ${Number(metrics.requestCount ?? 0)} of ${Number(metrics.maxRequests ?? 0)} HTTP request(s) across route, link, redirect, and asset verification.`,
+    `${Number(suppressedErrorCount)} per-route budget-exhaustion finding(s) were consolidated into this blocker; non-budget route and link findings remain reported separately.`
+  ];
+  return {
+    code: 'target.route-budget',
+    message: canExpand
+      ? `Live target route and link verification exhausted a coupled HTTP budget under its ${effectiveMaxRoutes}-route ceiling; final completion remains blocked.`
+      : `Live target route and link verification still exhausted a coupled HTTP budget at the maximum supported ${MAX_LIVE_TARGET_ROUTES}-route ceiling; final completion remains blocked.`,
+    attemptedEvidence,
+    missingInput: canExpand
+      ? `Owner authorization for one larger, complete live target verification with a ${nextMaxRoutes}-route ceiling.`
+      : 'Owner direction on a complete route-matrix treatment or a build-kit maintainer decision to extend the bounded live target verification.',
+    nextAction: canExpand
+      ? `After owner authorization, restart the complete verifier once with: node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --target-max-routes ${nextMaxRoutes}. This expands only the verifier budget; it does not accept unrepresented links or missing route-matrix rows. Do not combine or accept partial run results.`
+      : 'Record an owner-approved complete route-matrix treatment or ask a build-kit maintainer to extend the bounded live target verification. Do not exclude reachable public routes or combine partial run results.',
+    origin: 'live-route-verifier:budget',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
 }
 
 export function formatSourceSurfaceProgress(event = {}) {
@@ -12700,6 +12785,7 @@ export async function verifyLive({
         baseUrl: target.url,
         criticalAssetContext,
         liveHttpContext,
+        maxRoutes: liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
         tasks: liveRouteTasks
       })
     : {
@@ -12707,10 +12793,10 @@ export async function verifyLive({
         errors: [],
         budget: {
           attempted: false,
-          deadlineMs: LIVE_ROUTE_DEADLINE_MS,
-          maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
-          maxRequests: MAX_LIVE_HTTP_REQUESTS,
-          maxRoutes: MAX_LIVE_ROUTE_CHECKS,
+          deadlineMs: liveHttpLimits.deadlineMs ?? LIVE_ROUTE_DEADLINE_MS,
+          maxConcurrency: liveHttpLimits.concurrency ?? MAX_LIVE_ROUTE_CONCURRENCY,
+          maxRequests: liveHttpLimits.maxRequests ?? MAX_LIVE_HTTP_REQUESTS,
+          maxRoutes: liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
           requestCount: 0,
           routeCount: liveRouteTasks.length
         }
@@ -13198,6 +13284,30 @@ export async function verifyLive({
   liveErrors.push(...consentReconciliation.errors);
   const verifierOwnedAxeErrors = verifierAxeCompletionErrors(globalChromeCapture);
   const verifierOwnedAxeSupportsCompletion = verifierOwnedAxeErrors.length === 0;
+  // A live budget exhaustion is an authorization boundary, not hundreds of
+  // per-route defects. Consolidate pure budget-exhaustion findings into one
+  // structured target.route-budget blocker (mirroring source.census-budget)
+  // so genuine route/link repairs stay separately visible and agent-resolvable.
+  const liveHttpBudgetMetrics = liveHttpContext.metrics();
+  const liveRouteBudget = liveRouteSchedule.budget ?? {};
+  const liveRouteOverflow =
+    liveRouteBudget.attempted === false &&
+    Number(liveRouteBudget.routeCount ?? 0) > Number(liveRouteBudget.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS);
+  const liveTargetBudgetLimited = fetchChecksEnabled && (
+    liveHttpBudgetMetrics.requestCapExhausted === true ||
+    liveHttpBudgetMetrics.taskCapExhausted === true ||
+    liveHttpBudgetMetrics.deadlineExceeded === true ||
+    liveRouteOverflow
+  );
+  let suppressedLiveBudgetErrorCount = 0;
+  if (liveTargetBudgetLimited) {
+    const retainedLiveErrors = liveErrors.filter(
+      (error) => !LIVE_TARGET_BUDGET_ERROR_PATTERN.test(String(error))
+    );
+    suppressedLiveBudgetErrorCount = liveErrors.length - retainedLiveErrors.length;
+    liveErrors.length = 0;
+    liveErrors.push(...retainedLiveErrors);
+  }
   let liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
@@ -13335,10 +13445,12 @@ export async function verifyLive({
     : [];
   liveErrors.push(...observedCompositionErrors);
   liveTargetValid = liveTargetValid && observedCompositionErrors.length === 0;
+  const liveTargetBudgetSupportsCompletion = !liveTargetBudgetLimited;
   const lateSourceCensusEligible =
     !briefMode &&
     packetReport.valid &&
     liveTargetValid &&
+    liveTargetBudgetSupportsCompletion &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
@@ -13361,6 +13473,7 @@ export async function verifyLive({
   const completionClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
+    liveTargetBudgetSupportsCompletion &&
     sourceSurfaceSupportsCompletion &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
@@ -13387,6 +13500,14 @@ export async function verifyLive({
   }
   if (!liveTargetValid) {
     addCompletionBlocker('target.validation', 'Live target identity or route verification failed.');
+  }
+  if (liveTargetBudgetLimited) {
+    completionBlockers.push(liveTargetBudgetCompletionBlocker(
+      liveHttpBudgetMetrics,
+      liveRouteBudget,
+      liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
+      suppressedLiveBudgetErrorCount
+    ));
   }
   for (const error of canvasAvailabilityErrors) {
     addCompletionBlocker('canvas.runtime-availability', error, {
@@ -13775,6 +13896,9 @@ async function main() {
         packetDir: args.packet,
         targetUrl: args.targetUrl,
         outPath: args.out,
+        liveHttpLimits: liveTargetLimitsForRouteCount(
+          args.targetMaxRoutes || MAX_LIVE_ROUTE_CHECKS
+        ),
         sourceSurfaceLimits: sourceSurfaceLimitsForRouteCount(
           args.sourceMaxRoutes || SOURCE_SURFACE_LIMITS.maxRoutes
         ),
@@ -13880,6 +14004,12 @@ async function main() {
       .map((blocker) => blocker.nextAction));
     for (const nextAction of sourceNextActions) {
       process.stderr.write(`Source census next action: ${nextAction}\n`);
+    }
+    const liveTargetBudgetNextActions = new Set(report.agentContinuation.blockers
+      .filter((candidate) => candidate.code === 'target.route-budget')
+      .map((blocker) => blocker.nextAction));
+    for (const nextAction of liveTargetBudgetNextActions) {
+      process.stderr.write(`Live target budget next action: ${nextAction}\n`);
     }
     process.exitCode = 2;
   }

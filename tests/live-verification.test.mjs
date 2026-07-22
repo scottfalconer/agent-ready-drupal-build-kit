@@ -9798,7 +9798,6 @@ test('one live HTTP budget spans route classes, accepted seeds, rendered links, 
         drupalRuntime: injectedDrupalRuntime(baseUrl),
         liveHttpLimits: { concurrency: 2, deadlineMs: 2_000, maxRequests: 6, maxTasks: 20 }
       });
-      assert.equal(requestCapped.liveTargetValid, false);
       assert.equal(requestCapped.liveHttpBudget.requestCapExhausted, true);
       assert.equal(requestCapped.liveHttpBudget.requestCount, 6);
       assert.equal(requestCount, 6);
@@ -9812,7 +9811,17 @@ test('one live HTTP budget spans route classes, accepted seeds, rendered links, 
         'server-rendered-link': 1,
         'target-required-route': 1
       });
-      assert.match(requestCapped.errors.join('\n'), /exhausted its 6 HTTP request budget/i);
+      // Budget exhaustion is consolidated into one structured external blocker
+      // (mirroring source.census-budget) instead of per-route error spam, and
+      // it always blocks the completion claim.
+      const requestBudgetBlockers = requestCapped.completionBlockers
+        .filter((blocker) => blocker.code === 'target.route-budget');
+      assert.equal(requestBudgetBlockers.length, 1);
+      assert.equal(requestBudgetBlockers[0].resolutionClass, 'external');
+      assert.equal(requestBudgetBlockers[0].verifierConfirmedExternal, true);
+      assert.match(requestBudgetBlockers[0].nextAction, /--target-max-routes 2000/);
+      assert.doesNotMatch(requestCapped.errors.join('\n'), /exhausted its 6 HTTP request budget/i);
+      assert.equal(requestCapped.completeLocalRebuildClaimAllowed, false);
       assert.doesNotMatch(JSON.stringify(requestCapped), /private=one/);
 
       const taskCapped = await verifyLive({
@@ -9823,11 +9832,15 @@ test('one live HTTP budget spans route classes, accepted seeds, rendered links, 
         drupalRuntime: injectedDrupalRuntime(baseUrl),
         liveHttpLimits: { concurrency: 2, deadlineMs: 2_000, maxRequests: 50, maxTasks: 3 }
       });
-      assert.equal(taskCapped.liveTargetValid, false);
       assert.equal(taskCapped.liveHttpBudget.taskCapExhausted, true);
       assert.equal(taskCapped.liveHttpBudget.taskCount, 2);
       assert.ok(taskCapped.liveHttpBudget.taskRejectedCount >= 2);
-      assert.match(taskCapped.errors.join('\n'), /exhausted its 3 task budget/i);
+      const taskBudgetBlockers = taskCapped.completionBlockers
+        .filter((blocker) => blocker.code === 'target.route-budget');
+      assert.equal(taskBudgetBlockers.length, 1);
+      assert.equal(taskBudgetBlockers[0].verifierConfirmedExternal, true);
+      assert.doesNotMatch(taskCapped.errors.join('\n'), /exhausted its 3 task budget/i);
+      assert.equal(taskCapped.completeLocalRebuildClaimAllowed, false);
     }
   );
 });
