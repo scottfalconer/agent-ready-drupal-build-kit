@@ -27,6 +27,7 @@ import {
   canonicalizeSeleniumCdpUrl,
   cleanupBrowserProfile,
   compareGlobalChromeCaptures,
+  compareVerifierOwnedVisualFloor,
   createBrowserCaptureBudget,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
@@ -40,9 +41,11 @@ import {
   verifierAxeCompletionErrors
 } from '../bin/global-chrome.mjs';
 import {
+  buildReviewedBuilderVisualFallback,
   consentNetworkCaptureRequired,
   sharedBeforeConsentNetworkCapture,
   sharedGlobalChromeCapture,
+  visualParityCompletionSupport,
   verifyConsentReconciliation
 } from '../bin/verify.mjs';
 import { sha256 } from '../bin/state-fingerprint.mjs';
@@ -810,6 +813,370 @@ test('computed global chrome comparison catches missing chrome, links, mobile be
   assert.match(comparison.errors.join('\n'), /meaningful global hrefs disappeared/i);
   assert.match(comparison.errors.join('\n'), /mobile menu trigger no longer exposes navigation/i);
   assert.match(comparison.errors.join('\n'), /material normalized page-height change/i);
+});
+
+function visualFloorCapture({ origin, hashSeed, structure, protectedSource = false }) {
+  const routes = ['desktop', 'mobile'].map((viewport, index) => ({
+    path: '/',
+    viewport: {
+      name: viewport,
+      width: viewport === 'desktop' ? 1280 : 390,
+      height: viewport === 'desktop' ? 800 : 844
+    },
+    signals: {
+      finalUrl: `${origin}/`,
+      roles: {
+        header: { present: true, visible: true },
+        navigation: { present: true, visible: true },
+        main: { present: true, visible: true },
+        footer: { present: true, visible: true }
+      },
+      mobileMenu: {
+        triggerVisible: viewport === 'mobile',
+        activationWorks: viewport === 'mobile'
+      },
+      layout: { normalizedPageHeight: 2400 },
+      structure,
+      protection: {
+        detected: protectedSource,
+        responseStatus: protectedSource ? 403 : 200,
+        reasonCodes: protectedSource ? ['http-status-403'] : []
+      }
+    },
+    screenshot: {
+      path: `evidence/${hashSeed}-${viewport}.png`,
+      sha256: state(index === 0 ? hashSeed : (hashSeed === 'a' ? 'c' : 'd')),
+      size: 4096,
+      width: viewport === 'desktop' ? 1280 : 390,
+      height: 2400,
+      clipped: false
+    }
+  }));
+  return {
+    schemaVersion: 'public-kit.global-chrome-capture.1',
+    checkedAt: '2026-07-22T12:00:00Z',
+    status: 'captured',
+    authoritative: true,
+    captureMode: 'verifier-owned-browser',
+    targetOrigin: origin,
+    resultStateFingerprint: state('f'),
+    contract: normalizeGlobalChromeContract(),
+    primaryRoutes: ['/'],
+    routes,
+    captureFingerprint: state(hashSeed),
+    errors: []
+  };
+}
+
+const composedStructure = {
+  headingOrder: ['Build faster', 'Why it matters', 'Capabilities', 'Start today'],
+  headingCount: 4,
+  layoutBandCount: 4,
+  mediaCount: 3,
+  actionCount: 4
+};
+
+test('verifier-owned visual floor passes comparable composed routes at identical desktop/mobile viewports', () => {
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: composedStructure
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example',
+      hashSeed: 'b',
+      structure: {
+        headingOrder: ['Build faster', 'Why it matters', 'Capabilities', 'Start today'],
+        headingCount: 4,
+        layoutBandCount: 4,
+        mediaCount: 2,
+        actionCount: 4
+      }
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.equal(floor.completionSupported, true);
+  assert.equal(visualParityCompletionSupport(floor), true);
+  assert.equal(floor.verifierOwned, true);
+  assert.equal(floor.findings.length, 2);
+  assert.ok(floor.findings.every((finding) => finding.composedSource && finding.imageIdentityDistinct));
+});
+
+test('verifier-owned visual floor blocks gross composed-route omissions without a pixel threshold', () => {
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: composedStructure
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example',
+      hashSeed: 'b',
+      structure: {
+        headingOrder: ['Build faster'],
+        headingCount: 1,
+        layoutBandCount: 1,
+        mediaCount: 0,
+        actionCount: 0
+      }
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.equal(floor.completionSupported, false);
+  assert.match(floor.errors.join('\n'), /headings.*layout bands.*media.*actions/is);
+  assert.doesNotMatch(floor.errors.join('\n'), /pixel|diff score/i);
+});
+
+test('verifier-owned visual floor blocks missing source landmarks and inert mobile navigation', () => {
+  const targetCapture = visualFloorCapture({
+    origin: 'https://target.example',
+    hashSeed: 'b',
+    structure: composedStructure
+  });
+  for (const route of targetCapture.routes) route.signals.roles.footer.visible = false;
+  targetCapture.routes.find((route) => route.viewport.name === 'mobile').signals.mobileMenu.activationWorks = false;
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: composedStructure
+    }),
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /footer landmark/i);
+  assert.match(floor.errors.join('\n'), /mobile navigation/i);
+});
+
+test('verifier-owned visual floor treats complete loss of material media as a decisive omission', () => {
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: {
+        headingOrder: ['Build faster', 'Start today'],
+        headingCount: 2,
+        layoutBandCount: 2,
+        mediaCount: 5,
+        actionCount: 2
+      }
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example',
+      hashSeed: 'b',
+      structure: {
+        headingOrder: ['Build faster', 'Start today'],
+        headingCount: 2,
+        layoutBandCount: 2,
+        mediaCount: 0,
+        actionCount: 2
+      }
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'landing' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /media 0\/5/i);
+  assert.ok(floor.findings.every((finding) => finding.decisiveDeficits.includes('all material media omitted')));
+});
+
+test('verifier-owned visual floor rejects reused source and target image identities', () => {
+  const sourceCapture = visualFloorCapture({
+    origin: 'https://source.example',
+    hashSeed: 'a',
+    structure: composedStructure
+  });
+  const targetCapture = visualFloorCapture({
+    origin: 'https://target.example',
+    hashSeed: 'b',
+    structure: composedStructure
+  });
+  for (let index = 0; index < targetCapture.routes.length; index += 1) {
+    targetCapture.routes[index].screenshot.sha256 = sourceCapture.routes[index].screenshot.sha256;
+  }
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /distinct source and target screenshot identities/i);
+});
+
+test('positive source protection is review-required and never described as verifier-owned completion', () => {
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: { headingOrder: [], headingCount: 0, layoutBandCount: 0, mediaCount: 0, actionCount: 0 },
+      protectedSource: true
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example',
+      hashSeed: 'b',
+      structure: composedStructure
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'review_required');
+  assert.equal(floor.completionSupported, false);
+  assert.equal(floor.reviewFallbackEligible, true);
+  assert.match(floor.errors.join('\n'), /fresh handoff reviewer/i);
+});
+
+test('ordinary source capture failure stays blocked and cannot use the protected-source review fallback', () => {
+  const sourceCapture = visualFloorCapture({
+    origin: 'https://source.example',
+    hashSeed: 'a',
+    structure: composedStructure
+  });
+  sourceCapture.status = 'blocked';
+  sourceCapture.authoritative = false;
+  sourceCapture.errors = ['DNS lookup failed'];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example',
+      hashSeed: 'b',
+      structure: composedStructure
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'blocked');
+  assert.equal(floor.completionSupported, false);
+  assert.notEqual(floor.reviewFallbackEligible, true);
+  assert.match(floor.errors.join('\n'), /DNS lookup failed/i);
+});
+
+test('protected-source fallback requires a fresh blind reviewer over the exact handoff-bound builder captures', () => {
+  const browserEvidence = {
+    publicRouteChecks: ['desktop', 'mobile'].map((viewport) => ({
+      sourceUrl: 'https://source.example/',
+      targetUrl: 'https://target.example/',
+      viewport: {
+        name: viewport,
+        width: viewport === 'desktop' ? 1280 : 390,
+        height: viewport === 'desktop' ? 800 : 844
+      },
+      sourceScreenshot: `evidence/browser/source-${viewport}.png`,
+      targetScreenshot: `evidence/browser/target-${viewport}.png`,
+      visualComparison: { method: 'agent_review', status: 'pass' },
+      captureState: {
+        evidenceBindings: {
+          sourceScreenshotSha256: state(viewport === 'desktop' ? '1' : '2'),
+          targetScreenshotSha256: state(viewport === 'desktop' ? '3' : '4')
+        }
+      }
+    }))
+  };
+  const blindReview = {
+    reviewer: {
+      freshContextUsed: true,
+      sameContextAsBuilder: false,
+      didNotBuildTarget: true,
+      inputsRestrictedToBriefTargetAndSourceTruth: true,
+      implementationFilesReadBeforePublicReview: false,
+      reviewPacketReadBeforePublicReview: false,
+      priorBuildConversationRead: false,
+      builderSummaryExcluded: true
+    },
+    summary: { verdict: 'good', completionState: 'parity_reviewed' },
+    routeViewportReviews: ['desktop', 'mobile'].map((viewport) => ({
+      route: '/',
+      viewport,
+      sourceScreenshot: `evidence/browser/source-${viewport}.png`,
+      targetScreenshot: `evidence/browser/target-${viewport}.png`,
+      verdict: 'good',
+      checks: {
+        actualRequestedOutcome: 'pass',
+        firstFoldVisualParity: 'pass',
+        navigationBehavior: 'pass',
+        contentHierarchyCompleteness: 'pass',
+        mediaArtworkFidelity: 'pass',
+        interactionParity: 'pass'
+      }
+    }))
+  };
+  const files = browserEvidence.publicRouteChecks.flatMap((check) => [
+    {
+      path: `review-packet/${check.sourceScreenshot}`,
+      sha256: check.captureState.evidenceBindings.sourceScreenshotSha256,
+      size: 4096
+    },
+    {
+      path: `review-packet/${check.targetScreenshot}`,
+      sha256: check.captureState.evidenceBindings.targetScreenshotSha256,
+      size: 4096
+    }
+  ]);
+  const input = {
+    browserEvidence,
+    blindReview,
+    independentVerification: {
+      completionClaims: [{ gate: 'visual', status: 'pass' }],
+      summary: { verdict: 'pass' }
+    },
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    reviewHandoff: {
+      binding: { packetPath: 'review-packet' },
+      handoffDigest: state('9')
+    },
+    reviewHandoffIndependent: { allowedInputs: { files } },
+    reviewHandoffStateValid: true,
+    blindReviewSupportsCompletion: true,
+    independentVerificationSupportsCompletion: true
+  };
+  const fallback = buildReviewedBuilderVisualFallback(input);
+  assert.equal(fallback.status, 'passed', fallback.errors.join('\n'));
+  assert.equal(fallback.verifierOwned, false);
+  assert.equal(fallback.authority, 'handoff-reviewed-builder-captures');
+  assert.equal(fallback.findings.length, 2);
+  assert.equal(visualParityCompletionSupport({
+    schemaVersion: 'public-kit.visual-parity-floor.1',
+    status: 'passed_with_handoff_review',
+    authority: 'handoff-reviewed-builder-captures',
+    verifierOwned: false,
+    completionSupported: true,
+    sourceProtectionDegradation: true,
+    verifierCapture: { status: 'review_required', completionSupported: false },
+    reviewedBuilderFallback: fallback
+  }), true);
+
+  const agentReviewOnly = buildReviewedBuilderVisualFallback({
+    ...input,
+    blindReview: { ...blindReview, routeViewportReviews: [] }
+  });
+  assert.equal(agentReviewOnly.status, 'blocked');
+  assert.match(agentReviewOnly.errors.join('\n'), /fresh blind reviewer/i);
+  assert.equal(visualParityCompletionSupport({
+    status: 'passed',
+    authority: 'builder-agent-review',
+    verifierOwned: false,
+    completionSupported: true
+  }), false);
+
+  const unbound = structuredClone(input);
+  unbound.reviewHandoffIndependent.allowedInputs.files = files.filter(({ path }) => !path.includes('source-mobile'));
+  const unboundFallback = buildReviewedBuilderVisualFallback(unbound);
+  assert.equal(unboundFallback.status, 'blocked');
+  assert.match(unboundFallback.errors.join('\n'), /handoff-bound/i);
 });
 
 test('actual config, theme, shared display, navigation, and menu-link changes trigger executable chrome coverage', () => {

@@ -33,6 +33,7 @@ const WebSocket = await loadPinnedWebSocket();
 export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1';
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
+export const VISUAL_PARITY_FLOOR_SCHEMA = 'public-kit.visual-parity-floor.1';
 export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
 export const VERIFIER_AXE_SCHEMA = 'public-kit.verifier-axe.1';
 export const VERIFIER_AXE_VERSION = '4.10.3';
@@ -78,6 +79,14 @@ const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
   maximumPageHeightRatio: 1.6,
   minimumPageHeightRatio: 0.65
+});
+const VISUAL_FLOOR_THRESHOLDS = Object.freeze({
+  minimumActionRatio: 0.5,
+  minimumHeadingRatio: 0.5,
+  minimumHeadingOrderRatio: 0.5,
+  minimumLayoutBandRatio: 0.5,
+  minimumMediaRatio: 0.4,
+  minimumPageHeightRatio: 0.45
 });
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
@@ -329,7 +338,7 @@ function normalizedSelectors(value) {
 export function normalizeGlobalChromeContract(value = {}) {
   const contract = {
     schemaVersion: GLOBAL_CHROME_CONTRACT_SCHEMA,
-    selectorHeuristicsVersion: 1,
+    selectorHeuristicsVersion: 2,
     dynamicRegionSelectors: normalizedSelectors(value?.dynamicRegionSelectors),
     thresholds: FIXED_THRESHOLDS,
     viewports: VIEWPORTS.map(({ name, width, height }) => ({ name, width, height }))
@@ -1012,6 +1021,72 @@ function collectorExpression(contract, mobile) {
     const main = first(['main', '[role="main"]', '#main-content', '.main-content'], false);
     const documentHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0);
     const roleSignal = (element) => ({ present: Boolean(element), visible: visible(element), box: box(element) });
+    const normalizeText = (value, limit = 160) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+    const contentRoot = main || document.body;
+    const headings = contentRoot instanceof Element
+      ? [...contentRoot.querySelectorAll('h1,h2,h3')].filter(visible).slice(0, 64)
+      : [];
+    const headingOrder = headings.map((heading) => normalizeText(heading.textContent)).filter(Boolean);
+    const media = contentRoot instanceof Element
+      ? [...contentRoot.querySelectorAll('img,picture,video,iframe,svg')].filter((element) => {
+          if (!visible(element)) return false;
+          const value = element.getBoundingClientRect();
+          return value.width >= 80 && value.height >= 50;
+        })
+      : [];
+    const actions = contentRoot instanceof Element
+      ? [...contentRoot.querySelectorAll('a[href],button,[role="button"]')].filter((element) => {
+          if (!visible(element)) return false;
+          const label = normalizeText(element.getAttribute('aria-label') || element.textContent || element.getAttribute('title'));
+          if (!label) return false;
+          if (element.matches('a')) {
+            const raw = String(element.getAttribute('href') || '').trim();
+            if (!raw || raw === '#' || /^javascript:/i.test(raw)) return false;
+          }
+          return true;
+        })
+      : [];
+    let bandCandidates = contentRoot instanceof Element
+      ? [...contentRoot.querySelectorAll('section,[role="region"]')].filter((element) => {
+          if (!visible(element)) return false;
+          const value = element.getBoundingClientRect();
+          return value.height >= 80 && value.width >= Math.max(200, innerWidth * 0.35);
+        })
+      : [];
+    bandCandidates = bandCandidates.filter((element) =>
+      !bandCandidates.some((candidate) => candidate !== element && candidate.contains(element))
+    );
+    if (bandCandidates.length < 2 && contentRoot instanceof Element) {
+      bandCandidates = [...contentRoot.children].filter((element) => {
+        if (!visible(element) || ['SCRIPT', 'STYLE', 'LINK'].includes(element.tagName)) return false;
+        const value = element.getBoundingClientRect();
+        return value.height >= 80 && value.width >= Math.max(200, innerWidth * 0.35);
+      });
+    }
+    const layoutBands = bandCandidates.slice(0, 64).map((element) => {
+      const value = element.getBoundingClientRect();
+      const heading = element.matches('h1,h2,h3') ? element : element.querySelector('h1,h2,h3');
+      return {
+        heading: normalizeText(heading?.textContent),
+        top: Math.round(value.top + scrollY),
+        height: Math.round(value.height)
+      };
+    });
+    const navigationEntry = performance.getEntriesByType('navigation')?.[0];
+    const responseStatus = Number(navigationEntry?.responseStatus || 0);
+    const pageText = normalizeText(document.body?.innerText, 5000).toLowerCase();
+    const pageTitle = normalizeText(document.title).toLowerCase();
+    const challengePresent = Boolean(document.querySelector(
+      'iframe[src*="captcha" i],iframe[src*="challenges.cloudflare" i],#cf-challenge-running,.cf-challenge,[id*="captcha" i],input[name*="captcha" i]'
+    ));
+    const challengeTitle = /just a moment|attention required|access denied|security check|verify (?:you are|that you are) human/.test(pageTitle);
+    const challengeCopy = /cloudflare ray id|checking your browser|enable javascript and cookies to continue|complete the captcha|verify (?:you are|that you are) human/.test(pageText);
+    const sparseChallengeSurface = headingOrder.length <= 2 && layoutBands.length <= 2 && actions.length <= 3;
+    const reasonCodes = [];
+    if ([401, 403, 429].includes(responseStatus)) reasonCodes.push(`http-status-${responseStatus}`);
+    if (sparseChallengeSurface && challengeTitle) reasonCodes.push('challenge-title');
+    if (sparseChallengeSurface && challengeCopy) reasonCodes.push('challenge-copy');
+    if (sparseChallengeSurface && challengePresent && (challengeTitle || challengeCopy)) reasonCodes.push('challenge-element');
     return {
       title: document.title,
       finalUrl: location.href,
@@ -1021,11 +1096,25 @@ function collectorExpression(contract, mobile) {
         brand: { ...roleSignal(brand), identity: brandIdentity },
         footer: roleSignal(footer),
         header: roleSignal(header),
+        main: roleSignal(main),
         navigation: roleSignal(navigation)
       },
       meaningfulHrefs: links,
       placeholderHrefs: placeholders,
       mobileMenu,
+      protection: {
+        detected: reasonCodes.length > 0,
+        responseStatus,
+        reasonCodes: [...new Set(reasonCodes)].sort()
+      },
+      structure: {
+        headingCount: headingOrder.length,
+        headingOrder,
+        layoutBandCount: layoutBands.length,
+        layoutBands,
+        mediaCount: media.length,
+        actionCount: actions.length
+      },
       layout: {
         viewportWidth: innerWidth,
         viewportHeight: innerHeight,
@@ -1446,6 +1535,291 @@ export async function captureGlobalChrome({
     warnings,
     errors
   };
+}
+
+function screenshotSha256(route) {
+  const declared = String(route?.screenshot?.sha256 ?? '').trim();
+  if (HASH_RE.test(declared)) return declared;
+  const encoded = String(route?.screenshot?.base64 ?? '');
+  if (!encoded) return '';
+  try {
+    return sha256(Buffer.from(encoded, 'base64'));
+  } catch {
+    return '';
+  }
+}
+
+function normalizedHeading(value) {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function headingSimilarity(left, right) {
+  const leftWords = new Set(normalizedHeading(left).split(/\s+/).filter(Boolean));
+  const rightWords = new Set(normalizedHeading(right).split(/\s+/).filter(Boolean));
+  if (leftWords.size === 0 || rightWords.size === 0) return false;
+  let intersection = 0;
+  for (const word of leftWords) if (rightWords.has(word)) intersection += 1;
+  return intersection / Math.min(leftWords.size, rightWords.size) >= 0.6;
+}
+
+function orderedHeadingMatchCount(sourceOrder, targetOrder) {
+  const source = Array.isArray(sourceOrder) ? sourceOrder : [];
+  const target = Array.isArray(targetOrder) ? targetOrder : [];
+  let targetIndex = 0;
+  let matches = 0;
+  for (const sourceHeading of source) {
+    while (targetIndex < target.length && !headingSimilarity(sourceHeading, target[targetIndex])) targetIndex += 1;
+    if (targetIndex < target.length) {
+      matches += 1;
+      targetIndex += 1;
+    }
+  }
+  return matches;
+}
+
+function visualStructureSummary(signals) {
+  const structure = signals?.structure ?? {};
+  const nonNegative = (value) => {
+    const number = Number(value ?? 0);
+    return Number.isFinite(number) ? Math.max(0, number) : 0;
+  };
+  return {
+    headingCount: nonNegative(structure.headingCount),
+    headingOrder: (Array.isArray(structure.headingOrder) ? structure.headingOrder : [])
+      .map((heading) => String(heading).replace(/\s+/g, ' ').trim().slice(0, 160))
+      .filter(Boolean)
+      .slice(0, 64),
+    layoutBandCount: nonNegative(structure.layoutBandCount),
+    mediaCount: nonNegative(structure.mediaCount),
+    actionCount: nonNegative(structure.actionCount),
+    normalizedPageHeight: nonNegative(signals?.layout?.normalizedPageHeight)
+  };
+}
+
+function composedSourceRoute(routeRole, structure) {
+  if (!['homepage', 'landing'].includes(String(routeRole ?? '').trim())) return false;
+  return structure.layoutBandCount >= 3 ||
+    structure.headingCount >= 3 ||
+    (structure.headingCount >= 2 && (structure.mediaCount >= 1 || structure.actionCount >= 2)) ||
+    (structure.mediaCount >= 3 && structure.actionCount >= 2) ||
+    (structure.actionCount >= 4 && structure.normalizedPageHeight >= 1600);
+}
+
+function captureRouteIndex(capture) {
+  return new Map((Array.isArray(capture?.routes) ? capture.routes : []).map((route) => [
+    `${normalizeRoute(route?.path)}\0${String(route?.viewport?.name ?? '')}`,
+    route
+  ]));
+}
+
+function visualFloorResult(value) {
+  const record = { schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA, ...value };
+  return { ...record, fingerprint: sha256(record) };
+}
+
+export function compareVerifierOwnedVisualFloor({
+  sourceCapture,
+  targetCapture,
+  primaryRoutes = [],
+  stateFingerprint = ''
+} = {}) {
+  const checkedAt = String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString());
+  const base = {
+    checkedAt,
+    authority: 'verifier-owned-managed-browser-structural-floor',
+    verifierOwned: true,
+    completionSupported: false,
+    sourceOrigin: String(sourceCapture?.targetOrigin ?? ''),
+    targetOrigin: String(targetCapture?.targetOrigin ?? ''),
+    resultStateFingerprint: String(stateFingerprint || targetCapture?.resultStateFingerprint || ''),
+    sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
+    targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
+    thresholds: VISUAL_FLOOR_THRESHOLDS,
+    findings: [],
+    errors: []
+  };
+  const captureErrors = [];
+  if (sourceCapture?.status !== 'captured' || sourceCapture?.authoritative !== true) {
+    captureErrors.push(`Source managed-browser capture is unavailable: ${(sourceCapture?.errors ?? []).join(' ') || sourceCapture?.status || 'missing'}.`);
+  }
+  if (targetCapture?.status !== 'captured' || targetCapture?.authoritative !== true) {
+    captureErrors.push(`Target managed-browser capture is unavailable: ${(targetCapture?.errors ?? []).join(' ') || targetCapture?.status || 'missing'}.`);
+  }
+  if (!base.sourceOrigin || !base.targetOrigin || base.sourceOrigin === base.targetOrigin) {
+    captureErrors.push('Verifier-owned visual comparison requires distinct source and target origins.');
+  }
+  if (!HASH_RE.test(base.sourceCaptureFingerprint) || !HASH_RE.test(base.targetCaptureFingerprint)) {
+    captureErrors.push('Verifier-owned visual comparison requires fingerprint-bound source and target captures.');
+  }
+  if (
+    base.resultStateFingerprint &&
+    (
+      sourceCapture?.resultStateFingerprint !== base.resultStateFingerprint ||
+      targetCapture?.resultStateFingerprint !== base.resultStateFingerprint
+    )
+  ) {
+    captureErrors.push('Verifier-owned visual comparison captures do not match the exact result-state fingerprint.');
+  }
+  if (captureErrors.length > 0) {
+    return visualFloorResult({ ...base, status: 'blocked', errors: captureErrors });
+  }
+
+  const sourceIndex = captureRouteIndex(sourceCapture);
+  const targetIndex = captureRouteIndex(targetCapture);
+  const findings = [];
+  const errors = [];
+  let protectedFindingCount = 0;
+  for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
+    const sourcePath = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetPath = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    for (const viewport of VIEWPORTS) {
+      const source = sourceIndex.get(`${sourcePath}\0${viewport.name}`);
+      const target = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const routeErrors = [];
+      const deficits = [];
+      const decisiveDeficits = [];
+      const sourceStructure = visualStructureSummary(source?.signals);
+      const targetStructure = visualStructureSummary(target?.signals);
+      const composedSource = composedSourceRoute(route?.routeRole, sourceStructure);
+      const sourceProtection = source?.signals?.protection ?? {};
+      const protectedSource = sourceProtection.detected === true;
+      if (!source || !target) {
+        routeErrors.push(`missing ${!source ? 'source' : 'target'} managed-browser capture`);
+      } else {
+        const sameViewport = source.viewport?.width === target.viewport?.width &&
+          source.viewport?.height === target.viewport?.height &&
+          source.viewport?.width === viewport.width &&
+          source.viewport?.height === viewport.height;
+        if (!sameViewport) routeErrors.push('source and target were not captured at the identical required viewport');
+        try {
+          if (new URL(target.signals?.finalUrl ?? 'about:blank').origin !== base.targetOrigin) {
+            routeErrors.push('target capture left the inspected target origin');
+          }
+          if (!protectedSource && new URL(source.signals?.finalUrl ?? 'about:blank').origin !== base.sourceOrigin) {
+            routeErrors.push('source capture left the declared source origin');
+          }
+        } catch {
+          routeErrors.push('source or target capture lacks a valid final URL identity');
+        }
+        const sourceHash = screenshotSha256(source);
+        const targetHash = screenshotSha256(target);
+        if (!HASH_RE.test(sourceHash) || !HASH_RE.test(targetHash)) {
+          routeErrors.push('source or target screenshot lacks a computed sha256 identity');
+        } else if (sourceHash === targetHash) {
+          routeErrors.push('source and target must use distinct source and target screenshot identities');
+        }
+        if (!protectedSource) {
+          for (const role of ['header', 'navigation', 'main', 'footer']) {
+            if (source.signals?.roles?.[role]?.visible === true && target.signals?.roles?.[role]?.visible !== true) {
+              routeErrors.push(`${role} landmark visible on the source is missing from the target`);
+            }
+          }
+          if (
+            viewport.mobile &&
+            source.signals?.mobileMenu?.triggerVisible === true &&
+            source.signals?.mobileMenu?.activationWorks === true &&
+            (
+              target.signals?.mobileMenu?.triggerVisible !== true ||
+              target.signals?.mobileMenu?.activationWorks !== true
+            )
+          ) {
+            routeErrors.push('working source mobile navigation is missing or inert on the target');
+          }
+          if (composedSource) {
+            if (
+              sourceStructure.headingCount >= 3 &&
+              targetStructure.headingCount < Math.ceil(sourceStructure.headingCount * VISUAL_FLOOR_THRESHOLDS.minimumHeadingRatio)
+            ) {
+              deficits.push(`headings ${targetStructure.headingCount}/${sourceStructure.headingCount}`);
+              if (sourceStructure.headingCount >= 4 && targetStructure.headingCount === 0) decisiveDeficits.push('all material headings omitted');
+            }
+            if (
+              sourceStructure.layoutBandCount >= 3 &&
+              targetStructure.layoutBandCount < Math.ceil(sourceStructure.layoutBandCount * VISUAL_FLOOR_THRESHOLDS.minimumLayoutBandRatio)
+            ) {
+              deficits.push(`layout bands ${targetStructure.layoutBandCount}/${sourceStructure.layoutBandCount}`);
+              if (sourceStructure.layoutBandCount >= 4 && targetStructure.layoutBandCount === 0) decisiveDeficits.push('all material layout bands omitted');
+            }
+            if (
+              sourceStructure.mediaCount >= 2 &&
+              targetStructure.mediaCount < Math.ceil(sourceStructure.mediaCount * VISUAL_FLOOR_THRESHOLDS.minimumMediaRatio)
+            ) {
+              deficits.push(`media ${targetStructure.mediaCount}/${sourceStructure.mediaCount}`);
+              if (sourceStructure.mediaCount >= 3 && targetStructure.mediaCount === 0) decisiveDeficits.push('all material media omitted');
+            }
+            if (
+              sourceStructure.actionCount >= 2 &&
+              targetStructure.actionCount < Math.ceil(sourceStructure.actionCount * VISUAL_FLOOR_THRESHOLDS.minimumActionRatio)
+            ) {
+              deficits.push(`actions ${targetStructure.actionCount}/${sourceStructure.actionCount}`);
+              if (sourceStructure.actionCount >= 4 && targetStructure.actionCount === 0) decisiveDeficits.push('all material actions omitted');
+            }
+            if (sourceStructure.headingOrder.length >= 3) {
+              const orderedMatches = orderedHeadingMatchCount(sourceStructure.headingOrder, targetStructure.headingOrder);
+              if (orderedMatches < Math.ceil(sourceStructure.headingOrder.length * VISUAL_FLOOR_THRESHOLDS.minimumHeadingOrderRatio)) {
+                deficits.push(`heading/section order ${orderedMatches}/${sourceStructure.headingOrder.length}`);
+              }
+            }
+            const heightRatio = sourceStructure.normalizedPageHeight > 0
+              ? targetStructure.normalizedPageHeight / sourceStructure.normalizedPageHeight
+              : 1;
+            if (!Number.isFinite(heightRatio) || heightRatio < VISUAL_FLOOR_THRESHOLDS.minimumPageHeightRatio) {
+              deficits.push(`page-height ratio ${Number.isFinite(heightRatio) ? heightRatio.toFixed(3) : 'invalid'}`);
+              if (!Number.isFinite(heightRatio) || heightRatio < 0.25) decisiveDeficits.push('target page collapsed below one quarter of source height');
+            }
+            if (decisiveDeficits.length > 0 || deficits.length >= 2) {
+              routeErrors.push(`gross structural omissions detected: ${deficits.join('; ')}`);
+            }
+          }
+        }
+      }
+      if (protectedSource) protectedFindingCount += 1;
+      const finding = {
+        sourcePath,
+        targetPath,
+        routeRole: String(route?.routeRole ?? ''),
+        viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        composedSource,
+        protectedSource,
+        protectionReasonCodes: Array.isArray(sourceProtection.reasonCodes) ? sourceProtection.reasonCodes : [],
+        sourceScreenshotSha256: screenshotSha256(source),
+        targetScreenshotSha256: screenshotSha256(target),
+        imageIdentityDistinct: Boolean(
+          HASH_RE.test(screenshotSha256(source)) &&
+          HASH_RE.test(screenshotSha256(target)) &&
+          screenshotSha256(source) !== screenshotSha256(target)
+        ),
+        sourceStructure,
+        targetStructure,
+        deficits,
+        decisiveDeficits,
+        passed: routeErrors.length === 0 && !protectedSource,
+        errors: routeErrors
+      };
+      findings.push(finding);
+      errors.push(...routeErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+    }
+  }
+  if (findings.length !== primaryRoutes.length * VIEWPORTS.length) {
+    errors.push('Visual floor did not cover every primary route at desktop and mobile viewports.');
+  }
+  const status = errors.length > 0 ? 'failed' : protectedFindingCount > 0 ? 'review_required' : 'passed';
+  return visualFloorResult({
+    ...base,
+    status,
+    completionSupported: status === 'passed',
+    protectedFindingCount,
+    reviewFallbackEligible: status === 'review_required' && protectedFindingCount > 0,
+    findings,
+    errors: status === 'review_required'
+      ? ['Source protection prevented verifier-owned structural comparison; a fresh handoff reviewer must adjudicate the exact bound builder captures.']
+      : errors
+  });
 }
 
 function networkRequestValue(params) {

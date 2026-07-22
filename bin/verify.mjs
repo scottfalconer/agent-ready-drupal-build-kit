@@ -32,9 +32,11 @@ import {
   captureBeforeConsentNetwork,
   captureGlobalChrome,
   captureSummary,
+  compareVerifierOwnedVisualFloor,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
   validateBeforeConsentNetworkCapture,
+  VISUAL_PARITY_FLOOR_SCHEMA,
   verifierAxeCompletionErrors
 } from './global-chrome.mjs';
 import {
@@ -804,6 +806,184 @@ function requestPathAndSearch(value) {
   } catch {
     return '';
   }
+}
+
+function packetEvidenceReference(value, defaultDirectory) {
+  const text = String(value ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!text || text.startsWith('/') || text.split('/').includes('..')) return '';
+  return text.startsWith('evidence/') ? text : `${defaultDirectory}/${text}`;
+}
+
+function projectPacketReference(packetPath, packetReference) {
+  const prefix = String(packetPath ?? '').trim().replace(/\\/g, '/').replace(/^\.\/$/, '').replace(/^\.\//, '').replace(/\/$/, '');
+  return [prefix, packetReference].filter(Boolean).join('/');
+}
+
+export function buildReviewedBuilderVisualFallback({
+  browserEvidence,
+  blindReview,
+  independentVerification,
+  primaryRoutes = [],
+  reviewHandoff,
+  reviewHandoffIndependent,
+  reviewHandoffStateValid = false,
+  blindReviewSupportsCompletion = false,
+  independentVerificationSupportsCompletion = false
+} = {}) {
+  const errors = [];
+  const reviewer = blindReview?.reviewer ?? {};
+  const reviewerFresh = reviewer.freshContextUsed === true &&
+    reviewer.sameContextAsBuilder === false &&
+    reviewer.didNotBuildTarget === true &&
+    reviewer.inputsRestrictedToBriefTargetAndSourceTruth === true &&
+    reviewer.implementationFilesReadBeforePublicReview === false &&
+    reviewer.reviewPacketReadBeforePublicReview === false &&
+    reviewer.priorBuildConversationRead === false &&
+    reviewer.builderSummaryExcluded === true;
+  if (
+    !reviewerFresh ||
+    !['good', 'good_enough'].includes(blindReview?.summary?.verdict) ||
+    !['parity_reviewed', 'human_accepted', 'complete'].includes(blindReview?.summary?.completionState) ||
+    blindReviewSupportsCompletion !== true
+  ) {
+    errors.push('Protected-source degradation requires a fresh blind reviewer with completion-bearing route/viewport adjudication.');
+  }
+  const independentVisualClaim = (Array.isArray(independentVerification?.completionClaims)
+    ? independentVerification.completionClaims
+    : []).find((claim) => claim?.gate === 'visual' && claim?.status === 'pass');
+  if (
+    independentVerification?.summary?.verdict !== 'pass' ||
+    independentVerificationSupportsCompletion !== true ||
+    !independentVisualClaim
+  ) {
+    errors.push('Protected-source degradation requires the handoff-bound independent reviewer to pass the visual completion claim.');
+  }
+  if (reviewHandoffStateValid !== true || !/^sha256:[a-f0-9]{64}$/.test(String(reviewHandoff?.handoffDigest ?? ''))) {
+    errors.push('Protected-source degradation requires the current state-bound review handoff.');
+  }
+  const packetPath = String(reviewHandoff?.binding?.packetPath ?? '');
+  const handedOffFiles = new Map((Array.isArray(reviewHandoffIndependent?.allowedInputs?.files)
+    ? reviewHandoffIndependent.allowedInputs.files
+    : []).map((binding) => [String(binding?.path ?? ''), binding]));
+  const browserChecks = Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [];
+  const blindChecks = Array.isArray(blindReview?.routeViewportReviews) ? blindReview.routeViewportReviews : [];
+  const findings = [];
+  if (!Array.isArray(primaryRoutes) || primaryRoutes.length === 0) {
+    errors.push('Protected-source degradation requires at least one handoff-bound primary route.');
+  }
+  const viewportDimensions = {
+    desktop: { width: 1280, height: 800 },
+    mobile: { width: 390, height: 844 }
+  };
+  for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
+    const sourcePath = requestPathAndSearch(route?.sourcePath ?? route?.targetPath);
+    const targetPath = requestPathAndSearch(route?.targetPath ?? route?.sourcePath);
+    for (const viewport of ['desktop', 'mobile']) {
+      const expectedViewport = viewportDimensions[viewport];
+      const browserCheck = browserChecks.find((check) =>
+        requestPathAndSearch(check?.targetUrl) === targetPath &&
+        requestPathAndSearch(check?.sourceUrl) === sourcePath &&
+        String(check?.viewport?.name ?? '') === viewport &&
+        String(check?.captureState?.id ?? 'default') === 'default'
+      );
+      const blindCheck = blindChecks.find((check) =>
+        requestPathAndSearch(check?.route) === targetPath &&
+        String(check?.viewport ?? '') === viewport
+      );
+      const findingErrors = [];
+      if (!browserCheck || !blindCheck) {
+        findingErrors.push('fresh blind reviewer did not adjudicate the matching builder route/viewport capture');
+      } else {
+        if (
+          browserCheck.viewport?.width !== expectedViewport.width ||
+          browserCheck.viewport?.height !== expectedViewport.height
+        ) {
+          findingErrors.push('builder capture did not use the required desktop/mobile viewport');
+        }
+        if (browserCheck.visualComparison?.status !== 'pass') {
+          findingErrors.push('builder capture was not recorded as a passing comparison');
+        }
+        if (
+          !['good', 'good_enough'].includes(blindCheck.verdict) ||
+          ['actualRequestedOutcome', 'firstFoldVisualParity', 'navigationBehavior', 'contentHierarchyCompleteness', 'mediaArtworkFidelity', 'interactionParity']
+            .some((check) => blindCheck.checks?.[check] !== 'pass')
+        ) {
+          findingErrors.push('fresh blind reviewer did not pass the required visual, hierarchy, media, navigation, and interaction checks');
+        }
+        const browserSource = packetEvidenceReference(browserCheck.sourceScreenshot, 'evidence/browser');
+        const browserTarget = packetEvidenceReference(browserCheck.targetScreenshot, 'evidence/browser');
+        const blindSource = packetEvidenceReference(blindCheck.sourceScreenshot, 'evidence/blind-adversarial-review');
+        const blindTarget = packetEvidenceReference(blindCheck.targetScreenshot, 'evidence/blind-adversarial-review');
+        if (!browserSource || !browserTarget || browserSource !== blindSource || browserTarget !== blindTarget) {
+          findingErrors.push('fresh blind reviewer did not inspect the exact builder source/target captures');
+        }
+        const sourceHash = String(browserCheck.captureState?.evidenceBindings?.sourceScreenshotSha256 ?? '');
+        const targetHash = String(browserCheck.captureState?.evidenceBindings?.targetScreenshotSha256 ?? '');
+        if (
+          !/^sha256:[a-f0-9]{64}$/.test(sourceHash) ||
+          !/^sha256:[a-f0-9]{64}$/.test(targetHash) ||
+          sourceHash === targetHash
+        ) {
+          findingErrors.push('builder source/target capture hashes are missing or not distinct');
+        }
+        for (const [reference, digest] of [[browserSource, sourceHash], [browserTarget, targetHash]]) {
+          const binding = handedOffFiles.get(projectPacketReference(packetPath, reference));
+          if (!binding || binding.sha256 !== digest) {
+            findingErrors.push(`builder capture ${reference || 'missing'} is not handoff-bound to its declared sha256`);
+          }
+        }
+      }
+      findings.push({
+        sourcePath,
+        targetPath,
+        routeRole: String(route?.routeRole ?? ''),
+        viewport: { name: viewport, ...expectedViewport },
+        passed: findingErrors.length === 0,
+        errors: findingErrors,
+        sourceScreenshotSha256: String(browserCheck?.captureState?.evidenceBindings?.sourceScreenshotSha256 ?? ''),
+        targetScreenshotSha256: String(browserCheck?.captureState?.evidenceBindings?.targetScreenshotSha256 ?? '')
+      });
+      errors.push(...findingErrors.map((message) => `${targetPath || '/'} ${viewport}: ${message}.`));
+    }
+  }
+  if (findings.length !== primaryRoutes.length * 2) {
+    errors.push('Fresh blind reviewer coverage does not include every primary route at desktop and mobile viewports.');
+  }
+  const value = {
+    schemaVersion: 'public-kit.reviewed-builder-visual-fallback.1',
+    authority: 'handoff-reviewed-builder-captures',
+    verifierOwned: false,
+    completionSupported: errors.length === 0,
+    status: errors.length === 0 ? 'passed' : 'blocked',
+    handoffDigest: String(reviewHandoff?.handoffDigest ?? ''),
+    findings,
+    errors
+  };
+  return { ...value, fingerprint: stateSha256(value) };
+}
+
+export function visualParityCompletionSupport(record, { briefMode = false } = {}) {
+  if (briefMode) {
+    return record?.schemaVersion === VISUAL_PARITY_FLOOR_SCHEMA &&
+      record?.status === 'not_applicable' &&
+      record?.completionSupported === true;
+  }
+  if (record?.schemaVersion !== VISUAL_PARITY_FLOOR_SCHEMA) return false;
+  const verifierOwnedPass =
+    record?.status === 'passed' &&
+    record?.authority === 'verifier-owned-managed-browser-structural-floor' &&
+    record?.verifierOwned === true &&
+    record?.completionSupported === true;
+  const reviewedProtectedSourcePass =
+    record?.status === 'passed_with_handoff_review' &&
+    record?.authority === 'handoff-reviewed-builder-captures' &&
+    record?.verifierOwned === false &&
+    record?.completionSupported === true &&
+    record?.sourceProtectionDegradation === true &&
+    record?.verifierCapture?.status === 'review_required' &&
+    record?.verifierCapture?.completionSupported === false &&
+    record?.reviewedBuilderFallback?.completionSupported === true;
+  return verifierOwnedPass || reviewedProtectedSourcePass;
 }
 
 function normalizeRouteKey(value) {
@@ -11872,6 +12052,7 @@ export async function verifyLive({
   let sourceAudit = null;
   let negativeRouteConsent = null;
   let reviewHandoff = null;
+  let reviewHandoffIndependent = null;
   try {
     independentVerification = (await readBoundedJsonFile(join(absolutePacketDir, 'independent-verification.json'), { budget: runtimeJsonBudget })).value;
     blindReview = (await readBoundedJsonFile(join(absolutePacketDir, 'blind-adversarial-review.json'), { budget: runtimeJsonBudget })).value;
@@ -11895,6 +12076,19 @@ export async function verifyLive({
         // Packet validation records malformed, non-regular, or oversized optional handoff JSON.
       }
       reviewHandoff = null;
+    }
+    try {
+      reviewHandoffIndependent = (
+        await readBoundedJsonFile(
+          join(absolutePacketDir, 'evidence', 'review-handoff-independent.json'),
+          { budget: runtimeJsonBudget }
+        )
+      ).value;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Packet validation records malformed, non-regular, or oversized optional handoff JSON.
+      }
+      reviewHandoffIndependent = null;
     }
   } catch {
     // Packet validation already records malformed or missing required JSON.
@@ -12642,6 +12836,126 @@ export async function verifyLive({
       })
     : [];
   const reviewHandoffStateValid = reviewHandoffRequired && reviewHandoffBindingErrors.length === 0;
+  const visualFloorCaptureEligible =
+    !briefMode &&
+    liveTargetValid &&
+    verifierOwnedAxeSupportsCompletion &&
+    drupalRuntimeSupportsCompletion;
+  let visualParityFloor;
+  if (briefMode) {
+    const value = {
+      schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
+      checkedAt: new Date().toISOString(),
+      status: 'not_applicable',
+      authority: 'not-applicable-build-from-brief',
+      verifierOwned: false,
+      completionSupported: true,
+      findings: [],
+      errors: []
+    };
+    visualParityFloor = { ...value, fingerprint: stateSha256(value) };
+  } else if (visualFloorCaptureEligible) {
+    const sourcePrimaryRoutes = primaryRoutes.map((route) => ({ targetPath: route?.sourcePath }));
+    const rawSourceVisualCapture = await captureGlobalChrome({
+      browserBackend,
+      baseUrl: new URL(declaredSource),
+      primaryRoutes: sourcePrimaryRoutes,
+      contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+      environment
+    });
+    let sourceVisualCapture = globalChromeCaptureWithoutArtifacts(rawSourceVisualCapture, {
+      status: rawSourceVisualCapture.status === 'captured' ? 'blocked' : rawSourceVisualCapture.status,
+      resultStateFingerprint: buildState?.fingerprint ?? '',
+      error: rawSourceVisualCapture.status === 'captured'
+        ? 'Source visual capture could not be bound to the current Drupal build state.'
+        : ''
+    });
+    if (
+      buildStateReady &&
+      rawSourceVisualCapture.status === 'captured' &&
+      rawSourceVisualCapture.authoritative === true
+    ) {
+      try {
+        sourceVisualCapture = finalizeGlobalChromeCapture({
+          capture: rawSourceVisualCapture,
+          packetDir: absolutePacketDir,
+          stateFingerprint: buildState.fingerprint
+        });
+      } catch (error) {
+        sourceVisualCapture = globalChromeCaptureWithoutArtifacts(rawSourceVisualCapture, {
+          status: 'blocked',
+          resultStateFingerprint: buildState.fingerprint,
+          error: `Source visual capture finalization failed: ${error.message}`
+        });
+      }
+    }
+    const verifierFloor = compareVerifierOwnedVisualFloor({
+      sourceCapture: sourceVisualCapture,
+      targetCapture: globalChromeCapture,
+      primaryRoutes,
+      stateFingerprint: buildState.fingerprint
+    });
+    if (verifierFloor.status === 'review_required' && verifierFloor.reviewFallbackEligible === true) {
+      const reviewedBuilderFallback = buildReviewedBuilderVisualFallback({
+        browserEvidence,
+        blindReview,
+        independentVerification,
+        primaryRoutes,
+        reviewHandoff,
+        reviewHandoffIndependent,
+        reviewHandoffStateValid,
+        blindReviewSupportsCompletion:
+          packetReport.completionEvidence?.blindAdversarialReviewSupportsCompletion === true,
+        independentVerificationSupportsCompletion:
+          packetReport.completionEvidence?.independentVerificationSupportsCompletion === true
+      });
+      const value = reviewedBuilderFallback.completionSupported === true
+        ? {
+            schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
+            checkedAt: verifierFloor.checkedAt,
+            status: 'passed_with_handoff_review',
+            authority: 'handoff-reviewed-builder-captures',
+            verifierOwned: false,
+            completionSupported: true,
+            sourceOrigin: verifierFloor.sourceOrigin,
+            targetOrigin: verifierFloor.targetOrigin,
+            resultStateFingerprint: verifierFloor.resultStateFingerprint,
+            sourceProtectionDegradation: true,
+            verifierCapture: {
+              authority: verifierFloor.authority,
+              fingerprint: verifierFloor.fingerprint,
+              status: verifierFloor.status,
+              completionSupported: false
+            },
+            reviewedBuilderFallback,
+            findings: reviewedBuilderFallback.findings,
+            errors: []
+          }
+        : {
+            ...verifierFloor,
+            completionSupported: false,
+            reviewedBuilderFallback,
+            errors: [...verifierFloor.errors, ...reviewedBuilderFallback.errors]
+          };
+      const { fingerprint: _fingerprint, ...unfingerprinted } = value;
+      visualParityFloor = { ...unfingerprinted, fingerprint: stateSha256(unfingerprinted) };
+    } else {
+      visualParityFloor = verifierFloor;
+    }
+  } else {
+    const value = {
+      schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
+      checkedAt: new Date().toISOString(),
+      status: 'not_run',
+      authority: 'verifier-owned-managed-browser-structural-floor',
+      verifierOwned: true,
+      completionSupported: false,
+      findings: [],
+      errors: ['Verifier-owned source/target visual capture waits until target, accessibility, runtime, and build-state prerequisites pass.']
+    };
+    visualParityFloor = { ...value, fingerprint: stateSha256(value) };
+  }
+  const visualParityFloorSupportsCompletion = visualParityCompletionSupport(visualParityFloor, { briefMode });
   const lateSourceCensusEligible =
     !briefMode &&
     packetReport.valid &&
@@ -12649,7 +12963,8 @@ export async function verifyLive({
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
-    reviewHandoffStateValid;
+    reviewHandoffStateValid &&
+    visualParityFloorSupportsCompletion;
   // Source discovery is deliberately the last expensive verification phase.
   // Primary target routes, representative routes, browser/editor workflows,
   // accessibility, consent, and build-state checks therefore produce useful
@@ -12671,7 +12986,8 @@ export async function verifyLive({
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
-    reviewHandoffStateValid;
+    reviewHandoffStateValid &&
+    visualParityFloorSupportsCompletion;
   const completeLocalRebuildClaimAllowed = !briefMode && completionClaimAllowed;
   const completeLocalBuildFromBriefClaimAllowed = briefMode && completionClaimAllowed;
   const completionBlockers = [];
@@ -12741,6 +13057,18 @@ export async function verifyLive({
   }
   for (const error of verifierOwnedAxeErrors) {
     addCompletionBlocker('accessibility.axe', error);
+  }
+  if (!visualParityFloorSupportsCompletion) {
+    const visualErrors = Array.isArray(visualParityFloor?.errors) && visualParityFloor.errors.length > 0
+      ? visualParityFloor.errors
+      : ['Verifier-owned source/target structural visual coverage did not support completion.'];
+    for (const error of visualErrors) {
+      addCompletionBlocker('visual.parity-floor', error, {
+        nextAction: visualParityFloor?.status === 'review_required'
+          ? 'Use fresh blind-review context to adjudicate the exact builder source/target screenshots sealed into the current handoff, then rerun the live verifier.'
+          : 'Repair the gross source/target structural omissions or browser-capture failure, refresh affected evidence, and rerun the live verifier.'
+      });
+    }
   }
   if (!reviewHandoffStateValid) {
     const handoffBlockers = reviewHandoffBindingErrors.length > 0
@@ -12830,6 +13158,7 @@ export async function verifyLive({
     origin: target?.url.origin ?? '',
     sourceSurfaceFingerprint: sourceSurfaceCensus.fingerprint ?? '',
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
+    visualParityFloorFingerprint: visualParityFloor?.fingerprint ?? '',
     beforeConsentNetworkCaptureFingerprint: beforeConsentNetworkCapture?.captureFingerprint ?? '',
     negativeRouteCheck: negativeRouteCheck
       ? { bodySha256: negativeRouteCheck.bodySha256 ?? '', path: negativeRouteCheck.path, status: negativeRouteCheck.status ?? 0 }
@@ -12900,6 +13229,9 @@ export async function verifyLive({
   const liveGateFindings = [
     ...sharedPacketReport.errors,
     ...(sharedPacketReport.completionEvidence?.packetCompletionBlockedReasons ?? []),
+    ...(visualParityFloorSupportsCompletion
+      ? []
+      : (visualParityFloor?.errors ?? []).map((error) => `G-PARITY-01 ${sharedMessage(error, absolutePacketDir)}`)),
     ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...sourceSurfaceErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
@@ -12930,9 +13262,10 @@ export async function verifyLive({
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
+      visualParityFloorSha256: visualParityFloor?.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 7
+      targetFingerprintInputVersion: 8
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
@@ -12957,6 +13290,7 @@ export async function verifyLive({
       passed: verifierOwnedAxeSupportsCompletion,
       errors: verifierOwnedAxeErrors
     },
+    visualParityFloor: sharedValue(visualParityFloor, absolutePacketDir),
     beforeConsentNetworkCapture: sharedBeforeConsentCapture,
     negativeRouteCheck: sharedValue(negativeRouteCheck, absolutePacketDir),
     accessWallChecks: sharedValue(accessWallChecks, absolutePacketDir),
