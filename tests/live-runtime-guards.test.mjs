@@ -8,6 +8,7 @@ import {
   ddevProjectWebUrls,
   exportedSeoUrlPortabilityFindings,
   isLocalEnvironmentHost,
+  liveTargetBudgetCompletionBlocker,
   liveTargetLimitsForRouteCount,
   localOnlyFormExceptionsBoundToRuntime,
   scheduleLiveRouteChecks
@@ -267,6 +268,27 @@ test('live target limits reject counts outside the supported range', () => {
   assert.throws(() => liveTargetLimitsForRouteCount(999), /from 1000 through 8192/);
   assert.throws(() => liveTargetLimitsForRouteCount(8_193), /from 1000 through 8192/);
   assert.throws(() => liveTargetLimitsForRouteCount(1.5), /from 1000 through 8192/);
+});
+
+test('live target budget blocker recommends a sufficient one-run route ceiling', () => {
+  const blocker = liveTargetBudgetCompletionBlocker(
+    { requestCount: 2_000, maxRequests: 2_000 },
+    { routeCount: 3_132 },
+    1_000,
+    499
+  );
+  assert.match(blocker.missingInput, /3132-route ceiling/);
+  assert.match(blocker.nextAction, /--target-max-routes 3132\b/);
+});
+
+test('live target budget blocker does not recommend a known-insufficient supported ceiling', () => {
+  const blocker = liveTargetBudgetCompletionBlocker(
+    { requestCount: 0, maxRequests: 2_000 },
+    { routeCount: 8_193 },
+    1_000
+  );
+  assert.doesNotMatch(blocker.nextAction, /--target-max-routes/);
+  assert.match(blocker.nextAction, /build-kit maintainer/);
 });
 
 test('scheduler route ceiling honors an authorized larger maxRoutes without fetching on overflow', async () => {

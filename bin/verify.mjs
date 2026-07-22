@@ -1608,7 +1608,7 @@ function sourceSurfaceNonBudgetErrors(sourceSurfaceCensus) {
     .filter((error) => !/(?:exceeded its \d+ (?:route|sitemap|URL) limit|HTTP (?:request )?budget|task budget|wall-clock deadline)/i.test(String(error)));
 }
 
-function liveTargetBudgetCompletionBlocker(
+export function liveTargetBudgetCompletionBlocker(
   metrics = {},
   routeBudget = {},
   currentMaxRoutes = MAX_LIVE_ROUTE_CHECKS,
@@ -1618,8 +1618,16 @@ function liveTargetBudgetCompletionBlocker(
     MAX_LIVE_ROUTE_CHECKS,
     Number.isSafeInteger(Number(currentMaxRoutes)) ? Number(currentMaxRoutes) : MAX_LIVE_ROUTE_CHECKS
   );
-  const canExpand = effectiveMaxRoutes < MAX_LIVE_TARGET_ROUTES;
-  const nextMaxRoutes = Math.min(MAX_LIVE_TARGET_ROUTES, effectiveMaxRoutes * 2);
+  const observedRouteCount = Number(routeBudget.routeCount ?? 0);
+  const requiredRouteCount = Number.isSafeInteger(observedRouteCount) && observedRouteCount > 0
+    ? observedRouteCount
+    : 0;
+  const canExpand = effectiveMaxRoutes < MAX_LIVE_TARGET_ROUTES
+    && requiredRouteCount <= MAX_LIVE_TARGET_ROUTES;
+  const nextMaxRoutes = Math.min(
+    MAX_LIVE_TARGET_ROUTES,
+    Math.max(effectiveMaxRoutes * 2, requiredRouteCount)
+  );
   const attemptedEvidence = [
     `The bounded live run scheduled ${Number(routeBudget.routeCount ?? 0)} declared route check(s) under a ${effectiveMaxRoutes}-route ceiling and used ${Number(metrics.requestCount ?? 0)} of ${Number(metrics.maxRequests ?? 0)} HTTP request(s) across route, link, redirect, and asset verification.`,
     `${Number(suppressedErrorCount)} per-route budget-exhaustion finding(s) were consolidated into this blocker; non-budget route and link findings remain reported separately.`
