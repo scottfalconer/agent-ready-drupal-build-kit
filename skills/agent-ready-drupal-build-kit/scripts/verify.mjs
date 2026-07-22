@@ -43,6 +43,10 @@ import {
   collectRuntimeCodeManifest,
   sha256 as stateSha256
 } from './state-fingerprint.mjs';
+import {
+  createLiveVerificationReport,
+  LIVE_VERIFICATION_MODE
+} from './live-verification-contract.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -282,6 +286,7 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
     scriptPath,
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'review-handoff.mjs'),
+    join(scriptDirectory, 'live-verification-contract.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
@@ -12900,14 +12905,13 @@ export async function verifyLive({
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
   ];
 
-  return publicRedactedValue({
-    schemaVersion: 'public-kit.live-verification.2',
+  return publicRedactedValue(createLiveVerificationReport({
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope,
     productionReadinessEvaluated: false,
     launchReady: false,
-    verificationMode: 'live-target-and-packet',
+    verificationMode: LIVE_VERIFICATION_MODE,
     gateResults: perGateResults(gates, liveGateFindings, { mode: 'live' }),
     packetDir: sharedPacketDirName(absolutePacketDir),
     target: target
@@ -13022,7 +13026,7 @@ export async function verifyLive({
       ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))
     ],
     warnings: sharedPacketReport.warnings
-  });
+  }));
 }
 
 async function main() {

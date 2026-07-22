@@ -45,6 +45,7 @@ import {
   sealReviewHandoff,
   sealReviewHandoffBundle
 } from '../bin/review-handoff.mjs';
+import { isCurrentLiveVerificationReport } from '../bin/live-verification-contract.mjs';
 import { validatePacket as validateInstalledPacket } from '../skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -3370,6 +3371,11 @@ test('default verifier fetches the declared real target and binds primary-route 
       });
 
       assert.equal(report.valid, true, report.errors.join('\n'));
+      assert.equal(
+        isCurrentLiveVerificationReport(report),
+        true,
+        'The live verifier producer must emit the contract consumed by review handoff.'
+      );
       assert.equal(report.liveTargetValid, true);
       assert.equal(report.routeChecks.length, 1);
       assert.equal(report.routeChecks[0].passed, true, report.routeChecks[0].errors.join('\n'));

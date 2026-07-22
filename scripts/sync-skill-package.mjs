@@ -107,6 +107,10 @@ function copyPlan(assetsOnly) {
         executable: true
       },
       {
+        source: join(repoRoot, 'bin', 'live-verification-contract.mjs'),
+        destination: join(skillRoot, 'scripts', 'live-verification-contract.mjs')
+      },
+      {
         source: join(repoRoot, 'bin', 'reconcile.mjs'),
         destination: join(skillRoot, 'scripts', 'reconcile.mjs'),
         executable: true

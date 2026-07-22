@@ -29,6 +29,7 @@ import {
   readLifecycleStatus
 } from '../bin/lifecycle.mjs';
 import { normalizeGlobalChromeContract } from '../bin/global-chrome.mjs';
+import { LIVE_VERIFICATION_SCHEMA } from '../bin/live-verification-contract.mjs';
 
 const digest = (seed) => `sha256:${seed.repeat(64)}`;
 const chromeScreenshotBytes = Buffer.from('fixture-global-chrome-screenshot');
@@ -154,7 +155,7 @@ function passingReport(buildState = siteState(), overrides = {}) {
     errors: []
   }));
   return {
-    schemaVersion: 'public-kit.live-verification.1',
+    schemaVersion: LIVE_VERIFICATION_SCHEMA,
     checkedAt: new Date().toISOString(),
     buildMode: 'source_site',
     claimScope: 'complete-local-rebuild',

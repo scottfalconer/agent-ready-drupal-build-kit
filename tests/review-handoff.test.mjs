@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
+  createLiveVerificationReport,
+  LIVE_VERIFICATION_MODE,
+  LIVE_VERIFICATION_SCHEMA
+} from '../bin/live-verification-contract.mjs';
+import {
   reviewHandoffManifestErrors,
   reviewHandoffInputFileBindings,
   reviewHandoffPreliminaryPacketFingerprint,
@@ -90,9 +95,8 @@ function fixtureProject() {
   };
   writeJson(blindPath, blind);
   const liveVerificationPath = join(packetDir, 'evidence', 'live-verification.json');
-  const liveVerification = {
-    schemaVersion: 'public-kit.live-verification.1',
-    verificationMode: 'live-target-and-packet',
+  const liveVerification = createLiveVerificationReport({
+    verificationMode: LIVE_VERIFICATION_MODE,
     buildMode: 'source_site',
     liveTargetValid: true,
     target: { resolvedBaseUrl: 'https://target.ddev.site/' },
@@ -115,7 +119,7 @@ function fixtureProject() {
       configStatusClean: true,
       configSyncMatchesHead: true
     }
-  };
+  });
   writeJson(liveVerificationPath, liveVerification);
   liveVerification.buildState.evidenceBindings.packetFingerprint = reviewHandoffPreliminaryPacketFingerprint(packetDir);
   writeJson(liveVerificationPath, liveVerification);
@@ -228,6 +232,26 @@ test('review handoff is byte-stable, sanitized, state-bound, and never writes re
   for (const forbidden of ['completionClaim', 'completionClaims', 'readbackComplete', 'reviewerArtifact', 'reviewerIdentity', 'verdict']) {
     assert.equal(allKeys({ manifest: first.manifest, projections: first.projections }).includes(forbidden), false, forbidden);
   }
+});
+
+test('review handoff consumes the current verifier report contract and rejects legacy schema v1', () => {
+  const current = fixtureProject();
+  const currentReportPath = join(current.packetDir, 'evidence', 'live-verification.json');
+  const currentReport = JSON.parse(readFileSync(currentReportPath, 'utf8'));
+
+  assert.equal(currentReport.schemaVersion, LIVE_VERIFICATION_SCHEMA);
+  assert.doesNotThrow(() => writeReviewHandoff({ project: current.projectRoot }));
+
+  const legacy = fixtureProject();
+  const legacyReportPath = join(legacy.packetDir, 'evidence', 'live-verification.json');
+  const legacyReport = JSON.parse(readFileSync(legacyReportPath, 'utf8'));
+  legacyReport.schemaVersion = 'public-kit.live-verification.1';
+  writeJson(legacyReportPath, legacyReport);
+
+  assert.throws(
+    () => writeReviewHandoff({ project: legacy.projectRoot }),
+    /Run the live-target verifier before creating a review handoff/
+  );
 });
 
 test('reviewer references reject stale digests and inputs outside the generated boundary', () => {
