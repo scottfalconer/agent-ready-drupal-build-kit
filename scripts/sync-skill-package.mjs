@@ -89,6 +89,14 @@ function copyPlan(assetsOnly) {
   if (!assetsOnly) {
     plan.push(
       {
+        source: join(repoRoot, 'scripts', 'canvas-discover.php'),
+        destination: join(skillRoot, 'scripts', 'canvas-discover.php')
+      },
+      {
+        source: join(repoRoot, 'scripts', 'canvas-author-page.php'),
+        destination: join(skillRoot, 'scripts', 'canvas-author-page.php')
+      },
+      {
         source: join(repoRoot, 'bin', 'doctor.mjs'),
         destination: join(skillRoot, 'scripts', 'doctor.mjs'),
         executable: true
