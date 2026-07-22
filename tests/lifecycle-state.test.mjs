@@ -29,6 +29,7 @@ import {
   readLifecycleStatus
 } from '../bin/lifecycle.mjs';
 import { normalizeGlobalChromeContract } from '../bin/global-chrome.mjs';
+import { LIVE_VERIFICATION_SCHEMA } from '../bin/live-verification-contract.mjs';
 
 const digest = (seed) => `sha256:${seed.repeat(64)}`;
 const chromeScreenshotBytes = Buffer.from('fixture-global-chrome-screenshot');
@@ -154,7 +155,7 @@ function passingReport(buildState = siteState(), overrides = {}) {
     errors: []
   }));
   return {
-    schemaVersion: 'public-kit.live-verification.1',
+    schemaVersion: LIVE_VERIFICATION_SCHEMA,
     checkedAt: new Date().toISOString(),
     buildMode: 'source_site',
     claimScope: 'complete-local-rebuild',
@@ -692,6 +693,33 @@ test('the first authoritative pass creates one create-only baseline and later st
   const status = readLifecycleStatus(packetDir);
   assert.equal(status.initialBaseline.status, 'passed');
   assert.equal(status.currentState.relation, 'changed-since-latest-anchor');
+});
+
+test('lifecycle rejects legacy reports at fresh ingress but keeps certified legacy history readable', () => {
+  const fresh = lifecycleFixture();
+  const legacyIngress = passingReport();
+  legacyIngress.schemaVersion = 'public-kit.live-verification.1';
+  assert.throws(
+    () => applyVerificationLifecycle({ packetDir: fresh.packetDir, report: legacyIngress }),
+    /current live-verification schema/i
+  );
+
+  const historical = lifecycleFixture();
+  applyVerificationLifecycle({ packetDir: historical.packetDir, report: passingReport() });
+  const baselinePath = join(historical.packetDir, 'evidence', 'lifecycle', 'initial-baseline.json');
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+  baseline.passingReport.schemaVersion = 'public-kit.live-verification.1';
+  delete baseline.certificateSha256;
+  baseline.certificateSha256 = sha256(baseline);
+  writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
+
+  const status = readLifecycleStatus(historical.packetDir);
+  assert.equal(status.initialBaseline.status, 'passed');
+  const current = applyVerificationLifecycle({
+    packetDir: historical.packetDir,
+    report: passingReport(siteState(), { completeLocalRebuildClaimAllowed: false })
+  });
+  assert.equal(current.initialBaseline.status, 'passed');
 });
 
 test('a brief-mode authoritative pass creates a baseline for its typed completion claim', () => {

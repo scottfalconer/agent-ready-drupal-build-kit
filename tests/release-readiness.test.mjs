@@ -194,6 +194,12 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     assert.equal(files.has(path), true, `${path} missing from npm package`);
     assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
   }
+  for (const path of [
+    'bin/live-verification-contract.mjs',
+    'skills/agent-ready-drupal-build-kit/scripts/live-verification-contract.mjs'
+  ]) {
+    assert.equal(files.has(path), true, `${path} missing from npm package`);
+  }
 });
 
 test('PACKAGE-MANIFEST.json includedPaths matches the npm pack surface exactly', () => {

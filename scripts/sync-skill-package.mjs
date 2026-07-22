@@ -89,6 +89,14 @@ function copyPlan(assetsOnly) {
   if (!assetsOnly) {
     plan.push(
       {
+        source: join(repoRoot, 'scripts', 'canvas-discover.php'),
+        destination: join(skillRoot, 'scripts', 'canvas-discover.php')
+      },
+      {
+        source: join(repoRoot, 'scripts', 'canvas-author-page.php'),
+        destination: join(skillRoot, 'scripts', 'canvas-author-page.php')
+      },
+      {
         source: join(repoRoot, 'bin', 'doctor.mjs'),
         destination: join(skillRoot, 'scripts', 'doctor.mjs'),
         executable: true
@@ -97,6 +105,10 @@ function copyPlan(assetsOnly) {
         source: join(repoRoot, 'bin', 'verify.mjs'),
         destination: join(skillRoot, 'scripts', 'verify.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'live-verification-contract.mjs'),
+        destination: join(skillRoot, 'scripts', 'live-verification-contract.mjs')
       },
       {
         source: join(repoRoot, 'bin', 'reconcile.mjs'),

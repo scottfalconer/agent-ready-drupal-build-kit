@@ -56,7 +56,7 @@ Before changing the site, read these installed references completely:
 1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
 2. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
 
-Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
+Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: live Canvas component discovery and guarded headless page authoring, editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
 
 ## Build contract
 
@@ -157,6 +157,8 @@ This lifecycle does not require a Git commit, Canvas, a checkpoint after every e
 Everything required at runtime is inside this skill directory:
 
 - `scripts/doctor.mjs` performs non-authoring pre-baseline substrate, route, browser, Recipe, and explicit package-candidate diagnostics.
+- `scripts/canvas-discover.php` reports the live Canvas page/component/version/slot/theme surface and guarded-replacement tree digests without changing Drupal.
+- `scripts/canvas-author-page.php` creates or optimistic-lock-replaces a validated `canvas_page` component tree from a typed JSON manifest.
 - `scripts/init-kit.mjs` initializes an existing target without overwriting unrelated instructions.
 - `scripts/lifecycle.mjs` records post-baseline status, repair/extension scope, and completed change evidence.
 - `scripts/review-handoff.mjs` generates the deterministic, state- and byte-bound root handoff plus isolated independent/blind reviewer projections without writing reviewer output.
