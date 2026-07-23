@@ -8,6 +8,7 @@ import {
   readdir,
   readFile,
   rename,
+  rmdir,
   unlink,
   writeFile
 } from 'node:fs/promises';
@@ -21,6 +22,14 @@ const AGENT_NEXT_SCHEMA = 'public-kit.agent-next.1';
 const LOCAL_STATE_DIRECTORY = '.agent-ready-drupal';
 const LOCAL_STATE_OWNER_FILE = '.agent-ready-drupal-build-kit-owner';
 const LOCAL_STATE_OWNER_TEXT = 'agent-ready-drupal-build-kit verification state v1\n';
+const LOCAL_STATE_LOCK_DIRECTORY = '.verification-observability-write-lock';
+const LOCAL_STATE_LOCK_OWNER_FILE = 'owner.json';
+const LOCAL_STATE_LOCK_SCHEMA = 'public-kit.verification-observability-lock.1';
+const LOCAL_STATE_LOCK_MAX_BYTES = 1_024;
+const LOCAL_STATE_LOCK_STALE_MS = 5 * 60 * 1_000;
+const LOCAL_STATE_LOCK_WAIT_MS = 2_000;
+const LOCAL_STATE_LOCK_RETRY_MS = 20;
+const LOCAL_STATE_OWNER_WAIT_MS = 500;
 const MAX_AGENT_NEXT_BLOCKERS = 32;
 const MAX_BLOCKER_MESSAGE_BYTES = 512;
 const MAX_JSON_FILE_BYTES = 1024 * 1024;
@@ -239,6 +248,156 @@ function localStateRoot(projectRoot) {
   return resolve(projectRoot, LOCAL_STATE_DIRECTORY);
 }
 
+function wait(milliseconds) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+}
+
+async function validateLocalStateOwner(root) {
+  const ownerPath = join(root, LOCAL_STATE_OWNER_FILE);
+  const ownerMetadata = await lstat(ownerPath);
+  if (
+    ownerMetadata.isSymbolicLink() ||
+    !ownerMetadata.isFile() ||
+    ownerMetadata.nlink !== 1 ||
+    await readFile(ownerPath, 'utf8') !== LOCAL_STATE_OWNER_TEXT
+  ) {
+    throw new Error('The project-local verification state ownership marker is invalid.');
+  }
+}
+
+async function waitForConcurrentStateOwner(root, rootMetadata) {
+  const ageMs = Math.max(0, Date.now() - rootMetadata.mtimeMs);
+  if (ageMs > LOCAL_STATE_OWNER_WAIT_MS) return false;
+  const deadline = Date.now() + LOCAL_STATE_OWNER_WAIT_MS;
+  while (Date.now() < deadline) {
+    try {
+      await validateLocalStateOwner(root);
+      return true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await wait(LOCAL_STATE_LOCK_RETRY_MS);
+  }
+  return false;
+}
+
+async function readOwnedWriteLock(lockPath) {
+  const metadata = await lstat(lockPath);
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isDirectory()
+  ) {
+    throw new Error('The verification observability write lock is not a real directory.');
+  }
+  const entries = await readdir(lockPath);
+  if (entries.length === 0) return { acquiredAtMs: metadata.mtimeMs, metadata, owner: null };
+  if (entries.length !== 1 || entries[0] !== LOCAL_STATE_LOCK_OWNER_FILE) {
+    throw new Error('The verification observability write lock contains unexpected entries.');
+  }
+  const ownerPath = join(lockPath, LOCAL_STATE_LOCK_OWNER_FILE);
+  const ownerMetadata = await lstat(ownerPath);
+  if (
+    ownerMetadata.isSymbolicLink() ||
+    !ownerMetadata.isFile() ||
+    ownerMetadata.nlink !== 1 ||
+    ownerMetadata.size > LOCAL_STATE_LOCK_MAX_BYTES
+  ) {
+    throw new Error('The verification observability write lock owner is invalid.');
+  }
+  const owner = JSON.parse(await readFile(ownerPath, 'utf8'));
+  const acquiredAtMs = Date.parse(String(owner?.acquiredAt ?? ''));
+  const token = String(owner?.token ?? '');
+  if (
+    owner?.schemaVersion !== LOCAL_STATE_LOCK_SCHEMA ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(token) ||
+    !Number.isFinite(acquiredAtMs)
+  ) {
+    throw new Error('The verification observability write lock owner record is invalid.');
+  }
+  return { acquiredAtMs, metadata, owner, ownerPath, token };
+}
+
+async function recoverStaleWriteLock(root, lockPath) {
+  let lock;
+  try {
+    lock = await readOwnedWriteLock(lockPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true;
+    throw error;
+  }
+  if (Date.now() - lock.acquiredAtMs < LOCAL_STATE_LOCK_STALE_MS) return false;
+  const stalePath = join(root, `.${LOCAL_STATE_LOCK_DIRECTORY}.stale-${randomUUID()}`);
+  try {
+    await rename(lockPath, stalePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return true;
+    throw error;
+  }
+  const moved = await readOwnedWriteLock(stalePath);
+  if (
+    moved.token !== lock.token ||
+    moved.metadata.dev !== lock.metadata.dev ||
+    moved.metadata.ino !== lock.metadata.ino
+  ) {
+    try { await rename(stalePath, lockPath); } catch {}
+    throw new Error('The verification observability write lock changed during stale-lock recovery.');
+  }
+  if (moved.owner) await unlink(moved.ownerPath);
+  await rmdir(stalePath);
+  return true;
+}
+
+async function acquireWriteLock(root) {
+  const token = randomUUID();
+  const lockPath = join(root, LOCAL_STATE_LOCK_DIRECTORY);
+  const ownerPath = join(lockPath, LOCAL_STATE_LOCK_OWNER_FILE);
+  const temporaryOwnerPath = join(root, `.${LOCAL_STATE_LOCK_DIRECTORY}.owner-${token}.tmp`);
+  const owner = {
+    schemaVersion: LOCAL_STATE_LOCK_SCHEMA,
+    token,
+    acquiredAt: new Date().toISOString()
+  };
+  const deadline = Date.now() + LOCAL_STATE_LOCK_WAIT_MS;
+  while (true) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    if (await recoverStaleWriteLock(root, lockPath)) continue;
+    if (Date.now() >= deadline) {
+      throw new Error('Verification observability is busy; this run skipped local metrics after a bounded wait.');
+    }
+    await wait(LOCAL_STATE_LOCK_RETRY_MS);
+  }
+  try {
+    await writeFile(temporaryOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx', mode: 0o600 });
+    await rename(temporaryOwnerPath, ownerPath);
+  } catch (error) {
+    try { await unlink(temporaryOwnerPath); } catch {}
+    try { await rmdir(lockPath); } catch {}
+    throw error;
+  }
+  return async () => {
+    const lock = await readOwnedWriteLock(lockPath);
+    if (lock.token !== token) {
+      throw new Error('Verification observability cannot release a write lock owned by another run.');
+    }
+    await unlink(ownerPath);
+    await rmdir(lockPath);
+  };
+}
+
+async function withWriteLock(root, operation) {
+  const release = await acquireWriteLock(root);
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
+}
+
 export function findDrupalDdevRoot(cwd) {
   let candidate = resolve(cwd);
   while (true) {
@@ -286,31 +445,34 @@ async function ensureSafeDirectory(projectRoot, directory) {
     }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
-    await mkdir(root, { mode: 0o700 });
-    rootCreated = true;
+    try {
+      await mkdir(root, { mode: 0o700 });
+      rootCreated = true;
+    } catch (mkdirError) {
+      if (mkdirError?.code !== 'EEXIST') throw mkdirError;
+      const rootMetadata = await lstat(root);
+      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+        throw new Error('The project-local verification state root must be a real directory.');
+      }
+    }
   }
   const ownerPath = join(root, LOCAL_STATE_OWNER_FILE);
   if (rootCreated) {
     await writeFile(ownerPath, LOCAL_STATE_OWNER_TEXT, { flag: 'wx', mode: 0o600 });
   } else {
-    let ownerMetadata;
     try {
-      ownerMetadata = await lstat(ownerPath);
+      await validateLocalStateOwner(root);
     } catch (error) {
       if (error?.code === 'ENOENT') {
-        throw new Error(
-          'The existing .agent-ready-drupal directory is not owned by the build kit; local metrics were not written.'
-        );
+        const rootMetadata = await lstat(root);
+        if (!await waitForConcurrentStateOwner(root, rootMetadata)) {
+          throw new Error(
+            'The existing .agent-ready-drupal directory is not owned by the build kit; local metrics were not written.'
+          );
+        }
+      } else {
+        throw error;
       }
-      throw error;
-    }
-    if (
-      ownerMetadata.isSymbolicLink() ||
-      !ownerMetadata.isFile() ||
-      ownerMetadata.nlink !== 1 ||
-      await readFile(ownerPath, 'utf8') !== LOCAL_STATE_OWNER_TEXT
-    ) {
-      throw new Error('The project-local verification state ownership marker is invalid.');
     }
   }
   const ignorePath = join(root, '.gitignore');
@@ -339,7 +501,11 @@ async function ensureSafeDirectory(projectRoot, directory) {
       metadata = await lstat(cursor);
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
-      await mkdir(cursor, { mode: 0o700 });
+      try {
+        await mkdir(cursor, { mode: 0o700 });
+      } catch (mkdirError) {
+        if (mkdirError?.code !== 'EEXIST') throw mkdirError;
+      }
       metadata = await lstat(cursor);
     }
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -442,17 +608,22 @@ export async function recordVerificationObservability({
   const root = localStateRoot(project);
   const metricsDirectory = join(root, 'verification-metrics');
   const runDirectory = join(metricsDirectory, 'runs');
-  await ensureSafeDirectory(project, metricsDirectory);
-  await ensureSafeDirectory(project, runDirectory);
-  const historyPath = join(metricsDirectory, 'runs.jsonl');
-  const runPath = join(runDirectory, `${normalizedRunId}.json`);
-  const agentNextPath = join(root, 'agent-next.json');
-  await Promise.all([
-    assertSafeLocalFile(historyPath),
-    assertSafeLocalFile(runPath),
-    assertSafeLocalFile(agentNextPath)
-  ]);
-  const previousAgentNext = await readJson(agentNextPath, null);
+  await ensureSafeDirectory(project, root);
+  return withWriteLock(root, async () => {
+    await ensureSafeDirectory(project, metricsDirectory);
+    await ensureSafeDirectory(project, runDirectory);
+    const historyPath = join(metricsDirectory, 'runs.jsonl');
+    const runPath = join(runDirectory, `${normalizedRunId}.json`);
+    const agentNextPath = join(root, 'agent-next.json');
+    const [, runMetadata] = await Promise.all([
+      assertSafeLocalFile(historyPath),
+      assertSafeLocalFile(runPath),
+      assertSafeLocalFile(agentNextPath)
+    ]);
+    if (runMetadata) {
+      throw new Error(`Verification observability run ${normalizedRunId} already exists.`);
+    }
+    const previousAgentNext = await readJson(agentNextPath, null);
   const evaluated = blockerRecords(report, failureClass);
   const resolutionUnknown = !report;
   const previousBlockers = Array.isArray(previousAgentNext?.blockers)
@@ -557,10 +728,14 @@ export async function recordVerificationObservability({
     instrumentationPrePersistenceMs: 0,
     instrumentationBoundary: 'after-agent-next-before-metric-record-persistence',
   };
-  await writeJsonAtomic(agentNextPath, agentNext);
   record.instrumentationPrePersistenceMs = roundedMilliseconds(
     performance.now() - instrumentationClockStartedAt
   );
+  const runText = `${JSON.stringify(record, null, 2)}\n`;
+  if (Buffer.byteLength(runText) > MAX_JSON_FILE_BYTES) {
+    throw new Error(`Verification observability run exceeds its ${MAX_JSON_FILE_BYTES}-byte limit.`);
+  }
+  await writeJsonAtomic(agentNextPath, agentNext);
   const history = await readJsonLines(historyPath, {
     maxBytes: MAX_JSONL_FILE_BYTES,
     maxRecords: MAX_HISTORY_RECORDS
@@ -569,23 +744,20 @@ export async function recordVerificationObservability({
     maxBytes: MAX_JSONL_FILE_BYTES,
     maxRecords: MAX_HISTORY_RECORDS
   });
-  const runText = `${JSON.stringify(record, null, 2)}\n`;
-  if (Buffer.byteLength(runText) > MAX_JSON_FILE_BYTES) {
-    throw new Error(`Verification observability run exceeds its ${MAX_JSON_FILE_BYTES}-byte limit.`);
-  }
   await writeFile(runPath, runText, {
     flag: 'wx',
     mode: 0o600
   });
   await pruneRunFiles(runDirectory);
-  return {
-    record,
-    paths: {
-      agentNext: relative(project, agentNextPath).split(sep).join('/'),
-      history: relative(project, historyPath).split(sep).join('/'),
-      run: relative(project, runPath).split(sep).join('/')
-    }
-  };
+    return {
+      record,
+      paths: {
+        agentNext: relative(project, agentNextPath).split(sep).join('/'),
+        history: relative(project, historyPath).split(sep).join('/'),
+        run: relative(project, runPath).split(sep).join('/')
+      }
+    };
+  });
 }
 
 function median(values) {
