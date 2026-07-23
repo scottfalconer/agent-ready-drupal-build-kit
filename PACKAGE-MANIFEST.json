@@ -1,6 +1,6 @@
 {
   "packageName": "agent-ready-drupal-build-kit",
-  "packageDate": "2026-07-13",
+  "packageDate": "2026-07-15",
   "status": "public_shareable_instruction_kit",
   "containsImplementationCode": true,
   "containsSiteImplementationCode": false,
@@ -57,6 +57,7 @@
     "docs/recommended-agent-skills.md",
     "docs/output-inventory.md",
     "Verifier-owned live-surface reconciliation worksheet plus guarded materialization that preserves explicit builder dispositions and strict packet evidence checks",
+    "Parser-backed custom-code Phase C: bounded pinned-Acorn JavaScript and runtime PHP/Twig AST mutable-identity checks, plus real Drupal anonymous entity-output, access, reference-chain, cacheability, and disposable owned-tag invalidation evidence",
     "gates.json stable machine-readable gate vocabulary",
     "bin/verify.mjs default DDEV live-target verifier plus bin/verify-packet.mjs structural packet linter, with server-rendered response-link declaration integrity, exact external-redirect expectations, source-origin leak blocking with exact exceptions, representative route-role coverage, target-origin, Drupal site UUID, front-page, config-sync, clean-config, semantic packet, credible screenshot, recipe, and durable-intent checks",
     "templates/maintainer-review.template.md",

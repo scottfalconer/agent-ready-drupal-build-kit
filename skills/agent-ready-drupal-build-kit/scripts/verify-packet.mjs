@@ -194,7 +194,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-RECIPE-01': 'recipeStartPoint',
   'G-CONFIG-01': 'trackedConfigSync',
   'G-SURFACE-01': 'liveDrupalSurfaceReconciliation',
-  'G-CODE-01': 'customCodeInventoryQualityTestsRouteSchema',
+  'G-CODE-01': 'customCodeInventoryAstEntityOutputQualityTestsRouteSchema',
   'G-INTENT-01': 'durableIntent',
   'G-FIELD-01': 'fieldOutput',
   'G-OFFROAD-01': 'offRoadAndRawMarkup',

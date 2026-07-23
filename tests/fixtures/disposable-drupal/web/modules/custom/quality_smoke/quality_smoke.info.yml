@@ -2,3 +2,6 @@ name: Quality smoke
 type: module
 description: Minimal custom-code quality CI fixture.
 core_version_requirement: ^11
+dependencies:
+  - drupal:media
+  - drupal:node

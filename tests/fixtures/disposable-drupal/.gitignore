@@ -20,6 +20,14 @@
 /web/modules/custom/*
 !/web/modules/custom/quality_smoke/
 !/web/modules/custom/quality_smoke/**
+!/web/themes/
+/web/themes/*
+!/web/themes/custom/
+/web/themes/custom/*
+!/web/themes/custom/quality_smoke_base/
+!/web/themes/custom/quality_smoke_base/**
+!/web/themes/custom/quality_smoke_child/
+!/web/themes/custom/quality_smoke_child/**
 !/web/sites/
 /web/sites/*
 !/web/sites/default/

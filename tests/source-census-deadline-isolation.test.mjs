@@ -15,17 +15,29 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 
-test('verifier fingerprint binds its live-report contract, handoff validation, and executable vendored WebSocket transport', () => {
+test('verifier fingerprint binds its live-report contract, handoff, parser/runtime helpers, and vendored transports', () => {
   const kitRoot = mkdtempSync(join(tmpdir(), 'verifier-fingerprint-'));
   const scriptPath = join(kitRoot, 'bin', 'verify.mjs');
   const vendorRoot = join(kitRoot, 'vendor', 'ws', '8.21.0');
+  const acornRoot = join(kitRoot, 'vendor', 'acorn', '8.15.0');
   mkdirSync(dirname(scriptPath), { recursive: true });
   mkdirSync(vendorRoot, { recursive: true });
+  mkdirSync(acornRoot, { recursive: true });
   writeFileSync(scriptPath, 'fixture verifier');
   writeFileSync(join(dirname(scriptPath), 'live-verification-contract.mjs'), 'export const schema = "first";\n');
   writeFileSync(join(dirname(scriptPath), 'review-handoff.mjs'), 'export const handoff = "first";\n');
+  for (const helper of [
+    'custom-mutable-identity-audit.mjs',
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    writeFileSync(join(dirname(scriptPath), helper), `export const helper = "${helper}:first";\n`);
+  }
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
   writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "first";\n');
+  writeFileSync(join(acornRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
+  writeFileSync(join(acornRoot, 'acorn.mjs'), 'export default "first";\n');
 
   const before = verifierFingerprint({ kitRoot, scriptPath });
   writeFileSync(join(dirname(scriptPath), 'live-verification-contract.mjs'), 'export const schema = "second";\n');
@@ -41,7 +53,26 @@ test('verifier fingerprint binds its live-report contract, handoff validation, a
   assert.notEqual(afterBundleChange, afterHandoffChange);
 
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
-  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterBundleChange);
+  let previous = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(previous, afterBundleChange);
+
+  for (const helper of [
+    'custom-mutable-identity-audit.mjs',
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    writeFileSync(join(dirname(scriptPath), helper), `export const helper = "${helper}:second";\n`);
+    const changed = verifierFingerprint({ kitRoot, scriptPath });
+    assert.notEqual(changed, previous, `${helper} must participate in verifier identity`);
+    previous = changed;
+  }
+
+  writeFileSync(join(acornRoot, 'acorn.mjs'), 'export default "second";\n');
+  const afterAcornChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterAcornChange, previous);
+  writeFileSync(join(acornRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
+  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterAcornChange);
 });
 
 async function withServer(handler, callback) {

@@ -52,6 +52,11 @@ import {
   perGateResults,
   validatePacket
 } from '../bin/verify-packet.mjs';
+import { customMutableIdentityResultFingerprint } from '../bin/custom-mutable-identity-audit.mjs';
+import {
+  CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+  customEntityOutputAuditResultFingerprint
+} from '../bin/custom-entity-output-audit.mjs';
 import {
   reviewHandoffInputFileBindings,
   reviewHandoffReference,
@@ -529,16 +534,144 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
   };
   writeFixture('.ddev/config.yaml', 'name: inventory-fixture\ndocroot: web\n');
   writeFixture('web/modules/custom/catalog/catalog.info.yml', 'name: Catalog\ntype: module\ncore_version_requirement: ^11\n');
-  writeFixture('web/modules/custom/catalog/catalog.module', '<?php\nfunction catalog_help() {}\n');
+  writeFixture('web/modules/custom/catalog/catalog.module', '<?php\nfunction catalog_help() {}\nfunction node_entity_view() {}\n');
   writeFixture('web/modules/custom/catalog/src/Controller/CatalogController.php', '<?php\nfinal class CatalogController {}\n');
   writeFixture('web/modules/custom/catalog/src/Plugin/Block/CatalogBlock.php', '<?php\nfinal class CatalogBlock {}\n');
   writeFixture('web/modules/custom/catalog/src/CommentOnly.php', '<?php\n// class Phantom {}\n$example = "class Ghost";\n');
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/CatalogHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook as DrupalHook;
+#[DrupalHook('theme_suggestions_node_alter', method: 'suggestNodeAlter')]
+#[\\Drupal\\Core\\Hook\\Attribute\\Hook('theme_suggestions_alter')]
+final class CatalogHooks {
+  #[DrupalHook('preprocess_node')]
+  #[DrupalHook(hook: 'entity_view_alter')]
+  public function preprocessNode(array &$variables): void {}
+
+  #[DrupalHook('node_view'), DrupalHook('node_view_alter')]
+  public function nodeView(): void {}
+
+  #[\\Drupal\\Core\\Hook\\Attribute\\Hook('theme_suggestions_node')]
+  public function suggestNodeTemplates(): void {}
+
+  public function suggestNodeAlter(): void {}
+
+  public function __invoke(): void {}
+
+  public function helper(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/DefaultHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class DefaultHooks {
+  #[Hook('preprocess_node')]
+  public function preprocessNode(array &$variables): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/GroupImportHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\{Hook, HookDependsOnModule};
+final class GroupImportHooks {
+  #[Hook('theme_suggestions_node')]
+  public function suggestNodeTemplates(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/NamespaceAliasHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute as Attr;
+final class NamespaceAliasHooks {
+  #[Attr\\Hook('node_view')]
+  public function nodeView(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/CommaImportHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook as CommaHook, Drupal\\Core\\Hook\\Attribute\\HookDependsOnModule;
+final class CommaImportHooks {
+  #[CommaHook('entity_view')]
+  public function entityView(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/EmojiStringHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class EmojiStringHooks {
+  private const LABEL = '😀';
+  #[Hook('node_view_alter')]
+  public function nodeViewAlter(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/EmojiCommentHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class EmojiCommentHooks {
+  // 😀 must not shift the later attribute's source index.
+  #[Hook('entity_view_alter')]
+  public function entityViewAlter(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/NamedModuleHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class NamedModuleHooks {
+  #[Hook('node_view', module: 'node')]
+  public function nodeView(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/PositionalModuleHooks.php',
+    `<?php
+namespace Drupal\\catalog\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class PositionalModuleHooks {
+  #[Hook('entity_view', '', 'node')]
+  public function entityView(): void {}
+}
+`
+  );
+  writeFixture(
+    'web/modules/custom/catalog/src/Hook/UnrelatedHooks.php',
+    `<?php
+namespace Drupal\\catalog;
+use Drupal\\catalog\\Attribute\\Hook;
+final class UnrelatedHooks {
+  #[Hook('theme_suggestions_alter')]
+  public function notADrupalHook(): void {}
+}
+`
+  );
   writeFixture('web/modules/custom/catalog/catalog.services.yml', 'services:\n  catalog.repository:\n    class: Drupal\\catalog\\Repository\n');
   writeFixture('web/modules/custom/catalog/catalog.routing.yml', "catalog.item:\n  path: '/catalog/{node}'\n  defaults:\n    _controller: 'Drupal\\\\catalog\\\\Controller\\\\CatalogController::view'\n");
   writeFixture('web/modules/custom/catalog/templates/catalog.html.twig', '<article>{{ title }}</article>\n');
   writeFixture('web/modules/custom/catalog/js/catalog.js', 'Drupal.behaviors.catalogFilters = {};\n');
   writeFixture('web/modules/custom/catalog/css/catalog.css', '.catalog { display: grid; }\n');
   writeFixture('web/modules/custom/catalog/components/card/card.component.yml', 'name: Card\nstatus: stable\n');
+  writeFixture('web/modules/custom/catalog/components/card/card.twig', "{% if node.title == 'Hero' %}<article>{{ content }}</article>{% endif %}\n");
   writeFixture('web/modules/custom/catalog/config/install/catalog.settings.yml', 'enabled: true\n');
   writeFixture('web/modules/custom/catalog/config/schema/catalog.schema.yml', 'catalog.settings:\n  type: config_object\n');
   writeFixture('web/modules/custom/catalog/tests/src/Kernel/CatalogTest.php', '<?php\nfinal class CatalogTest {\n  public function testCatalogRoute() {}\n}\n');
@@ -568,7 +701,105 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
     }
   }
   assert.equal(first.sourceFiles.flatMap((source) => source.surfaces).some((surface) => ['Phantom', 'Ghost'].includes(surface.name)), false);
+  const attributedHookSource = first.sourceFiles.find((source) => source.path.endsWith('/src/Hook/CatalogHooks.php'));
+  const attributedHooks = attributedHookSource.surfaces.filter((surface) => surface.kind === 'hook_or_callback');
+  assert.deepEqual(attributedHooks.map(({ hookName }) => hookName).sort(), [
+    'entity_view_alter', 'node_view', 'node_view_alter', 'preprocess_node', 'theme_suggestions_alter',
+    'theme_suggestions_node', 'theme_suggestions_node_alter'
+  ]);
+  assert.deepEqual(Object.fromEntries(attributedHooks.map(({ hookName, methodName }) => [hookName, methodName])), {
+    entity_view_alter: 'preprocessNode',
+    node_view: 'nodeView',
+    node_view_alter: 'nodeView',
+    preprocess_node: 'preprocessNode',
+    theme_suggestions_alter: '__invoke',
+    theme_suggestions_node: 'suggestNodeTemplates',
+    theme_suggestions_node_alter: 'suggestNodeAlter'
+  });
+  assert.equal(new Set(attributedHooks.map(({ id }) => id)).size, attributedHooks.length);
+  assert.ok(attributedHooks.every((surface) => surface.className === 'Drupal\\catalog\\Hook\\CatalogHooks'));
+  assert.ok(attributedHooks.every((surface) => surface.name === `${surface.className}::${surface.methodName}`));
+  assert.equal(attributedHooks.some((surface) => surface.methodName === 'helper'), false);
+  const proceduralHookSource = first.sourceFiles.find((source) => source.path.endsWith('/catalog.module'));
+  const crossProviderHook = proceduralHookSource.surfaces.find((surface) => surface.name === 'node_entity_view');
+  assert.deepEqual({
+    hookName: crossProviderHook.hookName,
+    kind: crossProviderHook.kind,
+    moduleName: crossProviderHook.moduleName
+  }, {
+    hookName: 'entity_view',
+    kind: 'hook_or_callback',
+    moduleName: 'node'
+  });
+  const defaultHookSource = first.sourceFiles.find((source) => source.path.endsWith('/src/Hook/DefaultHooks.php'));
+  const defaultHook = defaultHookSource.surfaces.find((surface) => surface.kind === 'hook_or_callback');
+  assert.deepEqual({
+    className: defaultHook.className,
+    hookName: defaultHook.hookName,
+    kind: defaultHook.kind,
+    methodName: defaultHook.methodName,
+    moduleName: defaultHook.moduleName,
+    name: defaultHook.name
+  }, {
+    className: 'Drupal\\catalog\\Hook\\DefaultHooks',
+    hookName: 'preprocess_node',
+    kind: 'hook_or_callback',
+    methodName: 'preprocessNode',
+    moduleName: '',
+    name: 'Drupal\\catalog\\Hook\\DefaultHooks::preprocessNode'
+  });
+  for (const expected of [
+    {
+      path: '/src/Hook/GroupImportHooks.php', className: 'Drupal\\catalog\\Hook\\GroupImportHooks',
+      hookName: 'theme_suggestions_node', methodName: 'suggestNodeTemplates'
+    },
+    {
+      path: '/src/Hook/NamespaceAliasHooks.php', className: 'Drupal\\catalog\\Hook\\NamespaceAliasHooks',
+      hookName: 'node_view', methodName: 'nodeView'
+    },
+    {
+      path: '/src/Hook/CommaImportHooks.php', className: 'Drupal\\catalog\\Hook\\CommaImportHooks',
+      hookName: 'entity_view', methodName: 'entityView'
+    },
+    {
+      path: '/src/Hook/EmojiStringHooks.php', className: 'Drupal\\catalog\\Hook\\EmojiStringHooks',
+      hookName: 'node_view_alter', methodName: 'nodeViewAlter'
+    },
+    {
+      path: '/src/Hook/EmojiCommentHooks.php', className: 'Drupal\\catalog\\Hook\\EmojiCommentHooks',
+      hookName: 'entity_view_alter', methodName: 'entityViewAlter'
+    },
+    {
+      path: '/src/Hook/NamedModuleHooks.php', className: 'Drupal\\catalog\\Hook\\NamedModuleHooks',
+      hookName: 'node_view', methodName: 'nodeView', moduleName: 'node'
+    },
+    {
+      path: '/src/Hook/PositionalModuleHooks.php', className: 'Drupal\\catalog\\Hook\\PositionalModuleHooks',
+      hookName: 'entity_view', methodName: 'entityView', moduleName: 'node'
+    }
+  ]) {
+    const source = first.sourceFiles.find((candidate) => candidate.path.endsWith(expected.path));
+    const surface = source.surfaces.find((candidate) => candidate.kind === 'hook_or_callback');
+    assert.deepEqual({
+      className: surface.className,
+      hookName: surface.hookName,
+      methodName: surface.methodName,
+      moduleName: surface.moduleName,
+      name: surface.name
+    }, {
+      className: expected.className,
+      hookName: expected.hookName,
+      methodName: expected.methodName,
+      moduleName: expected.moduleName ?? '',
+      name: `${expected.className}::${expected.methodName}`
+    });
+  }
+  const unrelatedHookSource = first.sourceFiles.find((source) => source.path.endsWith('/src/Hook/UnrelatedHooks.php'));
+  assert.equal(unrelatedHookSource.surfaces.some((surface) => surface.kind === 'hook_or_callback'), false);
   assert.ok(first.sourceFiles.some((source) => source.kind === 'extension_metadata'));
+  assert.ok(first.sourceFiles.some((source) =>
+    source.kind === 'twig_template' && source.path.endsWith('/components/card/card.twig')
+  ));
   writeFixture('web/modules/custom/catalog/dist/catalog.min.js', 'window.catalogBuild = true;\n');
   const builtAssetInventory = inspectCustomCodeFilesystem(projectRoot);
   assert.ok(builtAssetInventory.sourceFiles.some((source) => source.path.endsWith('/dist/catalog.min.js')));
@@ -659,6 +890,95 @@ test('custom code inventory is realpath-safe, stable, bounded, and covers Drupal
   );
   const testMethodBound = inspectCustomCodeFilesystem(testMethodRoot);
   assert.ok(testMethodBound.errors.some((error) => /exceeded 5000 discovered test methods/.test(error)));
+
+  const unresolvedRoot = mkdtempSync(join(tmpdir(), 'custom-code-unresolved-hook-'));
+  mkdirSync(join(unresolvedRoot, 'web/modules/custom/unresolved/src/Hook'), { recursive: true });
+  writeFileSync(join(unresolvedRoot, 'web/modules/custom/unresolved/unresolved.info.yml'), 'name: Unresolved\ntype: module\n');
+  writeFileSync(
+    join(unresolvedRoot, 'web/modules/custom/unresolved/src/Hook/UnresolvedHooks.php'),
+    `<?php
+namespace Drupal\\unresolved\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class UnresolvedHooks {
+  private const HOOK_NAME = 'preprocess_node';
+  #[Hook(self::HOOK_NAME)]
+  public function preprocessNode(): void {}
+}
+`
+  );
+  writeFileSync(
+    join(unresolvedRoot, 'web/modules/custom/unresolved/src/Hook/AmbiguousHooks.php'),
+    `<?php
+namespace Drupal\\unresolved\\Hook;
+final class AmbiguousHooks {
+  #[Hook('node_view')]
+  public function nodeView(): void {}
+}
+`
+  );
+  writeFileSync(
+    join(unresolvedRoot, 'web/modules/custom/unresolved/src/Hook/UnresolvedModuleHooks.php'),
+    `<?php
+namespace Drupal\\unresolved\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+final class UnresolvedModuleHooks {
+  private const PROVIDER = 'node';
+  #[Hook('node_view', module: self::PROVIDER)]
+  public function nodeView(): void {}
+}
+`
+  );
+  const unresolvedHook = inspectCustomCodeFilesystem(unresolvedRoot);
+  assert.equal(unresolvedHook.completed, false);
+  assert.ok(unresolvedHook.errors.some((error) => /UnresolvedHooks\.php:\d+ Drupal Hook attribute must declare a literal hook name\./.test(error)));
+  assert.ok(unresolvedHook.errors.some((error) => /AmbiguousHooks\.php:\d+ Hook-like attribute Hook could not be resolved to an exact imported class\./.test(error)));
+  assert.ok(unresolvedHook.errors.some((error) => /UnresolvedModuleHooks\.php:\d+ Drupal Hook attribute for node_view must declare a literal module override or NULL\./.test(error)));
+
+  const traitRoot = mkdtempSync(join(tmpdir(), 'custom-code-trait-hook-'));
+  mkdirSync(join(traitRoot, 'web/modules/custom/trait_hook/src/Hook'), { recursive: true });
+  writeFileSync(join(traitRoot, 'web/modules/custom/trait_hook/trait_hook.info.yml'), 'name: Trait hook\ntype: module\n');
+  writeFileSync(
+    join(traitRoot, 'web/modules/custom/trait_hook/src/Hook/TraitHooks.php'),
+    `<?php
+namespace Drupal\\trait_hook\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+trait NodeViewHookTrait {
+  #[Hook('node_view')]
+  public function nodeView(): void {}
+}
+final class TraitHooks {
+  use NodeViewHookTrait;
+}
+`
+  );
+  const traitHook = inspectCustomCodeFilesystem(traitRoot);
+  assert.equal(traitHook.completed, false);
+  assert.ok(traitHook.errors.some((error) => /TraitHooks\.php:\d+ Drupal Hook class Drupal\\trait_hook\\Hook\\TraitHooks uses trait composition that source inventory cannot bind exactly\./.test(error)));
+
+  const inheritanceRoot = mkdtempSync(join(tmpdir(), 'custom-code-inherited-hook-'));
+  mkdirSync(join(inheritanceRoot, 'web/modules/custom/inherited_hook/src/Hook'), { recursive: true });
+  writeFileSync(join(inheritanceRoot, 'web/modules/custom/inherited_hook/inherited_hook.info.yml'), 'name: Inherited hook\ntype: module\n');
+  writeFileSync(
+    join(inheritanceRoot, 'web/modules/custom/inherited_hook/src/Hook/BaseHooks.php'),
+    `<?php
+namespace Drupal\\inherited_hook\\Hook;
+use Drupal\\Core\\Hook\\Attribute\\Hook;
+class BaseHooks {
+  #[Hook('node_view')]
+  public function nodeView(): void {}
+}
+`
+  );
+  writeFileSync(
+    join(inheritanceRoot, 'web/modules/custom/inherited_hook/src/Hook/ChildHooks.php'),
+    `<?php
+namespace Drupal\\inherited_hook\\Hook;
+final class ChildHooks extends BaseHooks {}
+`
+  );
+  const inheritedHook = inspectCustomCodeFilesystem(inheritanceRoot);
+  assert.equal(inheritedHook.completed, false);
+  assert.ok(inheritedHook.errors.some((error) => /ChildHooks\.php:\d+ Drupal Hook class Drupal\\inherited_hook\\Hook\\ChildHooks uses parent-class inheritance that source inventory cannot bind exactly\./.test(error)));
 });
 
 test('G-CODE route and schema probes use Drupal routing, anonymous access manager, and SchemaCheckTrait', () => {
@@ -672,10 +992,8 @@ test('G-CODE route and schema probes use Drupal routing, anonymous access manage
   assert.match(CUSTOM_ROUTE_AUDIT_PHP, /anonymous_access_mismatch/);
   assert.match(CUSTOM_ROUTE_AUDIT_PHP, /expectedAnonymousAccess/);
   assert.match(CUSTOM_ROUTE_AUDIT_PHP, /custom_extension_runtime_path_mismatch/);
-  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /\$custom_route_callback_class = static function/);
   assert.doesNotMatch(CUSTOM_ROUTE_AUDIT_PHP, /function custom_route_/);
   assert.match(CUSTOM_ROUTE_AUDIT_PHP, /convertedParameterTypes/);
-  assert.match(CUSTOM_ROUTE_AUDIT_PHP, /route_scan_limit = 5000/);
   assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /SchemaCheckTrait/);
   assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /checkConfigSchema\(\$typed_config, \$config_name, \$dataset\['data'\], TRUE\)/);
   assert.match(CUSTOM_CONFIG_SCHEMA_AUDIT_PHP, /\['source' => 'active', 'data' => \$active_data\]/);
@@ -768,10 +1086,11 @@ test('G-CODE reconciliation binds every stable source surface and representative
     cleanupCommandResultHashes: [`sha256:${'9'.repeat(64)}`, `sha256:${'a'.repeat(64)}`]
   };
   const runtime = {
-    schemaVersion: 'public-kit.custom-code-inventory.2',
+    schemaVersion: 'public-kit.custom-code-inventory.3',
     completed: true,
     errors: [],
     fingerprint,
+    filesystemFingerprint: `sha256:${'c'.repeat(64)}`,
     extensions: [{ machineName: 'catalog', type: 'module' }],
     sourceFiles: [{
       id: 'SOURCE-0123456789abcdef',
@@ -798,6 +1117,8 @@ test('G-CODE reconciliation binds every stable source surface and representative
         anonymousAccess: 'allowed'
       }]
     },
+    mutableIdentityAudit: null,
+    customEntityOutputAudit: null,
     qualityAudit: bindResult({
       schemaVersion: 'public-kit.custom-code-quality.1',
       applies: true,
@@ -826,6 +1147,62 @@ test('G-CODE reconciliation binds every stable source surface and representative
       failures: []
     }),
     focusedTestExecution: null
+  };
+  const mutableIdentityAudit = {
+    schemaVersion: 'public-kit.custom-mutable-identity-audit.1',
+    inputInventoryFingerprint: runtime.filesystemFingerprint,
+    applies: true,
+    completed: true,
+    status: 'pass',
+    excludedTestFileIds: [],
+    runtimeTypeScriptSurfaceIds: [],
+    unboundRuntimeTypeScriptSurfaceIds: [],
+    runtimeJavascriptSurfaceIds: [],
+    unboundRuntimeJavascriptSurfaceIds: [],
+    expectedFileIds: ['SOURCE-0123456789abcdef'],
+    completedFileIds: ['SOURCE-0123456789abcdef'],
+    findingCount: 0,
+    blockerCount: 0,
+    entityOutputCandidates: [],
+    javascript: {
+      schemaVersion: 'public-kit.mutable-identity-worker-result.1',
+      status: 'pass',
+      files: [],
+      findings: [],
+      blockers: []
+    },
+    drupal: {
+      schemaVersion: 'public-kit.mutable-identity-drupal-ast.1',
+      completed: true,
+      status: 'pass',
+      completedFileIds: ['SOURCE-0123456789abcdef'],
+      findings: [],
+      blockers: [],
+      entityOutputCandidates: []
+    }
+  };
+  runtime.mutableIdentityAudit = {
+    ...mutableIdentityAudit,
+    resultFingerprint: customMutableIdentityResultFingerprint(mutableIdentityAudit)
+  };
+  const entityOutputAudit = {
+    schemaVersion: CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+    candidateSourceFileIds: ['SOURCE-0123456789abcdef'],
+    candidateSurfaceIds: [surfaceId],
+    typedDeclarationIds: [],
+    publicRouteCount: 1,
+    inputFingerprint: `sha256:${'b'.repeat(64)}`,
+    noExplicitVerifierMutation: false,
+    allowOwnedCacheInvalidation: true,
+    applies: false,
+    completed: true,
+    status: 'not_applicable',
+    runtime: null,
+    failures: []
+  };
+  runtime.customEntityOutputAudit = {
+    ...entityOutputAudit,
+    resultFingerprint: customEntityOutputAuditResultFingerprint(entityOutputAudit)
   };
   const capabilityKey = 'catalog_item_route';
   const review = {
@@ -882,6 +1259,76 @@ test('G-CODE reconciliation binds every stable source surface and representative
     failures: []
   });
   assert.deepEqual(customCodeReconciliationErrors(runtime, review), []);
+  const routeLevelNotApplicableRuntime = {
+    schemaVersion: CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+    completed: true,
+    status: 'not_applicable',
+    noExplicitVerifierMutation: false,
+    allowOwnedCacheInvalidation: true,
+    inputFingerprint: runtime.customEntityOutputAudit.inputFingerprint,
+    activeCandidateExtensionCount: 1,
+    applicableRouteCount: 0,
+    matchedNodeRouteCount: 0,
+    renderedRouteCount: 0,
+    dependencyCount: 0,
+    coveredDeclarationCount: 0,
+    coveredDeclarationSetSha256: '',
+    coveredCandidateSourceFileCount: 0,
+    coveredCandidateSourceFileSetSha256: '',
+    coveredCandidateSurfaceCount: 0,
+    coveredCandidateSurfaceSetSha256: '',
+    routes: [{ applies: false, matched: false, rendered: false }],
+    invalidation: {
+      status: 'pre_capture_performed_not_applicable',
+      preCaptureAttempted: true,
+      preCaptureTagCount: 3,
+      preCaptureEvidenceSha256: `sha256:${'e'.repeat(64)}`,
+      attempted: false,
+      seededCount: 0,
+      invalidatedCount: 0,
+      cleanupRequired: false,
+      cleanupCompleted: true,
+      evidenceSha256: ''
+    },
+    violations: []
+  };
+  routeLevelNotApplicableRuntime.resultFingerprint = customEntityOutputAuditResultFingerprint(routeLevelNotApplicableRuntime);
+  const routeLevelNotApplicable = structuredClone(runtime);
+  routeLevelNotApplicable.customEntityOutputAudit = {
+    ...routeLevelNotApplicable.customEntityOutputAudit,
+    runtime: routeLevelNotApplicableRuntime
+  };
+  routeLevelNotApplicable.customEntityOutputAudit.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    routeLevelNotApplicable.customEntityOutputAudit
+  );
+  assert.deepEqual(customCodeReconciliationErrors(routeLevelNotApplicable, review), []);
+  const forgedRouteLevelNotApplicable = structuredClone(routeLevelNotApplicable);
+  forgedRouteLevelNotApplicable.customEntityOutputAudit.runtime.invalidation = {
+    ...forgedRouteLevelNotApplicable.customEntityOutputAudit.runtime.invalidation,
+    status: 'not_run_due_to_not_applicable',
+    preCaptureAttempted: false,
+    preCaptureTagCount: 0,
+    preCaptureEvidenceSha256: ''
+  };
+  forgedRouteLevelNotApplicable.customEntityOutputAudit.runtime.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteLevelNotApplicable.customEntityOutputAudit.runtime
+  );
+  forgedRouteLevelNotApplicable.customEntityOutputAudit.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteLevelNotApplicable.customEntityOutputAudit
+  );
+  assert.ok(customCodeReconciliationErrors(forgedRouteLevelNotApplicable, review).some((error) =>
+    /N\/A evidence contradicts/i.test(error)
+  ));
+  const forgedRouteApplicability = structuredClone(routeLevelNotApplicable);
+  forgedRouteApplicability.customEntityOutputAudit.runtime.routes[0].applies = true;
+  forgedRouteApplicability.customEntityOutputAudit.runtime.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteApplicability.customEntityOutputAudit.runtime
+  );
+  forgedRouteApplicability.customEntityOutputAudit.resultFingerprint = customEntityOutputAuditResultFingerprint(
+    forgedRouteApplicability.customEntityOutputAudit
+  );
+  assert.ok(customCodeReconciliationErrors(forgedRouteApplicability, review)
+    .some((error) => /N\/A evidence contradicts/i.test(error)));
   assert.deepEqual(customCodeReviewReasons({ implementationQuality: { customCodeInventory: review } }), []);
   const reusedMethodCoverage = structuredClone(review);
   reusedMethodCoverage.capabilities[0].acceptanceCriteria.push({
@@ -1382,7 +1829,7 @@ test('every non-human gate has an explicit machine evaluator and a supported blo
   assert.equal(gates.gates.find((gate) => gate.id === 'G-SEO-01')?.evidenceFile, 'browser-evidence.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-PRIVACY-01')?.evidenceFile, 'negative-route-consent.json');
   assert.equal(gates.gates.find((gate) => gate.id === 'G-EDITOR-02')?.evidenceFile, 'next-cycle-verification.json');
-  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryQualityTestsRouteSchema');
+  assert.equal(MACHINE_GATE_EVALUATORS['G-CODE-01'], 'customCodeInventoryAstEntityOutputQualityTestsRouteSchema');
   assert.equal(MACHINE_GATE_EVALUATORS['G-REPRO-01'], 'disposableReproduction');
   assert.deepEqual(
     gates.gates.find((gate) => gate.id === 'G-REPRO-01'),
