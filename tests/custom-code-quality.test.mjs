@@ -174,7 +174,7 @@ function qualityFixture({
   if (phpstanConfig) writeFixture(root, 'phpstan.neon', 'parameters:\n  level: 6\n');
   const inventory = inspectCustomCodeFilesystem(root);
   assert.equal(inventory.completed, true, inventory.errors.join('\n'));
-  assert.equal(inventory.schemaVersion, 'public-kit.custom-code-inventory.2');
+  assert.equal(inventory.schemaVersion, 'public-kit.custom-code-inventory.3');
   const testFile = inventory.tests.find((candidate) => candidate.path.endsWith('CatalogTest.php'));
   const method = testFile.testMethods.find((candidate) => candidate.methodName === 'testCatalogRoute');
   const review = {

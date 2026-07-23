@@ -51,6 +51,30 @@ test('checked-in disposable reproduction fixture binds its current input bytes',
   );
 });
 
+test('entity-output smoke owns a fixed thumbnail and restores the exact managed-file inventory', () => {
+  const fixtureRoot = fileURLToPath(new URL('./fixtures/disposable-drupal/', import.meta.url));
+  const setup = readFileSync(join(fixtureRoot, 'scripts', 'setup-custom-entity-output-smoke.php'), 'utf8');
+  const cleanup = readFileSync(join(fixtureRoot, 'scripts', 'cleanup-custom-entity-output-smoke.php'), 'utf8');
+  const smoke = readFileSync(new URL('./assert-custom-entity-output-smoke.mjs', import.meta.url), 'utf8');
+  const thumbnailUuid = '4cdd2af4-6c57-43b4-a978-f80f07fa53b1';
+
+  assert.match(setup, new RegExp(`'uuid' => '${thumbnailUuid}'`));
+  assert.match(setup, /hash\('sha256', \$thumbnail_bytes\) !== '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460'/);
+  assert.match(setup, /\$file_directory \. '\/generic\.png'/);
+  assert.match(setup, /\$original_icon_base_uri !== 'public:\/\/media-icons\/generic'/);
+  assert.match(setup, /\$media_settings->set\('icon_base_uri', \$file_directory\)->save\(\)/);
+  assert.match(setup, /\(int\) \$media->get\('thumbnail'\)->target_id !== \(int\) \$thumbnail_file->id\(\)/);
+  assert.match(cleanup, new RegExp(`\\['file', '${thumbnailUuid.replaceAll('-', '\\-')}'\\]`));
+  assert.match(cleanup, /->set\('icon_base_uri', \$original_icon_base_uri\)/);
+  assert.match(cleanup, /\$state->delete\(\$icon_base_snapshot_key\)/);
+  assert.doesNotMatch(cleanup, /getStorage\('file'\)->(?:loadMultiple|delete)/);
+  assert.match(smoke, /const filesBefore = managedFileInventory\(\);/);
+  assert.match(smoke, /const mediaIconRuntimeBefore = mediaIconRuntime\(\);/);
+  assert.match(smoke, /'uuid'.*'uri'.*'filename'.*'bytesExist'/s);
+  assert.match(smoke, /assert\.deepEqual\(mediaIconRuntime\(\), mediaIconRuntimeBefore\);/);
+  assert.match(smoke, /assert\.deepEqual\(managedFileInventory\(\), filesBefore\);/);
+});
+
 function assertTrustedDisposableDdevEnvironment(ddevCalls) {
   assert.ok(ddevCalls.length > 0);
   assert.equal(new Set(ddevCalls.map((call) => call.options.env.XDG_CONFIG_HOME)).size, 1);

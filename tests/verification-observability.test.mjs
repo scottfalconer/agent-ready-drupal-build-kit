@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   cpSync,
   existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -14,7 +16,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join, parse } from 'node:path';
+import { delimiter, join, parse } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 
@@ -28,6 +30,37 @@ import {
 import { recordObservabilitySafely } from '../bin/verify.mjs';
 
 const repoRoot = join(import.meta.dirname, '..');
+const observabilityModuleUrl = new URL('../bin/verification-observability.mjs', import.meta.url).href;
+
+function runConcurrentObservabilityWriter(projectRoot, index) {
+  const source = `
+    const [moduleUrl, root, writerIndex] = process.argv.slice(1);
+    const { recordVerificationObservability } = await import(moduleUrl);
+    await recordVerificationObservability({
+      projectRoot: root,
+      timing: { totalWallClockMs: 1, phases: [] },
+      failureClass: 'ConcurrentWriter' + writerIndex,
+      runId: 'concurrent-' + writerIndex
+    });
+  `;
+  return new Promise((resolveWriter, rejectWriter) => {
+    const child = spawn(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      source,
+      observabilityModuleUrl,
+      projectRoot,
+      String(index)
+    ], { cwd: repoRoot, encoding: 'utf8' });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', rejectWriter);
+    child.on('close', (status) => {
+      if (status === 0) resolveWriter();
+      else rejectWriter(new Error(`Concurrent observability writer ${index} failed (${status}): ${stderr}`));
+    });
+  });
+}
 
 function copyTemplatePacket(projectRoot) {
   const packetDir = join(projectRoot, 'review-packet');
@@ -214,11 +247,25 @@ test('metrics recorder failures cannot escape into verifier control flow', async
 
 test('default verifier binds metrics to report bytes and storage failure preserves authority', () => {
   const verifyScript = join(repoRoot, 'bin', 'verify.mjs');
-  const run = (projectRoot) => spawnSync(
-    process.execPath,
-    [verifyScript, '--packet', 'review-packet'],
-    { cwd: projectRoot, encoding: 'utf8' }
-  );
+  const run = (projectRoot) => {
+    const stubBin = join(projectRoot, 'test-bin');
+    const ddevStub = join(stubBin, 'ddev');
+    mkdirSync(stubBin);
+    writeFileSync(ddevStub, '#!/bin/sh\nexit 1\n');
+    chmodSync(ddevStub, 0o755);
+    return spawnSync(
+      process.execPath,
+      [verifyScript, '--packet', 'review-packet'],
+      {
+        cwd: projectRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: [stubBin, process.env.PATH].filter(Boolean).join(delimiter)
+        }
+      }
+    );
+  };
 
   const controlRoot = mkdtempSync(join(tmpdir(), 'verification-performance-cli-control-'));
   const controlPacket = copyTemplatePacket(controlRoot);
@@ -465,6 +512,133 @@ test('an unevaluated verifier failure preserves known site blockers', async () =
   assert.equal(agentNext.blockers.some((blocker) => /UsageError/.test(blocker.message)), true);
   assert.deepEqual(agentNext.delta.resolved, []);
   assert.equal(agentNext.delta.resolutionUnknown, true);
+});
+
+test('concurrent first-use writers serialize history and cumulative unknown blockers', async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'verification-performance-concurrent-'));
+  const writerCount = 12;
+  await Promise.all(
+    Array.from({ length: writerCount }, (_, index) => (
+      runConcurrentObservabilityWriter(projectRoot, index)
+    ))
+  );
+
+  const stateRoot = join(projectRoot, '.agent-ready-drupal');
+  const metricsRoot = join(stateRoot, 'verification-metrics');
+  const history = readFileSync(join(metricsRoot, 'runs.jsonl'), 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const runFiles = readdirSync(join(metricsRoot, 'runs'))
+    .filter((name) => name.endsWith('.json'));
+  const agentNext = JSON.parse(readFileSync(join(stateRoot, 'agent-next.json'), 'utf8'));
+
+  assert.equal(history.length, writerCount);
+  assert.equal(new Set(history.map((record) => record.runId)).size, writerCount);
+  assert.equal(runFiles.length, writerCount);
+  assert.equal(agentNext.totalBlockerCount, writerCount);
+  assert.equal(agentNext.blockers.length, writerCount);
+  assert.equal(agentNext.delta.resolutionUnknown, true);
+  for (let index = 0; index < writerCount; index += 1) {
+    assert.equal(
+      agentNext.blockers.some((blocker) => blocker.message.includes(`ConcurrentWriter${index}`)),
+      true
+    );
+  }
+  assert.equal(existsSync(join(stateRoot, '.verification-observability-write-lock')), false);
+});
+
+test('stale lock recovery requires an exact owned lock and hostile hard links fail bounded', async () => {
+  const staleRoot = mkdtempSync(join(tmpdir(), 'verification-performance-stale-lock-'));
+  await recordVerificationObservability({
+    projectRoot: staleRoot,
+    timing: timingFixture(),
+    failureClass: 'Seed',
+    runId: 'seed'
+  });
+  const staleStateRoot = join(staleRoot, '.agent-ready-drupal');
+  const staleLock = join(staleStateRoot, '.verification-observability-write-lock');
+  mkdirSync(staleLock);
+  writeFileSync(join(staleLock, 'owner.json'), `${JSON.stringify({
+    schemaVersion: 'public-kit.verification-observability-lock.1',
+    token: '11111111-1111-4111-8111-111111111111',
+    acquiredAt: '2000-01-01T00:00:00.000Z'
+  })}\n`);
+  await recordVerificationObservability({
+    projectRoot: staleRoot,
+    timing: timingFixture(),
+    failureClass: 'AfterStale',
+    runId: 'after-stale'
+  });
+  assert.equal(existsSync(staleLock), false);
+  assert.equal(
+    readFileSync(join(staleStateRoot, 'verification-metrics', 'runs.jsonl'), 'utf8')
+      .trim().split('\n').length,
+    2
+  );
+
+  const hostileRoot = mkdtempSync(join(tmpdir(), 'verification-performance-hostile-lock-'));
+  await recordVerificationObservability({
+    projectRoot: hostileRoot,
+    timing: timingFixture(),
+    failureClass: 'Seed',
+    runId: 'seed'
+  });
+  const hostileStateRoot = join(hostileRoot, '.agent-ready-drupal');
+  const hostileLock = join(hostileStateRoot, '.verification-observability-write-lock');
+  const hostileToken = '22222222-2222-4222-8222-222222222222';
+  mkdirSync(hostileLock);
+  const hostileOwner = join(hostileLock, 'owner.json');
+  writeFileSync(hostileOwner, `${JSON.stringify({
+    schemaVersion: 'public-kit.verification-observability-lock.1',
+    token: hostileToken,
+    acquiredAt: '2000-01-01T00:00:00.000Z'
+  })}\n`);
+  const unrelatedLink = join(hostileStateRoot, '.unrelated-hard-link');
+  linkSync(hostileOwner, unrelatedLink);
+  await assert.rejects(
+    recordVerificationObservability({
+      projectRoot: hostileRoot,
+      timing: timingFixture(),
+      failureClass: 'MustNotWrite',
+      runId: 'must-not-write'
+    }),
+    /write lock owner is invalid/
+  );
+  assert.equal(existsSync(hostileLock), true);
+  assert.equal(existsSync(unrelatedLink), true);
+  assert.equal(
+    readFileSync(join(hostileStateRoot, 'verification-metrics', 'runs.jsonl'), 'utf8')
+      .trim().split('\n').length,
+    1
+  );
+});
+
+test('duplicate run ids are rejected before shared observability state changes', async () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'verification-performance-duplicate-'));
+  await recordVerificationObservability({
+    projectRoot,
+    timing: timingFixture(),
+    failureClass: 'First',
+    runId: 'duplicate'
+  });
+  const stateRoot = join(projectRoot, '.agent-ready-drupal');
+  const agentNextPath = join(stateRoot, 'agent-next.json');
+  const historyPath = join(stateRoot, 'verification-metrics', 'runs.jsonl');
+  const beforeAgentNext = readFileSync(agentNextPath, 'utf8');
+  const beforeHistory = readFileSync(historyPath, 'utf8');
+
+  await assert.rejects(
+    recordVerificationObservability({
+      projectRoot,
+      timing: timingFixture(),
+      failureClass: 'Second',
+      runId: 'duplicate'
+    }),
+    /run duplicate already exists/
+  );
+  assert.equal(readFileSync(agentNextPath, 'utf8'), beforeAgentNext);
+  assert.equal(readFileSync(historyPath, 'utf8'), beforeHistory);
 });
 
 test('agent-next bounds blocker count and message bytes while retaining totals', async () => {

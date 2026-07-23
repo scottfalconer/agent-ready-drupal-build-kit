@@ -260,6 +260,12 @@ test('npm package excludes local agent state and keeps verifier bins executable'
       assert.equal(files.has(path), true, `${path} missing from npm package`);
       assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
     }
+    for (const path of [
+      'bin/live-verification-contract.mjs',
+      'skills/agent-ready-drupal-build-kit/scripts/live-verification-contract.mjs'
+    ]) {
+      assert.equal(files.has(path), true, `${path} missing from npm package`);
+    }
     assert.equal(files.has('bin/verification-reuse.mjs'), true, 'shadow reuse module missing from npm package');
   } finally {
     unlinkSync(sentinelPath);

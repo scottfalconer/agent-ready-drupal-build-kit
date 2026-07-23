@@ -466,6 +466,9 @@ test('initializer runs from a copy containing only the installed skill directory
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /<path-to-skill>\/scripts\/verify/);
     assert.doesNotMatch(help.stdout, /node bin\/verify/);
+    if (verifier === 'verify.mjs') {
+      assert.match(help.stdout, /--source-max-routes <count>/);
+    }
   }
 
   const lifecyclePath = join(installedSkill, 'scripts', 'lifecycle.mjs');
@@ -508,6 +511,23 @@ test('initializer runs from a copy containing only the installed skill directory
   assert.equal(emptyObservabilityReport.globalChromeShadowReuse.status, 'missing');
   assert.equal(emptyObservabilityReport.globalChromeShadowReuse.actualReuseEligible, false);
 
+  const packetOnlySourceExpansion = spawnSync(process.execPath, [
+    join(installedSkill, 'scripts', 'verify.mjs'),
+    '--packet-only',
+    '--source-max-routes',
+    '2048'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(packetOnlySourceExpansion.status, 0);
+  assert.match(packetOnlySourceExpansion.stderr, /--source-max-routes cannot be combined with --packet-only/);
+
+  const excessiveSourceExpansion = spawnSync(process.execPath, [
+    join(installedSkill, 'scripts', 'verify.mjs'),
+    '--source-max-routes',
+    '8193'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.notEqual(excessiveSourceExpansion.status, 0);
+  assert.match(excessiveSourceExpansion.stderr, /integer from 1024 through 8192/);
+
   const packetOnly = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
     '--packet',
@@ -530,7 +550,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(63 files\)/);
+  assert.match(result.stdout, /is in sync \(73 files\)/);
   const canonicalObservability = join(repoRoot, 'bin', 'verification-observability.mjs');
   const installedObservability = join(skillRoot, 'scripts', 'verification-observability.mjs');
   assert.ok(
@@ -571,7 +591,10 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
     ['scripts', 'repair-browser-runtime.sh'],
     ['vendor', 'ws', '8.21.0', 'ws.mjs'],
     ['vendor', 'ws', '8.21.0', 'LICENSE'],
-    ['vendor', 'ws', '8.21.0', 'INTEGRITY.json']
+    ['vendor', 'ws', '8.21.0', 'INTEGRITY.json'],
+    ['vendor', 'acorn', '8.15.0', 'acorn.mjs'],
+    ['vendor', 'acorn', '8.15.0', 'LICENSE'],
+    ['vendor', 'acorn', '8.15.0', 'INTEGRITY.json']
   ]) {
     assert.ok(readFileSync(
       join(repoRoot, ...relativePath)
@@ -579,17 +602,27 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
       join(skillRoot, ...relativePath)
     )), `${relativePath.join('/')} drifted from the canonical runtime`);
   }
-  assert.ok(readFileSync(
-    join(repoRoot, 'bin', 'review-handoff.mjs')
-  ).equals(readFileSync(
-    join(skillRoot, 'scripts', 'review-handoff.mjs')
-  )), 'scripts/review-handoff.mjs drifted from the canonical runtime');
+  for (const verifier of [
+    'live-verification-contract.mjs',
+    'review-handoff.mjs',
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-mutable-identity-audit.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    assert.ok(readFileSync(
+      join(repoRoot, 'bin', verifier)
+    ).equals(readFileSync(
+      join(skillRoot, 'scripts', verifier)
+    )), `scripts/${verifier} drifted from the canonical runtime`);
+  }
   for (const relativePath of [
     ['scripts', 'reconcile.mjs'],
     ['scripts', 'browser-runtime-smoke.mjs'],
     ['scripts', 'setup-browser-runtime.sh'],
     ['scripts', 'repair-browser-runtime.sh'],
-    ['scripts', 'review-handoff.mjs']
+    ['scripts', 'review-handoff.mjs'],
+    ['scripts', 'mutable-identity-worker.mjs']
   ]) {
     assert.notEqual(
       statSync(join(skillRoot, ...relativePath)).mode & 0o111,
@@ -643,7 +676,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(63 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(73 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
   assert.ok(readFileSync(copiedObservability).equals(readFileSync(

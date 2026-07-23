@@ -118,6 +118,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Views own collection/listing/search routes and entity displays own repeatable detail pages; Canvas composition does not replace those Drupal primitives.
 - [ ] Composition modeling happened before implementation for every flexible landing-like route, and `pattern-map.json` records the selected owner, route rationale, sections, data sources, expected editor actions, and acceptance proof.
 - [ ] Canvas is not treated as a route mandate for `/`; every homepage, landing, campaign, splash, section landing, and presentation-heavy page has an explicit Drupal authoring owner that fits the editor mental model.
+- [ ] A verifier-observed design-led route uses Canvas when the runtime is authorable, or names an externally authenticated owner exception; packet-local reviewer declarations are not treated as exception authority.
 - [ ] Repeatable collections inside composed pages remain Drupal-owned through entities, media, entity references, Views, slots, or child components backed by Drupal data.
 - [ ] Any deviation from the declared composition owner or component model has a deviation record; silent fallback to theme-only composition or a blob component is not accepted.
 - [ ] Canvas authoring ownership: The public homepage or landing-page composition is editable in Canvas when Canvas is the selected owner.

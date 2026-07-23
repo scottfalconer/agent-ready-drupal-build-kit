@@ -32,6 +32,7 @@ import {
   captureBeforeConsentNetwork,
   captureGlobalChrome,
   captureSummary,
+  compareVerifierOwnedVisualFloor,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
   normalizeGlobalChromeContract,
@@ -40,6 +41,7 @@ import {
   validateBeforeConsentNetworkCapture,
   VERIFIER_AXE_SOURCE_SHA256,
   VERIFIER_WEBSOCKET_BUNDLE_SHA256,
+  VISUAL_PARITY_FLOOR_SCHEMA,
   verifierAxeCompletionErrors
 } from './global-chrome.mjs';
 import {
@@ -52,6 +54,19 @@ import {
   createPhaseRecorder,
   recordVerificationObservability
 } from './verification-observability.mjs';
+import {
+  customMutableIdentityAuditErrors,
+  inspectCustomMutableIdentity
+} from './custom-mutable-identity-audit.mjs';
+import {
+  CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
+  customEntityOutputAuditResultFingerprint,
+  inspectCustomEntityOutputAudit
+} from './custom-entity-output-audit.mjs';
+import {
+  createLiveVerificationReport,
+  LIVE_VERIFICATION_MODE
+} from './live-verification-contract.mjs';
 import {
   buildGlobalChromePreflightKey,
   captureGlobalChromeWithShadowPrediction,
@@ -68,6 +83,10 @@ Options:
   --packet <path>      Review packet directory (default: review-packet)
   --target-url <url>   Explicit target URL (otherwise detect current DDEV target)
   --out <path>         Report path (default: review-packet/evidence/live-verification.json)
+  --source-max-routes <count>
+                       Expand the late source crawl after owner approval (default: 1024; max: 8192)
+  --target-max-routes <count>
+                       Expand the live target route/link budget after owner approval (default: 1000; max: 8192)
   --change <id>        Bind a passing full run to an evidence-recorded repair or extension
   --checkpoint <id>    Create a create-only checkpoint for the passing change
   --reuse <mode>       Reuse experiment: off (default) or shadow (always verifies fresh)
@@ -84,16 +103,22 @@ const MAX_LIVE_ROUTE_CONCURRENCY = 12;
 const MAX_LIVE_HTTP_REQUESTS = 2_000;
 const MAX_LIVE_HTTP_TASKS = 20_000;
 const LIVE_ROUTE_DEADLINE_MS = 90_000;
+const MAX_LIVE_TARGET_ROUTES = 8_192;
+const LIVE_TARGET_BUDGET_ERROR_PATTERN =
+  /Live route verification (?:exhausted its \d+ (?:HTTP request|task) budget|exceeded its total wall-clock deadline|requires \d+ checks, exceeding the \d+ route limit)/i;
 export const SOURCE_SURFACE_LIMITS = Object.freeze({
   concurrency: 8,
-  deadlineMs: 90_000,
+  deadlineMs: 180_000,
   maxBodyBytes: 2 * 1024 * 1024,
-  maxRequests: 768,
-  maxRoutes: 512,
+  maxRequests: 2_048,
+  maxRoutes: 1_024,
   maxSitemapLocs: 5_000,
   maxSitemaps: 24,
-  maxTasks: 1_024
+  maxTasks: 2_048
 });
+const MAX_SOURCE_SURFACE_ROUTES = 8_192;
+const MAX_SOURCE_CLI_FINDINGS = 20;
+const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
 const globalChromeShadowSessions = new WeakMap();
@@ -126,6 +151,8 @@ function parseArgs(argv) {
     out: '',
     packetOnly: false,
     reuseMode: 'off',
+    sourceMaxRoutes: 0,
+    targetMaxRoutes: 0,
     targetUrl: ''
   };
   const valueOptions = new Map([
@@ -133,6 +160,8 @@ function parseArgs(argv) {
     ['--checkpoint', 'checkpointId'],
     ['--packet', 'packet'],
     ['--reuse', 'reuseMode'],
+    ['--source-max-routes', 'sourceMaxRoutes'],
+    ['--target-max-routes', 'targetMaxRoutes'],
     ['--out', 'out'],
     ['--target-url', 'targetUrl']
   ]);
@@ -167,6 +196,38 @@ function parseArgs(argv) {
   if (args.packetOnly && args.targetUrl) {
     throw new UsageError('--target-url cannot be combined with --packet-only.');
   }
+  if (args.packetOnly && args.sourceMaxRoutes) {
+    throw new UsageError('--source-max-routes cannot be combined with --packet-only.');
+  }
+  if (args.sourceMaxRoutes) {
+    const value = Number(args.sourceMaxRoutes);
+    if (
+      !Number.isSafeInteger(value) ||
+      value < SOURCE_SURFACE_LIMITS.maxRoutes ||
+      value > MAX_SOURCE_SURFACE_ROUTES
+    ) {
+      throw new UsageError(
+        `--source-max-routes must be an integer from ${SOURCE_SURFACE_LIMITS.maxRoutes} through ${MAX_SOURCE_SURFACE_ROUTES}.`
+      );
+    }
+    args.sourceMaxRoutes = value;
+  }
+  if (args.packetOnly && args.targetMaxRoutes) {
+    throw new UsageError('--target-max-routes cannot be combined with --packet-only.');
+  }
+  if (args.targetMaxRoutes) {
+    const value = Number(args.targetMaxRoutes);
+    if (
+      !Number.isSafeInteger(value) ||
+      value < MAX_LIVE_ROUTE_CHECKS ||
+      value > MAX_LIVE_TARGET_ROUTES
+    ) {
+      throw new UsageError(
+        `--target-max-routes must be an integer from ${MAX_LIVE_ROUTE_CHECKS} through ${MAX_LIVE_TARGET_ROUTES}.`
+      );
+    }
+    args.targetMaxRoutes = value;
+  }
   if (args.packetOnly && (args.changeId || args.checkpointId)) {
     throw new UsageError('Lifecycle change/checkpoint options cannot be combined with --packet-only.');
   }
@@ -184,6 +245,48 @@ function parseArgs(argv) {
     args.out = join(args.packet, 'evidence', filename);
   }
   return args;
+}
+
+export function sourceSurfaceLimitsForRouteCount(maxRoutes = SOURCE_SURFACE_LIMITS.maxRoutes) {
+  if (
+    !Number.isSafeInteger(maxRoutes) ||
+    maxRoutes < SOURCE_SURFACE_LIMITS.maxRoutes ||
+    maxRoutes > MAX_SOURCE_SURFACE_ROUTES
+  ) {
+    throw new UsageError(
+      `Source max routes must be an integer from ${SOURCE_SURFACE_LIMITS.maxRoutes} through ${MAX_SOURCE_SURFACE_ROUTES}.`
+    );
+  }
+  const scale = Math.ceil(maxRoutes / SOURCE_SURFACE_LIMITS.maxRoutes);
+  return {
+    ...SOURCE_SURFACE_LIMITS,
+    deadlineMs: SOURCE_SURFACE_LIMITS.deadlineMs * scale,
+    maxRequests: SOURCE_SURFACE_LIMITS.maxRequests * scale,
+    maxRoutes,
+    maxSitemapLocs: SOURCE_SURFACE_LIMITS.maxSitemapLocs * scale,
+    maxSitemaps: SOURCE_SURFACE_LIMITS.maxSitemaps * scale,
+    maxTasks: SOURCE_SURFACE_LIMITS.maxTasks * scale
+  };
+}
+
+export function liveTargetLimitsForRouteCount(maxRoutes = MAX_LIVE_ROUTE_CHECKS) {
+  if (
+    !Number.isSafeInteger(maxRoutes) ||
+    maxRoutes < MAX_LIVE_ROUTE_CHECKS ||
+    maxRoutes > MAX_LIVE_TARGET_ROUTES
+  ) {
+    throw new UsageError(
+      `Live target max routes must be an integer from ${MAX_LIVE_ROUTE_CHECKS} through ${MAX_LIVE_TARGET_ROUTES}.`
+    );
+  }
+  const scale = Math.ceil(maxRoutes / MAX_LIVE_ROUTE_CHECKS);
+  return {
+    concurrency: MAX_LIVE_ROUTE_CONCURRENCY,
+    deadlineMs: LIVE_ROUTE_DEADLINE_MS * scale,
+    maxRequests: MAX_LIVE_HTTP_REQUESTS * scale,
+    maxRoutes,
+    maxTasks: MAX_LIVE_HTTP_TASKS * scale
+  };
 }
 
 function isDirectRun() {
@@ -261,15 +364,22 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
     scriptPath,
     join(scriptDirectory, 'verify-packet.mjs'),
     join(scriptDirectory, 'review-handoff.mjs'),
+    join(scriptDirectory, 'live-verification-contract.mjs'),
     join(scriptDirectory, 'state-fingerprint.mjs'),
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
     join(scriptDirectory, 'verification-observability.mjs'),
     join(scriptDirectory, 'verification-reuse.mjs'),
+    join(scriptDirectory, 'custom-mutable-identity-audit.mjs'),
+    join(scriptDirectory, 'mutable-identity-worker.mjs'),
+    join(scriptDirectory, 'mutable-identity-drupal.mjs'),
+    join(scriptDirectory, 'custom-entity-output-audit.mjs'),
     join(kitRoot, 'gates.json'),
     join(kitRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js'),
     join(kitRoot, 'vendor', 'ws', '8.21.0', 'INTEGRITY.json'),
-    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs')
+    join(kitRoot, 'vendor', 'ws', '8.21.0', 'ws.mjs'),
+    join(kitRoot, 'vendor', 'acorn', '8.15.0', 'INTEGRITY.json'),
+    join(kitRoot, 'vendor', 'acorn', '8.15.0', 'acorn.mjs')
   ]
     .filter((path) => existsSync(path))
     .map((path) => relative(kitRoot, path));
@@ -884,6 +994,175 @@ function requestPathAndSearch(value) {
   }
 }
 
+function packetEvidenceReference(value, defaultDirectory) {
+  const text = String(value ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!text || text.startsWith('/') || text.split('/').includes('..')) return '';
+  return text.startsWith('evidence/') ? text : `${defaultDirectory}/${text}`;
+}
+
+function projectPacketReference(packetPath, packetReference) {
+  const prefix = String(packetPath ?? '').trim().replace(/\\/g, '/').replace(/^\.\/$/, '').replace(/^\.\//, '').replace(/\/$/, '');
+  return [prefix, packetReference].filter(Boolean).join('/');
+}
+
+export function buildReviewedBuilderVisualFallback({
+  browserEvidence,
+  blindReview,
+  independentVerification,
+  primaryRoutes = [],
+  reviewHandoff,
+  reviewHandoffIndependent,
+  reviewHandoffStateValid = false,
+  blindReviewSupportsCompletion = false,
+  independentVerificationSupportsCompletion = false
+} = {}) {
+  const errors = [];
+  const reviewer = blindReview?.reviewer ?? {};
+  const reviewerFresh = reviewer.freshContextUsed === true &&
+    reviewer.sameContextAsBuilder === false &&
+    reviewer.didNotBuildTarget === true &&
+    reviewer.inputsRestrictedToBriefTargetAndSourceTruth === true &&
+    reviewer.implementationFilesReadBeforePublicReview === false &&
+    reviewer.reviewPacketReadBeforePublicReview === false &&
+    reviewer.priorBuildConversationRead === false &&
+    reviewer.builderSummaryExcluded === true;
+  if (
+    !reviewerFresh ||
+    !['good', 'good_enough'].includes(blindReview?.summary?.verdict) ||
+    !['parity_reviewed', 'human_accepted', 'complete'].includes(blindReview?.summary?.completionState) ||
+    blindReviewSupportsCompletion !== true
+  ) {
+    errors.push('Protected-source degradation requires a fresh blind reviewer with completion-bearing route/viewport adjudication.');
+  }
+  const independentVisualClaim = (Array.isArray(independentVerification?.completionClaims)
+    ? independentVerification.completionClaims
+    : []).find((claim) => claim?.gate === 'visual' && claim?.status === 'pass');
+  if (
+    independentVerification?.summary?.verdict !== 'pass' ||
+    independentVerificationSupportsCompletion !== true ||
+    !independentVisualClaim
+  ) {
+    errors.push('Protected-source degradation requires the handoff-bound independent reviewer to pass the visual completion claim.');
+  }
+  if (reviewHandoffStateValid !== true || !/^sha256:[a-f0-9]{64}$/.test(String(reviewHandoff?.handoffDigest ?? ''))) {
+    errors.push('Protected-source degradation requires the current state-bound review handoff.');
+  }
+  const packetPath = String(reviewHandoff?.binding?.packetPath ?? '');
+  const handedOffFiles = new Map((Array.isArray(reviewHandoffIndependent?.allowedInputs?.files)
+    ? reviewHandoffIndependent.allowedInputs.files
+    : []).map((binding) => [String(binding?.path ?? ''), binding]));
+  const browserChecks = Array.isArray(browserEvidence?.publicRouteChecks) ? browserEvidence.publicRouteChecks : [];
+  const blindChecks = Array.isArray(blindReview?.routeViewportReviews) ? blindReview.routeViewportReviews : [];
+  const findings = [];
+  if (!Array.isArray(primaryRoutes) || primaryRoutes.length === 0) {
+    errors.push('Protected-source degradation requires at least one handoff-bound primary route.');
+  }
+  const viewportDimensions = {
+    desktop: { width: 1280, height: 800 },
+    mobile: { width: 390, height: 844 }
+  };
+  for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
+    const sourcePath = requestPathAndSearch(route?.sourcePath ?? route?.targetPath);
+    const targetPath = requestPathAndSearch(route?.targetPath ?? route?.sourcePath);
+    for (const viewport of ['desktop', 'mobile']) {
+      const expectedViewport = viewportDimensions[viewport];
+      const browserCheck = browserChecks.find((check) =>
+        requestPathAndSearch(check?.targetUrl) === targetPath &&
+        requestPathAndSearch(check?.sourceUrl) === sourcePath &&
+        String(check?.viewport?.name ?? '') === viewport &&
+        String(check?.captureState?.id ?? 'default') === 'default'
+      );
+      const blindCheck = blindChecks.find((check) =>
+        requestPathAndSearch(check?.route) === targetPath &&
+        String(check?.viewport ?? '') === viewport
+      );
+      const findingErrors = [];
+      if (!browserCheck || !blindCheck) {
+        findingErrors.push('fresh blind reviewer did not adjudicate the matching builder route/viewport capture');
+      } else {
+        if (
+          browserCheck.viewport?.width !== expectedViewport.width ||
+          browserCheck.viewport?.height !== expectedViewport.height
+        ) {
+          findingErrors.push('builder capture did not use the required desktop/mobile viewport');
+        }
+        if (browserCheck.visualComparison?.status !== 'pass') {
+          findingErrors.push('builder capture was not recorded as a passing comparison');
+        }
+        if (
+          !['good', 'good_enough'].includes(blindCheck.verdict) ||
+          ['actualRequestedOutcome', 'firstFoldVisualParity', 'navigationBehavior', 'contentHierarchyCompleteness', 'mediaArtworkFidelity', 'interactionParity']
+            .some((check) => blindCheck.checks?.[check] !== 'pass')
+        ) {
+          findingErrors.push('fresh blind reviewer did not pass the required visual, hierarchy, media, navigation, and interaction checks');
+        }
+        const browserSource = packetEvidenceReference(browserCheck.sourceScreenshot, 'evidence/browser');
+        const browserTarget = packetEvidenceReference(browserCheck.targetScreenshot, 'evidence/browser');
+        const blindSource = packetEvidenceReference(blindCheck.sourceScreenshot, 'evidence/blind-adversarial-review');
+        const blindTarget = packetEvidenceReference(blindCheck.targetScreenshot, 'evidence/blind-adversarial-review');
+        if (!browserSource || !browserTarget || browserSource !== blindSource || browserTarget !== blindTarget) {
+          findingErrors.push('fresh blind reviewer did not inspect the exact builder source/target captures');
+        }
+        const sourceHash = String(browserCheck.captureState?.evidenceBindings?.sourceScreenshotSha256 ?? '');
+        const targetHash = String(browserCheck.captureState?.evidenceBindings?.targetScreenshotSha256 ?? '');
+        if (
+          !/^sha256:[a-f0-9]{64}$/.test(sourceHash) ||
+          !/^sha256:[a-f0-9]{64}$/.test(targetHash) ||
+          sourceHash === targetHash
+        ) {
+          findingErrors.push('builder source/target capture hashes are missing or not distinct');
+        }
+        for (const [reference, digest] of [[browserSource, sourceHash], [browserTarget, targetHash]]) {
+          const binding = handedOffFiles.get(projectPacketReference(packetPath, reference));
+          if (!binding || binding.sha256 !== digest) {
+            findingErrors.push(`builder capture ${reference || 'missing'} is not handoff-bound to its declared sha256`);
+          }
+        }
+      }
+      findings.push({
+        sourcePath,
+        targetPath,
+        routeRole: String(route?.routeRole ?? ''),
+        viewport: { name: viewport, ...expectedViewport },
+        passed: findingErrors.length === 0,
+        errors: findingErrors,
+        sourceScreenshotSha256: String(browserCheck?.captureState?.evidenceBindings?.sourceScreenshotSha256 ?? ''),
+        targetScreenshotSha256: String(browserCheck?.captureState?.evidenceBindings?.targetScreenshotSha256 ?? '')
+      });
+      errors.push(...findingErrors.map((message) => `${targetPath || '/'} ${viewport}: ${message}.`));
+    }
+  }
+  if (findings.length !== primaryRoutes.length * 2) {
+    errors.push('Fresh blind reviewer coverage does not include every primary route at desktop and mobile viewports.');
+  }
+  const value = {
+    schemaVersion: 'public-kit.reviewed-builder-visual-fallback.1',
+    authority: 'handoff-reviewed-builder-captures',
+    verifierOwned: false,
+    completionSupported: errors.length === 0,
+    status: errors.length === 0 ? 'passed' : 'blocked',
+    handoffDigest: String(reviewHandoff?.handoffDigest ?? ''),
+    findings,
+    errors
+  };
+  return { ...value, fingerprint: stateSha256(value) };
+}
+
+export function visualParityCompletionSupport(record, { briefMode = false } = {}) {
+  if (briefMode) {
+    return record?.schemaVersion === VISUAL_PARITY_FLOOR_SCHEMA &&
+      record?.status === 'not_applicable' &&
+      record?.completionSupported === true;
+  }
+  if (record?.schemaVersion !== VISUAL_PARITY_FLOOR_SCHEMA) return false;
+  const verifierOwnedPass =
+    record?.status === 'passed' &&
+    record?.authority === 'verifier-owned-managed-browser-structural-floor' &&
+    record?.verifierOwned === true &&
+    record?.completionSupported === true;
+  return verifierOwnedPass;
+}
+
 function normalizeRouteKey(value) {
   return requestPathAndSearch(value) || normalizePath(value);
 }
@@ -1418,10 +1697,126 @@ function sourceSurfaceNotRun(reason, { status = 'not_run', authoritative = false
   };
 }
 
+export function sourceSurfaceCompletionBlocker(sourceSurfaceCensus) {
+  if (sourceSurfaceCensus?.status === 'passed') {
+    return null;
+  }
+  const budget = sourceSurfaceCensus?.budget ?? {};
+  const budgetLimited =
+    Number(budget.droppedRouteCount ?? 0) > 0 ||
+    Number(budget.droppedSitemapCount ?? 0) > 0 ||
+    Number(budget.sitemapLocCount ?? 0) > Number(budget.maxSitemapLocs ?? Number.POSITIVE_INFINITY) ||
+    budget.deadlineExceeded === true ||
+    budget.requestCapExhausted === true ||
+    budget.taskCapExhausted === true;
+  if (!budgetLimited) {
+    return {
+      code: 'source.census',
+      message: 'Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.',
+      nextAction: 'Repair the source route matrix or source response failure, refresh affected evidence, and rerun the default live verifier.',
+      origin: 'source-census-verifier:reconciliation',
+      resolutionClass: 'agent_resolvable'
+    };
+  }
+
+  const currentMaxRoutes = Math.max(
+    SOURCE_SURFACE_LIMITS.maxRoutes,
+    Number.isSafeInteger(Number(budget.maxRoutes)) ? Number(budget.maxRoutes) : SOURCE_SURFACE_LIMITS.maxRoutes
+  );
+  const canExpand = currentMaxRoutes < MAX_SOURCE_SURFACE_ROUTES;
+  const nextMaxRoutes = Math.min(MAX_SOURCE_SURFACE_ROUTES, currentMaxRoutes * 2);
+  const attemptedEvidence = [
+    `The bounded crawl attempt inspected ${Number(budget.routeCount ?? 0)} route(s), found ${Number(budget.droppedRouteCount ?? 0)} route discovery event(s) and ${Number(budget.droppedSitemapCount ?? 0)} sitemap discovery event(s) beyond their caps, parsed ${Number(budget.sitemapLocCount ?? 0)} of ${Number(budget.maxSitemapLocs ?? 0)} allowed sitemap locations, and used ${Number(budget.requestCount ?? 0)} of ${Number(budget.maxRequests ?? 0)} HTTP request(s).`
+  ];
+  return {
+    code: 'source.census-budget',
+    message: canExpand
+      ? `Core target delivery checks completed, but the verifier-owned source census exhausted a coupled crawl bound with a ${currentMaxRoutes}-route ceiling; final completion remains blocked.`
+      : `Core target delivery checks completed, but the verifier-owned source census still exhausted a coupled crawl bound at the maximum supported ${MAX_SOURCE_SURFACE_ROUTES}-route ceiling; final completion remains blocked.`,
+    attemptedEvidence,
+    missingInput: canExpand
+      ? `Owner authorization for one larger, complete ${nextMaxRoutes}-route source crawl.`
+      : 'Owner direction on a complete route-matrix treatment or a build-kit maintainer decision to extend the bounded census.',
+    nextAction: canExpand
+      ? `After owner authorization, restart the complete verifier once with: node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --source-max-routes ${nextMaxRoutes}. This expands only the verifier budget; it does not accept missing route-matrix rows. Do not combine or accept partial crawl results.`
+      : 'Record an owner-approved complete route-matrix treatment or ask a build-kit maintainer to extend the bounded census. Do not exclude reachable public routes or combine partial crawl results.',
+    origin: 'source-census-verifier:budget',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+}
+
+function sourceSurfaceNonBudgetErrors(sourceSurfaceCensus) {
+  return (Array.isArray(sourceSurfaceCensus?.errors) ? sourceSurfaceCensus.errors : [])
+    .filter((error) => !/(?:exceeded its \d+ (?:route|sitemap|URL) limit|HTTP (?:request )?budget|task budget|wall-clock deadline)/i.test(String(error)));
+}
+
+export function liveTargetBudgetCompletionBlocker(
+  metrics = {},
+  routeBudget = {},
+  currentMaxRoutes = MAX_LIVE_ROUTE_CHECKS,
+  suppressedErrorCount = 0
+) {
+  const effectiveMaxRoutes = Math.max(
+    MAX_LIVE_ROUTE_CHECKS,
+    Number.isSafeInteger(Number(currentMaxRoutes)) ? Number(currentMaxRoutes) : MAX_LIVE_ROUTE_CHECKS
+  );
+  const observedRouteCount = Number(routeBudget.routeCount ?? 0);
+  const requiredRouteCount = Number.isSafeInteger(observedRouteCount) && observedRouteCount > 0
+    ? observedRouteCount
+    : 0;
+  const canExpand = effectiveMaxRoutes < MAX_LIVE_TARGET_ROUTES
+    && requiredRouteCount <= MAX_LIVE_TARGET_ROUTES;
+  const nextMaxRoutes = Math.min(
+    MAX_LIVE_TARGET_ROUTES,
+    Math.max(effectiveMaxRoutes * 2, requiredRouteCount)
+  );
+  const attemptedEvidence = [
+    `The bounded live run scheduled ${Number(routeBudget.routeCount ?? 0)} declared route check(s) under a ${effectiveMaxRoutes}-route ceiling and used ${Number(metrics.requestCount ?? 0)} of ${Number(metrics.maxRequests ?? 0)} HTTP request(s) across route, link, redirect, and asset verification.`,
+    `${Number(suppressedErrorCount)} per-route budget-exhaustion finding(s) were consolidated into this blocker; non-budget route and link findings remain reported separately.`
+  ];
+  return {
+    code: 'target.route-budget',
+    message: canExpand
+      ? `Live target route and link verification exhausted a coupled HTTP budget under its ${effectiveMaxRoutes}-route ceiling; final completion remains blocked.`
+      : `Live target route and link verification still exhausted a coupled HTTP budget at the maximum supported ${MAX_LIVE_TARGET_ROUTES}-route ceiling; final completion remains blocked.`,
+    attemptedEvidence,
+    missingInput: canExpand
+      ? `Owner authorization for one larger, complete live target verification with a ${nextMaxRoutes}-route ceiling.`
+      : 'Owner direction on a complete route-matrix treatment or a build-kit maintainer decision to extend the bounded live target verification.',
+    nextAction: canExpand
+      ? `After owner authorization, restart the complete verifier once with: node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --target-max-routes ${nextMaxRoutes}. This expands only the verifier budget; it does not accept unrepresented links or missing route-matrix rows. Do not combine or accept partial run results.`
+      : 'Record an owner-approved complete route-matrix treatment or ask a build-kit maintainer to extend the bounded live target verification. Do not exclude reachable public routes or combine partial run results.',
+    origin: 'live-route-verifier:budget',
+    resolutionClass: 'external',
+    verifierConfirmedExternal: true
+  };
+}
+
+export function formatSourceSurfaceProgress(event = {}) {
+  const phase = event.phase === 'primary' ? 'primary routes' : 'deep discovery';
+  const elapsedSeconds = (Math.max(0, Number(event.elapsedMs ?? 0)) / 1_000).toFixed(1);
+  const parts = [
+    `Source census ${phase} ${String(event.status ?? 'progress')}:`,
+    `${Number(event.inspectedRoutes ?? 0)} inspected,`,
+    `${Number(event.discoveredRoutes ?? 0)} discovered,`,
+    `${Number(event.queuedRoutes ?? 0)} queued,`
+  ];
+  if (Number(event.droppedRoutes ?? 0) > 0) {
+    parts.push(`${Number(event.droppedRoutes)} beyond cap (not inspected),`);
+  }
+  parts.push(
+    `${Number(event.requestCount ?? 0)}/${Number(event.limits?.maxRequests ?? 0)} requests;`,
+    `${elapsedSeconds}s elapsed.`
+  );
+  return parts.join(' ');
+}
+
 export async function inspectSourceSurface({
   independentVerification = {},
   limits = {},
   liveHttpContext = null,
+  onProgress = null,
   routeMatrix = {}
 } = {}) {
   const checkedAt = new Date().toISOString();
@@ -1475,9 +1870,54 @@ export async function inspectSourceSurface({
   const sitemapProvenance = new Map();
   const routes = new Map();
   const sitemaps = [];
+  let routeCursor = 0;
   let droppedRouteCount = 0;
   let droppedSitemapCount = 0;
   let sitemapLocCount = 0;
+  let lastProgressRouteCount = 0;
+  let lastProgressAt = Date.now();
+  let progressReporterActive = typeof onProgress === 'function';
+
+  const emitProgress = (phase, status, { force = false } = {}) => {
+    if (!progressReporterActive) return;
+    const now = Date.now();
+    const inspectedRoutes = routes.size;
+    if (
+      status === 'progress' &&
+      !force &&
+      inspectedRoutes - lastProgressRouteCount < SOURCE_PROGRESS_ROUTE_INTERVAL &&
+      now - lastProgressAt < 10_000
+    ) {
+      return;
+    }
+    lastProgressAt = now;
+    lastProgressRouteCount = inspectedRoutes;
+    const metrics = context.metrics();
+    try {
+      onProgress({
+        schemaVersion: 'public-kit.source-surface-progress.1',
+        phase,
+        status,
+        discoveredRoutes: routeQueue.length,
+        inspectedRoutes,
+        queuedRoutes: Math.max(0, routeQueue.length - routeCursor),
+        droppedRoutes: droppedRouteCount,
+        discoveredSitemaps: sitemapQueue.length,
+        inspectedSitemaps: sitemaps.length,
+        requestCount: metrics.requestCount,
+        taskCount: metrics.taskCount,
+        elapsedMs: metrics.elapsedMs,
+        limits: {
+          maxRequests: effectiveLimits.maxRequests,
+          maxRoutes: effectiveLimits.maxRoutes,
+          maxTasks: effectiveLimits.maxTasks
+        }
+      });
+    } catch {
+      progressReporterActive = false;
+      warnings.push('Source census progress reporting failed; verification continued without status updates.');
+    }
+  };
 
   const addProvenance = (map, key, provenance) => {
     const records = map.get(key) ?? new Map();
@@ -1522,6 +1962,107 @@ export async function inspectSourceSurface({
   for (const route of Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []) {
     enqueueRoute(route?.sourcePath, { kind: 'declared-primary', referrer: 'route-matrix.json#primaryRoutes' });
   }
+
+  const drainRouteQueue = async (phase, { throughIndex = Number.POSITIVE_INFINITY } = {}) => {
+    while (routeCursor < routeQueue.length && routeCursor < throughIndex) {
+      const batchEnd = Math.min(
+        routeCursor + effectiveLimits.concurrency,
+        routeQueue.length,
+        throughIndex
+      );
+      const batch = routeQueue.slice(routeCursor, batchEnd);
+      routeCursor += batch.length;
+      let results;
+      try {
+        results = await context.runTasks('source-route', batch, async (path) => {
+          const url = new URL(path, sourceBaseUrl);
+          const routeErrors = [];
+          try {
+            const response = await requestFollowingRedirects(url, {
+              liveHttpContext: context,
+              maxBodyBytes: effectiveLimits.maxBodyBytes
+            });
+            const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
+            const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
+              (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
+            const metadata = isHtml ? renderedMetadata(response.body, response.finalUrl) : {};
+            const extracted = isHtml
+              ? sourceRenderedRouteLinks(response.body, response.finalUrl, sourceBaseUrl.origin)
+              : { paths: [], warnings: [] };
+            warnings.push(...extracted.warnings);
+            const boundary = sourceBoundaryKind(response.status);
+            let boundaryConfirmationStatus = 0;
+            let boundaryConfirmed = false;
+            if (boundary) {
+              try {
+                const confirmation = await requestFollowingRedirects(url, {
+                  captureBody: 'never',
+                  liveHttpContext: context,
+                  maxBodyBytes: effectiveLimits.maxBodyBytes
+                });
+                boundaryConfirmationStatus = confirmation.status;
+                boundaryConfirmed = confirmation.status === response.status;
+                if (!boundaryConfirmed) {
+                  routeErrors.push(`Source boundary ${path} changed from HTTP ${response.status} to ${confirmation.status} on immediate verifier recheck.`);
+                }
+              } catch (error) {
+                routeErrors.push(`Source boundary ${path} could not be confirmed by a second verifier request: ${error.message}`);
+              }
+            }
+            if (response.status >= 500 || response.status === 429) {
+              routeErrors.push(`Source route ${path} returned HTTP ${response.status}; public reachability cannot be established.`);
+            }
+            return {
+              bodySha256: `sha256:${sha256(response.body)}`,
+              boundaryConfirmationStatus,
+              boundaryConfirmed,
+              canonical: metadata.canonicalUrl ?? '',
+              discoveredLinks: extracted.paths,
+              errors: routeErrors,
+              finalUrl: response.finalUrl,
+              h1: isHtml ? elementText(response.body, 'h1') : '',
+              initialStatus: response.initialStatus,
+              isHtml,
+              path,
+              status: response.status,
+              title: isHtml ? elementText(response.body, 'title') : ''
+            };
+          } catch (error) {
+            return {
+              bodySha256: '', canonical: '', discoveredLinks: [],
+              boundaryConfirmationStatus: 0, boundaryConfirmed: false,
+              errors: [`Source route ${path} could not be inspected: ${error.message}`],
+              finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
+            };
+          }
+        });
+      } catch (error) {
+        errors.push(`Verifier-owned source route census could not complete within its HTTP budget: ${error.message}`);
+        return false;
+      }
+      for (const record of results) {
+        routes.set(record.path, record);
+        errors.push(...record.errors);
+        for (const linkedPath of record.discoveredLinks) {
+          enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
+        }
+        if (record.finalUrl) {
+          const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
+          if (finalPath && finalPath !== record.path) {
+            enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
+          }
+        }
+      }
+      emitProgress(phase, 'progress');
+    }
+    return true;
+  };
+
+  const primaryRouteCount = routeQueue.length;
+  emitProgress('primary', 'started', { force: true });
+  const primaryPhaseCompleted = await drainRouteQueue('primary', { throughIndex: primaryRouteCount });
+  emitProgress('primary', primaryPhaseCompleted ? 'completed' : 'blocked', { force: true });
+  emitProgress('discovery', primaryPhaseCompleted ? 'started' : 'blocked', { force: true });
 
   let robots = null;
   try {
@@ -1597,6 +2138,7 @@ export async function inspectSourceSurface({
         };
       });
       sitemaps.push(record);
+      emitProgress('discovery', 'progress', { force: true });
     } catch (error) {
       const onlyDefaultProbe = [...(sitemapProvenance.get(sitemapUrl)?.values() ?? [])]
         .every((record) => record.kind === 'default-sitemap-probe');
@@ -1606,92 +2148,7 @@ export async function inspectSourceSurface({
     }
   }
 
-  let routeCursor = 0;
-  while (routeCursor < routeQueue.length) {
-    const batch = routeQueue.slice(routeCursor, routeCursor + effectiveLimits.concurrency);
-    routeCursor += batch.length;
-    let results;
-    try {
-      results = await context.runTasks('source-route', batch, async (path) => {
-      const url = new URL(path, sourceBaseUrl);
-      const routeErrors = [];
-      try {
-        const response = await requestFollowingRedirects(url, {
-          liveHttpContext: context,
-          maxBodyBytes: effectiveLimits.maxBodyBytes
-        });
-        const contentType = String(response.headers['content-type'] ?? '').toLowerCase();
-        const isHtml = /(?:text\/html|application\/xhtml\+xml)/.test(contentType) ||
-          (!contentType && /<(?:!doctype\s+html|html)\b/i.test(response.body));
-        const metadata = isHtml ? renderedMetadata(response.body, response.finalUrl) : {};
-        const extracted = isHtml
-          ? sourceRenderedRouteLinks(response.body, response.finalUrl, sourceBaseUrl.origin)
-          : { paths: [], warnings: [] };
-        warnings.push(...extracted.warnings);
-        const boundary = sourceBoundaryKind(response.status);
-        let boundaryConfirmationStatus = 0;
-        let boundaryConfirmed = false;
-        if (boundary) {
-          try {
-            const confirmation = await requestFollowingRedirects(url, {
-              captureBody: 'never',
-              liveHttpContext: context,
-              maxBodyBytes: effectiveLimits.maxBodyBytes
-            });
-            boundaryConfirmationStatus = confirmation.status;
-            boundaryConfirmed = confirmation.status === response.status;
-            if (!boundaryConfirmed) {
-              routeErrors.push(`Source boundary ${path} changed from HTTP ${response.status} to ${confirmation.status} on immediate verifier recheck.`);
-            }
-          } catch (error) {
-            routeErrors.push(`Source boundary ${path} could not be confirmed by a second verifier request: ${error.message}`);
-          }
-        }
-        if (response.status >= 500 || response.status === 429) {
-          routeErrors.push(`Source route ${path} returned HTTP ${response.status}; public reachability cannot be established.`);
-        }
-        return {
-          bodySha256: `sha256:${sha256(response.body)}`,
-          boundaryConfirmationStatus,
-          boundaryConfirmed,
-          canonical: metadata.canonicalUrl ?? '',
-          discoveredLinks: extracted.paths,
-          errors: routeErrors,
-          finalUrl: response.finalUrl,
-          h1: isHtml ? elementText(response.body, 'h1') : '',
-          initialStatus: response.initialStatus,
-          isHtml,
-          path,
-          status: response.status,
-          title: isHtml ? elementText(response.body, 'title') : ''
-        };
-      } catch (error) {
-        return {
-          bodySha256: '', canonical: '', discoveredLinks: [],
-          boundaryConfirmationStatus: 0, boundaryConfirmed: false,
-          errors: [`Source route ${path} could not be inspected: ${error.message}`],
-          finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
-        };
-      }
-      });
-    } catch (error) {
-      errors.push(`Verifier-owned source route census could not complete within its HTTP budget: ${error.message}`);
-      break;
-    }
-    for (const record of results) {
-      routes.set(record.path, record);
-      errors.push(...record.errors);
-      for (const linkedPath of record.discoveredLinks) {
-        enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
-      }
-      if (record.finalUrl) {
-        const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
-        if (finalPath && finalPath !== record.path) {
-          enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
-        }
-      }
-    }
-  }
+  await drainRouteQueue('discovery');
 
   if (droppedRouteCount > 0) {
     errors.push(`Verifier-owned source route discovery exceeded its ${effectiveLimits.maxRoutes} route limit; ${droppedRouteCount} additional discoveries were not inspected.`);
@@ -1778,6 +2235,7 @@ export async function inspectSourceSurface({
     sitemaps: sitemapRecords,
     robots
   };
+  emitProgress('discovery', errors.length === 0 ? 'completed' : 'blocked', { force: true });
   return {
     schemaVersion: 'public-kit.source-surface-census.1',
     checkedAt,
@@ -2755,6 +3213,79 @@ $add_surface = function (string $kind, string $identity, array $metadata = []) u
   ksort($metadata, SORT_STRING);
   $items[$key] = ['key' => $key, 'kind' => $kind] + $metadata;
 };
+
+// Canvas availability is a live Drupal fact, not a builder-authored opt-out.
+// Always include one capability record so absence, availability, and a broken
+// partial installation are distinct, fingerprint-bound outcomes.
+$canvas_enabled_modules = [];
+foreach (['canvas', 'experience_builder'] as $canvas_module) {
+  if (\Drupal::moduleHandler()->moduleExists($canvas_module)) {
+    $canvas_enabled_modules[] = $canvas_module;
+  }
+}
+sort($canvas_enabled_modules, SORT_STRING);
+$canvas_page_entity_type_available = isset($definitions['canvas_page']);
+$canvas_component_config_names = $config_factory->listAll('canvas.component.');
+sort($canvas_component_config_names, SORT_STRING);
+$canvas_enabled_component_count = 0;
+foreach ($canvas_component_config_names as $component_config_name) {
+  $component_config = $config_factory->get($component_config_name)->getRawData();
+  if (($component_config['status'] ?? TRUE) === TRUE) {
+    $canvas_enabled_component_count++;
+  }
+}
+$canvas_editor_routes = [];
+if (in_array('canvas', $canvas_enabled_modules, TRUE)) {
+  try {
+    $route_provider = \Drupal::service('router.route_provider');
+    foreach (['canvas.boot.empty', 'canvas.boot.entity'] as $route_name) {
+      $route_provider->getRouteByName($route_name);
+      $canvas_editor_routes[] = $route_name;
+    }
+  }
+  catch (\Throwable) {
+    // A partial route set is recorded as a broken capability below.
+  }
+}
+sort($canvas_editor_routes, SORT_STRING);
+$canvas_capability_status = 'unavailable';
+$canvas_capability_reason_codes = [];
+if ($canvas_enabled_modules !== []) {
+  $canvas_capability_status = 'broken';
+  if (!in_array('canvas', $canvas_enabled_modules, TRUE)) {
+    $canvas_capability_reason_codes[] = 'unsupported-experience-builder-mapping';
+  }
+  if (!$canvas_page_entity_type_available) {
+    $canvas_capability_reason_codes[] = 'canvas-page-entity-type-missing';
+  }
+  if ($canvas_enabled_component_count === 0) {
+    $canvas_capability_reason_codes[] = 'no-enabled-canvas-components';
+  }
+  if (count($canvas_editor_routes) !== 2) {
+    $canvas_capability_reason_codes[] = 'canvas-editor-routes-missing';
+  }
+  if (
+    in_array('canvas', $canvas_enabled_modules, TRUE) &&
+    $canvas_page_entity_type_available &&
+    $canvas_enabled_component_count > 0 &&
+    count($canvas_editor_routes) === 2
+  ) {
+    $canvas_capability_status = 'available';
+    $canvas_capability_reason_codes = [];
+  }
+}
+$add_surface('canvas_capability', 'runtime', [
+  'available' => $canvas_capability_status === 'available',
+  'componentConfigCount' => count($canvas_component_config_names),
+  'editorRoutes' => $canvas_editor_routes,
+  'enabledModules' => $canvas_enabled_modules,
+  'enabledComponentCount' => $canvas_enabled_component_count,
+  'frontPage' => $normalize_path($config_factory->get('system.site')->get('page.front') ?? ''),
+  'mapping' => 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity',
+  'pageEntityTypeAvailable' => $canvas_page_entity_type_available,
+  'reasonCodes' => $canvas_capability_reason_codes,
+  'status' => $canvas_capability_status,
+]);
 $bounded_ids = function ($query, string $context) use (&$truncated, &$errors, $surface_limit): array {
   try {
     $ids = array_values($query->range(0, $surface_limit + 1)->execute());
@@ -2977,14 +3508,58 @@ if (isset($definitions['canvas_page']) && $definitions['canvas_page'] instanceof
   }
   foreach ($manager->getStorage('canvas_page')->loadMultiple($bounded_ids($query, 'Published Canvas page')) as $page) {
     $uuid = method_exists($page, 'uuid') ? (string) $page->uuid() : (string) $page->id();
+    $entity_id = (string) $page->id();
     $path = '';
+    $internal_path = '';
+    $editor_path = '';
+    $component_count = 0;
+    $top_level_component_count = 0;
+    $component_topology_sha256 = '';
     try {
-      $path = $page->toUrl('canonical')->toString();
+      $url = $page->toUrl('canonical');
+      $path = $url->toString();
+      $internal_path = $normalize_path($url->getInternalPath());
+      $editor_path = $normalize_path($page->toUrl('edit-form')->getInternalPath());
     }
     catch (\Throwable) {
       // A missing canonical link remains visible as a page with an empty path.
     }
-    $add_surface('canvas_page', $uuid, ['path' => $normalize_path($path)]);
+    try {
+      $component_values = $page->hasField('components') ? $page->get('components')->getValue() : [];
+      $component_count = count($component_values);
+      $component_topology = [];
+      foreach ($component_values as $component_value) {
+        $parent_uuid = trim((string) ($component_value['parent_uuid'] ?? ''));
+        if ($parent_uuid === '') {
+          $top_level_component_count++;
+        }
+        $component_topology[] = [
+          'componentId' => (string) ($component_value['component_id'] ?? ''),
+          'componentVersion' => (string) ($component_value['component_version'] ?? ''),
+          'parentUuid' => $parent_uuid,
+          'slot' => (string) ($component_value['slot'] ?? ''),
+          'uuid' => (string) ($component_value['uuid'] ?? ''),
+        ];
+      }
+      $encoded_topology = json_encode($component_topology, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+      $component_topology_sha256 = 'sha256:' . hash(
+        'sha256',
+        $encoded_topology === FALSE ? serialize($component_topology) : $encoded_topology
+      );
+    }
+    catch (\Throwable) {
+      $errors[] = 'Published Canvas page component count failed for ' . $uuid . '.';
+    }
+    $add_surface('canvas_page', $uuid, [
+      'componentCount' => $component_count,
+      'componentTopologySha256' => $component_topology_sha256,
+      'editorPath' => $editor_path,
+      'entityId' => $entity_id,
+      'internalPath' => $internal_path,
+      'path' => $normalize_path($path),
+      'topLevelComponentCount' => $top_level_component_count,
+      'uuid' => $uuid,
+    ]);
   }
 }
 
@@ -3826,6 +4401,263 @@ export function inspectDrupalLiveSurface(projectRoot, environment) {
       truncated: false
     };
   }
+}
+
+const CANVAS_AVAILABILITY_SCHEMA = 'public-kit.canvas-runtime-availability.1';
+const CANVAS_MODULES = new Set(['canvas', 'experience_builder']);
+const CANVAS_CAPABILITY_STATUSES = new Set(['available', 'broken', 'unavailable']);
+const CANVAS_OWNER_IDS = new Set(['canvas_page', 'experience_builder_page']);
+const CANVAS_RUNTIME_MAPPING = 'canvas:canvas_page:canvas.component.:canvas.boot.empty+canvas.boot.entity';
+
+export function canvasAvailabilityFromLiveSurface(inventory = {}) {
+  const capabilityRecords = (Array.isArray(inventory?.items) ? inventory.items : [])
+    .filter((item) => item?.kind === 'canvas_capability' && item?.key === 'canvas_capability:runtime');
+  const capability = capabilityRecords[0] ?? {};
+  const enabledModules = Array.isArray(capability?.enabledModules)
+    ? capability.enabledModules.map((module) => String(module ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const editorRoutes = Array.isArray(capability?.editorRoutes)
+    ? capability.editorRoutes.map((route) => String(route ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const reasonCodes = Array.isArray(capability?.reasonCodes)
+    ? capability.reasonCodes.map((reason) => String(reason ?? '').trim()).filter(Boolean).sort(comparePortable)
+    : [];
+  const status = String(capability?.status ?? '');
+  const frontPage = normalizePath(capability?.frontPage);
+  const componentConfigCount = Number(capability?.componentConfigCount);
+  const enabledComponentCount = Number(capability?.enabledComponentCount);
+  const structurallyValid =
+    inventory?.confirmed === true &&
+    capabilityRecords.length === 1 &&
+    enabledModules.every((module) => CANVAS_MODULES.has(module)) &&
+    new Set(enabledModules).size === enabledModules.length &&
+    new Set(editorRoutes).size === editorRoutes.length &&
+    new Set(reasonCodes).size === reasonCodes.length &&
+    CANVAS_CAPABILITY_STATUSES.has(status) &&
+    capability?.mapping === CANVAS_RUNTIME_MAPPING &&
+    Number.isSafeInteger(componentConfigCount) && componentConfigCount >= 0 &&
+    Number.isSafeInteger(enabledComponentCount) && enabledComponentCount >= 0 &&
+    enabledComponentCount <= componentConfigCount &&
+    typeof capability?.pageEntityTypeAvailable === 'boolean' &&
+    typeof capability?.available === 'boolean' &&
+    capability.available === (status === 'available') &&
+    (status !== 'unavailable' || enabledModules.length === 0) &&
+    (status !== 'broken' || reasonCodes.length > 0) &&
+    (status !== 'available' || (
+      enabledModules.includes('canvas') &&
+      capability.pageEntityTypeAvailable === true &&
+      enabledComponentCount > 0 &&
+      ['canvas.boot.empty', 'canvas.boot.entity'].every((route) => editorRoutes.includes(route)) &&
+      reasonCodes.length === 0
+    ));
+  const value = {
+    schemaVersion: CANVAS_AVAILABILITY_SCHEMA,
+    authority: 'verifier-owned-live-drupal-inventory',
+    confirmed: structurallyValid,
+    status: structurallyValid ? status : 'unknown',
+    available: structurallyValid && status === 'available',
+    componentConfigCount: Number.isSafeInteger(componentConfigCount) ? componentConfigCount : 0,
+    editorRoutes,
+    enabledModules,
+    enabledComponentCount: Number.isSafeInteger(enabledComponentCount) ? enabledComponentCount : 0,
+    frontPage,
+    mapping: String(capability?.mapping ?? ''),
+    pageEntityTypeAvailable: capability?.pageEntityTypeAvailable === true,
+    reasonCodes,
+    liveSurfaceFingerprint: String(inventory?.fingerprint ?? ''),
+    reason: structurallyValid
+      ? ''
+      : inventory?.confirmed !== true
+        ? String(inventory?.reason ?? 'Drupal live public-surface inventory is unavailable.')
+        : 'Drupal live public-surface inventory did not contain one valid Canvas capability record.'
+  };
+  return { ...value, fingerprint: stateSha256(value) };
+}
+
+export function canvasAvailabilityReconciliationErrors(patternMap = {}, runtimeAvailability = {}) {
+  const errors = [];
+  if (
+    runtimeAvailability?.schemaVersion !== CANVAS_AVAILABILITY_SCHEMA ||
+    runtimeAvailability?.authority !== 'verifier-owned-live-drupal-inventory' ||
+    runtimeAvailability?.confirmed !== true ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(runtimeAvailability?.liveSurfaceFingerprint ?? ''))
+  ) {
+    return [
+      `Canvas availability could not be confirmed from the verifier-owned live Drupal inventory${runtimeAvailability?.reason ? `: ${runtimeAvailability.reason}` : '.'}`
+    ];
+  }
+
+  const buildType = String(patternMap?.buildTypeDeclaration?.type ?? '').trim();
+  const owners = Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : [];
+  const availabilityClaims = owners
+    .filter((owner) => typeof owner?.canvasOrExperienceBuilderAvailable === 'boolean')
+    .map((owner) => owner.canvasOrExperienceBuilderAvailable);
+  if (new Set(availabilityClaims).size > 1) {
+    errors.push('pageCompositionOwnership contains mixed Canvas availability claims for one live Drupal runtime.');
+  }
+  if (availabilityClaims.some((claim) => claim !== runtimeAvailability.available)) {
+    errors.push(
+      `Authored Canvas availability does not match the verifier-owned live Drupal runtime: runtime available=${runtimeAvailability.available}.`
+    );
+  }
+  if (
+    buildType === 'constrained_fallback_canvas_unavailable_or_blocked' &&
+    runtimeAvailability.status !== 'unavailable'
+  ) {
+    errors.push(
+      `The constrained Canvas-unavailable fallback is invalid because the verifier-owned live Drupal capability status is ${runtimeAvailability.status}; only confirmed module absence permits this fallback.`
+    );
+  }
+  if (
+    [
+      'structured_drupal_native_canvas_unused',
+      'hybrid_structured_content_plus_canvas',
+      'canvas_heavy_with_structured_data'
+    ].includes(buildType) &&
+    runtimeAvailability.status !== 'available'
+  ) {
+    errors.push(
+      `Build type ${buildType} requires a confirmed authorable Canvas runtime; use the constrained fallback only when the verifier confirms Canvas is absent.`
+    );
+  }
+  return errors;
+}
+
+export function canvasRouteOwnershipReconciliationErrors(
+  patternMap = {},
+  liveSurfaceInventory = {},
+  independentVerification = {},
+  browserEvidence = {},
+  targetOrigin = ''
+) {
+  if (liveSurfaceInventory?.confirmed !== true) {
+    return ['Canvas route ownership could not be reconciled because the live Drupal surface inventory is unavailable.'];
+  }
+  const items = Array.isArray(liveSurfaceInventory?.items) ? liveSurfaceInventory.items : [];
+  const capability = items.find((item) =>
+    item?.kind === 'canvas_capability' && item?.key === 'canvas_capability:runtime'
+  );
+  const frontPage = normalizePath(capability?.frontPage);
+  const aliases = items.filter((item) => item?.kind === 'alias');
+  const canvasPages = items.filter((item) => item?.kind === 'canvas_page').map((item) => {
+    const paths = new Set([normalizePath(item?.path), normalizePath(item?.internalPath)].filter(Boolean));
+    for (const alias of aliases) {
+      if (paths.has(normalizePath(alias?.internalPath))) {
+        const publicAlias = normalizePath(alias?.alias);
+        if (publicAlias) paths.add(publicAlias);
+      }
+    }
+    if (frontPage && paths.has(frontPage)) paths.add('/');
+    return { item, paths };
+  });
+  const componentChecks = Array.isArray(independentVerification?.canvasComponentModelChecks)
+    ? independentVerification.canvasComponentModelChecks
+    : [];
+  const authoringChecks = Array.isArray(browserEvidence?.canvasAuthoringChecks)
+    ? browserEvidence.canvasAuthoringChecks
+    : [];
+  const errors = [];
+  for (const owner of Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : []) {
+    const targetPath = normalizePath(owner?.targetRoute ?? owner?.sourceRoute);
+    if (!targetPath) continue;
+    const liveCanvasPages = canvasPages.filter((page) => page.paths.has(targetPath));
+    const liveCanvasMatches = liveCanvasPages.length;
+    const selectedCanvas = CANVAS_OWNER_IDS.has(String(owner?.selectedOwner ?? '').trim());
+    if (selectedCanvas && liveCanvasMatches !== 1) {
+      errors.push(`Canvas-selected route ${targetPath} must resolve to exactly one published canvas_page in the live Drupal inventory; found ${liveCanvasMatches}.`);
+    }
+    if (!selectedCanvas && liveCanvasMatches > 0) {
+      errors.push(`Route ${targetPath} is declared as non-Canvas but resolves to a published canvas_page in the live Drupal inventory.`);
+    }
+    if (selectedCanvas && liveCanvasMatches === 1) {
+      const sourcePath = normalizePath(owner?.sourceRoute ?? owner?.sourcePath);
+      const matchingChecks = componentChecks.filter((check) =>
+        normalizePath(check?.sourceRoute ?? check?.sourcePath) === sourcePath &&
+        normalizePath(check?.publicRoute ?? check?.targetRoute ?? check?.targetPath) === targetPath
+      );
+      const liveCount = Number(liveCanvasPages[0].item?.componentCount);
+      const liveTopLevelCount = Number(liveCanvasPages[0].item?.topLevelComponentCount);
+      const liveTopology = String(liveCanvasPages[0].item?.componentTopologySha256 ?? '');
+      if (
+        matchingChecks.length !== 1 ||
+        !Number.isSafeInteger(liveCount) ||
+        liveCount <= 0 ||
+        !Number.isSafeInteger(liveTopLevelCount) ||
+        liveTopLevelCount <= 0 ||
+        matchingChecks[0]?.actualComponentCount !== liveCount ||
+        matchingChecks[0]?.actualTopLevelComponentCount !== liveTopLevelCount ||
+        matchingChecks[0]?.actualComponentTopologySha256 !== liveTopology ||
+        !/^sha256:[a-f0-9]{64}$/.test(liveTopology)
+      ) {
+        errors.push(`Canvas-selected route ${targetPath} must bind its independent component inventory to the verifier-observed live count and topology digest.`);
+      }
+      const matchingAuthoringChecks = authoringChecks.filter((check) =>
+        normalizePath(check?.publicRoute) === targetPath
+      );
+      const canvasPageId = String(liveCanvasPages[0].item?.entityId ?? '').trim();
+      const expectedEditorPath = normalizePath(liveCanvasPages[0].item?.editorPath);
+      let editorUrlMatches = false;
+      try {
+        const editorUrl = new URL(String(matchingAuthoringChecks[0]?.canvasEditorUrl ?? ''));
+        editorUrlMatches =
+          Boolean(targetOrigin) &&
+          editorUrl.origin === targetOrigin &&
+          normalizePath(editorUrl.pathname) === normalizePath(expectedEditorPath);
+      } catch {
+        editorUrlMatches = false;
+      }
+      if (matchingAuthoringChecks.length !== 1 || !canvasPageId || !expectedEditorPath || !editorUrlMatches) {
+        errors.push(`Canvas-selected route ${targetPath} must bind its authoring check to the exact live Canvas entity editor URL.`);
+      }
+    }
+  }
+  return errors;
+}
+
+export function observedComposedRouteReconciliationErrors({
+  patternMap = {},
+  runtimeAvailability = {},
+  visualParityFloor = {}
+} = {}) {
+  const observedRoutes = new Map();
+  for (const finding of Array.isArray(visualParityFloor?.findings) ? visualParityFloor.findings : []) {
+    if (finding?.designLedComposition !== true) continue;
+    const targetPath = normalizePath(finding?.targetPath);
+    const sourcePath = normalizePath(finding?.sourcePath);
+    if (targetPath) observedRoutes.set(`${sourcePath}\0${targetPath}`, { sourcePath, targetPath });
+  }
+  const flexibleRoutes = Array.isArray(patternMap?.compositionModel?.flexibleLandingRoutes)
+    ? patternMap.compositionModel.flexibleLandingRoutes
+    : [];
+  const owners = Array.isArray(patternMap?.pageCompositionOwnership)
+    ? patternMap.pageCompositionOwnership
+    : [];
+  const errors = [];
+  for (const { sourcePath, targetPath } of observedRoutes.values()) {
+    const matchesPair = (record) =>
+      normalizePath(record?.sourceRoute ?? record?.sourcePath) === sourcePath &&
+      normalizePath(record?.targetRoute ?? record?.targetPath ?? record?.publicRoute) === targetPath;
+    const routeMatches = flexibleRoutes.filter(matchesPair);
+    const ownerMatches = owners.filter(matchesPair);
+    if (routeMatches.length !== 1 || ownerMatches.length !== 1) {
+      errors.push(`Verifier-observed composed route ${targetPath} must have exactly one flexible-route and page-owner declaration, regardless of builder-selected routeRole/pageType labels.`);
+      continue;
+    }
+    const owner = ownerMatches[0];
+    if (
+      runtimeAvailability?.status === 'available' &&
+      !CANVAS_OWNER_IDS.has(String(owner?.selectedOwner ?? '').trim())
+    ) {
+      errors.push(
+        `Verifier-observed design-led route ${targetPath} requires Canvas or an externally authenticated owner exception while the live runtime is authorable; packet-local reviewer declarations cannot authorize the exception.`
+      );
+    }
+  }
+  return errors;
 }
 
 function declaredPublicReferenceFields(fieldOutputMatrix) {
@@ -4844,8 +5676,12 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
   if (String(reconciliation.inventoryFingerprint ?? '') !== String(liveInventory.fingerprint ?? '')) {
     push('drupal-readback.json liveSurfaceReconciliation inventoryFingerprint does not match the current live-derived Drupal surface.');
   }
+  const reconciliationControlKinds = new Set(['canvas_capability']);
   const expectedCounts = liveInventory?.countsByKind && typeof liveInventory.countsByKind === 'object'
-    ? liveInventory.countsByKind
+    ? Object.fromEntries(
+        Object.entries(liveInventory.countsByKind)
+          .filter(([kind]) => !reconciliationControlKinds.has(String(kind)))
+      )
     : {};
   const recordedCounts = reconciliation?.countsByKind && typeof reconciliation.countsByKind === 'object'
     ? reconciliation.countsByKind
@@ -4861,7 +5697,8 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
 
   const declarations = Array.isArray(reconciliation.declarations) ? reconciliation.declarations : [];
   const exclusions = Array.isArray(reconciliation.exclusions) ? reconciliation.exclusions : [];
-  const liveItems = Array.isArray(liveInventory.items) ? liveInventory.items : [];
+  const liveItems = (Array.isArray(liveInventory.items) ? liveInventory.items : [])
+    .filter((item) => !reconciliationControlKinds.has(String(item?.kind ?? '')));
   const liveByKey = new Map(liveItems.map((item) => [String(item?.key ?? ''), item]));
   const declaredByKey = new Map();
   const excludedByKey = new Map();
@@ -4935,7 +5772,7 @@ function ddevDocroot(projectRoot) {
   }
 }
 
-const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.2';
+const CUSTOM_CODE_SCHEMA = 'public-kit.custom-code-inventory.3';
 const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
 const CUSTOM_CODE_QUALITY_SCHEMA = 'public-kit.custom-code-quality.1';
 const CUSTOM_CODE_TEST_EXECUTION_SCHEMA = 'public-kit.custom-code-test-execution.1';
@@ -5162,11 +5999,14 @@ function customSourceKind(extensionRelativePath) {
   if (/\.php$/.test(filename)) {
     return 'php_class';
   }
-  if (/\.html\.twig$/.test(filename)) {
+  if (/\.twig$/.test(filename)) {
     return 'twig_template';
   }
-  if (/\.(?:js|mjs|ts)$/.test(filename)) {
+  if (/\.(?:js|mjs)$/.test(filename)) {
     return 'javascript';
+  }
+  if (/\.ts$/.test(filename)) {
+    return 'typescript_source';
   }
   if (/\.(?:css|less|sass|scss)$/.test(filename)) {
     return 'stylesheet';
@@ -5181,7 +6021,11 @@ function customSourceFileEligible(extensionRelativePath) {
   const normalized = extensionRelativePath.split(sep).join('/');
   const segments = normalized.toLowerCase().split('/');
   const filename = basename(normalized).toLowerCase();
-  if (segments.some((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment)) || filename.startsWith('.')) {
+  const kind = customSourceKind(normalized);
+  const excludedSegments = segments.filter((segment) => CUSTOM_SOURCE_EXCLUDED_SEGMENTS.has(segment));
+  const testScript = ['javascript', 'typescript_source'].includes(kind) &&
+    excludedSegments.length > 0 && excludedSegments.every((segment) => ['test', 'tests'].includes(segment));
+  if ((excludedSegments.length > 0 && !testScript) || filename.startsWith('.')) {
     return false;
   }
   if (/\.map$/.test(filename) || /^(?:readme|changelog|license)(?:\.|$)/.test(filename)) {
@@ -5220,14 +6064,402 @@ function sourceLineLocator(text) {
   };
 }
 
-function customSourceSurface(extension, path, kind, name, locateLine, index = 0) {
-  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}`;
+function customSourceSurface(extension, path, kind, name, locateLine, index = 0, details = {}) {
+  const { identitySuffix = '', ...surfaceDetails } = details;
+  const identity = `${extension}\u0000${path}\u0000${kind}\u0000${name}\u0000${identitySuffix}`;
   return {
     id: `SURFACE-${sha256(identity).slice(0, 16)}`,
     kind,
     name,
-    line: locateLine(index)
+    line: locateLine(index),
+    ...surfaceDetails
   };
+}
+
+const DRUPAL_HOOK_ATTRIBUTE_CLASS = 'Drupal\\Core\\Hook\\Attribute\\Hook';
+const CUSTOM_OUTPUT_PROCEDURAL_HOOK_NAMES = Object.freeze([
+  'theme_suggestions_node_alter',
+  'theme_suggestions_node',
+  'theme_suggestions_alter',
+  'entity_view_alter',
+  'node_view_alter',
+  'preprocess_node',
+  'entity_view',
+  'node_view'
+]);
+
+function phpMatchingAttributeEnd(masked, start, limit = masked.length) {
+  if (masked.slice(start, start + 2) !== '#[') return -1;
+  let depth = 1;
+  for (let index = start + 2; index < limit; index += 1) {
+    if (masked[index] === '[') {
+      depth += 1;
+    } else if (masked[index] === ']') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function phpTopLevelParts(text, masked = phpCodeMask(text)) {
+  const parts = [];
+  let start = 0;
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < masked.length; index += 1) {
+    if (masked[index] === '(') parentheses += 1;
+    else if (masked[index] === ')') parentheses = Math.max(0, parentheses - 1);
+    else if (masked[index] === '[') brackets += 1;
+    else if (masked[index] === ']') brackets = Math.max(0, brackets - 1);
+    else if (masked[index] === '{') braces += 1;
+    else if (masked[index] === '}') braces = Math.max(0, braces - 1);
+    else if (masked[index] === ',' && parentheses === 0 && brackets === 0 && braces === 0) {
+      parts.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+function phpNamespaceImports(masked) {
+  const imports = new Map();
+  const errors = [];
+  const firstClass = masked.search(/(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+[A-Za-z_]/);
+  const header = firstClass === -1 ? masked : masked.slice(0, firstClass);
+  const addImport = (target, alias, index) => {
+    const normalizedTarget = String(target).replace(/^\\/, '');
+    const normalizedAlias = String(alias).toLowerCase();
+    const previous = imports.get(normalizedAlias);
+    if (previous && previous.toLowerCase() !== normalizedTarget.toLowerCase()) {
+      errors.push({ index, message: `PHP import alias ${alias} resolves to multiple classes or namespaces.` });
+      return;
+    }
+    imports.set(normalizedAlias, normalizedTarget);
+  };
+  const addClause = (clause, prefix, index) => {
+    const imported = clause.match(/^\s*(?:(?:function|const)\s+)?([\\A-Za-z_][\\A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$/i);
+    if (!imported || /^\s*(?:function|const)\s+/i.test(clause)) {
+      if (/\bHook\b/i.test(clause)) {
+        errors.push({ index, message: 'Hook-like PHP import could not be resolved.' });
+      }
+      return;
+    }
+    const target = `${prefix ? `${prefix.replace(/\\$/, '')}\\` : ''}${imported[1].replace(/^\\/, '')}`;
+    const alias = imported[2] || target.split('\\').at(-1);
+    addImport(target, alias, index);
+  };
+  const importPattern = /^[ \t]*use\s+(?!function\b|const\b)([\s\S]*?);/gmi;
+  for (const match of header.matchAll(importPattern)) {
+    const index = match.index ?? 0;
+    for (const declaration of phpTopLevelParts(match[1])) {
+      const openBrace = declaration.indexOf('{');
+      if (openBrace === -1) {
+        addClause(declaration, '', index);
+        continue;
+      }
+      const beforeBrace = declaration.slice(0, openBrace).trim();
+      const closeBrace = declaration.lastIndexOf('}');
+      if (!beforeBrace.endsWith('\\') || closeBrace < openBrace || declaration.slice(closeBrace + 1).trim()) {
+        if (/\bHook\b/i.test(declaration)) {
+          errors.push({ index, message: 'Hook-like PHP group import could not be resolved.' });
+        }
+        continue;
+      }
+      const prefix = beforeBrace.slice(0, -1);
+      for (const member of phpTopLevelParts(declaration.slice(openBrace + 1, closeBrace))) {
+        addClause(member, prefix, index);
+      }
+    }
+  }
+  return { errors, imports };
+}
+
+function phpResolvedAttributeClass(attributeName, namespace, imports) {
+  const absolute = attributeName.startsWith('\\');
+  const normalized = attributeName.replace(/^\\/, '');
+  if (absolute) return normalized;
+  const parts = normalized.split('\\');
+  const imported = imports.get(parts[0].toLowerCase());
+  if (imported) return [imported, ...parts.slice(1)].join('\\');
+  return namespace ? `${namespace}\\${normalized}` : normalized;
+}
+
+function phpAttributeArgument(argumentsList, name, positionalIndex) {
+  let positional = 0;
+  for (const argument of argumentsList) {
+    const named = argument.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)\s*([\s\S]*)$/);
+    if (named) {
+      if (named[1].toLowerCase() === name.toLowerCase()) {
+        return { present: true, raw: named[2] };
+      }
+      continue;
+    }
+    if (positional === positionalIndex) return { present: true, raw: argument };
+    positional += 1;
+  }
+  return { present: false, raw: '' };
+}
+
+function phpLiteralIdentifier(value, pattern) {
+  const literal = String(value ?? '').match(/^\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*$/);
+  return literal && pattern.test(literal[2]) ? literal[2] : '';
+}
+
+function phpLiteralEmptyString(value) {
+  return /^\s*(['"])\1\s*$/.test(String(value ?? ''));
+}
+
+function phpDrupalHooksFromAttributeGroup(text, masked, start, end, namespace, imports) {
+  const rawBody = text.slice(start + 2, end);
+  const maskedBody = masked.slice(start + 2, end);
+  const expressions = phpTopLevelParts(rawBody, maskedBody);
+  const hooks = [];
+  const errors = [];
+  for (const expression of expressions) {
+    const attributeName = expression.match(/^\s*([\\A-Za-z_][\\A-Za-z0-9_]*)/)?.[1] ?? '';
+    if (!attributeName) continue;
+    const resolvedName = phpResolvedAttributeClass(attributeName, namespace, imports);
+    if (resolvedName.toLowerCase() !== DRUPAL_HOOK_ATTRIBUTE_CLASS.toLowerCase()) {
+      const parts = attributeName.replace(/^\\/, '').split('\\');
+      const explicitlyResolved = attributeName.startsWith('\\') || imports.has(parts[0].toLowerCase());
+      if (parts.length === 1 && parts[0].toLowerCase() === 'hook' && !explicitlyResolved) {
+        errors.push({ index: start, message: `Hook-like attribute ${attributeName} could not be resolved to an exact imported class.` });
+      }
+      continue;
+    }
+    const attribute = expression.match(/^\s*[\\A-Za-z_][\\A-Za-z0-9_]*\s*\(([\s\S]*)\)\s*$/);
+    if (!attribute) {
+      errors.push({ index: start, message: 'Drupal Hook attribute arguments could not be resolved.' });
+      continue;
+    }
+    const argumentsList = phpTopLevelParts(attribute[1]);
+    const hookArgument = phpAttributeArgument(argumentsList, 'hook', 0);
+    const hookName = hookArgument.present
+      ? phpLiteralIdentifier(hookArgument.raw, /^[a-z][a-z0-9_]*$/i)
+      : '';
+    if (!hookName) {
+      errors.push({ index: start, message: 'Drupal Hook attribute must declare a literal hook name.' });
+      continue;
+    }
+    const methodArgument = phpAttributeArgument(argumentsList, 'method', 1);
+    const methodName = methodArgument.present
+      ? phpLiteralIdentifier(methodArgument.raw, /^[A-Za-z_][A-Za-z0-9_]*$/)
+      : '';
+    if (methodArgument.present && !methodName && !phpLiteralEmptyString(methodArgument.raw)) {
+      errors.push({ index: start, message: `Drupal Hook attribute for ${hookName} must declare a literal method name.` });
+      continue;
+    }
+    const moduleArgument = phpAttributeArgument(argumentsList, 'module', 2);
+    const moduleName = moduleArgument.present
+      ? phpLiteralIdentifier(moduleArgument.raw, /^[a-z][a-z0-9_]*$/)
+      : '';
+    const defaultModule = /^\s*null\s*$/i.test(moduleArgument.raw);
+    if (moduleArgument.present && !moduleName && !defaultModule) {
+      errors.push({ index: start, message: `Drupal Hook attribute for ${hookName} must declare a literal module override or NULL.` });
+      continue;
+    }
+    hooks.push({ hookName, methodName, moduleName });
+  }
+  return { errors, hooks };
+}
+
+function phpAttributeGroupsBefore(masked, declarationStart) {
+  const groups = [];
+  let cursor = declarationStart;
+  while (/\s/.test(masked[cursor - 1] ?? '')) cursor -= 1;
+  while (masked[cursor - 1] === ']') {
+    const end = cursor - 1;
+    let depth = 1;
+    let start = -1;
+    for (let index = end - 1; index >= 1; index -= 1) {
+      if (masked[index] === ']') depth += 1;
+      else if (masked[index] === '[') {
+        depth -= 1;
+        if (depth === 0 && masked[index - 1] === '#') {
+          start = index - 1;
+          break;
+        }
+      }
+    }
+    if (start === -1) break;
+    groups.push({ start, end });
+    cursor = start;
+    while (/\s/.test(masked[cursor - 1] ?? '')) cursor -= 1;
+  }
+  return groups.reverse();
+}
+
+function phpClassEnd(masked, openingBrace) {
+  let depth = 1;
+  for (let index = openingBrace + 1; index < masked.length; index += 1) {
+    if (masked[index] === '{') depth += 1;
+    else if (masked[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return masked.length;
+}
+
+function phpPublicClassMethods(masked, openingBrace, closingBrace) {
+  const methods = new Set();
+  let depth = 1;
+  for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+    if (masked[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (masked[index] === '}') {
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 1) continue;
+    const method = masked.slice(index, closingBrace).match(/^((?:(?:public|protected|private|static|final|abstract)\s+)*)function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (!method) continue;
+    if (!/\b(?:protected|private)\b/.test(method[1])) methods.add(method[2]);
+    index += method[0].length - 1;
+  }
+  return methods;
+}
+
+function phpClassTraitUseIndices(masked, openingBrace, closingBrace) {
+  const uses = [];
+  let depth = 1;
+  for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+    if (masked[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (masked[index] === '}') {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 1 && /^use\s+[\\A-Za-z_]/.test(masked.slice(index, closingBrace))) {
+      uses.push(index);
+      index += 2;
+    }
+  }
+  return uses;
+}
+
+function phpAttributedHookMethods(text) {
+  const masked = phpCodeMask(text);
+  const namespace = masked.match(/^[ \t]*namespace\s+([A-Za-z_][A-Za-z0-9_\\]*)\s*[;{]/m)?.[1] ?? '';
+  const namespaceImports = phpNamespaceImports(masked);
+  const hooks = [];
+  const errors = [...namespaceImports.errors];
+  const classPattern = /(?:^|\n)[ \t]*(?:(?:abstract|final|readonly)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  for (const classMatch of masked.matchAll(classPattern)) {
+    const openingBrace = masked.indexOf('{', (classMatch.index ?? 0) + classMatch[0].length);
+    if (openingBrace === -1) continue;
+    const closingBrace = phpClassEnd(masked, openingBrace);
+    const className = namespace ? `${namespace}\\${classMatch[1]}` : classMatch[1];
+    const publicMethods = phpPublicClassMethods(masked, openingBrace, closingBrace);
+    const declarationEnd = (classMatch.index ?? 0) + classMatch[0].length;
+    const inheritance = masked.slice(declarationEnd, openingBrace).match(/\bextends\s+[\\A-Za-z_][\\A-Za-z0-9_]*/);
+    if (inheritance) {
+      errors.push({
+        index: declarationEnd + (inheritance.index ?? 0),
+        message: `Drupal Hook class ${className} uses parent-class inheritance that source inventory cannot bind exactly.`
+      });
+    }
+    for (const index of phpClassTraitUseIndices(masked, openingBrace, closingBrace)) {
+      errors.push({
+        index,
+        message: `Drupal Hook class ${className} uses trait composition that source inventory cannot bind exactly.`
+      });
+    }
+    const declarationStart = (classMatch.index ?? 0) + (/^\n/.test(classMatch[0]) ? 1 : 0);
+    for (const group of phpAttributeGroupsBefore(masked, declarationStart)) {
+      const parsed = phpDrupalHooksFromAttributeGroup(
+        text, masked, group.start, group.end, namespace, namespaceImports.imports
+      );
+      errors.push(...parsed.errors);
+      for (const hook of parsed.hooks) {
+        const methodName = hook.methodName || '__invoke';
+        if (!publicMethods.has(methodName)) {
+          errors.push({
+            index: group.start,
+            message: `Drupal Hook attribute for ${hook.hookName} targets missing or non-public method ${className}::${methodName}.`
+          });
+          continue;
+        }
+        hooks.push({
+          callable: `${className}::${methodName}`,
+          className,
+          hookName: hook.hookName,
+          index: group.start,
+          methodName,
+          moduleName: hook.moduleName
+        });
+      }
+    }
+    let depth = 1;
+    for (let index = openingBrace + 1; index < closingBrace && depth > 0; index += 1) {
+      if (masked[index] === '{') {
+        depth += 1;
+        continue;
+      }
+      if (masked[index] === '}') {
+        depth -= 1;
+        continue;
+      }
+      if (depth !== 1 || masked.slice(index, index + 2) !== '#[') continue;
+
+      const attributeGroups = [];
+      let cursor = index;
+      while (masked.slice(cursor, cursor + 2) === '#[') {
+        const end = phpMatchingAttributeEnd(masked, cursor);
+        if (end === -1) break;
+        attributeGroups.push({ start: cursor, end });
+        cursor = end + 1;
+        while (/\s/.test(masked[cursor] ?? '')) cursor += 1;
+      }
+      if (attributeGroups.length === 0) continue;
+      const declaration = masked.slice(cursor, closingBrace);
+      const method = declaration.match(/^((?:(?:public|protected|private|static|final|abstract)\s+)*)function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      if (!method) {
+        index = attributeGroups.at(-1).end;
+        continue;
+      }
+      for (const group of attributeGroups) {
+        const parsed = phpDrupalHooksFromAttributeGroup(
+          text, masked, group.start, group.end, namespace, namespaceImports.imports
+        );
+        errors.push(...parsed.errors);
+        for (const hook of parsed.hooks) {
+          if (/\b(?:protected|private)\b/.test(method[1])) {
+            errors.push({
+              index: group.start,
+              message: `Drupal Hook attribute for ${hook.hookName} is attached to non-public method ${className}::${method[2]}.`
+            });
+            continue;
+          }
+          const methodName = hook.methodName || method[2];
+          if (!publicMethods.has(methodName)) {
+            errors.push({
+              index: group.start,
+              message: `Drupal Hook attribute for ${hook.hookName} targets missing or non-public method ${className}::${methodName}.`
+            });
+            continue;
+          }
+          hooks.push({
+            callable: `${className}::${methodName}`,
+            className,
+            hookName: hook.hookName,
+            index: group.start,
+            methodName,
+            moduleName: hook.moduleName
+          });
+        }
+      }
+      index = attributeGroups.at(-1).end;
+    }
+  }
+  return { errors, hooks };
 }
 
 function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FILE_LIMIT + 1) {
@@ -5271,30 +6503,60 @@ function yamlMappingChildren(text, rootKey, limit = CUSTOM_CODE_SURFACES_PER_FIL
 
 function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind, text) {
   const surfaces = [];
+  const errors = [];
   const locateLine = sourceLineLocator(text);
   let truncated = false;
-  const add = (surfaceKind, name, index = 0) => {
+  const add = (surfaceKind, name, index = 0, details = {}) => {
     if (surfaces.length >= CUSTOM_CODE_SURFACES_PER_FILE_LIMIT) {
       truncated = true;
       return false;
     }
-    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index));
+    surfaces.push(customSourceSurface(extension, sharedPath, surfaceKind, name, locateLine, index, details));
     return true;
   };
   const normalized = extensionRelativePath.split(sep).join('/');
   if (kind === 'procedural_php') {
     for (const match of text.matchAll(/^[ \t]*function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm)) {
-      const surfaceKind = match[1].startsWith(`${extension}_`) ? 'hook_or_callback' : 'function';
-      if (!add(surfaceKind, match[1], match.index)) break;
+      const functionName = match[1];
+      let hookName = functionName.startsWith(`${extension}_`) ? functionName.slice(extension.length + 1) : '';
+      let moduleName = hookName ? extension : '';
+      if (!hookName) {
+        for (const candidateHook of CUSTOM_OUTPUT_PROCEDURAL_HOOK_NAMES) {
+          const suffix = `_${candidateHook}`;
+          if (!functionName.endsWith(suffix) || functionName.length <= suffix.length) continue;
+          hookName = candidateHook;
+          moduleName = functionName.slice(0, -suffix.length);
+          break;
+        }
+      }
+      const surfaceKind = hookName ? 'hook_or_callback' : 'function';
+      const details = hookName
+        ? { hookName, identitySuffix: `${hookName}\u0000${moduleName}`, moduleName }
+        : {};
+      if (!add(surfaceKind, functionName, match.index, details)) break;
     }
   } else if (kind === 'php_class') {
-    for (const match of text.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
+    const masked = phpCodeMask(text);
+    for (const match of masked.matchAll(/^[ \t]*(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) {
       const surfaceKind = /(?:^|\/)src\/Controller\//i.test(normalized)
         ? 'controller_class'
         : /(?:^|\/)src\/Plugin\//i.test(normalized)
           ? 'plugin_class'
           : match[1];
       if (!add(surfaceKind, match[2], match.index)) break;
+    }
+    if (/(?:^|\/)src\/Hook\//i.test(normalized)) {
+      const attributedHooks = phpAttributedHookMethods(text);
+      errors.push(...attributedHooks.errors.map((error) => `${sharedPath}:${locateLine(error.index)} ${error.message}`));
+      for (const hook of attributedHooks.hooks) {
+        if (!add('hook_or_callback', hook.callable, hook.index, {
+          className: hook.className,
+          hookName: hook.hookName,
+          identitySuffix: `${hook.hookName}\u0000${hook.moduleName}`,
+          methodName: hook.methodName,
+          moduleName: hook.moduleName
+        })) break;
+      }
     }
   } else if (kind === 'javascript') {
     for (const match of text.matchAll(/^[ \t]*Drupal\.behaviors\.([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
@@ -5315,6 +6577,14 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
           if (!add('registration', match[1], match.index)) break;
         }
       }
+      if (/\.libraries\.ya?ml$/i.test(sharedPath)) {
+        for (const match of text.matchAll(/^[ \t]+(['"]?)([^'"#\n]+\.(?:m?js|ts)(?:\?[^'"#\n]*)?)\1\s*:\s*/gmi)) {
+          const asset = match[2].trim().replace(/\?.*$/, '');
+          if (asset.startsWith('/') || asset.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(asset)) continue;
+          const assetKind = /\.ts$/i.test(asset) ? 'runtime_typescript_asset' : 'runtime_javascript_asset';
+          if (!add(assetKind, asset, match.index)) break;
+        }
+      }
     }
   } else if (kind === 'shipped_config') {
     add('shipped_config', basename(sharedPath).replace(/\.ya?ml$/i, ''));
@@ -5329,6 +6599,7 @@ function customSourceSurfaces(extension, sharedPath, extensionRelativePath, kind
     add(`${kind}_file`, basename(sharedPath));
   }
   return {
+    errors,
     surfaces: [...new Map(surfaces.map((surface) => [surface.id, surface])).values()]
       .sort((left, right) => comparePortable(left.id, right.id)),
     truncated
@@ -5348,7 +6619,7 @@ function routingRecords(text, file, extension) {
 }
 
 function phpCodeMask(text) {
-  const characters = [...text];
+  const characters = text.split('');
   let state = 'code';
   for (let index = 0; index < characters.length; index += 1) {
     const character = characters[index];
@@ -5619,6 +6890,7 @@ export function inspectCustomCodeFilesystem(projectRoot, options = {}) {
             const text = bytes.toString('utf8');
             const kind = customSourceKind(extensionRelativePath);
             const surfaceInventory = customSourceSurfaces(machineName, sharedPath, extensionRelativePath, kind, text);
+            errors.push(...surfaceInventory.errors);
             if (surfaceInventory.truncated) {
               errors.push(`${sharedPath} exceeded ${CUSTOM_CODE_SURFACES_PER_FILE_LIMIT} lexical/registration custom-code surfaces.`);
               break extensionRoots;
@@ -5660,6 +6932,87 @@ export function inspectCustomCodeFilesystem(projectRoot, options = {}) {
           }
         } catch (error) {
           errors.push(`Custom code inventory could not read ${sharedPath}: ${error.message}`);
+        }
+      }
+      const knownSourcePaths = new Set(sourceFiles
+        .filter((source) => source.extension === machineName)
+        .map((source) => source.path));
+      let registeredAssetBytes = 0;
+      let registeredAssetFiles = 0;
+      const runtimeAssetSurfaces = sourceFiles
+        .filter((source) => source.extension === machineName && source.kind === 'drupal_registration')
+        .flatMap((source) => source.surfaces)
+        .filter((surface) => ['runtime_javascript_asset', 'runtime_typescript_asset'].includes(surface.kind));
+      for (const surface of runtimeAssetSurfaces) {
+        const asset = String(surface.name ?? '').replaceAll('\\', '/');
+        const segments = asset.split('/');
+        if (!asset || asset.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(asset) ||
+          segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+          errors.push(`${extensionPath} contains an unsafe local runtime script registration.`);
+          continue;
+        }
+        const logicalAssetPath = resolve(extensionRoot, ...segments);
+        let realAssetPath = '';
+        let assetStats;
+        try {
+          realAssetPath = realpathSync(logicalAssetPath);
+          assetStats = statSync(realAssetPath);
+        } catch {
+          errors.push(`${extensionPath} runtime script ${asset} could not be resolved to an inventoried local file.`);
+          continue;
+        }
+        if (!pathIsInside(extensionRealPath, realAssetPath) || !assetStats.isFile()) {
+          errors.push(`${extensionPath} runtime script ${asset} is not a regular file owned by the custom extension.`);
+          continue;
+        }
+        const sharedAssetPath = relative(projectRoot, logicalAssetPath).split(sep).join('/');
+        if (knownSourcePaths.has(sharedAssetPath)) continue;
+        const kind = customSourceKind(asset);
+        const expectedKind = surface.kind === 'runtime_typescript_asset' ? 'typescript_source' : 'javascript';
+        if (kind !== expectedKind || assetStats.size > CUSTOM_EXTENSION_FILE_BYTES_LIMIT) {
+          errors.push(`${extensionPath} runtime script ${asset} is unsupported or exceeds ${CUSTOM_EXTENSION_FILE_BYTES_LIMIT} bytes.`);
+          continue;
+        }
+        const assetWasWalked = walked.files.includes(logicalAssetPath);
+        if (!assetWasWalked) registeredAssetFiles += 1;
+        registeredAssetBytes += assetStats.size;
+        if (!assetWasWalked) aggregateBudget.filesVisited += 1;
+        aggregateBudget.bytesScanned += assetStats.size;
+        if (walked.files.length + registeredAssetFiles > CUSTOM_EXTENSION_FILE_LIMIT ||
+          walked.bytesScanned + registeredAssetBytes > CUSTOM_EXTENSION_TOTAL_BYTES_LIMIT ||
+          aggregateBudget.filesVisited > aggregateBudget.fileLimit ||
+          aggregateBudget.bytesScanned > aggregateBudget.totalBytesLimit ||
+          now() - aggregateBudget.startedAt > aggregateBudget.deadlineMs) {
+          errors.push(`Custom code inventory exceeded its bounded runtime script registration budget under ${extensionPath}.`);
+          break;
+        }
+        try {
+          const bytes = readFileSync(realAssetPath);
+          const text = bytes.toString('utf8');
+          const surfaceInventory = customSourceSurfaces(machineName, sharedAssetPath, asset, kind, text);
+          errors.push(...surfaceInventory.errors);
+          if (surfaceInventory.truncated) {
+            errors.push(`${sharedAssetPath} exceeded ${CUSTOM_CODE_SURFACES_PER_FILE_LIMIT} lexical custom-code surfaces.`);
+            continue;
+          }
+          surfaceCount += surfaceInventory.surfaces.length;
+          if (surfaceCount > CUSTOM_CODE_SURFACE_LIMIT) {
+            errors.push(`Custom code inventory aggregate exceeded ${CUSTOM_CODE_SURFACE_LIMIT} lexical/registration surfaces.`);
+            break;
+          }
+          const source = {
+            id: `SOURCE-${sha256(`${machineName}\u0000${sharedAssetPath}`).slice(0, 16)}`,
+            extension: machineName,
+            path: sharedAssetPath,
+            kind,
+            sha256: `sha256:${sha256(bytes)}`,
+            surfaces: surfaceInventory.surfaces
+          };
+          sourceFiles.push(source);
+          extensionSourceIds.push(source.id);
+          knownSourcePaths.add(sharedAssetPath);
+        } catch (error) {
+          errors.push(`Custom code inventory could not read registered runtime script ${sharedAssetPath}: ${error.message}`);
         }
       }
       extensions.push({
@@ -5742,13 +7095,11 @@ $url_generator = \Drupal::service('url_generator');
 $access_manager = \Drupal::service('access_manager');
 $router = \Drupal::service('router.no_access_checks');
 $request_stack = \Drupal::service('request_stack');
-$container = \Drupal::getContainer();
 $anonymous = new \Drupal\Core\Session\AnonymousUserSession();
 $route_inputs = is_array($audit_input['routes'] ?? NULL) ? $audit_input['routes'] : [];
 $route_bindings = is_array($audit_input['bindings'] ?? NULL) ? $audit_input['bindings'] : [];
 $custom_extensions = is_array($audit_input['extensions'] ?? NULL) ? $audit_input['extensions'] : [];
 $base_url = rtrim((string) ($audit_input['baseUrl'] ?? 'http://localhost'), '/');
-$route_scan_limit = 5000;
 $core_extensions = \Drupal::service('config.storage')->read('core.extension') ?: [];
 $active_custom_extensions = [];
 foreach ($custom_extensions as $extension) {
@@ -5808,108 +7159,6 @@ foreach ($route_inputs as $input) {
     continue;
   }
   $inputs_by_name[$name] = $input;
-}
-
-$custom_route_callback_class = static function (string $definition, string $kind, $container): string {
-  $definition = ltrim(trim($definition), '\\');
-  if ($definition === '') {
-    return '';
-  }
-  if (str_contains($definition, '::')) {
-    return ltrim(explode('::', $definition, 2)[0], '\\');
-  }
-  if ($kind === '_form' && class_exists($definition)) {
-    return $definition;
-  }
-  if (str_contains($definition, ':')) {
-    [$service_id] = explode(':', $definition, 2);
-    if ($container->has($service_id)) {
-      return get_class($container->get($service_id));
-    }
-  }
-  if ($container->has($definition)) {
-    return get_class($container->get($definition));
-  }
-  return class_exists($definition) ? $definition : '';
-};
-
-$custom_route_extension_for_class = static function (string $class, array $extensions): string {
-  $normalized = ltrim($class, '\\');
-  $class_file = '';
-  try {
-    $class_file = (new \ReflectionClass($normalized))->getFileName() ?: '';
-    $class_file = $class_file ? str_replace('\\', '/', realpath($class_file) ?: $class_file) : '';
-  }
-  catch (\Throwable) {
-    // Namespace ownership can still identify an unreflectable class.
-  }
-  foreach ($extensions as $extension) {
-    $machine_name = (string) ($extension['machineName'] ?? '');
-    $type = (string) ($extension['type'] ?? '');
-    if ($machine_name === '' || !in_array($type, ['module', 'theme'], TRUE)) {
-      continue;
-    }
-    if (str_starts_with($normalized, 'Drupal\\' . $machine_name . '\\')) {
-      return $machine_name;
-    }
-    try {
-      $list = \Drupal::service($type === 'module' ? 'extension.list.module' : 'extension.list.theme');
-      $extension_root = str_replace('\\', '/', realpath(DRUPAL_ROOT . '/' . $list->getPath($machine_name)) ?: '');
-      if ($class_file && $extension_root && ($class_file === $extension_root || str_starts_with($class_file, $extension_root . '/'))) {
-        return $machine_name;
-      }
-    }
-    catch (\Throwable) {
-      // Try the remaining custom extensions.
-    }
-  }
-  return '';
-};
-
-// Include attribute/callback routes whose executable callback resolves to a
-// custom extension even when no routing YAML record exists.
-$routes_scanned = 0;
-foreach ($route_provider->getAllRoutes() as $live_name => $live_route) {
-  $routes_scanned++;
-  if ($routes_scanned > $route_scan_limit) {
-    $output['violations'][] = ['name' => '', 'reason' => 'live_route_scan_limit_exceeded'];
-    break;
-  }
-  if (isset($inputs_by_name[$live_name])) {
-    continue;
-  }
-  $definitions = [];
-  foreach (['_controller', '_form', '_title_callback'] as $key) {
-    $value = $live_route->getDefault($key);
-    if (is_string($value) && $value !== '') {
-      $definitions[$key] = $value;
-    }
-  }
-  foreach ($live_route->getRequirements() as $key => $value) {
-    if (is_string($value) && str_starts_with((string) $key, '_') && str_contains((string) $key, 'access')) {
-      $definitions[(string) $key] = $value;
-    }
-  }
-  foreach ($definitions as $kind => $definition) {
-    $class = $custom_route_callback_class($definition, $kind, $container);
-    $extension = $class ? $custom_route_extension_for_class($class, $active_custom_extensions) : '';
-    if ($extension === '') {
-      continue;
-    }
-    $binding = $bindings_by_name[(string) $live_name] ?? [];
-    $inputs_by_name[(string) $live_name] = [
-      'name' => (string) $live_name,
-      'extension' => $extension,
-      'file' => 'live-router:' . $extension,
-      'path' => (string) $live_route->getPath(),
-      'controller' => (string) $live_route->getDefault('_controller'),
-      'routeParameters' => is_array($binding['routeParameters'] ?? NULL) ? $binding['routeParameters'] : [],
-      'requestMethod' => (string) ($binding['requestMethod'] ?? ''),
-      'requestContentType' => (string) ($binding['requestContentType'] ?? ''),
-      'discovery' => 'live_callback',
-    ];
-    break;
-  }
 }
 
 ksort($inputs_by_name);
@@ -7321,6 +8570,42 @@ function exactInventoryPhpFiles(projectRoot, inventory) {
     }
   }
   return { argvBytes, failures, files: unique };
+}
+
+function exactInventorySourceFiles(projectRoot, inventory) {
+  let realProjectRoot = projectRoot;
+  try {
+    realProjectRoot = realpathSync(projectRoot);
+  } catch {
+    // Individual file checks below fail closed.
+  }
+  const records = [
+    ...(Array.isArray(inventory?.sourceFiles) ? inventory.sourceFiles : []),
+    ...(Array.isArray(inventory?.tests) ? inventory.tests : [])
+  ].map((file) => ({
+    id: String(file?.id ?? ''),
+    path: String(file?.path ?? ''),
+    sha256: String(file?.sha256 ?? '')
+  }));
+  const files = [...new Map(records.map((file) => [file.path, file])).values()]
+    .sort((left, right) => comparePortable(left.path, right.path));
+  const failures = [];
+  for (const file of files) {
+    if (!file.path || isAbsolute(file.path) || file.path.includes('\u0000')) {
+      failures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', file.id, 'Inventoried custom source path is unsafe.'));
+      continue;
+    }
+    const absolute = resolve(projectRoot, file.path);
+    try {
+      const metadata = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      if (metadata.isSymbolicLink() || !metadata.isFile() || !pathIsInside(realProjectRoot, real)) throw new Error('unsafe path');
+      if (`sha256:${sha256(readFileSync(real))}` !== file.sha256) throw new Error('stale bytes');
+    } catch {
+      failures.push(customCodeFailure('stale_test_binding', 'working-target-snapshot', file.id, 'Inventoried custom source changed before snapshot reconciliation.'));
+    }
+  }
+  return { failures, files };
 }
 
 function executableCustomSurfaceIds(inventory) {
@@ -9072,11 +10357,11 @@ function runFocusedCustomCodeTests(projectRoot, inventory, coverage, runner, bas
 }
 
 function workingCustomCodeSnapshot(projectRoot, inventory) {
-  const php = exactInventoryPhpFiles(projectRoot, inventory);
-  if (php.failures.length > 0) throw new Error('working custom PHP changed');
+  const sources = exactInventorySourceFiles(projectRoot, inventory);
+  if (sources.failures.length > 0) throw new Error('working custom source changed');
   const runtime = collectRuntimeCodeManifest(projectRoot);
   return stateSha256({
-    inventoriedPhp: php.files.map((file) => ({ id: file.id, path: file.path, sha256: file.sha256 })),
+    inventoriedSources: sources.files,
     runtime
   });
 }
@@ -9345,17 +10630,42 @@ export function inspectCustomCodeQuality(projectRoot, environment, inventory, re
   return { qualityAudit, focusedTestExecution, executionBudget };
 }
 
+function stableMutableIdentityInventoryEvidence(audit) {
+  if (!audit || typeof audit !== 'object' || Array.isArray(audit)) return null;
+  const drupal = audit.drupal && typeof audit.drupal === 'object' && !Array.isArray(audit.drupal)
+    ? { ...audit.drupal, durationMs: 0, resultFingerprint: '' }
+    : audit.drupal ?? null;
+  return { ...audit, drupal, resultFingerprint: '' };
+}
+
 export function inspectCustomCode(projectRoot, environment, review = {}, options = {}) {
   const filesystem = inspectCustomCodeFilesystem(projectRoot);
+  const filesystemFingerprint = filesystem.fingerprint;
   const reviewRecord = Array.isArray(review) ? { routeBindings: review, capabilities: [], testCoverage: [] } : (review ?? {});
   const routeBindings = Array.isArray(reviewRecord?.routeBindings) ? reviewRecord.routeBindings : [];
+  const mutableIdentityAudit = inspectCustomMutableIdentity(projectRoot, filesystem, environment, options.mutableIdentity ?? {});
   const routeAudit = filesystem.completed
     ? inspectCustomRouteRuntime(projectRoot, environment, filesystem.routes, filesystem.extensions, routeBindings)
     : { completed: false, error: 'Filesystem custom-code inventory did not complete.', routes: [], violations: [] };
   const configSchema = filesystem.completed
     ? inspectCustomConfigSchema(projectRoot, environment, filesystem.extensions)
     : { completed: false, error: 'Filesystem custom-code inventory did not complete.', extensions: [], violations: [] };
+  const customEntityOutputAudit = inspectCustomEntityOutputAudit({
+    projectRoot,
+    environment,
+    sourceInventory: filesystem,
+    staticAudit: mutableIdentityAudit,
+    targetOrigin: options.baseUrl ?? '',
+    fieldOutputMatrix: options.fieldOutputMatrix ?? {},
+    routeMatrix: options.routeMatrix ?? {},
+    allowOwnedCacheInvalidation: options.allowOwnedCacheInvalidation === true,
+    isolation: options.entityOutputIsolation ?? null,
+    ...(typeof options.entityOutputRunner === 'function' ? { runner: options.entityOutputRunner } : {})
+  });
   const errors = [...filesystem.errors];
+  if (!['pass', 'not_applicable'].includes(mutableIdentityAudit.status)) {
+    errors.push(`Verifier-owned mutable-identity AST audit status is ${mutableIdentityAudit.status}.`);
+  }
   if (!routeAudit.completed) {
     errors.push(routeAudit.error || 'Live custom-route audit did not complete.');
   }
@@ -9368,17 +10678,30 @@ export function inspectCustomCode(projectRoot, environment, review = {}, options
   if (configSchema.violations.length > 0) {
     errors.push(`Live custom config-schema audit found ${configSchema.violations.length} violation(s).`);
   }
+  if (!['pass', 'not_applicable'].includes(customEntityOutputAudit.status)) {
+    errors.push(`Verifier-owned custom entity-output audit status is ${customEntityOutputAudit.status}.`);
+  }
   const fingerprintInput = {
     extensions: filesystem.extensions,
     sourceFiles: filesystem.sourceFiles,
     controllers: filesystem.controllers,
     routes: filesystem.routes,
     tests: filesystem.tests,
+    mutableIdentityAudit: stableMutableIdentityInventoryEvidence(mutableIdentityAudit),
     routeAudit,
-    configSchema
+    configSchema,
+    customEntityOutputAudit
   };
   const phaseAFingerprint = `sha256:${sha256(JSON.stringify(fingerprintInput))}`;
-  const phaseAInventory = { ...filesystem, routeAudit, configSchema, fingerprint: phaseAFingerprint };
+  const phaseAInventory = {
+    ...filesystem,
+    filesystemFingerprint,
+    mutableIdentityAudit,
+    routeAudit,
+    configSchema,
+    customEntityOutputAudit,
+    fingerprint: phaseAFingerprint
+  };
   const { qualityAudit, focusedTestExecution, executionBudget } = filesystem.completed
     ? inspectCustomCodeQuality(projectRoot, environment, phaseAInventory, reviewRecord, options)
     : {
@@ -9402,12 +10725,18 @@ export function inspectCustomCode(projectRoot, environment, review = {}, options
   }
   return {
     ...filesystem,
-    completed: filesystem.completed && routeAudit.completed && configSchema.completed &&
+    filesystemFingerprint,
+    completed: filesystem.completed && mutableIdentityAudit.completed &&
+      ['pass', 'not_applicable'].includes(mutableIdentityAudit.status) &&
+      routeAudit.completed && configSchema.completed && customEntityOutputAudit.completed &&
+      ['pass', 'not_applicable'].includes(customEntityOutputAudit.status) &&
       ['pass', 'not_applicable'].includes(qualityAudit.status) &&
       ['pass', 'not_applicable'].includes(focusedTestExecution.status) && errors.length === 0,
     errors,
+    mutableIdentityAudit,
     routeAudit,
     configSchema,
+    customEntityOutputAudit,
     qualityAudit,
     focusedTestExecution,
     executionBudget,
@@ -9485,6 +10814,96 @@ function trustedCustomCodeIsolation(isolation) {
     isolation.cleanupCommandResultHashes.every((hash) => /^sha256:[a-f0-9]{64}$/.test(String(hash)));
 }
 
+export function customEntityOutputAuditErrors(runtimeInventory) {
+  const errors = [];
+  const audit = runtimeInventory?.customEntityOutputAudit;
+  if (!audit || audit.schemaVersion !== CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA) {
+    return [`Verifier-owned custom entity-output audit must use schemaVersion ${CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA}.`];
+  }
+  if (audit.resultFingerprint !== customEntityOutputAuditResultFingerprint(audit)) {
+    errors.push('Verifier-owned custom entity-output audit result fingerprint is invalid.');
+  }
+  const sourceIds = new Set((Array.isArray(runtimeInventory?.sourceFiles) ? runtimeInventory.sourceFiles : [])
+    .map((source) => String(source?.id ?? ''))
+    .filter(Boolean));
+  const surfaceIds = new Set((Array.isArray(runtimeInventory?.sourceFiles) ? runtimeInventory.sourceFiles : [])
+    .flatMap((source) => Array.isArray(source?.surfaces) ? source.surfaces : [])
+    .map((surface) => String(surface?.id ?? ''))
+    .filter(Boolean));
+  if (!Array.isArray(audit.candidateSourceFileIds) ||
+    audit.candidateSourceFileIds.some((id, index, values) => !sourceIds.has(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output candidates are not exact unique inventory source identities.');
+  }
+  if (!Array.isArray(audit.candidateSurfaceIds) ||
+    audit.candidateSurfaceIds.some((id, index, values) => !surfaceIds.has(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output candidates are not exact unique inventory surface identities.');
+  }
+  if (!Array.isArray(audit.typedDeclarationIds) ||
+    audit.typedDeclarationIds.some((id, index, values) => !/^DECLARATION-[a-f0-9]{16}$/.test(String(id)) || values.indexOf(id) !== index)) {
+    errors.push('Verifier-owned custom entity-output declarations are not bounded typed identities.');
+  }
+  if (audit.completed !== true || !['pass', 'not_applicable'].includes(audit.status) ||
+    audit.applies !== (audit.status === 'pass') ||
+    audit.noExplicitVerifierMutation !== false || audit.allowOwnedCacheInvalidation !== true ||
+    !Array.isArray(audit.failures) || audit.failures.length > 0) {
+    errors.push('Verifier-owned custom entity-output audit must complete in target-bound owned-cache invalidation mode, with pass or exact N/A and no failures.');
+  }
+  const runtime = audit.runtime;
+  if (audit.status === 'pass') {
+    if (!runtime || runtime.schemaVersion !== CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA ||
+      runtime.resultFingerprint !== customEntityOutputAuditResultFingerprint(runtime) ||
+      runtime.inputFingerprint !== audit.inputFingerprint || runtime.status !== 'pass' || runtime.completed !== true ||
+      runtime.noExplicitVerifierMutation !== false || runtime.allowOwnedCacheInvalidation !== true ||
+      !Number.isSafeInteger(runtime.applicableRouteCount) || runtime.applicableRouteCount < 1 ||
+      runtime.matchedNodeRouteCount !== runtime.applicableRouteCount ||
+      runtime.renderedRouteCount !== runtime.applicableRouteCount || runtime.dependencyCount < 3 ||
+      !Array.isArray(runtime.violations) || runtime.violations.length > 0) {
+      errors.push('Passing custom entity-output evidence lacks a bound anonymous rendered Node/Media/File runtime result.');
+    } else {
+      const dependencies = runtime.routes.flatMap((route) => Array.isArray(route?.dependencies) ? route.dependencies : []);
+      for (const entityType of ['node', 'media', 'file']) {
+        if (!dependencies.some((dependency) =>
+          dependency?.entityType === entityType && dependency?.access === 'allowed' &&
+          Number(dependency?.invalidationTagCount) > 0 && Number(dependency?.renderedTagIntersectionCount) > 0
+        )) {
+          errors.push(`Passing custom entity-output evidence lacks allowed ${entityType} access and bubbled invalidation tags.`);
+        }
+      }
+      if (runtime?.invalidation?.status !== 'pass' || runtime?.invalidation?.attempted !== true ||
+        runtime?.invalidation?.preCaptureAttempted !== true ||
+        !Number.isSafeInteger(runtime?.invalidation?.preCaptureTagCount) || runtime.invalidation.preCaptureTagCount < 1 ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.preCaptureEvidenceSha256 ?? '')) ||
+        runtime?.invalidation?.cleanupRequired !== true || runtime?.invalidation?.cleanupCompleted !== true ||
+        !Number.isSafeInteger(runtime?.invalidation?.seededCount) || runtime.invalidation.seededCount < 1 ||
+        runtime?.invalidation?.invalidatedCount !== runtime.invalidation.seededCount ||
+        !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.evidenceSha256 ?? ''))) {
+        errors.push('Passing custom entity-output evidence lacks completed target-bound owned-cache invalidation and cleanup proof.');
+      }
+    }
+  } else if (runtime !== null && (
+    runtime?.status !== 'not_applicable' || runtime?.completed !== true ||
+    runtime?.applicableRouteCount !== 0 || runtime?.matchedNodeRouteCount !== 0 ||
+    runtime?.renderedRouteCount !== 0 || runtime?.dependencyCount !== 0 ||
+    runtime?.coveredDeclarationCount !== 0 || runtime?.coveredDeclarationSetSha256 !== '' ||
+    runtime?.coveredCandidateSourceFileCount !== 0 || runtime?.coveredCandidateSourceFileSetSha256 !== '' ||
+    runtime?.coveredCandidateSurfaceCount !== 0 || runtime?.coveredCandidateSurfaceSetSha256 !== '' ||
+    !Array.isArray(runtime?.routes) || runtime.routes.some((route) => route?.applies !== false || route?.matched !== false || route?.rendered !== false) ||
+    !Array.isArray(runtime?.violations) || runtime.violations.length > 0 ||
+    runtime?.noExplicitVerifierMutation !== false || runtime?.allowOwnedCacheInvalidation !== true ||
+    runtime?.invalidation?.status !== 'pre_capture_performed_not_applicable' ||
+    runtime?.invalidation?.preCaptureAttempted !== true ||
+    !Number.isSafeInteger(runtime?.invalidation?.preCaptureTagCount) || runtime.invalidation.preCaptureTagCount < 1 ||
+    !/^sha256:[a-f0-9]{64}$/.test(String(runtime?.invalidation?.preCaptureEvidenceSha256 ?? '')) ||
+    runtime?.invalidation?.attempted !== false ||
+    runtime?.invalidation?.seededCount !== 0 || runtime?.invalidation?.invalidatedCount !== 0 ||
+    runtime?.invalidation?.cleanupRequired !== false || runtime?.invalidation?.cleanupCompleted !== true ||
+    runtime?.invalidation?.evidenceSha256 !== ''
+  )) {
+    errors.push('Custom entity-output N/A evidence contradicts its live extension applicability.');
+  }
+  return errors;
+}
+
 export function customCodeReconciliationErrors(runtimeInventory, review, packetDir = '') {
   const errors = [];
   const push = (message) => {
@@ -9538,6 +10957,12 @@ export function customCodeReconciliationErrors(runtimeInventory, review, packetD
     ? runtimeInventory.routeAudit.violations
     : []) {
     push(`Custom route ${violation?.name || '(unknown route)'} failed runtime audit: ${violation?.reason || 'unknown violation'}.`);
+  }
+  for (const error of customMutableIdentityAuditErrors(runtimeInventory)) {
+    push(error);
+  }
+  for (const error of customEntityOutputAuditErrors(runtimeInventory)) {
+    push(error);
   }
 
   const runtimePhpFileIds = [
@@ -10431,7 +11856,7 @@ function inspectDrupalRuntime(cwd, environment, fieldOutputMatrix, browserEviden
     projectRoot,
     environment,
     drupalReadback?.implementationQuality?.customCodeInventory ?? {},
-    { baseUrl }
+    { baseUrl, fieldOutputMatrix, routeMatrix, allowOwnedCacheInvalidation: true }
   );
   const siteUuid = uuidResult.output.match(UUID_RE)?.[0]?.toLowerCase() ?? '';
   const confirmed = /successful/i.test(bootstrapResult.output) && Boolean(siteUuid);
@@ -11780,6 +13205,8 @@ export async function verifyLive({
   environment = process.env,
   drupalRuntime = null,
   liveHttpLimits = {},
+  sourceSurfaceLimits = {},
+  onSourceProgress = null,
   observabilityRecorder = null,
   reuseMode = 'off'
 } = {}) {
@@ -11819,6 +13246,7 @@ export async function verifyLive({
   let sourceAudit = null;
   let negativeRouteConsent = null;
   let reviewHandoff = null;
+  let reviewHandoffIndependent = null;
   try {
     independentVerification = (await readBoundedJsonFile(join(absolutePacketDir, 'independent-verification.json'), { budget: runtimeJsonBudget })).value;
     blindReview = (await readBoundedJsonFile(join(absolutePacketDir, 'blind-adversarial-review.json'), { budget: runtimeJsonBudget })).value;
@@ -11842,6 +13270,19 @@ export async function verifyLive({
         // Packet validation records malformed, non-regular, or oversized optional handoff JSON.
       }
       reviewHandoff = null;
+    }
+    try {
+      reviewHandoffIndependent = (
+        await readBoundedJsonFile(
+          join(absolutePacketDir, 'evidence', 'review-handoff-independent.json'),
+          { budget: runtimeJsonBudget }
+        )
+      ).value;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Packet validation records malformed, non-regular, or oversized optional handoff JSON.
+      }
+      reviewHandoffIndependent = null;
     }
   } catch {
     // Packet validation already records malformed or missing required JSON.
@@ -12086,36 +13527,27 @@ export async function verifyLive({
       : 'Verifier-owned browser preflight failed before source or target HTTP verification. Use the canonical DDEV agent workflow, or set CHROME_PATH for an explicit host-side maintainer run.');
   }
 
-  const sourceCensusAttempted = Boolean(
-    !briefMode &&
-    !browserRuntimeUnavailable &&
-    runtimeAuthoritativeForCompletion &&
-    declaredSource
-  );
-  const sourceSurfaceCensusPromise = phaseRecorder.measure(
-    'source-census',
-    async () => briefMode
-      ? sourceSurfaceNotRun(
-          'Source-site discovery does not apply to a brief-based build.',
-          { status: 'not_applicable', authoritative: true }
-        )
-      : browserRuntimeUnavailable
-        ? sourceSurfaceNotRun(
-            'Browser runtime preflight failed; expensive verification was not started.'
-          )
-        : runtimeAuthoritativeForCompletion && declaredSource
-          ? inspectSourceSurface({ independentVerification, routeMatrix })
-          : sourceSurfaceNotRun(
-              runtimeWasInjected
-                ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
-                : 'Verifier-owned source census could not start without sourceBaseUrl.'
-            ),
-    {
-      applicable: !briefMode,
-      attempted: sourceCensusAttempted,
-      authoritativeRuntime: runtimeAuthoritativeForCompletion
-    }
-  );
+  const runSourceSurfaceCensus = async () => briefMode
+    ? sourceSurfaceNotRun(
+        'Source-site discovery does not apply to a brief-based build.',
+        { status: 'not_applicable', authoritative: true }
+      )
+    : browserRuntimeUnavailable
+    ? sourceSurfaceNotRun(
+        'Browser runtime preflight failed; expensive verification was not started.'
+      )
+    : runtimeAuthoritativeForCompletion && declaredSource
+    ? inspectSourceSurface({
+        independentVerification,
+        limits: sourceSurfaceLimits,
+        onProgress: onSourceProgress,
+        routeMatrix
+      })
+    : sourceSurfaceNotRun(
+        runtimeWasInjected
+          ? 'Verifier-owned source census is disabled for an injected Drupal runtime.'
+          : 'Verifier-owned source census could not start without sourceBaseUrl.'
+      );
   const targetRequiredRoutes = Array.isArray(routeMatrix.targetRequiredRoutes)
     ? routeMatrix.targetRequiredRoutes
     : [];
@@ -12163,6 +13595,7 @@ export async function verifyLive({
           baseUrl: target.url,
           criticalAssetContext,
           liveHttpContext,
+          maxRoutes: liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
           tasks: liveRouteTasks
         })
       : {
@@ -12170,10 +13603,10 @@ export async function verifyLive({
           errors: [],
           budget: {
             attempted: false,
-            deadlineMs: LIVE_ROUTE_DEADLINE_MS,
-            maxConcurrency: MAX_LIVE_ROUTE_CONCURRENCY,
-            maxRequests: MAX_LIVE_HTTP_REQUESTS,
-            maxRoutes: MAX_LIVE_ROUTE_CHECKS,
+            deadlineMs: liveHttpLimits.deadlineMs ?? LIVE_ROUTE_DEADLINE_MS,
+            maxConcurrency: liveHttpLimits.concurrency ?? MAX_LIVE_ROUTE_CONCURRENCY,
+            maxRequests: liveHttpLimits.maxRequests ?? MAX_LIVE_HTTP_REQUESTS,
+            maxRoutes: liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
             requestCount: 0,
             routeCount: liveRouteTasks.length
           }
@@ -12329,19 +13762,6 @@ export async function verifyLive({
     liveErrors.push(...check.errors);
   }
   securityAndCleanupPhase.end();
-  // Await the verifier-owned source census only AFTER every target-side
-  // liveHttpContext check has completed. The census is started concurrently
-  // above (sourceSurfaceCensusPromise) but crawls a slow / large / CDN-gated
-  // SOURCE origin; awaiting it earlier let it consume the target context's
-  // fixed wall-clock deadline (deadlineAt = startedAt + deadlineMs), which then
-  // failed unrelated target-side checks (server-rendered surface, redirect
-  // materialization, next-cycle cleanup, generated missing-route, access-wall,
-  // legal/privacy) with false "exceeded its total wall-clock deadline" errors.
-  // The census result is only consumed by completion logic below, so deferring
-  // the await keeps the target-side verdict independent of source-census cost
-  // without changing any source-census behavior or enforcement.
-  const sourceSurfaceCensus = await sourceSurfaceCensusPromise;
-  liveErrors.push(...sourceSurfaceCensus.errors);
   for (const error of liveHttpContext.errors) {
     if (!liveErrors.includes(error)) {
       liveErrors.push(error);
@@ -12423,6 +13843,24 @@ export async function verifyLive({
     )
     : [];
   liveErrors.push(...surfaceReconciliationErrors);
+  const runtimeCanvasAvailability = canvasAvailabilityFromLiveSurface(
+    inspectedDrupalRuntime.liveSurfaceInventory
+  );
+  const canvasRuntimeEvidenceRequired =
+    !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'liveSurfaceInventory');
+  const canvasAvailabilityErrors = canvasRuntimeEvidenceRequired
+    ? canvasAvailabilityReconciliationErrors(patternMap, runtimeCanvasAvailability)
+    : [];
+  const canvasRouteOwnershipErrors = canvasRuntimeEvidenceRequired
+    ? canvasRouteOwnershipReconciliationErrors(
+        patternMap,
+        inspectedDrupalRuntime.liveSurfaceInventory,
+        independentVerification,
+        browserEvidence,
+        target?.url?.origin ?? ''
+      )
+    : [];
+  liveErrors.push(...canvasAvailabilityErrors, ...canvasRouteOwnershipErrors);
   const customCodeErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'customCodeInventory')
     ? customCodeReconciliationErrors(
       inspectedDrupalRuntime.customCodeInventory,
@@ -12529,7 +13967,7 @@ export async function verifyLive({
     stateBlockers.push('The current live-derived Drupal public surface is not exactly reconciled to packet declarations or owned exclusions.');
   }
   if (customCodeErrors.length > 0) {
-    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability/test-bound or its quality, focused-test, representative-route, or config-schema checks failed.');
+    stateBlockers.push('The current verifier-owned custom-code inventory is not exactly capability/test-bound or its AST identity, entity-output, quality, focused-test, representative-route, or config-schema checks failed.');
   }
   if (inspectedDrupalRuntime.entityInventory?.confirmed !== true) {
     stateBlockers.push(inspectedDrupalRuntime.entityInventory?.reason || 'Drupal entity inventory is unavailable.');
@@ -12705,7 +14143,31 @@ export async function verifyLive({
   });
   const verifierOwnedAxeErrors = verifierAxeCompletionErrors(globalChromeCapture);
   const verifierOwnedAxeSupportsCompletion = verifierOwnedAxeErrors.length === 0;
-  const liveTargetValid = Boolean(target) && liveErrors.length === 0;
+  // A live budget exhaustion is an authorization boundary, not hundreds of
+  // per-route defects. Consolidate pure budget-exhaustion findings into one
+  // structured target.route-budget blocker (mirroring source.census-budget)
+  // so genuine route/link repairs stay separately visible and agent-resolvable.
+  const liveHttpBudgetMetrics = liveHttpContext.metrics();
+  const liveRouteBudget = liveRouteSchedule.budget ?? {};
+  const liveRouteOverflow =
+    liveRouteBudget.attempted === false &&
+    Number(liveRouteBudget.routeCount ?? 0) > Number(liveRouteBudget.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS);
+  const liveTargetBudgetLimited = fetchChecksEnabled && (
+    liveHttpBudgetMetrics.requestCapExhausted === true ||
+    liveHttpBudgetMetrics.taskCapExhausted === true ||
+    liveHttpBudgetMetrics.deadlineExceeded === true ||
+    liveRouteOverflow
+  );
+  let suppressedLiveBudgetErrorCount = 0;
+  if (liveTargetBudgetLimited) {
+    const retainedLiveErrors = liveErrors.filter(
+      (error) => !LIVE_TARGET_BUDGET_ERROR_PATTERN.test(String(error))
+    );
+    suppressedLiveBudgetErrorCount = liveErrors.length - retainedLiveErrors.length;
+    liveErrors.length = 0;
+    liveErrors.push(...retainedLiveErrors);
+  }
+  let liveTargetValid = Boolean(target) && liveErrors.length === 0;
   const drupalRuntimeSupportsCompletion =
     runtimeAuthoritativeForCompletion &&
     inspectedDrupalRuntime.confirmed === true &&
@@ -12731,13 +14193,160 @@ export async function verifyLive({
       })
     : [];
   const reviewHandoffStateValid = reviewHandoffRequired && reviewHandoffBindingErrors.length === 0;
-  const completionClaimAllowed =
+  const visualFloorCaptureEligible =
+    !briefMode &&
+    liveTargetValid &&
+    verifierOwnedAxeSupportsCompletion &&
+    drupalRuntimeSupportsCompletion;
+  let visualParityFloor;
+  if (briefMode) {
+    const value = {
+      schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
+      checkedAt: new Date().toISOString(),
+      status: 'not_applicable',
+      authority: 'not-applicable-build-from-brief',
+      verifierOwned: false,
+      completionSupported: true,
+      findings: [],
+      errors: []
+    };
+    visualParityFloor = { ...value, fingerprint: stateSha256(value) };
+  } else if (visualFloorCaptureEligible) {
+    const sourcePrimaryRoutes = primaryRoutes.map((route) => ({ targetPath: route?.sourcePath }));
+    const rawSourceVisualCapture = await captureGlobalChrome({
+      browserBackend,
+      baseUrl: new URL(declaredSource),
+      primaryRoutes: sourcePrimaryRoutes,
+      contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
+      environment
+    });
+    let sourceVisualCapture = globalChromeCaptureWithoutArtifacts(rawSourceVisualCapture, {
+      status: rawSourceVisualCapture.status === 'captured' ? 'blocked' : rawSourceVisualCapture.status,
+      resultStateFingerprint: buildState?.fingerprint ?? '',
+      error: rawSourceVisualCapture.status === 'captured'
+        ? 'Source visual capture could not be bound to the current Drupal build state.'
+        : ''
+    });
+    if (
+      buildStateReady &&
+      rawSourceVisualCapture.status === 'captured' &&
+      rawSourceVisualCapture.authoritative === true
+    ) {
+      try {
+        sourceVisualCapture = finalizeGlobalChromeCapture({
+          capture: rawSourceVisualCapture,
+          packetDir: absolutePacketDir,
+          stateFingerprint: buildState.fingerprint
+        });
+      } catch (error) {
+        sourceVisualCapture = globalChromeCaptureWithoutArtifacts(rawSourceVisualCapture, {
+          status: 'blocked',
+          resultStateFingerprint: buildState.fingerprint,
+          error: `Source visual capture finalization failed: ${error.message}`
+        });
+      }
+    }
+    const verifierFloor = compareVerifierOwnedVisualFloor({
+      sourceCapture: sourceVisualCapture,
+      targetCapture: globalChromeCapture,
+      primaryRoutes,
+      stateFingerprint: buildState.fingerprint
+    });
+    if (verifierFloor.status === 'review_required' && verifierFloor.diagnosticReviewEligible === true) {
+      const reviewedBuilderFallback = buildReviewedBuilderVisualFallback({
+        browserEvidence,
+        blindReview,
+        independentVerification,
+        primaryRoutes,
+        reviewHandoff,
+        reviewHandoffIndependent,
+        reviewHandoffStateValid,
+        blindReviewSupportsCompletion:
+          packetReport.completionEvidence?.blindAdversarialReviewSupportsCompletion === true,
+        independentVerificationSupportsCompletion:
+          packetReport.completionEvidence?.independentVerificationSupportsCompletion === true
+      });
+      const value = {
+        ...verifierFloor,
+        completionSupported: false,
+        reviewedBuilderFallback,
+        errors: [
+          ...verifierFloor.errors,
+          ...reviewedBuilderFallback.errors,
+          'Builder-writable screenshots and self-attested reviewer identity are diagnostic only; they cannot replace verifier-owned source capture.'
+        ]
+      };
+      const { fingerprint: _fingerprint, ...unfingerprinted } = value;
+      visualParityFloor = { ...unfingerprinted, fingerprint: stateSha256(unfingerprinted) };
+    } else {
+      visualParityFloor = verifierFloor;
+    }
+  } else {
+    const value = {
+      schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA,
+      checkedAt: new Date().toISOString(),
+      status: 'not_run',
+      authority: 'verifier-owned-managed-browser-structural-floor',
+      verifierOwned: true,
+      completionSupported: false,
+      findings: [],
+      errors: ['Verifier-owned source/target visual capture waits until target, accessibility, runtime, and build-state prerequisites pass.']
+    };
+    visualParityFloor = { ...value, fingerprint: stateSha256(value) };
+  }
+  const visualParityFloorSupportsCompletion = visualParityCompletionSupport(visualParityFloor, { briefMode });
+  const observedCompositionErrors = !briefMode
+    ? observedComposedRouteReconciliationErrors({
+        patternMap,
+        runtimeAvailability: runtimeCanvasAvailability,
+        visualParityFloor
+      })
+    : [];
+  liveErrors.push(...observedCompositionErrors);
+  liveTargetValid = liveTargetValid && observedCompositionErrors.length === 0;
+  const liveTargetBudgetSupportsCompletion = !liveTargetBudgetLimited;
+  const lateSourceCensusEligible =
+    !briefMode &&
     packetReport.valid &&
     liveTargetValid &&
+    liveTargetBudgetSupportsCompletion &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
-    reviewHandoffStateValid;
+    reviewHandoffStateValid &&
+    visualParityFloorSupportsCompletion;
+  // Source discovery is deliberately the last expensive verification phase.
+  // Primary target routes, representative routes, browser/editor workflows,
+  // accessibility, consent, and build-state checks therefore produce useful
+  // delivery feedback before a very large source inventory consumes time.
+  const sourceSurfaceCensus = await phaseRecorder.measure(
+    'source-census',
+    async () => briefMode || lateSourceCensusEligible
+      ? runSourceSurfaceCensus()
+      : sourceSurfaceNotRun(
+          'The late source census was deferred until every higher-priority packet, target, accessibility, runtime, and review-handoff check passes.'
+        ),
+    {
+      applicable: !briefMode,
+      attempted: lateSourceCensusEligible,
+      authoritativeRuntime: runtimeAuthoritativeForCompletion
+    }
+  );
+  const sourceSurfaceErrors = boundedReportMessages(sourceSurfaceCensus.errors);
+  const sourceSurfaceSupportsCompletion =
+    briefMode ||
+    !runtimeAuthoritativeForCompletion ||
+    sourceSurfaceCensus.status === 'passed';
+  const completionClaimAllowed =
+    packetReport.valid &&
+    liveTargetValid &&
+    liveTargetBudgetSupportsCompletion &&
+    sourceSurfaceSupportsCompletion &&
+    packetSupportsCompletion &&
+    verifierOwnedAxeSupportsCompletion &&
+    drupalRuntimeSupportsCompletion &&
+    reviewHandoffStateValid &&
+    visualParityFloorSupportsCompletion;
   const completeLocalRebuildClaimAllowed = !briefMode && completionClaimAllowed;
   const completeLocalBuildFromBriefClaimAllowed = briefMode && completionClaimAllowed;
   const completionBlockers = [];
@@ -12759,11 +14368,48 @@ export async function verifyLive({
   if (!liveTargetValid) {
     addCompletionBlocker('target.validation', 'Live target identity or route verification failed.');
   }
-  if (!briefMode && runtimeAuthoritativeForCompletion && sourceSurfaceCensus.status !== 'passed') {
-    addCompletionBlocker(
-      'source.census',
-      'Verifier-owned source route discovery is incomplete or does not reconcile with route-matrix.json.'
-    );
+  if (liveTargetBudgetLimited) {
+    completionBlockers.push(liveTargetBudgetCompletionBlocker(
+      liveHttpBudgetMetrics,
+      liveRouteBudget,
+      liveHttpLimits.maxRoutes ?? MAX_LIVE_ROUTE_CHECKS,
+      suppressedLiveBudgetErrorCount
+    ));
+  }
+  for (const error of canvasAvailabilityErrors) {
+    addCompletionBlocker('canvas.runtime-availability', error, {
+      nextAction: 'Repair the Canvas runtime or align the build type and every route-level availability declaration with verifier-observed runtime facts, then rerun the live verifier.'
+    });
+  }
+  for (const error of canvasRouteOwnershipErrors) {
+    addCompletionBlocker('canvas.route-ownership', error, {
+      nextAction: 'Bind each Canvas-owned public route to exactly one published live Canvas page, its component topology, and its exact entity editor URL, then refresh evidence.'
+    });
+  }
+  for (const error of observedCompositionErrors) {
+    addCompletionBlocker('canvas.observed-composition', error, {
+      nextAction: 'Use Canvas for the verifier-observed design-led route or provide a future externally authenticated owner exception; packet-local self-attestation cannot waive this check.'
+    });
+  }
+  if (
+    lateSourceCensusEligible &&
+    sourceSurfaceCensus.status !== 'passed'
+  ) {
+    const sourceSurfaceBlocker = sourceSurfaceCompletionBlocker(sourceSurfaceCensus);
+    completionBlockers.push(sourceSurfaceBlocker);
+    if (
+      sourceSurfaceBlocker.code === 'source.census-budget' &&
+      sourceSurfaceNonBudgetErrors(sourceSurfaceCensus).length > 0
+    ) {
+      addCompletionBlocker(
+        'source.census',
+        'Source route-matrix or response reconciliation still requires agent repair independently of the larger crawl authorization.',
+        {
+          nextAction: 'Repair every non-budget source census error first; a larger crawl changes only verifier bounds and does not accept missing route-matrix rows.',
+          origin: 'source-census-verifier:reconciliation'
+        }
+      );
+    }
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
     addCompletionBlocker(
@@ -12793,6 +14439,18 @@ export async function verifyLive({
   }
   for (const error of verifierOwnedAxeErrors) {
     addCompletionBlocker('accessibility.axe', error);
+  }
+  if (!visualParityFloorSupportsCompletion) {
+    const visualErrors = Array.isArray(visualParityFloor?.errors) && visualParityFloor.errors.length > 0
+      ? visualParityFloor.errors
+      : ['Verifier-owned source/target structural visual coverage did not support completion.'];
+    for (const error of visualErrors) {
+      addCompletionBlocker('visual.parity-floor', error, {
+        nextAction: visualParityFloor?.status === 'review_required'
+          ? 'Restore verifier-owned access to the source route (or use a future externally authenticated review authority); packet-authored reviewer claims cannot authorize completion.'
+          : 'Repair the gross source/target structural omissions or browser-capture failure, refresh affected evidence, and rerun the live verifier.'
+      });
+    }
   }
   if (!reviewHandoffStateValid) {
     const handoffBlockers = reviewHandoffBindingErrors.length > 0
@@ -12880,8 +14538,10 @@ export async function verifyLive({
 
   const targetFingerprintInput = JSON.stringify({
     origin: target?.url.origin ?? '',
+    canvasRuntimeAvailabilityFingerprint: runtimeCanvasAvailability.fingerprint ?? '',
     sourceSurfaceFingerprint: sourceSurfaceCensus.fingerprint ?? '',
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
+    visualParityFloorFingerprint: visualParityFloor?.fingerprint ?? '',
     beforeConsentNetworkCaptureFingerprint: beforeConsentNetworkCapture?.captureFingerprint ?? '',
     negativeRouteCheck: negativeRouteCheck
       ? { bodySha256: negativeRouteCheck.bodySha256 ?? '', path: negativeRouteCheck.path, status: negativeRouteCheck.status ?? 0 }
@@ -12932,6 +14592,8 @@ export async function verifyLive({
       passed: liveEditorSurfaceReconciliation.passed
     },
     customCodeInventoryFingerprint: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+    customCodeMutableIdentityResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.mutableIdentityAudit?.resultFingerprint ?? '',
+    customCodeEntityOutputResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.customEntityOutputAudit?.resultFingerprint ?? '',
     customCodeQualityResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
     customCodeTestExecutionResultFingerprint: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? ''
   });
@@ -12952,18 +14614,21 @@ export async function verifyLive({
   const liveGateFindings = [
     ...sharedPacketReport.errors,
     ...(sharedPacketReport.completionEvidence?.packetCompletionBlockedReasons ?? []),
+    ...(visualParityFloorSupportsCompletion
+      ? []
+      : (visualParityFloor?.errors ?? []).map((error) => `G-PARITY-01 ${sharedMessage(error, absolutePacketDir)}`)),
     ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
+    ...sourceSurfaceErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
   ];
 
-  const liveReport = publicRedactedValue({
-    schemaVersion: 'public-kit.live-verification.2',
+  const liveReport = publicRedactedValue(createLiveVerificationReport({
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope,
     productionReadinessEvaluated: false,
     launchReady: false,
-    verificationMode: 'live-target-and-packet',
+    verificationMode: LIVE_VERIFICATION_MODE,
     gateResults: perGateResults(gates, liveGateFindings, { mode: 'live' }),
     packetDir: sharedPacketDirName(absolutePacketDir),
     target: target
@@ -12977,14 +14642,17 @@ export async function verifyLive({
       : null,
     evidenceBinding: {
       customCodeInventorySha256: inspectedDrupalRuntime.customCodeInventory?.fingerprint ?? '',
+      customCodeMutableIdentityResultSha256: inspectedDrupalRuntime.customCodeInventory?.mutableIdentityAudit?.resultFingerprint ?? '',
+      customCodeEntityOutputResultSha256: inspectedDrupalRuntime.customCodeInventory?.customEntityOutputAudit?.resultFingerprint ?? '',
       customCodeQualityResultSha256: inspectedDrupalRuntime.customCodeInventory?.qualityAudit?.resultFingerprint ?? '',
       customCodeTestExecutionResultSha256: inspectedDrupalRuntime.customCodeInventory?.focusedTestExecution?.resultFingerprint ?? '',
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
+      visualParityFloorSha256: visualParityFloor?.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 7
+      targetFingerprintInputVersion: 8
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
@@ -13009,6 +14677,7 @@ export async function verifyLive({
       passed: verifierOwnedAxeSupportsCompletion,
       errors: verifierOwnedAxeErrors
     },
+    visualParityFloor: sharedValue(visualParityFloor, absolutePacketDir),
     beforeConsentNetworkCapture: sharedBeforeConsentCapture,
     negativeRouteCheck: sharedValue(negativeRouteCheck, absolutePacketDir),
     accessWallChecks: sharedValue(accessWallChecks, absolutePacketDir),
@@ -13024,6 +14693,7 @@ export async function verifyLive({
     liveEditorSurfaceReconciliation,
     liveNextCycleReconciliation,
     liveTargetValid,
+    sourceSurfaceSupportsCompletion,
     buildState,
     reviewHandoffBinding: {
       attribution: 'builder-writable-self-attested-non-authoritative',
@@ -13053,6 +14723,7 @@ export async function verifyLive({
       trackedConfigYamlPresent: drupalRuntimeConfigSyncTracked,
       trackedConfigDirectory: runtimeTrackedConfigDirectory,
       trackedConfigReadbackMatches: drupalRuntimeTrackedConfigReadbackMatches,
+      canvasAvailability: runtimeCanvasAvailability,
       trackedConfigYamlFiles: runtimeTrackedConfigYamlFiles
     },
     packetVerification: sharedPacketReport,
@@ -13072,9 +14743,12 @@ export async function verifyLive({
     completionBlockers,
     completionBlockedReasons,
     valid: packetReport.valid && liveTargetValid,
-    errors: [...sharedPacketReport.errors, ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))],
+    errors: [
+      ...sharedPacketReport.errors,
+      ...liveErrors.map((error) => sharedMessage(error, absolutePacketDir))
+    ],
     warnings: sharedPacketReport.warnings
-  });
+  }));
   if (reuseMode === 'shadow') {
     globalChromeShadowSessions.set(liveReport, structuredClone({
       ...(globalChromeShadowSession ?? {}),
@@ -13204,6 +14878,15 @@ async function main() {
         packetDir: args.packet,
         targetUrl: args.targetUrl,
         outPath: args.out,
+        liveHttpLimits: liveTargetLimitsForRouteCount(
+          args.targetMaxRoutes || MAX_LIVE_ROUTE_CHECKS
+        ),
+        sourceSurfaceLimits: sourceSurfaceLimitsForRouteCount(
+          args.sourceMaxRoutes || SOURCE_SURFACE_LIMITS.maxRoutes
+        ),
+        onSourceProgress: (event) => {
+          process.stderr.write(`${formatSourceSurfaceProgress(event)}\n`);
+        },
         observabilityRecorder,
         reuseMode: args.reuseMode
       });
@@ -13350,6 +15033,27 @@ async function main() {
       : `Live target checks passed, but ${claimDescription} machine authorization remains blocked by required machine evidence.`;
     process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
     process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
+    const sourceFindings = Array.isArray(report.sourceSurfaceCensus?.errors)
+      ? report.sourceSurfaceCensus.errors
+      : [];
+    if (sourceFindings.length > 0) {
+      process.stderr.write(`Source census findings (showing ${Math.min(sourceFindings.length, MAX_SOURCE_CLI_FINDINGS)} of ${sourceFindings.length}):\n`);
+      for (const finding of sourceFindings.slice(0, MAX_SOURCE_CLI_FINDINGS)) {
+        process.stderr.write(`- ${finding}\n`);
+      }
+    }
+    const sourceNextActions = new Set(report.agentContinuation.blockers
+      .filter((candidate) => candidate.code.startsWith('source.census'))
+      .map((blocker) => blocker.nextAction));
+    for (const nextAction of sourceNextActions) {
+      process.stderr.write(`Source census next action: ${nextAction}\n`);
+    }
+    const liveTargetBudgetNextActions = new Set(report.agentContinuation.blockers
+      .filter((candidate) => candidate.code === 'target.route-budget')
+      .map((blocker) => blocker.nextAction));
+    for (const nextAction of liveTargetBudgetNextActions) {
+      process.stderr.write(`Live target budget next action: ${nextAction}\n`);
+    }
     process.exitCode = 2;
   }
 }

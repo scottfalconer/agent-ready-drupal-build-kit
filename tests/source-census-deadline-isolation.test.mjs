@@ -15,28 +15,69 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 
-test('verifier fingerprint binds handoff validation and the executable vendored WebSocket transport', () => {
+test('verifier fingerprint binds observability, live-report, parser/runtime helpers, and vendored transports', () => {
   const kitRoot = mkdtempSync(join(tmpdir(), 'verifier-fingerprint-'));
   const scriptPath = join(kitRoot, 'bin', 'verify.mjs');
   const vendorRoot = join(kitRoot, 'vendor', 'ws', '8.21.0');
+  const acornRoot = join(kitRoot, 'vendor', 'acorn', '8.15.0');
   mkdirSync(dirname(scriptPath), { recursive: true });
   mkdirSync(vendorRoot, { recursive: true });
+  mkdirSync(acornRoot, { recursive: true });
   writeFileSync(scriptPath, 'fixture verifier');
+  writeFileSync(join(dirname(scriptPath), 'live-verification-contract.mjs'), 'export const schema = "first";\n');
   writeFileSync(join(dirname(scriptPath), 'review-handoff.mjs'), 'export const handoff = "first";\n');
+  writeFileSync(join(dirname(scriptPath), 'verification-observability.mjs'), 'export const metrics = "first";\n');
+  for (const helper of [
+    'custom-mutable-identity-audit.mjs',
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    writeFileSync(join(dirname(scriptPath), helper), `export const helper = "${helper}:first";\n`);
+  }
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
   writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "first";\n');
+  writeFileSync(join(acornRoot, 'INTEGRITY.json'), '{"fixture":true}\n');
+  writeFileSync(join(acornRoot, 'acorn.mjs'), 'export default "first";\n');
 
   const before = verifierFingerprint({ kitRoot, scriptPath });
+  writeFileSync(join(dirname(scriptPath), 'live-verification-contract.mjs'), 'export const schema = "second";\n');
+  const afterContractChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterContractChange, before);
+
+  writeFileSync(join(dirname(scriptPath), 'verification-observability.mjs'), 'export const metrics = "second";\n');
+  const afterObservabilityChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterObservabilityChange, afterContractChange);
+
   writeFileSync(join(dirname(scriptPath), 'review-handoff.mjs'), 'export const handoff = "second";\n');
   const afterHandoffChange = verifierFingerprint({ kitRoot, scriptPath });
-  assert.notEqual(afterHandoffChange, before);
+  assert.notEqual(afterHandoffChange, afterObservabilityChange);
 
   writeFileSync(join(vendorRoot, 'ws.mjs'), 'export default "second";\n');
   const afterBundleChange = verifierFingerprint({ kitRoot, scriptPath });
   assert.notEqual(afterBundleChange, afterHandoffChange);
 
   writeFileSync(join(vendorRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
-  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterBundleChange);
+  let previous = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(previous, afterBundleChange);
+
+  for (const helper of [
+    'custom-mutable-identity-audit.mjs',
+    'mutable-identity-worker.mjs',
+    'mutable-identity-drupal.mjs',
+    'custom-entity-output-audit.mjs'
+  ]) {
+    writeFileSync(join(dirname(scriptPath), helper), `export const helper = "${helper}:second";\n`);
+    const changed = verifierFingerprint({ kitRoot, scriptPath });
+    assert.notEqual(changed, previous, `${helper} must participate in verifier identity`);
+    previous = changed;
+  }
+
+  writeFileSync(join(acornRoot, 'acorn.mjs'), 'export default "second";\n');
+  const afterAcornChange = verifierFingerprint({ kitRoot, scriptPath });
+  assert.notEqual(afterAcornChange, previous);
+  writeFileSync(join(acornRoot, 'INTEGRITY.json'), '{"fixture":false}\n');
+  assert.notEqual(verifierFingerprint({ kitRoot, scriptPath }), afterAcornChange);
 });
 
 async function withServer(handler, callback) {
@@ -105,14 +146,12 @@ test('browser preflight distinguishes runtime failure from route/site capture fa
   assert.equal(browserRuntimePreflightUnavailable(null, { attempted: false }), false);
 });
 
-// Structural guard on verifyLive's scheduling: browser/CDP/axe capture is the
-// early runtime preflight. Only after it succeeds may the verifier start either
-// the source census or target HTTP work. Once started, the source census may run
-// concurrently, but it must be awaited only AFTER every target-side
-// liveHttpContext check has run so source cost cannot consume the target
-// context's wall-clock. bin/ and skills/ copies are kept byte-identical by the
-// skill-package sync test, so checking bin/ suffices.
-test('verifyLive preflights browser capture before source/target work and awaits source census after target checks', () => {
+// Structural guard on verifyLive's delivery order: browser/CDP/axe capture is
+// the early runtime preflight, target routes and editor/runtime evidence finish
+// next, and only then may the expensive source crawl start. bin/ and skills/
+// copies are kept byte-identical by the skill-package sync test, so checking
+// bin/ suffices.
+test('verifyLive preflights the browser and completes target delivery checks before starting source census', () => {
   const source = readFileSync(join(repoRoot, 'bin', 'verify.mjs'), 'utf8');
   const start = source.indexOf('export async function verifyLive');
   assert.ok(start >= 0, 'verifyLive must exist');
@@ -122,14 +161,19 @@ test('verifyLive preflights browser capture before source/target work and awaits
     'const globalChromeExecution = await captureGlobalChromeWithShadowPrediction({'
   );
   const freshBrowserCapture = body.indexOf("captureFresh: () => phaseRecorder.measure(\n      'global-chrome'");
-  const censusAttempted = body.indexOf('const sourceCensusAttempted = Boolean(');
-  const censusStart = body.indexOf('const sourceSurfaceCensusPromise = phaseRecorder.measure(');
+  const censusDefinition = body.indexOf('const runSourceSurfaceCensus = async () => briefMode');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
   const accessWallCheck = body.indexOf('Access-wall verification could not complete');
   const legalPrivacyCheck = body.indexOf('Legal/privacy-link verification could not complete');
-  const censusAwait = body.indexOf('await sourceSurfaceCensusPromise');
+  const consentReconciliation = body.indexOf('const consentReconciliation = verifyConsentReconciliation(');
+  const axeEvaluation = body.indexOf('const verifierOwnedAxeErrors = verifierAxeCompletionErrors(');
+  const censusEligibility = body.indexOf('const lateSourceCensusEligible =');
+  const censusTiming = body.indexOf('const sourceSurfaceCensus = await phaseRecorder.measure(');
+  const censusStart = body.indexOf('? runSourceSurfaceCensus()');
+  const targetVerdict = body.search(/(?:const|let) liveTargetValid = Boolean\(target\)/);
 
   assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
+  assert.ok(censusDefinition >= 0, 'deferred source census definition must exist');
   assert.ok(freshBrowserCapture > browserCapture, 'shadow orchestration must retain the measured fresh capture');
   assert.equal(
     body.includes('const codeManifest = reusableCodeManifest ??'),
@@ -140,47 +184,58 @@ test('verifyLive preflights browser capture before source/target work and awaits
     body.indexOf('const codeManifest = runtimeProjectRoot') > browserCapture,
     'the authoritative code manifest must still be collected after browser capture'
   );
-  assert.ok(censusAttempted >= 0, 'source census timing must declare whether work was attempted');
-  assert.ok(censusStart >= 0, 'source census scheduling must exist');
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
   assert.ok(accessWallCheck >= 0, 'access-wall target-side check must exist');
   assert.ok(legalPrivacyCheck >= 0, 'legal/privacy target-side check must exist');
-  assert.ok(censusAwait >= 0, 'source census must be awaited');
+  assert.ok(consentReconciliation >= 0, 'target consent reconciliation must exist');
+  assert.ok(axeEvaluation >= 0, 'verifier-owned accessibility evaluation must exist');
+  assert.ok(censusEligibility >= 0, 'late source-census eligibility gate must exist');
+  assert.ok(censusTiming >= 0, 'late source census timing must exist');
+  assert.ok(censusStart >= 0, 'source census must be invoked');
+  assert.ok(targetVerdict >= 0, 'target verdict must exist');
 
   assert.ok(
-    browserCapture < censusStart,
-    'browser capture must finish before source census scheduling'
+    browserCapture < censusDefinition,
+    'browser capture must finish before defining the deferred source census'
   );
   assert.ok(
-    censusAttempted < censusStart,
-    'source census attempted state must be computed before timing begins'
+    censusDefinition < contextCreation,
+    'the deferred source census must be available before target work without starting it'
   );
   assert.ok(
-    censusStart < contextCreation,
-    'source census scheduling must stay before target context creation after the browser preflight'
+    censusStart > contextCreation,
+    'source census must start after the target liveHttpContext work'
   );
   assert.ok(
-    censusAwait > contextCreation,
-    'source census must be awaited after the target liveHttpContext is created'
+    censusStart > accessWallCheck,
+    'source census must start after the access-wall target-side check'
   );
   assert.ok(
-    censusAwait > accessWallCheck,
-    'source census must be awaited after the access-wall target-side check'
+    censusStart > legalPrivacyCheck,
+    'source census must start after the legal/privacy target-side check'
   );
   assert.ok(
-    censusAwait > legalPrivacyCheck,
-    'source census must be awaited after the legal/privacy target-side check (the last one)'
+    censusStart > consentReconciliation,
+    'source census must start after browser/consent reconciliation'
+  );
+  assert.ok(censusStart > axeEvaluation, 'source census must start after verifier-owned accessibility evaluation');
+  assert.ok(censusStart > censusEligibility, 'source census must start only through its late eligibility gate');
+  assert.ok(censusStart > censusTiming, 'source census must start inside the measured late phase');
+  assert.ok(
+    censusStart > targetVerdict,
+    'the core target verdict must be established before the late source census starts'
   );
   assert.match(
-    body.slice(censusStart, contextCreation),
-    /attempted:\s*sourceCensusAttempted/,
+    body.slice(censusTiming, body.indexOf('const sourceSurfaceErrors', censusTiming)),
+    /attempted:\s*lateSourceCensusEligible/,
     'synthetic source-census not-run branches must be marked skipped in timing'
   );
 
-  const awaitCount = body.split('await sourceSurfaceCensusPromise').length - 1;
+  const invocationCount = body.split('? runSourceSurfaceCensus()').length - 1;
   assert.equal(
-    awaitCount,
+    invocationCount,
     1,
-    'the source census must be awaited exactly once, after all target-side checks (no earlier serialization point)'
+    'the source census must start exactly once, after all target delivery checks'
   );
+  assert.equal(body.includes('liveErrors.push(...sourceSurfaceCensus.errors)'), false);
 });
