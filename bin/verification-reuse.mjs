@@ -847,35 +847,60 @@ function validateLockOwner(value) {
 }
 
 async function inspectGlobalStateLock(lockPath) {
-  let metadata;
   try {
-    metadata = await lstat(lockPath);
+    const metadata = await lstat(lockPath);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error('Global chrome shadow state lock must be a real directory.');
+    }
+    const entries = await readdir(lockPath, { withFileTypes: true });
+    if (entries.length === 0) {
+      const currentMetadata = await lstat(lockPath);
+      return (
+        currentMetadata.isDirectory() &&
+        !currentMetadata.isSymbolicLink() &&
+        currentMetadata.dev === metadata.dev &&
+        currentMetadata.ino === metadata.ino
+      )
+        ? { metadata: currentMetadata, owner: null }
+        : null;
+    }
+    if (
+      entries.length !== 1 ||
+      entries[0].name !== REUSE_LOCK_OWNER_FILE ||
+      !entries[0].isFile()
+    ) {
+      throw new Error('Global chrome shadow state lock contains unexpected entries.');
+    }
+    const ownerPath = join(lockPath, REUSE_LOCK_OWNER_FILE);
+    const ownerMetadata = await safeMetadata(ownerPath, { maxBytes: REUSE_LOCK_OWNER_MAX_BYTES });
+    if (!ownerMetadata) return null;
+    let owner;
+    try {
+      owner = validateLockOwner(JSON.parse(await readFile(ownerPath, 'utf8')));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null;
+      throw new Error(`Global chrome shadow state lock owner is invalid: ${error.message}`);
+    }
+    const [currentMetadata, currentOwnerMetadata] = await Promise.all([
+      lstat(lockPath),
+      safeMetadata(ownerPath, { maxBytes: REUSE_LOCK_OWNER_MAX_BYTES })
+    ]);
+    if (
+      !currentOwnerMetadata ||
+      currentMetadata.isSymbolicLink() ||
+      !currentMetadata.isDirectory() ||
+      currentMetadata.dev !== metadata.dev ||
+      currentMetadata.ino !== metadata.ino ||
+      currentOwnerMetadata.dev !== ownerMetadata.dev ||
+      currentOwnerMetadata.ino !== ownerMetadata.ino
+    ) {
+      return null;
+    }
+    return { metadata: currentMetadata, owner };
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
     throw error;
   }
-  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new Error('Global chrome shadow state lock must be a real directory.');
-  }
-  const entries = await readdir(lockPath, { withFileTypes: true });
-  if (entries.length === 0) return { metadata, owner: null };
-  if (
-    entries.length !== 1 ||
-    entries[0].name !== REUSE_LOCK_OWNER_FILE ||
-    !entries[0].isFile()
-  ) {
-    throw new Error('Global chrome shadow state lock contains unexpected entries.');
-  }
-  const ownerPath = join(lockPath, REUSE_LOCK_OWNER_FILE);
-  const ownerMetadata = await safeMetadata(ownerPath, { maxBytes: REUSE_LOCK_OWNER_MAX_BYTES });
-  if (!ownerMetadata) throw new Error('Global chrome shadow state lock owner disappeared.');
-  let owner;
-  try {
-    owner = validateLockOwner(JSON.parse(await readFile(ownerPath, 'utf8')));
-  } catch (error) {
-    throw new Error(`Global chrome shadow state lock owner is invalid: ${error.message}`);
-  }
-  return { metadata, owner };
 }
 
 async function withGlobalStateLock(directory, operation) {
@@ -887,10 +912,10 @@ async function withGlobalStateLock(directory, operation) {
         await mkdir(lockPath, { mode: 0o700 });
         const owner = newLockOwner();
         try {
-          await writeFile(
+          await writeTextAtomic(
             join(lockPath, REUSE_LOCK_OWNER_FILE),
             `${JSON.stringify(owner)}\n`,
-            { flag: 'wx', mode: 0o600 }
+            { temporaryDirectory: dirname(lockPath) }
           );
         } catch (error) {
           try { await rmdir(lockPath); } catch {}
