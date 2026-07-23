@@ -6,7 +6,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmdirSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,6 +18,7 @@ import test from 'node:test';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const verifyScript = join(repoRoot, 'bin', 'verify-packet.mjs');
+const observabilityScript = join(repoRoot, 'bin', 'verification-observability.mjs');
 const templatesDir = join(repoRoot, 'templates');
 
 function runVerifier(args, options = {}) {
@@ -136,6 +139,18 @@ test('verifier CLI runs when invoked through an npm-style bin symlink', () => {
   assert.match(result.stdout, /Usage: node .*verify-packet\.mjs/);
 });
 
+test('verification observability CLI runs when invoked through an npm-style bin symlink', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'observability-bin-'));
+  const link = join(temp, 'agent-ready-drupal-verification-observability');
+  symlinkSync(observabilityScript, link);
+
+  const result = spawnSync(link, ['--help'], { cwd: temp, encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /scripts\/verification-observability\.mjs/);
+  assert.match(result.stdout, /report \[--json\]/);
+});
+
 test('verifier rejects --packet without a value cleanly', () => {
   const result = runVerifier(['--packet']);
 
@@ -168,37 +183,55 @@ test('verifier accepts --packet=value form for explicit packet paths', () => {
 });
 
 test('npm package excludes local agent state and keeps verifier bins executable', () => {
-  const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
-    cwd: repoRoot,
-    encoding: 'utf8'
-  });
+  const localState = join(repoRoot, '.agent-ready-drupal');
+  const localStateExisted = existsSync(localState);
+  const sentinelName = `npm-pack-sentinel-${process.pid}.txt`;
+  const sentinelPath = join(localState, sentinelName);
+  mkdirSync(localState, { recursive: true });
+  writeFileSync(sentinelPath, 'must not ship\n', { flag: 'wx' });
 
-  assert.equal(result.status, 0, result.stderr);
-  const [pack] = JSON.parse(result.stdout);
-  const files = new Map(pack.files.map((file) => [file.path, file]));
-  for (const path of files.keys()) {
-    assert.doesNotMatch(path, /^(?:\.agents|\.claude)(?:\/|$)/);
-    assert.notEqual(path, 'skills-lock.json');
-    assert.doesNotMatch(path, /\.tgz$/);
-  }
-  for (const path of [
-    'bin/doctor.mjs',
-    'bin/reconcile.mjs',
-    'bin/verify.mjs',
-    'bin/verify-packet.mjs',
-    'bin/review-handoff.mjs',
-    'bin/verify-assembly.mjs',
-    'bin/verify-reproduction.mjs',
-    'bin/lifecycle.mjs'
-  ]) {
-    assert.equal(files.has(path), true, `${path} missing from npm package`);
-    assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
-  }
-  for (const path of [
-    'bin/live-verification-contract.mjs',
-    'skills/agent-ready-drupal-build-kit/scripts/live-verification-contract.mjs'
-  ]) {
-    assert.equal(files.has(path), true, `${path} missing from npm package`);
+  try {
+    const result = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+      cwd: repoRoot,
+      encoding: 'utf8'
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const [pack] = JSON.parse(result.stdout);
+    const files = new Map(pack.files.map((file) => [file.path, file]));
+    assert.equal(
+      files.has(`.agent-ready-drupal/${sentinelName}`),
+      false,
+      'project-local verification state must not enter the npm package'
+    );
+    for (const path of files.keys()) {
+      assert.doesNotMatch(path, /^(?:\.agents|\.agent-ready-drupal|\.claude)(?:\/|$)/);
+      assert.notEqual(path, 'skills-lock.json');
+      assert.doesNotMatch(path, /\.tgz$/);
+    }
+    for (const path of [
+      'bin/doctor.mjs',
+      'bin/reconcile.mjs',
+      'bin/verify.mjs',
+      'bin/verify-packet.mjs',
+      'bin/review-handoff.mjs',
+      'bin/verify-assembly.mjs',
+      'bin/verify-reproduction.mjs',
+      'bin/verification-observability.mjs',
+      'bin/lifecycle.mjs'
+    ]) {
+      assert.equal(files.has(path), true, `${path} missing from npm package`);
+      assert.notEqual(files.get(path).mode & 0o111, 0, `${path} should remain executable`);
+    }
+    for (const path of [
+      'bin/live-verification-contract.mjs',
+      'skills/agent-ready-drupal-build-kit/scripts/live-verification-contract.mjs'
+    ]) {
+      assert.equal(files.has(path), true, `${path} missing from npm package`);
+    }
+  } finally {
+    unlinkSync(sentinelPath);
+    if (!localStateExisted) rmdirSync(localState);
   }
 });
 

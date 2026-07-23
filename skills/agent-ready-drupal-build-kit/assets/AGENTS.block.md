@@ -8,6 +8,8 @@ Canonical workflow: [`{{SKILL_PATH}}/SKILL.md`]({{SKILL_PATH}}/SKILL.md)
 
 Review packet: `{{PACKET_PATH}}/`
 
+Default live verification records bounded local observability under `.agent-ready-drupal/` and refreshes `agent-next.json`; use its compact blocker delta to guide the next repair, then consult the exact hash-bound full live report. Inspect matched cohorts with `node {{SHELL_SKILL_PATH}}/scripts/verification-observability.mjs report` or `report --json`. This kit-owned, self-ignored state is outside review-packet evidence and marks itself `evidenceAuthority: none`; the verifier declines to write into an unowned namespace or over a modified ignore policy. Compare only matching workload/environment cohorts and separate implementation fingerprints. Phase spans may overlap, so do not sum them, and recorded verification duration stops before observability persistence. Never commit this local state or use metrics or `agent-next.json` instead of fresh verification.
+
 Non-negotiable gates:
 
 - Model repeatable information as Drupal-owned structured content. Every declared collection needs count, ownership, and non-admin add-a-row evidence; accepted exclusions need a named owner and evidence.

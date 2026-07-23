@@ -10844,7 +10844,7 @@ test('default CLI ignores an ambient DDEV URL outside a matching project/contain
         join(repoRoot, 'bin', 'verify.mjs'),
         '--packet',
         packetDir
-      ], repoRoot, { env: { ...process.env, DDEV_PRIMARY_URL: baseUrl } });
+      ], temp, { env: { ...process.env, DDEV_PRIMARY_URL: baseUrl } });
 
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, /No live target URL found/);
