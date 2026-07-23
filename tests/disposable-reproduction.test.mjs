@@ -60,11 +60,18 @@ test('entity-output smoke owns a fixed thumbnail and restores the exact managed-
 
   assert.match(setup, new RegExp(`'uuid' => '${thumbnailUuid}'`));
   assert.match(setup, /hash\('sha256', \$thumbnail_bytes\) !== '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460'/);
-  assert.match(setup, /'thumbnail' => \[\s*'target_id' => \$thumbnail_file->id\(\)/);
+  assert.match(setup, /\$file_directory \. '\/generic\.png'/);
+  assert.match(setup, /\$original_icon_base_uri !== 'public:\/\/media-icons\/generic'/);
+  assert.match(setup, /\$media_settings->set\('icon_base_uri', \$file_directory\)->save\(\)/);
+  assert.match(setup, /\(int\) \$media->get\('thumbnail'\)->target_id !== \(int\) \$thumbnail_file->id\(\)/);
   assert.match(cleanup, new RegExp(`\\['file', '${thumbnailUuid.replaceAll('-', '\\-')}'\\]`));
+  assert.match(cleanup, /->set\('icon_base_uri', \$original_icon_base_uri\)/);
+  assert.match(cleanup, /\$state->delete\(\$icon_base_snapshot_key\)/);
   assert.doesNotMatch(cleanup, /getStorage\('file'\)->(?:loadMultiple|delete)/);
   assert.match(smoke, /const filesBefore = managedFileInventory\(\);/);
+  assert.match(smoke, /const mediaIconRuntimeBefore = mediaIconRuntime\(\);/);
   assert.match(smoke, /'uuid'.*'uri'.*'filename'.*'bytesExist'/s);
+  assert.match(smoke, /assert\.deepEqual\(mediaIconRuntime\(\), mediaIconRuntimeBefore\);/);
   assert.match(smoke, /assert\.deepEqual\(managedFileInventory\(\), filesBefore\);/);
 });
 

@@ -22,7 +22,7 @@ foreach ([
 }
 
 $fixture_uri = 'public://phase-c/entity-output.txt';
-$thumbnail_uri = 'public://phase-c/entity-output-thumbnail.png';
+$thumbnail_uri = 'public://phase-c/generic.png';
 $fixture_directory = 'public://phase-c';
 $file_system = \Drupal::service('file_system');
 foreach ([$fixture_uri, $thumbnail_uri] as $owned_uri) {
@@ -33,6 +33,20 @@ foreach ([$fixture_uri, $thumbnail_uri] as $owned_uri) {
 if (is_dir($fixture_directory)) {
   $file_system->deleteRecursive($fixture_directory);
 }
+
+$icon_base_snapshot_key = 'agent_ready.phase_c.entity_output.original_icon_base_uri';
+$state = \Drupal::state();
+$original_icon_base_uri = $state->get($icon_base_snapshot_key);
+if (is_string($original_icon_base_uri)) {
+  \Drupal::configFactory()
+    ->getEditable('media.settings')
+    ->set('icon_base_uri', $original_icon_base_uri)
+    ->save();
+  $state->delete($icon_base_snapshot_key);
+}
+$media_icon_base_restored = is_string($original_icon_base_uri)
+  ? (string) \Drupal::config('media.settings')->get('icon_base_uri') === $original_icon_base_uri
+  : (string) \Drupal::config('media.settings')->get('icon_base_uri') !== $fixture_directory;
 
 foreach ([
   EntityViewDisplay::load('node.phase_c_output.default'),
@@ -92,6 +106,8 @@ print json_encode([
   'fixtureFileRemoved' => !file_exists($fixture_uri),
   'fixtureThumbnailRemoved' => !file_exists($thumbnail_uri),
   'fixtureDirectoryRemoved' => !is_dir($fixture_directory),
+  'mediaIconBaseRestored' => $media_icon_base_restored,
+  'mediaIconBaseSnapshotRemoved' => $state->get($icon_base_snapshot_key) === NULL,
   'themesRemoved' => !array_key_exists('quality_smoke_child', $remaining_themes) &&
     !array_key_exists('quality_smoke_base', $remaining_themes),
 ], JSON_UNESCAPED_SLASHES);

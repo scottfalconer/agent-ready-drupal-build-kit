@@ -202,7 +202,7 @@ if (
 }
 $thumbnail_uri = $file_system->saveData(
   $thumbnail_bytes,
-  $file_directory . '/entity-output-thumbnail.png',
+  $file_directory . '/generic.png',
   FileExists::Replace,
 );
 if (!is_string($thumbnail_uri) || $thumbnail_uri === '') {
@@ -210,12 +210,25 @@ if (!is_string($thumbnail_uri) || $thumbnail_uri === '') {
 }
 $thumbnail_file = File::create([
   'uuid' => '4cdd2af4-6c57-43b4-a978-f80f07fa53b1',
-  'filename' => 'entity-output-thumbnail.png',
+  'filename' => 'generic.png',
   'uri' => $thumbnail_uri,
   'filemime' => 'image/png',
   'status' => 1,
 ]);
 $thumbnail_file->save();
+
+$icon_base_snapshot_key = 'agent_ready.phase_c.entity_output.original_icon_base_uri';
+$state = \Drupal::state();
+if ($state->get($icon_base_snapshot_key) !== NULL) {
+  throw new RuntimeException('A stale verifier-owned media icon-base snapshot already exists.');
+}
+$media_settings = \Drupal::configFactory()->getEditable('media.settings');
+$original_icon_base_uri = (string) $media_settings->get('icon_base_uri');
+if ($original_icon_base_uri !== 'public://media-icons/generic') {
+  throw new RuntimeException('The Phase C smoke fixture requires the declared media icon base URI.');
+}
+$state->set($icon_base_snapshot_key, $original_icon_base_uri);
+$media_settings->set('icon_base_uri', $file_directory)->save();
 
 $media = Media::create([
   'uuid' => 'ed363033-e645-42f7-a940-5df63e7ed0f9',
@@ -223,16 +236,12 @@ $media = Media::create([
   'name' => 'Phase C file output',
   'status' => 1,
   'uid' => 1,
-  'thumbnail' => [
-    'target_id' => $thumbnail_file->id(),
-    'alt' => 'Phase C entity output thumbnail',
-    'title' => '',
-    'width' => 1,
-    'height' => 1,
-  ],
   'field_phase_c_file' => ['target_id' => $file->id()],
 ]);
 $media->save();
+if ((int) $media->get('thumbnail')->target_id !== (int) $thumbnail_file->id()) {
+  throw new RuntimeException('Drupal Media did not reuse the verifier-owned thumbnail fixture.');
+}
 
 $node = Node::create([
   'uuid' => 'f039a4de-ccf5-4f54-ab6e-32bf7812b387',
@@ -253,6 +262,9 @@ print json_encode([
   'mediaId' => (int) $media->id(),
   'fileId' => (int) $file->id(),
   'thumbnailFileId' => (int) $thumbnail_file->id(),
+  'thumbnailUri' => $thumbnail_uri,
+  'originalMediaIconBaseUri' => $original_icon_base_uri,
+  'ownedMediaIconBaseUri' => $file_directory,
   'routePath' => '/quality-smoke/' . $node->id(),
   'entityViewRoutePath' => '/quality-smoke-entity-view/' . $node->id(),
   'nodeBundle' => 'phase_c_output',

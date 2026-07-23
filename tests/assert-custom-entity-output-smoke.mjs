@@ -40,9 +40,20 @@ print json_encode($files, JSON_UNESCAPED_SLASHES);
 `]));
 }
 
+function mediaIconRuntime() {
+  return JSON.parse(drush(['php:eval', String.raw`
+print json_encode([
+  'iconBaseUri' => (string) \Drupal::config('media.settings')->get('icon_base_uri'),
+  'snapshot' => \Drupal::state()->get('agent_ready.phase_c.entity_output.original_icon_base_uri'),
+], JSON_UNESCAPED_SLASHES);
+`]));
+}
+
 let fixture;
 let setupAttempted = false;
 const filesBefore = managedFileInventory();
+const mediaIconRuntimeBefore = mediaIconRuntime();
+assert.equal(mediaIconRuntimeBefore.snapshot, null);
 try {
   setupAttempted = true;
   fixture = JSON.parse(drush(['php:script', 'scripts/setup-custom-entity-output-smoke.php']));
@@ -52,6 +63,13 @@ try {
   assert.match(fixture.routePath, /^\/quality-smoke\/\d+$/);
   assert.match(fixture.entityViewRoutePath, /^\/quality-smoke-entity-view\/\d+$/);
   assert.ok(Number.isSafeInteger(fixture.thumbnailFileId) && fixture.thumbnailFileId > 0);
+  assert.equal(fixture.thumbnailUri, 'public://phase-c/generic.png');
+  assert.equal(fixture.originalMediaIconBaseUri, mediaIconRuntimeBefore.iconBaseUri);
+  assert.equal(fixture.ownedMediaIconBaseUri, 'public://phase-c');
+  assert.deepEqual(mediaIconRuntime(), {
+    iconBaseUri: fixture.ownedMediaIconBaseUri,
+    snapshot: mediaIconRuntimeBefore.iconBaseUri
+  });
   const missingBubblingRoutePath = fixture.routePath.replace(
     /^\/quality-smoke\//,
     '/quality-smoke-missing-bubbling/'
@@ -267,6 +285,8 @@ function quality_smoke_inline_script_regression(): array {
     assert.equal(cleanup.fixtureFileRemoved, true);
     assert.equal(cleanup.fixtureThumbnailRemoved, true);
     assert.equal(cleanup.fixtureDirectoryRemoved, true);
+    assert.equal(cleanup.mediaIconBaseRestored, true);
+    assert.equal(cleanup.mediaIconBaseSnapshotRemoved, true);
     assert.equal(cleanup.themesRemoved, true);
     const residue = JSON.parse(drush(['php:eval', String.raw`
 $repository = \Drupal::service('entity.repository');
@@ -288,8 +308,10 @@ print json_encode([
   'baseThemeEnabled' => array_key_exists('quality_smoke_base', (array) \Drupal::config('core.extension')->get('theme')),
   'childThemeEnabled' => array_key_exists('quality_smoke_child', (array) \Drupal::config('core.extension')->get('theme')),
   'fixtureFile' => file_exists('public://phase-c/entity-output.txt'),
-  'fixtureThumbnail' => file_exists('public://phase-c/entity-output-thumbnail.png'),
+  'fixtureThumbnail' => file_exists('public://phase-c/generic.png'),
   'fixtureDirectory' => is_dir('public://phase-c'),
+  'mediaIconBaseUri' => (string) \Drupal::config('media.settings')->get('icon_base_uri'),
+  'mediaIconBaseSnapshot' => \Drupal::state()->get('agent_ready.phase_c.entity_output.original_icon_base_uri'),
 ]);
 `]));
     assert.deepEqual(residue, {
@@ -311,8 +333,11 @@ print json_encode([
       childThemeEnabled: false,
       fixtureFile: false,
       fixtureThumbnail: false,
-      fixtureDirectory: false
+      fixtureDirectory: false,
+      mediaIconBaseUri: mediaIconRuntimeBefore.iconBaseUri,
+      mediaIconBaseSnapshot: null
     });
+    assert.deepEqual(mediaIconRuntime(), mediaIconRuntimeBefore);
     assert.deepEqual(managedFileInventory(), filesBefore);
   }
 }
