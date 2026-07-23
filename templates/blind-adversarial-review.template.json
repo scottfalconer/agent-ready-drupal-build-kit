@@ -97,6 +97,21 @@
       "evidence": []
     }
   ],
+  "compositionOwnerDecisionReviews": [
+    {
+      "decisionId": "",
+      "sourceRoute": "",
+      "targetRoute": "",
+      "selectedOwner": "",
+      "outcomeBasis": "arrange_sections | stable_reusable_schema | collection_or_listing | simple_low_design | unavailable_or_blocked",
+      "canvasComparedToSelectedOwner": false,
+      "sourceCompositionInspected": false,
+      "editorOutcomeInspected": false,
+      "prosecution": "",
+      "verdict": "accepted | rejected | blocked",
+      "evidence": []
+    }
+  ],
   "productDefects": [
     {
       "id": "",

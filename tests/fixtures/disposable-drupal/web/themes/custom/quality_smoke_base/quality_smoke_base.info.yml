@@ -1,0 +1,5 @@
+name: Quality smoke base
+type: theme
+description: Base theme used to verify active theme-chain provenance.
+base theme: stark
+core_version_requirement: ^11

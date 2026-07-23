@@ -1,0 +1,5 @@
+name: Quality smoke child
+type: theme
+description: Active child theme used to verify base-theme execution.
+base theme: quality_smoke_base
+core_version_requirement: ^11

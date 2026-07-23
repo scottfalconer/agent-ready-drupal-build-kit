@@ -1,0 +1,35 @@
+quality_smoke.entity_output:
+  path: '/quality-smoke/{node}'
+  defaults:
+    _controller: '\Drupal\quality_smoke\Controller\EntityOutputController::view'
+    _title: 'Entity output smoke'
+  requirements:
+    _entity_access: 'node.view'
+  options:
+    parameters:
+      node:
+        type: entity:node
+
+quality_smoke.entity_output_missing_bubbling:
+  path: '/quality-smoke-missing-bubbling/{node}'
+  defaults:
+    _controller: '\Drupal\quality_smoke\Controller\EntityOutputController::viewWithoutReferencedDependencies'
+    _title: 'Entity output missing dependency bubbling smoke'
+  requirements:
+    _entity_access: 'node.view'
+  options:
+    parameters:
+      node:
+        type: entity:node
+
+quality_smoke.entity_view:
+  path: '/quality-smoke-entity-view/{node}'
+  defaults:
+    _entity_view: 'node.full'
+    _title: 'Entity view smoke'
+  requirements:
+    _entity_access: 'node.view'
+  options:
+    parameters:
+      node:
+        type: entity:node

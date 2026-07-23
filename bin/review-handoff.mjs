@@ -17,6 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 
 import { canonicalJson, hashManifest, sha256 } from './state-fingerprint.mjs';
+import { isCurrentLiveVerificationReport } from './live-verification-contract.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PACKAGE_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -595,7 +596,7 @@ function sourceTruthMaterials(projectRoot, packetDir, buildInput, routeMatrix, b
 }
 
 function stateBinding(report, buildMode, projectRoot, packetDir) {
-  if (report?.schemaVersion !== 'public-kit.live-verification.1' || report?.verificationMode !== 'live-target-and-packet') {
+  if (!isCurrentLiveVerificationReport(report)) {
     throw new Error('Run the live-target verifier before creating a review handoff.');
   }
   if (
