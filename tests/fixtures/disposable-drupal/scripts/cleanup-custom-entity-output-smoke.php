@@ -13,6 +13,7 @@ foreach ([
   ['node', 'f039a4de-ccf5-4f54-ab6e-32bf7812b387'],
   ['media', 'ed363033-e645-42f7-a940-5df63e7ed0f9'],
   ['file', '0869d341-f0ba-4a2d-b09c-d01baf35d3da'],
+  ['file', '4cdd2af4-6c57-43b4-a978-f80f07fa53b1'],
 ] as [$entity_type, $uuid]) {
   $entity = $entity_repository->loadEntityByUuid($entity_type, $uuid);
   if ($entity) {
@@ -21,10 +22,13 @@ foreach ([
 }
 
 $fixture_uri = 'public://phase-c/entity-output.txt';
+$thumbnail_uri = 'public://phase-c/entity-output-thumbnail.png';
 $fixture_directory = 'public://phase-c';
 $file_system = \Drupal::service('file_system');
-if (file_exists($fixture_uri)) {
-  $file_system->delete($fixture_uri);
+foreach ([$fixture_uri, $thumbnail_uri] as $owned_uri) {
+  if (file_exists($owned_uri)) {
+    $file_system->delete($owned_uri);
+  }
 }
 if (is_dir($fixture_directory)) {
   $file_system->deleteRecursive($fixture_directory);
@@ -86,6 +90,7 @@ print json_encode([
   'schemaVersion' => 'public-kit.custom-entity-output-smoke-cleanup.1',
   'cleaned' => TRUE,
   'fixtureFileRemoved' => !file_exists($fixture_uri),
+  'fixtureThumbnailRemoved' => !file_exists($thumbnail_uri),
   'fixtureDirectoryRemoved' => !is_dir($fixture_directory),
   'themesRemoved' => !array_key_exists('quality_smoke_child', $remaining_themes) &&
     !array_key_exists('quality_smoke_base', $remaining_themes),

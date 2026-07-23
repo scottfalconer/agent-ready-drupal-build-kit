@@ -266,7 +266,7 @@
     },
     {
       "id": "G-COMPOSITION-01",
-      "title": "Flexible page composition model declared",
+      "title": "Flexible route ownership decision reconciled",
       "phase": 2,
       "evidenceFile": "pattern-map.json",
       "checkedBy": "verify-script",

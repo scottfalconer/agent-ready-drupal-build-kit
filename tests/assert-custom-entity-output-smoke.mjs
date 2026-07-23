@@ -24,8 +24,25 @@ function drush(args) {
   }).trim();
 }
 
+function managedFileInventory() {
+  return JSON.parse(drush(['php:eval', String.raw`
+$files = [];
+foreach (\Drupal::entityTypeManager()->getStorage('file')->loadMultiple() as $file) {
+  $files[] = [
+    'uuid' => (string) $file->uuid(),
+    'uri' => (string) $file->getFileUri(),
+    'filename' => (string) $file->getFilename(),
+    'bytesExist' => file_exists((string) $file->getFileUri()),
+  ];
+}
+usort($files, static fn (array $left, array $right): int => $left['uuid'] <=> $right['uuid']);
+print json_encode($files, JSON_UNESCAPED_SLASHES);
+`]));
+}
+
 let fixture;
 let setupAttempted = false;
+const filesBefore = managedFileInventory();
 try {
   setupAttempted = true;
   fixture = JSON.parse(drush(['php:script', 'scripts/setup-custom-entity-output-smoke.php']));
@@ -34,6 +51,7 @@ try {
   assert.equal(fixture.baseTheme, 'quality_smoke_base');
   assert.match(fixture.routePath, /^\/quality-smoke\/\d+$/);
   assert.match(fixture.entityViewRoutePath, /^\/quality-smoke-entity-view\/\d+$/);
+  assert.ok(Number.isSafeInteger(fixture.thumbnailFileId) && fixture.thumbnailFileId > 0);
   const missingBubblingRoutePath = fixture.routePath.replace(
     /^\/quality-smoke\//,
     '/quality-smoke-missing-bubbling/'
@@ -247,6 +265,7 @@ function quality_smoke_inline_script_regression(): array {
     assert.equal(cleanup.schemaVersion, 'public-kit.custom-entity-output-smoke-cleanup.1');
     assert.equal(cleanup.cleaned, true);
     assert.equal(cleanup.fixtureFileRemoved, true);
+    assert.equal(cleanup.fixtureThumbnailRemoved, true);
     assert.equal(cleanup.fixtureDirectoryRemoved, true);
     assert.equal(cleanup.themesRemoved, true);
     const residue = JSON.parse(drush(['php:eval', String.raw`
@@ -256,6 +275,7 @@ print json_encode([
   'node' => (bool) $repository->loadEntityByUuid('node', 'f039a4de-ccf5-4f54-ab6e-32bf7812b387'),
   'media' => (bool) $repository->loadEntityByUuid('media', 'ed363033-e645-42f7-a940-5df63e7ed0f9'),
   'file' => (bool) $repository->loadEntityByUuid('file', '0869d341-f0ba-4a2d-b09c-d01baf35d3da'),
+  'thumbnailFile' => (bool) $repository->loadEntityByUuid('file', '4cdd2af4-6c57-43b4-a978-f80f07fa53b1'),
   'nodeType' => (bool) \Drupal\node\Entity\NodeType::load('phase_c_output'),
   'mediaType' => (bool) \Drupal\media\Entity\MediaType::load('phase_c_file'),
   'nodeFieldStorage' => (bool) \Drupal\field\Entity\FieldStorageConfig::loadByName('node', 'field_phase_c_media'),
@@ -268,6 +288,7 @@ print json_encode([
   'baseThemeEnabled' => array_key_exists('quality_smoke_base', (array) \Drupal::config('core.extension')->get('theme')),
   'childThemeEnabled' => array_key_exists('quality_smoke_child', (array) \Drupal::config('core.extension')->get('theme')),
   'fixtureFile' => file_exists('public://phase-c/entity-output.txt'),
+  'fixtureThumbnail' => file_exists('public://phase-c/entity-output-thumbnail.png'),
   'fixtureDirectory' => is_dir('public://phase-c'),
 ]);
 `]));
@@ -276,6 +297,7 @@ print json_encode([
       node: false,
       media: false,
       file: false,
+      thumbnailFile: false,
       nodeType: false,
       mediaType: false,
       nodeFieldStorage: false,
@@ -288,8 +310,10 @@ print json_encode([
       baseThemeEnabled: false,
       childThemeEnabled: false,
       fixtureFile: false,
+      fixtureThumbnail: false,
       fixtureDirectory: false
     });
+    assert.deepEqual(managedFileInventory(), filesBefore);
   }
 }
 

@@ -8,6 +8,103 @@ Commands that change Composer dependencies are not pre-authorized by this cookbo
 
 Stance-type dispositions (multilingual scope, caching/performance budget, update strategy, 404-page quality) are not cookbook material: record each as a row in `review-packet/scoped-gap-list.md`.
 
+## Discover and Author Canvas Pages Headlessly
+
+Canvas is not UI-only. In Canvas 1.8, a composed page is a `canvas_page` content entity whose `components` field is a `component_tree`. Each row records an instance UUID, an enabled Component config-entity id, that component's active version, source-specific inputs, and—when nested—a parent UUID plus slot. Do not guess any of those values from a source site's markup. The included helpers fail closed outside Canvas 1.8.x so a future internal API change cannot silently corrupt a tree; revalidate and update them before using another release line.
+
+First inspect the installed substrate. The kit's read-only discovery script reports the live component catalog, active versions, slot names, source-specific default client models, existing Canvas pages, and a digest of every current component tree:
+
+```bash
+ddev drush php:script \
+  --script-path=/var/www/html/.agents/skills/agent-ready-drupal-build-kit/scripts \
+  canvas-discover \
+  > review-packet/evidence/canvas-discovery.json
+```
+
+Inside an active DDEV agent, omit the `ddev` prefix. If the skill has a nonstandard project-local install path, adjust only `--script-path`. Drush passes script arguments after `--`; do not substitute `php:eval` with a long shell-quoted program.
+
+Read these fields before deciding the presentation architecture:
+
+- `canvas.enabled`, `canvas.version`, and `canvas.pageEntityType` prove the Canvas runtime actually available to the target.
+- `presentation.defaultTheme` and `presentation.mercury` show whether Mercury is installed, enabled, and the default theme. When Mercury is present and source-fitting, inspect and reuse its enabled SDCs rather than building an unrelated Olivero subtheme. Absence is a discovery fact, not permission to silently avoid Canvas or install a package without approval.
+- `components[].id`, `activeVersion`, and `slots` are the only valid values for a manifest. IDs such as Views block components must come from this enabled catalog; `disabledComponentIds` are diagnostic and cannot be authored.
+- `components[].defaultClientModel` is the source plugin's actual client-side shape. Copy it before changing typed values; SDC, Code Component, media, link, and Block inputs are not interchangeable.
+- `pages[].componentTreeSha256` fingerprints the composition. `pages[].authoringStateSha256` is the optimistic-lock token used for replacement; it also binds the title, description, publication state, and alias so none of those editor changes are silently overwritten.
+
+Create a manifest under the review packet (the component ids, slot, and client model below are illustrative and must be replaced with discovered values):
+
+```json
+{
+  "operation": "create",
+  "pageUuid": "f99308fe-b37f-454f-8639-49b8df1c184e",
+  "title": "Services",
+  "description": "How we help",
+  "path": "/services",
+  "published": true,
+  "components": [
+    {
+      "key": "hero",
+      "uuid": "687ce66f-d993-4450-af90-22a9948ff09e",
+      "componentId": "REPLACE_WITH_DISCOVERED_HERO_ID",
+      "clientModel": {
+        "resolved": {
+          "heading": "Make the next move clear"
+        },
+        "source": {
+          "heading": {
+            "sourceType": "RETAIN_FROM_DISCOVERY",
+            "expression": "RETAIN_FROM_DISCOVERY",
+            "value": "Make the next move clear"
+          }
+        }
+      }
+    },
+    {
+      "key": "cards",
+      "uuid": "2157f0d4-13cc-4828-8f85-082981fdf599",
+      "componentId": "REPLACE_WITH_DISCOVERED_CONTAINER_ID"
+    },
+    {
+      "key": "case_studies",
+      "uuid": "26b82398-250a-4372-9758-9ca90051b5ac",
+      "componentId": "REPLACE_WITH_DISCOVERED_VIEWS_BLOCK_ID",
+      "parent": "cards",
+      "slot": "REPLACE_WITH_DISCOVERED_SLOT"
+    }
+  ]
+}
+```
+
+Every page and component instance UUID is required and stable; the dry-run and apply therefore address and hash the same proposed tree. Omit `clientModel` to use exactly the component's discovered defaults. To provide real values, start with the complete discovered model and preserve its `sourceType`, expression, and source-type settings while changing the corresponding source and resolved values. A media/reference prop may need an existing Drupal entity and cannot be safely reduced to a URL string. Recurring case studies, posts, events, or products stay canonical Drupal entities; place the discovered Views block component in the Canvas tree instead of copying those rows into component props.
+
+Validate the proposed entity and all component inputs before writing:
+
+```bash
+ddev drush php:script \
+  --script-path=/var/www/html/.agents/skills/agent-ready-drupal-build-kit/scripts \
+  canvas-author-page \
+  -- /var/www/html/review-packet/evidence/canvas-services-manifest.json --dry-run
+```
+
+Then rerun with the explicit write flag and rediscover. Missing, misspelled, duplicated, or unknown mode arguments are rejected, so a typo cannot turn a dry-run into a write:
+
+```bash
+ddev drush php:script \
+  --script-path=/var/www/html/.agents/skills/agent-ready-drupal-build-kit/scripts \
+  canvas-author-page \
+  -- /var/www/html/review-packet/evidence/canvas-services-manifest.json --apply
+ddev drush php:script \
+  --script-path=/var/www/html/.agents/skills/agent-ready-drupal-build-kit/scripts \
+  canvas-discover \
+  > review-packet/evidence/canvas-discovery-after.json
+```
+
+The authoring script resolves every enabled Component entity and writes its current `getActiveVersion()`; manifests never supply a version. Top-level components omit `parent` and `slot`; nested components require both, and the slot must exist on the discovered parent. It validates source inputs and the complete Page entity before save, clears Canvas's temporary block-form validation entries, then reloads and hashes the normalized stored tree. A create defaults to unpublished when `published` is omitted. A replace preserves the current description and publication state unless those keys are present, and `published` accepts only a JSON boolean. It also rejects an alias already owned by any other Drupal route.
+
+For an existing page, use `"operation": "replace"`, set `pageUuid`, and copy its observed `authoringStateSha256` into `expectedExistingAuthoringStateSha256`. There is deliberately no implicit upsert. A digest mismatch means stop, rediscover, and reconcile the editor's newer page state rather than overwriting it.
+
+After the save, open both `/canvas/editor/canvas_page/{id}` as a non-admin editor and the public alias anonymously. Prove the editor can identify and change the intended section, that the public route is owned by the same Canvas page, and that a recurring-data edit flows through its Drupal entity/View without editing the Canvas layout. The JSON manifest is assembly input for a content entity; `drush config:export` does not turn a `canvas_page` into configuration.
+
 ## Seed the Non-Admin Editor Role and User
 
 Every custom public bundle needs a non-admin editor who can create and edit it. Drupal CMS ships `content_editor`; when the target has no suitable role, seed one instead of testing as uid 1.

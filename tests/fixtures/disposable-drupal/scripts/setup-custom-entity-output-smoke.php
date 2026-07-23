@@ -158,6 +158,7 @@ foreach ([
   ['node', 'f039a4de-ccf5-4f54-ab6e-32bf7812b387'],
   ['media', 'ed363033-e645-42f7-a940-5df63e7ed0f9'],
   ['file', '0869d341-f0ba-4a2d-b09c-d01baf35d3da'],
+  ['file', '4cdd2af4-6c57-43b4-a978-f80f07fa53b1'],
 ] as [$entity_type, $uuid]) {
   if ($entity_repository->loadEntityByUuid($entity_type, $uuid)) {
     throw new RuntimeException("A stale verifier-owned {$entity_type} fixture already exists.");
@@ -188,12 +189,47 @@ $file = File::create([
 ]);
 $file->save();
 
+$thumbnail_bytes = base64_decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  TRUE,
+);
+if (
+  !is_string($thumbnail_bytes) ||
+  hash('sha256', $thumbnail_bytes) !== '431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460' ||
+  getimagesizefromstring($thumbnail_bytes) === FALSE
+) {
+  throw new RuntimeException('The verifier-owned thumbnail fixture is invalid.');
+}
+$thumbnail_uri = $file_system->saveData(
+  $thumbnail_bytes,
+  $file_directory . '/entity-output-thumbnail.png',
+  FileExists::Replace,
+);
+if (!is_string($thumbnail_uri) || $thumbnail_uri === '') {
+  throw new RuntimeException('The verifier-owned thumbnail fixture could not be written.');
+}
+$thumbnail_file = File::create([
+  'uuid' => '4cdd2af4-6c57-43b4-a978-f80f07fa53b1',
+  'filename' => 'entity-output-thumbnail.png',
+  'uri' => $thumbnail_uri,
+  'filemime' => 'image/png',
+  'status' => 1,
+]);
+$thumbnail_file->save();
+
 $media = Media::create([
   'uuid' => 'ed363033-e645-42f7-a940-5df63e7ed0f9',
   'bundle' => 'phase_c_file',
   'name' => 'Phase C file output',
   'status' => 1,
   'uid' => 1,
+  'thumbnail' => [
+    'target_id' => $thumbnail_file->id(),
+    'alt' => 'Phase C entity output thumbnail',
+    'title' => '',
+    'width' => 1,
+    'height' => 1,
+  ],
   'field_phase_c_file' => ['target_id' => $file->id()],
 ]);
 $media->save();
@@ -216,6 +252,7 @@ print json_encode([
   'nodeId' => (int) $node->id(),
   'mediaId' => (int) $media->id(),
   'fileId' => (int) $file->id(),
+  'thumbnailFileId' => (int) $thumbnail_file->id(),
   'routePath' => '/quality-smoke/' . $node->id(),
   'entityViewRoutePath' => '/quality-smoke-entity-view/' . $node->id(),
   'nodeBundle' => 'phase_c_output',

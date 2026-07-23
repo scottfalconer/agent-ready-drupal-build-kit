@@ -27,6 +27,7 @@ import {
   validateGlobalChromeCapture,
   validateScreenshotArtifacts
 } from './global-chrome.mjs';
+import { isCurrentLiveVerificationReport } from './live-verification-contract.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -451,6 +452,10 @@ function authoritativePassingReport(report) {
     report.valid === true;
 }
 
+function currentAuthoritativePassingReport(report) {
+  return isCurrentLiveVerificationReport(report) && authoritativePassingReport(report);
+}
+
 function validatePassingReport(report, label) {
   if (!authoritativePassingReport(report)) {
     throw new Error(`${label} must be a valid, authoritative live-target report that allows its typed completion claim.`);
@@ -462,6 +467,9 @@ function validatePassingReport(report, label) {
 function validateInspectableReport(report, label, { notBefore = '', fresh = false } = {}) {
   if (!isObject(report) || report.verificationMode !== 'live-target-and-packet' || report.valid !== true) {
     throw new Error(`${label} must be a valid live-target-and-packet report.`);
+  }
+  if (fresh && !isCurrentLiveVerificationReport(report)) {
+    throw new Error(`${label} must use the current live-verification schema.`);
   }
   assertTimeBounds(report.checkedAt, `${label}.checkedAt`, { notBefore, fresh });
   validateBuildState(report.buildState, `${label}.buildState`);
@@ -1831,10 +1839,13 @@ export function applyVerificationLifecycle({
   changeId = ''
 } = {}) {
   if (!isObject(report)) throw new Error('applyVerificationLifecycle requires a verification report object.');
+  if (!isCurrentLiveVerificationReport(report)) {
+    throw new Error('applyVerificationLifecycle requires the current live-verification schema.');
+  }
   const { root } = packetEvidence(packetDir);
   ensureLifecycleDirectories(root);
   let baseline = readInitialBaseline(root);
-  if (!baseline && authoritativePassingReport(report)) baseline = createInitialBaseline(root, report);
+  if (!baseline && currentAuthoritativePassingReport(report)) baseline = createInitialBaseline(root, report);
   if (checkpointId) {
     const preflightGraph = buildLifecycleGraph(root, baseline);
     if (preflightGraph.active) {
@@ -1843,7 +1854,7 @@ export function applyVerificationLifecycle({
   }
   let boundChange = null;
   if (changeId) {
-    if (!authoritativePassingReport(report)) {
+    if (!currentAuthoritativePassingReport(report)) {
       throw new Error('Binding a change requires a currently passing authoritative full verification report.');
     }
     boundChange = bindAuthoritativeFullVerification({ root, changeId, report });
