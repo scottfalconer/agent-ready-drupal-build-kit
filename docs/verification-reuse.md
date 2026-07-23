@@ -38,7 +38,7 @@ Training requires all of the following:
 
 State is bounded under `.agent-ready-drupal/global-chrome-shadow-reuse/`. It stores dependency, result, and artifact fingerprints plus privacy-screened manifests—not screenshots, axe payloads, raw hostnames, or query values. Each key retains only its eight most recent observations, so report counts and timing aggregates are explicitly named as retained-window values rather than lifetime experiment totals. It has `evidenceAuthority: none`, must never enter `review-packet/`, and cannot authorize completion.
 
-Concurrent updates use a local ownership lock. A dead same-host owner is recovered conservatively; a live, foreign-host, malformed, or ambiguous lock is never stolen. If a run reports an unreleased lock, first confirm no verifier process is active, then inspect and remove `.agent-ready-drupal/global-chrome-shadow-reuse.lock/` before rerunning the experiment.
+Concurrent updates use a local ownership lock. The verifier never removes an existing lock automatically, including one whose recorded process appears dead, because a recycled lock pathname could already belong to a newer writer. If a run reports an unreleased lock, first confirm no verifier process is active, then inspect and remove `.agent-ready-drupal/global-chrome-shadow-reuse.lock/` before rerunning the experiment.
 
 The experiment retains at most 128 exact dependency-key namespaces and does not evict quarantines. If that ceiling is reached, preserve the JSON summary, end the current experiment, confirm no verifier process is active, and move or remove the entire `global-chrome-shadow-reuse/` directory before starting a separately reported experiment. Deleting selected quarantines and continuing the same evidence series is not valid.
 

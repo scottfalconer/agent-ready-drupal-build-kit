@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict';
-import {
+import fs, {
   existsSync,
   linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmdirSync,
   symlinkSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -1146,13 +1148,14 @@ test('concurrent divergent first observations initialize once and quarantine', a
   assert.equal(finalState.shadowQualified, false);
 });
 
-test('dead same-host lock owners recover while a live owner is never stolen', async () => {
+test('stale locks require manual cleanup and simultaneous contenders never steal a recycled live owner', async () => {
   const root = projectRoot('lock-recovery');
   const key = preflight();
   const capture = captured();
   await observe(root, key, capture, 'fresh-1');
   const lockPath = join(root, '.agent-ready-drupal', 'global-chrome-shadow-reuse.lock');
   const ownerPath = join(lockPath, 'owner.json');
+  const abandonedPath = `${lockPath}.test-abandoned`;
   const lockOwner = (pid, token) => ({
     schemaVersion: 'public-kit.global-chrome-shadow-lock-owner.1',
     token,
@@ -1166,22 +1169,167 @@ test('dead same-host lock owners recover while a live owner is never stolen', as
     2147483647,
     '11111111-1111-4111-8111-111111111111'
   ))}\n`);
-  const recovered = await observe(root, key, capture, 'fresh-2');
-  assert.equal(recovered.status, 'exact-match');
-  assert.equal(existsSync(lockPath), false);
+  const blocked = observe(root, key, capture, 'fresh-2');
+  await delay(100);
+  assert.equal(
+    JSON.parse(readFileSync(ownerPath, 'utf8')).token,
+    '11111111-1111-4111-8111-111111111111',
+    'a stale owner must remain until the operator removes it'
+  );
+  unlinkSync(ownerPath);
+  rmdirSync(lockPath);
+  assert.equal((await blocked).status, 'exact-match');
 
   mkdirSync(lockPath);
   writeFileSync(ownerPath, `${JSON.stringify(lockOwner(
-    process.pid,
+    2147483647,
     '22222222-2222-4222-8222-222222222222'
   ))}\n`);
-  const pending = observe(root, key, capture, 'fresh-3');
-  await delay(100);
-  assert.equal(existsSync(ownerPath), true, 'a live same-host lock must remain owned');
-  unlinkSync(ownerPath);
-  rmdirSync(lockPath);
-  const afterRelease = await pending;
-  assert.equal(afterRelease.status, 'shadow-qualified');
+
+  const originalReadFile = fs.promises.readFile;
+  let staleOwnerReads = 0;
+  let releaseStaleReads;
+  const staleReadsReleased = new Promise((resolvePromise) => {
+    releaseStaleReads = resolvePromise;
+  });
+  let resolveBothStaleReads;
+  const bothStaleReads = new Promise((resolvePromise) => {
+    resolveBothStaleReads = resolvePromise;
+  });
+  fs.promises.readFile = async (path, ...args) => {
+    const value = await originalReadFile(path, ...args);
+    if (resolve(String(path)) === resolve(ownerPath) && staleOwnerReads < 2) {
+      staleOwnerReads += 1;
+      if (staleOwnerReads === 2) resolveBothStaleReads();
+      await staleReadsReleased;
+    }
+    return value;
+  };
+  syncBuiltinESMExports();
+
+  const contenders = [
+    observe(root, key, capture, 'fresh-3'),
+    observe(root, key, capture, 'fresh-4')
+  ];
+  try {
+    await bothStaleReads;
+    renameSync(lockPath, abandonedPath);
+    mkdirSync(lockPath);
+    writeFileSync(ownerPath, `${JSON.stringify(lockOwner(
+      process.pid,
+      '33333333-3333-4333-8333-333333333333'
+    ))}\n`);
+    releaseStaleReads();
+    await delay(100);
+    assert.equal(
+      JSON.parse(readFileSync(ownerPath, 'utf8')).token,
+      '33333333-3333-4333-8333-333333333333',
+      'stale lock snapshots must never delete or replace a recycled live owner'
+    );
+    unlinkSync(ownerPath);
+    rmdirSync(lockPath);
+    unlinkSync(join(abandonedPath, 'owner.json'));
+    rmdirSync(abandonedPath);
+    const results = await Promise.all(contenders);
+    assert.deepEqual(results.map((result) => result.status), ['shadow-qualified', 'shadow-qualified']);
+  } finally {
+    releaseStaleReads();
+    fs.promises.readFile = originalReadFile;
+    syncBuiltinESMExports();
+    if (existsSync(ownerPath)) unlinkSync(ownerPath);
+    if (existsSync(lockPath)) rmdirSync(lockPath);
+    if (existsSync(join(abandonedPath, 'owner.json'))) unlinkSync(join(abandonedPath, 'owner.json'));
+    if (existsSync(abandonedPath)) rmdirSync(abandonedPath);
+    await Promise.allSettled(contenders);
+  }
+});
+
+test('lookup during a paused atomic write preserves a concurrent mismatch quarantine', async () => {
+  const root = projectRoot('reader-during-write');
+  const key = preflight();
+  const baseline = captured();
+  await observe(root, key, baseline, 'fresh-1');
+  const statePath = onlyStatePath(root);
+  const preCapturePrediction = await lookupGlobalChromeShadowReuse({
+    projectRoot: root,
+    preflightKey: key
+  });
+  const exactRecord = observabilityRecord(root, 'fresh-2', baseline, {
+    reportName: 'live-verification-fresh-2.json'
+  });
+  const drift = structuredClone(baseline);
+  drift.routes[0].screenshot.sha256 = digest('reader-during-write-drift');
+  refingerprint(drift);
+  const driftRecord = observabilityRecord(root, 'fresh-3', drift, {
+    reportName: 'live-verification-fresh-3.json'
+  });
+
+  const originalRename = fs.promises.rename;
+  let temporaryPath = '';
+  let resolveWritePaused;
+  const writePaused = new Promise((resolvePromise) => {
+    resolveWritePaused = resolvePromise;
+  });
+  let releaseWrite;
+  const writeReleased = new Promise((resolvePromise) => {
+    releaseWrite = resolvePromise;
+  });
+  fs.promises.rename = async (source, destination, ...args) => {
+    if (resolve(String(destination)) === resolve(statePath) && !temporaryPath) {
+      temporaryPath = String(source);
+      resolveWritePaused();
+      await writeReleased;
+    }
+    return originalRename(source, destination, ...args);
+  };
+  syncBuiltinESMExports();
+
+  const exactWriter = recordGlobalChromeShadowObservation({
+    projectRoot: root,
+    preflightKey: key,
+    capture: baseline,
+    fresh: true,
+    freshRunId: 'fresh-2',
+    observabilityRecord: exactRecord,
+    preCapturePrediction
+  });
+  let mismatchWriter = null;
+  try {
+    await writePaused;
+    assert.equal(dirname(temporaryPath), join(root, '.agent-ready-drupal'));
+    assert.equal(existsSync(temporaryPath), true);
+    assert.equal(
+      readdirSync(stateDirectory(root)).some((name) => name.endsWith('.tmp')),
+      false,
+      'atomic state-write temporaries must stay outside the enumerated namespace directory'
+    );
+    const mismatchPrediction = await lookupGlobalChromeShadowReuseSafely({
+      projectRoot: root,
+      preflightKey: key
+    });
+    assert.equal(mismatchPrediction.status, 'tracking');
+    mismatchWriter = recordGlobalChromeShadowObservation({
+      projectRoot: root,
+      preflightKey: key,
+      capture: drift,
+      fresh: true,
+      freshRunId: 'fresh-3',
+      observabilityRecord: driftRecord,
+      preCapturePrediction: mismatchPrediction
+    });
+    releaseWrite();
+    assert.equal((await exactWriter).status, 'exact-match');
+    assert.equal((await mismatchWriter).status, 'quarantined');
+  } finally {
+    releaseWrite();
+    fs.promises.rename = originalRename;
+    syncBuiltinESMExports();
+    await Promise.allSettled([exactWriter, ...(mismatchWriter ? [mismatchWriter] : [])]);
+  }
+  const finalState = await lookupGlobalChromeShadowReuse({ projectRoot: root, preflightKey: key });
+  assert.equal(finalState.status, 'quarantined');
+  assert.equal(finalState.shadowQualified, false);
+  assert.equal(finalState.prediction, null);
 });
 
 test('symlinked storage fails safely and cannot gain evidence authority', async () => {

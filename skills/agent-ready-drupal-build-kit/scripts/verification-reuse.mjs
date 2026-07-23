@@ -42,8 +42,6 @@ const REUSE_LOCK_DIRECTORY = `${REUSE_DIRECTORY}.lock`;
 const REUSE_LOCK_OWNER_FILE = 'owner.json';
 const REUSE_LOCK_OWNER_SCHEMA = 'public-kit.global-chrome-shadow-lock-owner.1';
 const REUSE_LOCK_OWNER_MAX_BYTES = 1024;
-const REUSE_LOCK_EMPTY_STALE_MS = 60_000;
-const REUSE_LOCK_DEAD_PROCESS_GRACE_MS = 250;
 const STATE_FILE_RE = /^[a-f0-9]{64}\.json$/;
 const PREFLIGHT_DEPENDENCY_SCHEMA = 'public-kit.global-chrome-preflight-dependencies.1';
 const ACTUAL_REUSE_BLOCKERS = Object.freeze([
@@ -779,12 +777,12 @@ async function existingOwnedStateDirectory(projectRoot) {
   return directory;
 }
 
-async function writeTextAtomic(path, value) {
+async function writeTextAtomic(path, value, { temporaryDirectory = dirname(path) } = {}) {
   if (Buffer.byteLength(value) > GLOBAL_CHROME_SHADOW_LIMITS.maxStateFileBytes) {
     throw new Error(`Global chrome shadow state exceeds its ${GLOBAL_CHROME_SHADOW_LIMITS.maxStateFileBytes}-byte limit.`);
   }
   await safeMetadata(path, { maxBytes: GLOBAL_CHROME_SHADOW_LIMITS.maxStateFileBytes });
-  const temporary = join(resolve(path, '..'), `.${randomUUID()}.tmp`);
+  const temporary = join(resolve(temporaryDirectory), `.${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, value, { flag: 'wx', mode: 0o600 });
     await rename(temporary, path);
@@ -880,28 +878,6 @@ async function inspectGlobalStateLock(lockPath) {
   return { metadata, owner };
 }
 
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code !== 'ESRCH';
-  }
-}
-
-async function recoverAbandonedGlobalStateLock(lockPath, inspected) {
-  const current = await inspectGlobalStateLock(lockPath);
-  if (!current) return true;
-  if (!sameCanonical(current.owner, inspected.owner)) return false;
-  if (current.owner) await unlink(join(lockPath, REUSE_LOCK_OWNER_FILE));
-  try {
-    await rmdir(lockPath);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
-  return true;
-}
-
 async function withGlobalStateLock(directory, operation) {
   const lockPath = join(dirname(directory), REUSE_LOCK_DIRECTORY);
   let acquiredOwner = null;
@@ -925,24 +901,6 @@ async function withGlobalStateLock(directory, operation) {
         if (error?.code !== 'EEXIST') throw error;
         const inspected = await inspectGlobalStateLock(lockPath);
         if (!inspected) continue;
-        const now = Date.now();
-        const directoryAgeMs = Math.max(0, now - inspected.metadata.mtimeMs);
-        const ownerAgeMs = inspected.owner
-          ? Math.max(0, now - Date.parse(inspected.owner.acquiredAt))
-          : directoryAgeMs;
-        const emptyLockAbandoned = !inspected.owner && directoryAgeMs >= REUSE_LOCK_EMPTY_STALE_MS;
-        const deadOwnerAbandoned = Boolean(
-          inspected.owner &&
-          inspected.owner.hostFingerprint === lockHostFingerprint() &&
-          ownerAgeMs >= REUSE_LOCK_DEAD_PROCESS_GRACE_MS &&
-          !processIsAlive(inspected.owner.pid)
-        );
-        if (
-          (emptyLockAbandoned || deadOwnerAbandoned) &&
-          await recoverAbandonedGlobalStateLock(lockPath, inspected)
-        ) {
-          continue;
-        }
         if (attempt === 199) {
           throw new Error(
             'Another global chrome shadow state update did not release its lock. ' +
@@ -1221,7 +1179,11 @@ async function readState(directory, key) {
 
 async function writeState(directory, key, state) {
   validateStoredState(state, key);
-  await writeTextAtomic(statePath(directory, key.fingerprint), `${JSON.stringify(state, null, 2)}\n`);
+  await writeTextAtomic(
+    statePath(directory, key.fingerprint),
+    `${JSON.stringify(state, null, 2)}\n`,
+    { temporaryDirectory: dirname(directory) }
+  );
 }
 
 function resultFromState(state, keyFingerprint = '') {
