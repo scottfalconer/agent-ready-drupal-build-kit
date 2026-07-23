@@ -886,6 +886,40 @@ test('summaries compare like workloads and retain overlap-aware phase medians', 
   );
 });
 
+test('matched workloads keep standard and shadow implementation timing separate', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'verification-performance-variants-'));
+  const report = reportFixture();
+  for (const [runId, implementationVariant, duration] of [
+    ['11111111-1111-4111-8111-111111111111', 'standard', 20],
+    ['22222222-2222-4222-8222-222222222222', 'global-chrome-shadow', 35]
+  ]) {
+    await recordVerificationObservability({
+      projectRoot: root,
+      report,
+      timing: timingFixture(duration),
+      verificationPreObservabilityMs: duration,
+      implementationVariant,
+      runId
+    });
+  }
+  const runs = readdirSync(join(root, '.agent-ready-drupal', 'verification-metrics', 'runs'))
+    .map((name) => JSON.parse(readFileSync(
+      join(root, '.agent-ready-drupal', 'verification-metrics', 'runs', name),
+      'utf8'
+    )));
+  const summary = summarizeVerificationRuns(runs);
+  const cohort = summary.comparableWorkloads[buildVerificationWorkload(report).fingerprint];
+  const implementations = Object.values(cohort.implementations);
+  assert.deepEqual(implementations.map((value) => value.variant).sort(), [
+    'global-chrome-shadow',
+    'standard'
+  ]);
+  assert.deepEqual(implementations.map((value) => value.medianVerificationPreObservabilityMs).sort(), [
+    20,
+    35
+  ]);
+});
+
 test('plain observability report labels global data and shows matched implementation cohorts', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'verification-performance-cohorts-'));
   const reportA = reportFixture();
@@ -920,6 +954,20 @@ test('plain observability report labels global data and shows matched implementa
   assert.match(output, /coarse inventory; not comparable across workloads/);
   assert.match(output, /Matched workload cohorts/);
   assert.equal((output.match(/implementation sha256:/g) ?? []).length, 2);
+
+  const shadowDirectory = join(
+    projectRoot,
+    '.agent-ready-drupal',
+    'global-chrome-shadow-reuse'
+  );
+  mkdirSync(shadowDirectory);
+  writeFileSync(join(shadowDirectory, `${'a'.repeat(64)}.json`), '{invalid-json\n');
+  const unavailableOutput = execFileSync(process.execPath, [script, 'report'], {
+    cwd: projectRoot,
+    encoding: 'utf8'
+  });
+  assert.match(unavailableOutput, /shadow reuse diagnostics unavailable/);
+  assert.doesNotMatch(unavailableOutput, /shadow reuse: 0 key/);
 });
 
 test('observability CLI anchors nested invocations to the Drupal DDEV project root', async () => {

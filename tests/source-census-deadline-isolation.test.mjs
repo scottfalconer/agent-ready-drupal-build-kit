@@ -157,7 +157,10 @@ test('verifyLive preflights the browser and completes target delivery checks bef
   assert.ok(start >= 0, 'verifyLive must exist');
   const body = source.slice(start);
 
-  const browserCapture = body.indexOf('const rawGlobalChromeCapture = await phaseRecorder.measure(');
+  const browserCapture = body.indexOf(
+    'const globalChromeExecution = await captureGlobalChromeWithShadowPrediction({'
+  );
+  const freshBrowserCapture = body.indexOf("captureFresh: () => phaseRecorder.measure(\n      'global-chrome'");
   const censusDefinition = body.indexOf('const runSourceSurfaceCensus = async () => briefMode');
   const contextCreation = body.indexOf('const liveHttpContext = createLiveHttpContext({');
   const accessWallCheck = body.indexOf('Access-wall verification could not complete');
@@ -171,6 +174,16 @@ test('verifyLive preflights the browser and completes target delivery checks bef
 
   assert.ok(browserCapture >= 0, 'verifier-owned browser preflight must exist');
   assert.ok(censusDefinition >= 0, 'deferred source census definition must exist');
+  assert.ok(freshBrowserCapture > browserCapture, 'shadow orchestration must retain the measured fresh capture');
+  assert.equal(
+    body.includes('const codeManifest = reusableCodeManifest ??'),
+    false,
+    'shadow prediction must not replace the late authoritative code-manifest collection'
+  );
+  assert.ok(
+    body.indexOf('const codeManifest = runtimeProjectRoot') > browserCapture,
+    'the authoritative code manifest must still be collected after browser capture'
+  );
   assert.ok(contextCreation >= 0, 'target liveHttpContext creation must exist in verifyLive');
   assert.ok(accessWallCheck >= 0, 'access-wall target-side check must exist');
   assert.ok(legalPrivacyCheck >= 0, 'legal/privacy target-side check must exist');

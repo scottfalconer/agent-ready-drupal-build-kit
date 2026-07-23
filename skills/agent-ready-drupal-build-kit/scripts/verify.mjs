@@ -35,7 +35,12 @@ import {
   compareVerifierOwnedVisualFloor,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
+  normalizeGlobalChromeContract,
+  SELENIUM_ADD_ON_RELEASE,
+  SELENIUM_CHROMIUM_IMAGE,
   validateBeforeConsentNetworkCapture,
+  VERIFIER_AXE_SOURCE_SHA256,
+  VERIFIER_WEBSOCKET_BUNDLE_SHA256,
   VISUAL_PARITY_FLOOR_SCHEMA,
   verifierAxeCompletionErrors
 } from './global-chrome.mjs';
@@ -62,6 +67,11 @@ import {
   createLiveVerificationReport,
   LIVE_VERIFICATION_MODE
 } from './live-verification-contract.mjs';
+import {
+  buildGlobalChromePreflightKey,
+  captureGlobalChromeWithShadowPrediction,
+  recordGlobalChromeShadowObservationSafely
+} from './verification-reuse.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const KIT_ROOT = resolve(dirname(SCRIPT_PATH), '..');
@@ -79,6 +89,7 @@ Options:
                        Expand the live target route/link budget after owner approval (default: 1000; max: 8192)
   --change <id>        Bind a passing full run to an evidence-recorded repair or extension
   --checkpoint <id>    Create a create-only checkpoint for the passing change
+  --reuse <mode>       Reuse experiment: off (default) or shadow (always verifies fresh)
   --packet-only        Run structural packet lint only; never authorizes completion
   --help               Show this help`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -110,6 +121,7 @@ const MAX_SOURCE_CLI_FINDINGS = 20;
 const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const globalChromeShadowSessions = new WeakMap();
 
 class UsageError extends Error {}
 
@@ -138,6 +150,7 @@ function parseArgs(argv) {
     packet: 'review-packet',
     out: '',
     packetOnly: false,
+    reuseMode: 'off',
     sourceMaxRoutes: 0,
     targetMaxRoutes: 0,
     targetUrl: ''
@@ -146,6 +159,7 @@ function parseArgs(argv) {
     ['--change', 'changeId'],
     ['--checkpoint', 'checkpointId'],
     ['--packet', 'packet'],
+    ['--reuse', 'reuseMode'],
     ['--source-max-routes', 'sourceMaxRoutes'],
     ['--target-max-routes', 'targetMaxRoutes'],
     ['--out', 'out'],
@@ -216,6 +230,12 @@ function parseArgs(argv) {
   }
   if (args.packetOnly && (args.changeId || args.checkpointId)) {
     throw new UsageError('Lifecycle change/checkpoint options cannot be combined with --packet-only.');
+  }
+  if (!['off', 'shadow'].includes(args.reuseMode)) {
+    throw new UsageError('--reuse must be off or shadow; no actual reuse mode exists.');
+  }
+  if (args.packetOnly && args.reuseMode !== 'off') {
+    throw new UsageError('--reuse=shadow cannot be combined with --packet-only.');
   }
   if (args.checkpointId && !args.changeId) {
     throw new UsageError('--checkpoint requires --change <id>.');
@@ -349,6 +369,7 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
     join(scriptDirectory, 'lifecycle.mjs'),
     join(scriptDirectory, 'global-chrome.mjs'),
     join(scriptDirectory, 'verification-observability.mjs'),
+    join(scriptDirectory, 'verification-reuse.mjs'),
     join(scriptDirectory, 'custom-mutable-identity-audit.mjs'),
     join(scriptDirectory, 'mutable-identity-worker.mjs'),
     join(scriptDirectory, 'mutable-identity-drupal.mjs'),
@@ -390,6 +411,108 @@ function publicRedactedValue(value) {
     );
   }
   return value;
+}
+
+function hashFingerprint(value) {
+  return /^sha256:[a-f0-9]{64}$/.test(String(value ?? ''));
+}
+
+export function buildVerifierGlobalChromePreflight({
+  browserBackend,
+  briefMode,
+  chromeContract,
+  codeManifest,
+  inspectedDrupalRuntime,
+  primaryRoutes,
+  routeMatrixText,
+  targetOrigin
+} = {}) {
+  const siteUuid = String(inspectedDrupalRuntime?.siteUuid ?? '').trim().toLowerCase();
+  const frontPage = normalizePath(inspectedDrupalRuntime?.frontPage);
+  const configFingerprint = inspectedDrupalRuntime?.configManifest?.fingerprint ?? '';
+  const entityFingerprint = inspectedDrupalRuntime?.entityInventory?.fingerprint ?? '';
+  const liveSurfaceFingerprint = inspectedDrupalRuntime?.liveSurfaceInventory?.fingerprint ?? '';
+  const runtimeFingerprint = inspectedDrupalRuntime?.runtimeFacts?.fingerprint ?? '';
+  const codeFingerprint = codeManifest?.fingerprint ?? '';
+  const codeEnvironmentFingerprint = codeManifest?.environmentBinding?.fingerprint ?? '';
+  if (
+    browserBackend !== 'remote' ||
+    !UUID_RE.test(siteUuid) ||
+    !frontPage ||
+    !routeMatrixText ||
+    !hashFingerprint(configFingerprint) ||
+    !hashFingerprint(entityFingerprint) ||
+    !hashFingerprint(liveSurfaceFingerprint) ||
+    !hashFingerprint(runtimeFingerprint) ||
+    !hashFingerprint(codeFingerprint) ||
+    !hashFingerprint(codeEnvironmentFingerprint) ||
+    inspectedDrupalRuntime?.entityInventory?.confirmed !== true ||
+    inspectedDrupalRuntime?.liveSurfaceInventory?.confirmed !== true ||
+    inspectedDrupalRuntime?.runtimeFacts?.confirmed !== true
+  ) return null;
+
+  const {
+    intrinsic: runtimeFacts,
+    environmentBinding: runtimeEnvironmentBinding
+  } = stateBoundRuntimeFacts(inspectedDrupalRuntime.runtimeFacts);
+  const contract = normalizeGlobalChromeContract(chromeContract);
+  const preflight = buildGlobalChromePreflightKey({
+    drupalPreflightFingerprint: stateSha256({
+      schemaVersion: 'public-kit.drupal-global-chrome-preflight.1',
+      buildMode: briefMode ? 'brief' : 'source_site',
+      targetIdentity: {
+        siteUuid,
+        frontPage,
+        configSyncDirectory: sharedConfigSyncDirectory(inspectedDrupalRuntime.configSyncDirectory)
+      },
+      configFingerprint,
+      codeFingerprint,
+      codeEnvironmentFingerprint,
+      entityFingerprint,
+      liveSurfaceFingerprint,
+      runtimeFingerprint,
+      runtimeFacts,
+      configStatusClean: inspectedDrupalRuntime.configStatusClean === true,
+      configSyncMatchesHead: inspectedDrupalRuntime.configSyncMatchesHead === true,
+      configSyncTracked: inspectedDrupalRuntime.configSyncTracked === true
+    }),
+    runtimeEnvironmentFingerprint: runtimeEnvironmentBinding.fingerprint,
+    browserRuntimeFingerprint: stateSha256({
+      schemaVersion: 'public-kit.global-chrome-browser-runtime-preflight.1',
+      backend: 'remote',
+      addOnRelease: SELENIUM_ADD_ON_RELEASE,
+      image: SELENIUM_CHROMIUM_IMAGE,
+      axeSource: VERIFIER_AXE_SOURCE_SHA256,
+      websocketBundle: VERIFIER_WEBSOCKET_BUNDLE_SHA256
+    }),
+    captureImplementationFingerprint: verifierFingerprint(),
+    contractFingerprint: contract.fingerprint,
+    targetOrigin,
+    primaryRoutes,
+    additionalDependencyFingerprints: {
+      'route-matrix': stateSha256(routeMatrixText),
+      'shadow-policy': stateSha256('public-kit.global-chrome-shadow-policy.1')
+    }
+  });
+  return preflight.eligible ? preflight : null;
+}
+
+export function retainGlobalChromeShadowSessionForFinalCodeState({
+  shadowSession,
+  shadowCodeManifest,
+  authoritativeCodeManifest
+} = {}) {
+  if (!shadowSession) return null;
+  const predicted = shadowCodeManifest?.fingerprint ?? '';
+  const authoritative = authoritativeCodeManifest?.fingerprint ?? '';
+  const predictedEnvironment = shadowCodeManifest?.environmentBinding?.fingerprint ?? '';
+  const authoritativeEnvironment = authoritativeCodeManifest?.environmentBinding?.fingerprint ?? '';
+  return hashFingerprint(predicted) &&
+      predicted === authoritative &&
+      hashFingerprint(predictedEnvironment) &&
+      predictedEnvironment === authoritativeEnvironment
+    ? shadowSession
+    : null;
 }
 
 function redactedUrl(value, baseUrl = undefined) {
@@ -13084,8 +13207,12 @@ export async function verifyLive({
   liveHttpLimits = {},
   sourceSurfaceLimits = {},
   onSourceProgress = null,
-  observabilityRecorder = null
+  observabilityRecorder = null,
+  reuseMode = 'off'
 } = {}) {
+  if (!['off', 'shadow'].includes(reuseMode)) {
+    throw new Error('verifyLive reuseMode must be off or shadow; no actual reuse mode exists.');
+  }
   const phaseRecorder = observabilityRecorder ?? createPhaseRecorder();
   const absolutePacketDir = resolve(cwd, packetDir);
   assertVerificationPacketInputs(absolutePacketDir);
@@ -13294,44 +13421,103 @@ export async function verifyLive({
     explicitTargetFetchAllowed &&
     runtimeAuthoritativeForCompletion
   );
-  const rawGlobalChromeCapture = await phaseRecorder.measure(
-    'global-chrome',
-    async () => browserCaptureAttempted
-      ? captureGlobalChrome({
-          browserBackend,
-          baseUrl: target.url,
-          primaryRoutes,
-          contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-          environment
-        })
-      : globalChromeCaptureWithoutArtifacts({
-          schemaVersion: 'public-kit.global-chrome-capture.1',
-          checkedAt: new Date().toISOString(),
-          status: 'unavailable',
-          authoritative: false,
-          captureMode: 'verifier-owned-browser',
-          targetOrigin: target?.url?.origin ?? '',
-          contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
-          browser: { executable: '', product: '' },
-          runtime: {
-            backend: browserBackend === 'remote' ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
-            executionBoundary: browserBackend === 'remote' ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
-            service: browserBackend === 'remote' ? 'selenium-chrome' : '',
-            addOnRelease: '',
-            image: '',
-            executable: '',
-            product: '',
-            protocolVersion: '',
-            ready: false
-          },
-          primaryRoutes: [],
-          routes: [],
-          budget: null,
-          warnings: [],
-          errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
-        }),
-    { attempted: browserCaptureAttempted, backend: browserBackend }
-  );
+  const runtimeProjectRoot = findDrupalDdevRoot(cwd);
+  const effectiveChromeContract = chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {};
+  let shadowCodeManifest = null;
+  let shadowPreflightKey = null;
+  let shadowExperimentDiagnostic = reuseMode === 'shadow'
+    ? { status: 'ineligible', reason: 'Shadow prediction prerequisites were not evaluated.' }
+    : null;
+  if (
+    reuseMode === 'shadow' &&
+    browserBackend === 'remote' &&
+    browserCaptureAttempted &&
+    runtimeProjectRoot
+  ) {
+    try {
+      shadowCodeManifest = phaseRecorder.measureSync(
+        'shadow-key-code-manifest',
+        () => collectRuntimeCodeManifest(runtimeProjectRoot),
+        { diagnosticOnly: true }
+      );
+      shadowPreflightKey = buildVerifierGlobalChromePreflight({
+        browserBackend,
+        briefMode,
+        chromeContract: effectiveChromeContract,
+        codeManifest: shadowCodeManifest,
+        inspectedDrupalRuntime,
+        primaryRoutes,
+        routeMatrixText,
+        targetOrigin: target.url.origin
+      });
+      shadowExperimentDiagnostic = shadowPreflightKey
+        ? { status: 'eligible', reason: '' }
+        : {
+            status: 'ineligible',
+            reason: 'The current Drupal/runtime dependency inputs could not form a complete shadow key.'
+          };
+    } catch (error) {
+      shadowPreflightKey = null;
+      shadowExperimentDiagnostic = {
+        status: 'ineligible',
+        reason: `Shadow-key preparation failed (${error?.constructor?.name ?? 'Error'}).`
+      };
+    }
+  } else if (reuseMode === 'shadow') {
+    shadowExperimentDiagnostic = {
+      status: 'ineligible',
+      reason: browserBackend !== 'remote'
+        ? 'Shadow prediction requires the kit-managed remote DDEV browser runtime.'
+        : !browserCaptureAttempted
+          ? 'The authoritative verifier-owned browser capture was not eligible to run.'
+          : 'The current Drupal DDEV project root could not be resolved.'
+    };
+  }
+  const globalChromeExecution = await captureGlobalChromeWithShadowPrediction({
+    reuseMode,
+    projectRoot: runtimeProjectRoot,
+    preflightKey: shadowPreflightKey,
+    captureFresh: () => phaseRecorder.measure(
+      'global-chrome',
+      async () => browserCaptureAttempted
+        ? captureGlobalChrome({
+            browserBackend,
+            baseUrl: target.url,
+            primaryRoutes,
+            contract: effectiveChromeContract,
+            environment
+          })
+        : globalChromeCaptureWithoutArtifacts({
+            schemaVersion: 'public-kit.global-chrome-capture.1',
+            checkedAt: new Date().toISOString(),
+            status: 'unavailable',
+            authoritative: false,
+            captureMode: 'verifier-owned-browser',
+            targetOrigin: target?.url?.origin ?? '',
+            contract: effectiveChromeContract,
+            browser: { executable: '', product: '' },
+            runtime: {
+              backend: browserBackend === 'remote' ? 'selenium-grid-cdp' : 'local-executable-cdp-pipe',
+              executionBoundary: browserBackend === 'remote' ? 'ddev-add-on-sidecar' : 'maintainer-local-process',
+              service: browserBackend === 'remote' ? 'selenium-chrome' : '',
+              addOnRelease: '',
+              image: '',
+              executable: '',
+              product: '',
+              protocolVersion: '',
+              ready: false
+            },
+            primaryRoutes: [],
+            routes: [],
+            budget: null,
+            warnings: [],
+            errors: ['Verifier-owned browser capture is disabled for an injected or unavailable runtime.']
+          }),
+      { attempted: browserCaptureAttempted, backend: browserBackend }
+    )
+  });
+  const rawGlobalChromeCapture = globalChromeExecution.capture;
+  let globalChromeShadowSession = globalChromeExecution.shadowSession;
   const browserRuntimeUnavailable = browserRuntimePreflightUnavailable(rawGlobalChromeCapture, {
     attempted: browserCaptureAttempted
   });
@@ -13765,7 +13951,6 @@ export async function verifyLive({
   evidenceReconciliationPhase.end();
   const stateFingerprintPhase = phaseRecorder.start('state-fingerprint');
   const stateBlockers = [];
-  const runtimeProjectRoot = findDrupalDdevRoot(cwd);
   if (!runtimeProjectRoot) {
     stateBlockers.push('Current Drupal project root could not be resolved for state fingerprinting.');
   }
@@ -13797,9 +13982,24 @@ export async function verifyLive({
   }
   let buildState = null;
   try {
+    // The early shadow manifest is prediction-only. Always collect the
+    // authoritative code manifest at the original late state-fingerprint seam
+    // so a change made during verification cannot be hidden by shadow mode.
     const codeManifest = runtimeProjectRoot
       ? collectRuntimeCodeManifest(runtimeProjectRoot)
       : collectFileManifest(cwd, []);
+    const retainedShadowSession = retainGlobalChromeShadowSessionForFinalCodeState({
+      shadowSession: globalChromeShadowSession,
+      shadowCodeManifest,
+      authoritativeCodeManifest: codeManifest
+    });
+    if (globalChromeShadowSession && !retainedShadowSession) {
+      shadowExperimentDiagnostic = {
+        status: 'ineligible',
+        reason: 'Runtime code or its machine-local environment binding changed during verification.'
+      };
+    }
+    globalChromeShadowSession = retainedShadowSession;
     const entityInventory = {
       schemaVersion: inspectedDrupalRuntime.entityInventory?.schemaVersion ?? '',
       fingerprint: inspectedDrupalRuntime.entityInventory?.fingerprint ?? '',
@@ -14422,7 +14622,7 @@ export async function verifyLive({
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
   ];
 
-  return publicRedactedValue(createLiveVerificationReport({
+  const liveReport = publicRedactedValue(createLiveVerificationReport({
     checkedAt: new Date().toISOString(),
     buildMode: briefMode ? 'brief' : 'source_site',
     claimScope,
@@ -14549,6 +14749,14 @@ export async function verifyLive({
     ],
     warnings: sharedPacketReport.warnings
   }));
+  if (reuseMode === 'shadow') {
+    globalChromeShadowSessions.set(liveReport, structuredClone({
+      ...(globalChromeShadowSession ?? {}),
+      capture: globalChromeShadowSession ? globalChromeCapture : null,
+      experimentDiagnostic: shadowExperimentDiagnostic
+    }));
+  }
+  return liveReport;
 }
 
 export async function recordObservabilitySafely({
@@ -14557,6 +14765,7 @@ export async function recordObservabilitySafely({
   reportPath = '',
   reportPersisted = false,
   failure = null,
+  implementationVariant = 'standard',
   projectRoot = findDrupalDdevRoot(process.cwd()),
   recordObservability = recordVerificationObservability,
   stderr = process.stderr
@@ -14571,7 +14780,8 @@ export async function recordObservabilitySafely({
       reportPersisted,
       timing,
       verificationPreObservabilityMs: timing.totalWallClockMs,
-      failureClass: failure?.constructor?.name ?? ''
+      failureClass: failure?.constructor?.name ?? '',
+      implementationVariant
     });
   } catch (error) {
     stderr.write(
@@ -14579,6 +14789,71 @@ export async function recordObservabilitySafely({
     );
     return null;
   }
+}
+
+export async function recordGlobalChromeShadowSessionSafely({
+  reuseMode = 'off',
+  shadowSession = null,
+  observabilityResult = null,
+  recordShadow = recordGlobalChromeShadowObservationSafely,
+  stderr = process.stderr
+} = {}) {
+  if (reuseMode !== 'shadow') return null;
+  if (!shadowSession) {
+    stderr.write(
+      'Global Chrome shadow observation was not recorded: no experiment session was available.\n'
+    );
+    return { status: 'ineligible', reason: 'no experiment session was available' };
+  }
+  if (shadowSession.experimentDiagnostic?.status === 'ineligible') {
+    stderr.write(
+      `Global Chrome shadow observation was not recorded: ` +
+      `${shadowSession.experimentDiagnostic.reason}\n`
+    );
+    return { ...shadowSession.experimentDiagnostic };
+  }
+  if (!observabilityResult?.record) {
+    stderr.write(
+      'Global Chrome shadow observation was not recorded: the same-run observability record is unavailable.\n'
+    );
+    return { status: 'ineligible', reason: 'same-run observability record is unavailable' };
+  }
+  try {
+    const result = await recordShadow(structuredClone({
+      projectRoot: shadowSession.projectRoot,
+      preflightKey: shadowSession.preflightKey,
+      capture: shadowSession.capture,
+      fresh: true,
+      freshRunId: observabilityResult.record.runId,
+      observabilityRecord: observabilityResult.record,
+      preCapturePrediction: shadowSession.prediction
+    }));
+    if (result?.status === 'storage-error' || result?.status === 'ineligible') {
+      stderr.write(
+        `Global Chrome shadow observation could not be recorded; verification is unchanged: ` +
+        `${String(result.errors?.[0] ?? 'unknown local-state error')}\n`
+      );
+    } else {
+      const key = result?.keyFingerprint
+        ? ` for ${result.keyFingerprint.slice(0, 19)}…`
+        : '';
+      stderr.write(`Global Chrome shadow observation: ${result?.status ?? 'unknown'}${key}.\n`);
+    }
+    return result;
+  } catch (error) {
+    stderr.write(
+      `Global Chrome shadow observation could not be recorded; verification is unchanged ` +
+      `(${error?.constructor?.name ?? 'Error'}).\n`
+    );
+    return null;
+  }
+}
+
+function reportInterruptedShadowExperiment(reuseMode, stage, stderr = process.stderr) {
+  if (reuseMode !== 'shadow') return;
+  stderr.write(
+    `Global Chrome shadow observation was not recorded: verification ended during ${stage}.\n`
+  );
 }
 
 async function main() {
@@ -14592,6 +14867,9 @@ async function main() {
   }
 
   const observabilityRecorder = args.packetOnly ? null : createPhaseRecorder();
+  const implementationVariant = args.reuseMode === 'shadow'
+    ? 'global-chrome-shadow'
+    : 'standard';
   let report;
   try {
     report = args.packetOnly
@@ -14609,13 +14887,16 @@ async function main() {
         onSourceProgress: (event) => {
           process.stderr.write(`${formatSourceSurfaceProgress(event)}\n`);
         },
-        observabilityRecorder
+        observabilityRecorder,
+        reuseMode: args.reuseMode
       });
   } catch (error) {
+    reportInterruptedShadowExperiment(args.reuseMode, 'live inspection');
     await recordObservabilitySafely({
       recorder: observabilityRecorder,
       reportPath: args.out,
-      failure: error
+      failure: error,
+      implementationVariant
     });
     throw error;
   }
@@ -14636,11 +14917,13 @@ async function main() {
         })
       );
     } catch (error) {
+      reportInterruptedShadowExperiment(args.reuseMode, 'lifecycle processing');
       await recordObservabilitySafely({
         recorder: observabilityRecorder,
         report,
         reportPath: args.out,
-        failure: error
+        failure: error,
+        implementationVariant
       });
       throw error;
     }
@@ -14673,19 +14956,29 @@ async function main() {
         await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
       });
     } catch (error) {
+      reportInterruptedShadowExperiment(args.reuseMode, 'report persistence');
       await recordObservabilitySafely({
         recorder: observabilityRecorder,
         report,
         reportPath: args.out,
-        failure: error
+        failure: error,
+        implementationVariant
       });
       throw error;
     }
-    await recordObservabilitySafely({
+    const observabilityResult = await recordObservabilitySafely({
       recorder: observabilityRecorder,
       report,
       reportPath: args.out,
-      reportPersisted: true
+      reportPersisted: true,
+      implementationVariant
+    });
+    const shadowSession = globalChromeShadowSessions.get(report) ?? null;
+    globalChromeShadowSessions.delete(report);
+    await recordGlobalChromeShadowSessionSafely({
+      reuseMode: args.reuseMode,
+      shadowSession,
+      observabilityResult
     });
   } else {
     await mkdir(dirname(args.out), { recursive: true });

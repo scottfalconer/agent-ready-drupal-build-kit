@@ -67,6 +67,7 @@ function copyPlan(assetsOnly) {
     { source: join(repoRoot, 'docs', 'build-playbook.md'), destination: join(skillRoot, 'references', 'build-playbook.md') },
     { source: join(repoRoot, 'docs', 'site-lifecycle.md'), destination: join(skillRoot, 'references', 'site-lifecycle.md') },
     { source: join(repoRoot, 'docs', 'disposable-assembly.md'), destination: join(skillRoot, 'references', 'disposable-assembly.md') },
+    { source: join(repoRoot, 'docs', 'verification-reuse.md'), destination: join(skillRoot, 'references', 'verification-reuse.md') },
     { source: join(repoRoot, 'docs', 'disposable-reproduction.md'), destination: join(skillRoot, 'references', 'disposable-reproduction.md') },
     { source: join(repoRoot, 'docs', 'cookbook.md'), destination: join(skillRoot, 'references', 'cookbook.md') },
     ...['runtime.json', 'docker-compose.zz-agent-ready-verifier.yaml'].map((name) => ({
@@ -168,6 +169,10 @@ function copyPlan(assetsOnly) {
         source: join(repoRoot, 'bin', 'verification-observability.mjs'),
         destination: join(skillRoot, 'scripts', 'verification-observability.mjs'),
         executable: true
+      },
+      {
+        source: join(repoRoot, 'bin', 'verification-reuse.mjs'),
+        destination: join(skillRoot, 'scripts', 'verification-reuse.mjs')
       },
       {
         source: join(repoRoot, 'bin', 'disposable-ddev.mjs'),

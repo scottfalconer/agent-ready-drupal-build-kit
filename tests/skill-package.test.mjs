@@ -508,6 +508,8 @@ test('initializer runs from a copy containing only the installed skill directory
     'public-kit.verification-observability-report.1'
   );
   assert.equal(emptyObservabilityReport.verification.runCount, 0);
+  assert.equal(emptyObservabilityReport.globalChromeShadowReuse.status, 'missing');
+  assert.equal(emptyObservabilityReport.globalChromeShadowReuse.actualReuseEligible, false);
 
   const packetOnlySourceExpansion = spawnSync(process.execPath, [
     join(installedSkill, 'scripts', 'verify.mjs'),
@@ -548,7 +550,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(71 files\)/);
+  assert.match(result.stdout, /is in sync \(73 files\)/);
   const canonicalObservability = join(repoRoot, 'bin', 'verification-observability.mjs');
   const installedObservability = join(skillRoot, 'scripts', 'verification-observability.mjs');
   assert.ok(
@@ -565,6 +567,16 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
     0,
     'installed verification-observability.mjs should be executable'
   );
+  assert.ok(readFileSync(
+    join(repoRoot, 'bin', 'verification-reuse.mjs')
+  ).equals(readFileSync(
+    join(skillRoot, 'scripts', 'verification-reuse.mjs')
+  )), 'verification-reuse.mjs drifted from the canonical module');
+  assert.ok(readFileSync(
+    join(repoRoot, 'docs', 'verification-reuse.md')
+  ).equals(readFileSync(
+    join(skillRoot, 'references', 'verification-reuse.md')
+  )), 'verification-reuse.md drifted from the canonical reference');
   assert.ok(readFileSync(
     join(repoRoot, 'assets', 'vendor', 'axe-core', '4.10.3', 'axe.min.js')
   ).equals(readFileSync(
@@ -664,7 +676,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(71 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(73 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
   assert.ok(readFileSync(copiedObservability).equals(readFileSync(

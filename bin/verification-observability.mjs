@@ -15,6 +15,7 @@ import {
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
+import { summarizeGlobalChromeShadowReuseSafely } from './verification-reuse.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const OBSERVABILITY_SCHEMA = 'public-kit.verification-observability.1';
@@ -241,6 +242,27 @@ export function buildVerificationWorkload(report) {
     fingerprint: missing.length === 0 ? observabilityFingerprint(workloadIdentity) : '',
     inputs: canonicalValue(inputs),
     missing
+  };
+}
+
+function normalizedImplementationVariant(value) {
+  const variant = String(value ?? 'standard').trim();
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(variant)) {
+    throw new Error('Verification implementation variant must use 1-64 safe identifier characters.');
+  }
+  return variant;
+}
+
+function verificationImplementation(workload, variant) {
+  const verifierFingerprint = workload?.inputs?.verifier ?? '';
+  const normalizedVariant = normalizedImplementationVariant(variant);
+  return {
+    schemaVersion: 'public-kit.verification-implementation.1',
+    verifierFingerprint,
+    variant: normalizedVariant,
+    fingerprint: verifierFingerprint
+      ? observabilityFingerprint({ verifierFingerprint, variant: normalizedVariant })
+      : ''
   };
 }
 
@@ -598,6 +620,7 @@ export async function recordVerificationObservability({
   timing,
   verificationPreObservabilityMs = timing?.totalWallClockMs ?? 0,
   failureClass = '',
+  implementationVariant = 'standard',
   runId = randomUUID(),
   now = () => new Date()
 }) {
@@ -680,6 +703,13 @@ export async function recordVerificationObservability({
   };
   const reportBytes = observedReport.bytes;
   const agentNextBytes = Buffer.byteLength(JSON.stringify(agentNext));
+  const workload = report ? buildVerificationWorkload(report) : {
+    schemaVersion: 'public-kit.verification-workload.1',
+    comparable: false,
+    fingerprint: '',
+    inputs: {},
+    missing: ['report']
+  };
   const record = {
     schemaVersion: OBSERVABILITY_SCHEMA,
     authority: DIAGNOSTIC_AUTHORITY,
@@ -689,13 +719,8 @@ export async function recordVerificationObservability({
     verificationPreObservabilityMs: roundedMilliseconds(verificationPreObservabilityMs),
     verificationTimingBoundary: 'before-observability-preparation-and-persistence',
     timing,
-    workload: report ? buildVerificationWorkload(report) : {
-      schemaVersion: 'public-kit.verification-workload.1',
-      comparable: false,
-      fingerprint: '',
-      inputs: {},
-      missing: ['report']
-    },
+    workload,
+    implementation: verificationImplementation(workload, implementationVariant),
     observedReport,
     command: {
       status: failureClass ? 'failed' : 'completed',
@@ -826,7 +851,9 @@ function summarizePhases(records) {
 function summarizeImplementations(records) {
   const groups = new Map();
   for (const record of records) {
-    const implementation = record?.workload?.inputs?.verifier || 'unknown';
+    const implementation = record?.implementation?.fingerprint ||
+      record?.workload?.inputs?.verifier ||
+      'unknown';
     const implementationRecords = groups.get(implementation) ?? [];
     implementationRecords.push(record);
     groups.set(implementation, implementationRecords);
@@ -839,6 +866,7 @@ function summarizeImplementations(records) {
           (record) => commandStatus(record) === 'completed'
         );
         return [implementation, {
+          variant: implementationRecords[0]?.implementation?.variant ?? 'legacy',
           runCount: implementationRecords.length,
           completedRunCount: completed.length,
           failedCommandRunCount: implementationRecords.length - completed.length,
@@ -1060,7 +1088,8 @@ async function main() {
     const summary = {
       schemaVersion: 'public-kit.verification-observability-report.1',
       authority: DIAGNOSTIC_AUTHORITY,
-      verification: summarizeVerificationRuns(await readVerificationRuns(projectRoot))
+      verification: summarizeVerificationRuns(await readVerificationRuns(projectRoot)),
+      globalChromeShadowReuse: await summarizeGlobalChromeShadowReuseSafely({ projectRoot })
     };
     if (options.json) {
       process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
@@ -1074,6 +1103,20 @@ async function main() {
         `Median metrics preparation time (excludes metric persistence): ` +
         `${Math.round(summary.verification.medianInstrumentationPrePersistenceMs)} ms\n`
       );
+      if (summary.globalChromeShadowReuse.status === 'storage-error') {
+        process.stdout.write(
+          `Global Chrome shadow reuse diagnostics unavailable: ` +
+          `${summary.globalChromeShadowReuse.errors[0] ?? 'unknown local-state error'}\n`
+        );
+      } else {
+        process.stdout.write(
+          `Global Chrome shadow reuse: ${summary.globalChromeShadowReuse.namespaceCount} key(s), ` +
+          `${summary.globalChromeShadowReuse.shadowQualifiedCount} qualified, ` +
+          `${summary.globalChromeShadowReuse.quarantinedCount} quarantined, ` +
+          `${Math.round(summary.globalChromeShadowReuse.retainedPotentialAvoidablePhaseMs)} ms ` +
+          `counterfactual phase time in the bounded retained window\n`
+        );
+      }
       const slowPhases = Object.entries(summary.verification.phases)
         .sort(([, left], [, right]) => right.medianDurationMs - left.medianDurationMs)
         .slice(0, 5);
@@ -1091,7 +1134,8 @@ async function main() {
           process.stdout.write(`- ${fingerprint.slice(0, 19)}…: ${workload.runCount} run(s)\n`);
           for (const [implementation, values] of Object.entries(workload.implementations)) {
             process.stdout.write(
-              `  - implementation ${implementation.slice(0, 19)}…: ` +
+              `  - implementation ${implementation.slice(0, 19)}… ` +
+              `(${values.variant}): ` +
               `n=${values.completedRunCount}, ` +
               `pre-observability median=${Math.round(values.medianVerificationPreObservabilityMs)} ms\n`
             );

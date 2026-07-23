@@ -18,6 +18,7 @@ import test from 'node:test';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const verifyScript = join(repoRoot, 'bin', 'verify-packet.mjs');
+const liveVerifyScript = join(repoRoot, 'bin', 'verify.mjs');
 const observabilityScript = join(repoRoot, 'bin', 'verification-observability.mjs');
 const templatesDir = join(repoRoot, 'templates');
 
@@ -159,6 +160,42 @@ test('verifier rejects --packet without a value cleanly', () => {
   assert.doesNotMatch(result.stderr, /TypeError|at .*verify-packet/);
 });
 
+test('live verifier exposes shadow-only reuse and rejects actual reuse', () => {
+  const actual = spawnSync(process.execPath, [liveVerifyScript, '--reuse=actual'], {
+    cwd: repoRoot,
+    encoding: 'utf8'
+  });
+  assert.notEqual(actual.status, 0);
+  assert.match(actual.stderr, /no actual reuse mode exists/);
+
+  const packetOnly = spawnSync(process.execPath, [
+    liveVerifyScript,
+    '--reuse=shadow',
+    '--packet-only'
+  ], { cwd: repoRoot, encoding: 'utf8' });
+  assert.notEqual(packetOnly.status, 0);
+  assert.match(packetOnly.stderr, /cannot be combined with --packet-only/);
+
+  const help = spawnSync(process.execPath, [liveVerifyScript, '--help'], {
+    cwd: repoRoot,
+    encoding: 'utf8'
+  });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /--reuse <mode>.*off \(default\) or shadow/);
+
+  const temp = mkdtempSync(join(tmpdir(), 'shadow-diagnostic-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const interrupted = spawnSync(process.execPath, [
+    liveVerifyScript,
+    '--reuse=shadow',
+    '--packet', packetDir,
+    '--out', join(packetDir, 'evidence', 'live-verification.json')
+  ], { cwd: temp, encoding: 'utf8' });
+  assert.notEqual(interrupted.status, 0);
+  assert.match(interrupted.stderr, /shadow observation was not recorded/);
+});
+
 test('verifier qualifies structural success when no complete rebuild claim is made', () => {
   const temp = mkdtempSync(join(tmpdir(), 'packet-stub-'));
   const packetDir = join(temp, 'review-packet');
@@ -229,6 +266,7 @@ test('npm package excludes local agent state and keeps verifier bins executable'
     ]) {
       assert.equal(files.has(path), true, `${path} missing from npm package`);
     }
+    assert.equal(files.has('bin/verification-reuse.mjs'), true, 'shadow reuse module missing from npm package');
   } finally {
     unlinkSync(sentinelPath);
     if (!localStateExisted) rmdirSync(localState);
