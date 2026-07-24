@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 import {
   findDrupalDdevRoot,
   inspectDrupalLiveSurface,
-  liveSurfaceReconciliationErrors
+  liveSurfaceReconciliationErrors,
+  reconcilableLiveSurface
 } from './verify.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -612,7 +613,12 @@ function main() {
   }
   const inventory = inspectDrupalLiveSurface(projectRoot, process.env);
   assertInventory(inventory);
-  const draft = refreshLiveSurfaceDraft(inventory, {
+  // Control-kind surfaces (e.g. the Canvas capability probe) are handled by
+  // dedicated availability gates, not by live-surface reconciliation. Exclude
+  // them here so the worksheet matches exactly what the reconciliation
+  // validator accepts; otherwise they can never be dispositioned.
+  const reconcilableInventory = reconcilableLiveSurface(inventory);
+  const draft = refreshLiveSurfaceDraft(reconcilableInventory, {
     priorDraft,
     readbackReconciliation: readback.liveSurfaceReconciliation
   });
@@ -624,7 +630,7 @@ function main() {
     );
     return;
   }
-  const result = materializeLiveSurfaceReconciliation(inventory, draft, packetDir);
+  const result = materializeLiveSurfaceReconciliation(reconcilableInventory, draft, packetDir);
   if (result.errors.length > 0) {
     process.stderr.write(`Live-surface reconciliation remains unresolved. Worksheet: ${draftPath}\n`);
     for (const error of result.errors.slice(0, 200)) {
