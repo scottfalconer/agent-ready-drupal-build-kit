@@ -12,7 +12,7 @@ import {
   readbackWithLiveSurfaceReconciliation,
   refreshLiveSurfaceDraft
 } from '../bin/reconcile.mjs';
-import { liveSurfaceReconciliationErrors } from '../bin/verify.mjs';
+import { liveSurfaceReconciliationErrors, reconcilableLiveSurface } from '../bin/verify.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const reconcileScript = join(repoRoot, 'bin', 'reconcile.mjs');
@@ -59,6 +59,18 @@ function privateView() {
     displayId: 'page_admin',
     path: '/admin/content',
     publicSurface: false
+  };
+}
+
+function canvasCapability(available = false) {
+  return {
+    key: 'canvas_capability:runtime',
+    kind: 'canvas_capability',
+    available,
+    status: available ? 'available' : 'unavailable',
+    enabledModules: available ? ['canvas'] : [],
+    editorRoutes: available ? ['canvas.boot.empty', 'canvas.boot.entity'] : [],
+    reasonCodes: []
   };
 }
 
@@ -439,4 +451,103 @@ process.stdout.write(process.env.FAKE_LIVE_SURFACE + '\\n');
   assert.equal(materializedReadback.liveSurfaceReconciliation.reconciliationComplete, true);
   assert.equal(materializedReadback.liveSurfaceReconciliation.declarations.length, 1);
   assert.equal(materializedReadback.liveSurfaceReconciliation.exclusions.length, 1);
+});
+
+test('reconcilableLiveSurface drops control-kind surfaces so Canvas capability is never surfaced for disposition', () => {
+  const full = inventory([publicBundle(), privateView(), canvasCapability(false)]);
+  const reconcilable = reconcilableLiveSurface(full);
+
+  // Control-kind surfaces are removed from items/itemCount/countsByKind...
+  assert.equal(reconcilable.items.length, 2);
+  assert.equal(reconcilable.itemCount, 2);
+  assert.equal(reconcilable.items.some((item) => item.kind === 'canvas_capability'), false);
+  assert.equal('canvas_capability' in reconcilable.countsByKind, false);
+  // ...but the census fingerprint still identifies the full live surface, so the
+  // recorded reconciliation still matches the verifier's fresh census.
+  assert.equal(reconcilable.fingerprint, full.fingerprint);
+
+  const packetDir = mkdtempSync(join(tmpdir(), 'live-surface-canvas-'));
+  mkdirSync(join(packetDir, 'evidence', 'live-surface'), { recursive: true });
+  writeFileSync(join(packetDir, 'pattern-map.json'), '{"contentTypes":[{"machineName":"page"}]}\n');
+  writeFileSync(join(packetDir, 'evidence', 'live-surface', 'admin-view.txt'), 'Administrative-only View.\n');
+
+  const authored = resolveDraft(refreshLiveSurfaceDraft(reconcilable));
+  const current = refreshLiveSurfaceDraft(reconcilable, { priorDraft: authored });
+  const result = materializeLiveSurfaceReconciliation(reconcilable, current, packetDir);
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.reconciliation.declarations.length, 1);
+  assert.equal(result.reconciliation.exclusions.length, 1);
+  // The materialized reconciliation is accepted by the strict validator run
+  // against the FULL live inventory, which still contains the control kind.
+  assert.deepEqual(liveSurfaceReconciliationErrors(full, result.reconciliation, packetDir), []);
+});
+
+test('CLI excludes the Canvas capability control surface from the worksheet (regression)', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'live-surface-canvas-cli-'));
+  const packetDir = join(projectRoot, 'review-packet');
+  const fakeBin = join(projectRoot, 'fake-bin');
+  mkdirSync(join(projectRoot, '.ddev'), { recursive: true });
+  mkdirSync(join(packetDir, 'evidence', 'live-surface'), { recursive: true });
+  mkdirSync(fakeBin);
+  writeFileSync(
+    join(projectRoot, '.ddev', 'config.yaml'),
+    'name: reconcile-canvas\ntype: drupal11\ndocroot: web\n'
+  );
+  const readbackPath = join(packetDir, 'drupal-readback.json');
+  writeFileSync(readbackPath, `${JSON.stringify({
+    schemaVersion: 'public-kit.drupal-readback.1',
+    site: 'https://fixture.ddev.site',
+    checkedAt: 'preserved',
+    liveSurfaceReconciliation: {
+      schemaVersion: 'public-kit.live-surface-reconciliation.1',
+      inventoryFingerprint: '',
+      countsByKind: {},
+      declarations: [],
+      exclusions: [],
+      reconciliationComplete: false,
+      blockers: []
+    },
+    readbackComplete: false,
+    blockers: ['preserved']
+  }, null, 2)}\n`);
+  writeFileSync(join(packetDir, 'pattern-map.json'), '{"contentTypes":[{"machineName":"page"}]}\n');
+  writeFileSync(join(packetDir, 'evidence', 'live-surface', 'admin-view.txt'), 'Administrative-only View.\n');
+
+  const fakeDdev = join(fakeBin, 'ddev');
+  writeFileSync(fakeDdev, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] !== 'drush' || args[1] !== 'php:eval') process.exit(1);
+process.stdout.write(process.env.FAKE_LIVE_SURFACE + '\\n');
+`);
+  chmodSync(fakeDdev, 0o755);
+  // The live census always emits canvas_capability:runtime; the worksheet must not.
+  const live = inventory([publicBundle(), privateView(), canvasCapability(false)]);
+  const environment = {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FAKE_LIVE_SURFACE: JSON.stringify(live)
+  };
+
+  const draftResult = spawnSync(process.execPath, [reconcileScript, '--draft'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    env: environment
+  });
+  assert.equal(draftResult.status, 0, draftResult.stderr);
+  assert.match(draftResult.stdout, /2 live, 2 unresolved/);
+  const draftPath = join(packetDir, 'live-surface-reconciliation-draft.json');
+  const draft = JSON.parse(readFileSync(draftPath, 'utf8'));
+  assert.equal(draft.items.some((row) => row.kind === 'canvas_capability'), false);
+
+  writeFileSync(draftPath, `${JSON.stringify(resolveDraft(draft), null, 2)}\n`);
+  const materializedResult = spawnSync(process.execPath, [reconcileScript, '--materialize'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    env: environment
+  });
+  assert.equal(materializedResult.status, 0, materializedResult.stderr);
+  const readback = JSON.parse(readFileSync(readbackPath, 'utf8'));
+  assert.equal(readback.liveSurfaceReconciliation.reconciliationComplete, true);
+  assert.equal('canvas_capability' in readback.liveSurfaceReconciliation.countsByKind, false);
 });

@@ -5650,6 +5650,41 @@ function nonEmptyPacketFile(packetDir, reference, { requireFragment = false, evi
   }
 }
 
+// Control-kind surfaces are inspected by dedicated availability gates (e.g. the
+// Canvas/Experience Builder capability probe), not by the general live-surface
+// reconciliation. `liveSurfaceReconciliationErrors` excludes them from the
+// reconcilable set, so the reconcile worksheet must exclude them too — otherwise
+// a control-kind row is surfaced for disposition that the validator can never
+// accept (declaring/excluding it reports "packet-only … not present in the
+// current Drupal census", while dropping it fails the draft-matches-inventory
+// check). Keep this the single source of truth shared with reconcile.mjs.
+export const RECONCILIATION_CONTROL_KINDS = new Set(['canvas_capability']);
+
+/**
+ * Returns the live-surface census view used for reconciliation, with
+ * control-kind surfaces removed from `items`/`itemCount`/`countsByKind`. The
+ * census `fingerprint` is preserved because it identifies the full live surface
+ * and must still match the reconciliation's recorded fingerprint.
+ */
+export function reconcilableLiveSurface(inventory) {
+  if (!inventory || typeof inventory !== 'object' || !Array.isArray(inventory.items)) {
+    return inventory;
+  }
+  const items = inventory.items.filter(
+    (item) => !RECONCILIATION_CONTROL_KINDS.has(String(item?.kind ?? ''))
+  );
+  if (items.length === inventory.items.length) {
+    return inventory;
+  }
+  const countsByKind = inventory.countsByKind && typeof inventory.countsByKind === 'object' && !Array.isArray(inventory.countsByKind)
+    ? Object.fromEntries(
+        Object.entries(inventory.countsByKind)
+          .filter(([kind]) => !RECONCILIATION_CONTROL_KINDS.has(String(kind)))
+      )
+    : inventory.countsByKind;
+  return { ...inventory, items, itemCount: items.length, countsByKind };
+}
+
 export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, packetDir) {
   const errors = [];
   const push = (message) => {
@@ -5676,7 +5711,7 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
   if (String(reconciliation.inventoryFingerprint ?? '') !== String(liveInventory.fingerprint ?? '')) {
     push('drupal-readback.json liveSurfaceReconciliation inventoryFingerprint does not match the current live-derived Drupal surface.');
   }
-  const reconciliationControlKinds = new Set(['canvas_capability']);
+  const reconciliationControlKinds = RECONCILIATION_CONTROL_KINDS;
   const expectedCounts = liveInventory?.countsByKind && typeof liveInventory.countsByKind === 'object'
     ? Object.fromEntries(
         Object.entries(liveInventory.countsByKind)
