@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const contractRoot = join(repoRoot, 'contract');
+
+function usage() {
+  return `Usage: node scripts/build-contract.mjs [--check|--write] [--quiet]
+
+Concatenate the canonical per-phase contract parts in contract/ into the full
+AGENTS.md.template contract. The parts are the source of truth; the combined
+file is generated so existing readers and the installed skill package keep a
+single complete document.
+
+  --check   Report drift without writing (default)
+  --write   Regenerate AGENTS.md.template from contract/manifest.json
+  --quiet   Suppress success output
+  --help    Show this help
+`;
+}
+
+function parseArgs(argv) {
+  const options = { mode: 'check', quiet: false };
+  for (const argument of argv) {
+    if (argument === '--help') {
+      process.stdout.write(usage());
+      process.exit(0);
+    } else if (argument === '--check') {
+      options.mode = 'check';
+    } else if (argument === '--write') {
+      options.mode = 'write';
+    } else if (argument === '--quiet') {
+      options.quiet = true;
+    } else {
+      throw new Error(`Unknown argument: ${argument}`);
+    }
+  }
+  return options;
+}
+
+export function readManifest() {
+  const manifest = JSON.parse(readFileSync(join(contractRoot, 'manifest.json'), 'utf8'));
+  if (manifest.schemaVersion !== 'public-kit.build-contract-parts.1') {
+    throw new Error(`Unsupported contract manifest schemaVersion: ${manifest.schemaVersion}`);
+  }
+  if (!Array.isArray(manifest.parts) || manifest.parts.length === 0) {
+    throw new Error('contract/manifest.json must list at least one part.');
+  }
+  return manifest;
+}
+
+export function composeContract() {
+  const manifest = readManifest();
+  const bodies = manifest.parts.map(({ file, heading }) => {
+    const body = readFileSync(join(contractRoot, file), 'utf8');
+    const firstLine = body.split('\n', 1)[0];
+    if (firstLine !== heading) {
+      throw new Error(`contract/${file} must start with its manifest heading "${heading}" but starts with "${firstLine}".`);
+    }
+    return body;
+  });
+  // Parts are split on line boundaries, so a single newline restores the original document.
+  return bodies.join('\n');
+}
+
+function main() {
+  const options = parseArgs(process.argv.slice(2));
+  const composed = composeContract();
+  const generatedPath = join(repoRoot, readManifest().generated);
+
+  if (options.mode === 'write') {
+    writeFileSync(generatedPath, composed);
+  }
+
+  const current = readFileSync(generatedPath, 'utf8');
+  if (current !== composed) {
+    throw new Error(
+      'AGENTS.md.template is out of sync with contract/. Edit the part under contract/ and run: node scripts/build-contract.mjs --write'
+    );
+  }
+
+  if (!options.quiet) {
+    const manifest = readManifest();
+    process.stdout.write(
+      `Build contract ${options.mode === 'write' ? 'regenerated' : 'is in sync'} (${manifest.parts.length} parts).\n`
+    );
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
+}

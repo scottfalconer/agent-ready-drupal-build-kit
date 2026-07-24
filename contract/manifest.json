@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "public-kit.build-contract-parts.1",
+  "generated": "AGENTS.md.template",
+  "parts": [
+    {
+      "file": "00-orientation.md",
+      "heading": "# Detailed Build Contract For A Drupal CMS Build",
+      "summary": "Always read first: scope, operating contract, local stack, starting commands, and build input handling.",
+      "bytes": 10697
+    },
+    {
+      "file": "10-phase-1-introspection.md",
+      "heading": "## Operating Phases",
+      "summary": "Phase 1 introspection plus the structured-content, composition, and Canvas ownership gates.",
+      "bytes": 18935
+    },
+    {
+      "file": "20-phase-2-assembly.md",
+      "heading": "### Phase 2: Recipe-Backed Assembly",
+      "summary": "Phase 2 recipe-backed assembly.",
+      "bytes": 4941
+    },
+    {
+      "file": "30-phase-3-5-intent-gap-self-eval.md",
+      "heading": "### Phase 3: Durable Intent",
+      "summary": "Phases 3-5: durable intent, gap list, and stake-my-name self-eval.",
+      "bytes": 3276
+    },
+    {
+      "file": "40-phase-6-verification.md",
+      "heading": "### Phase 6: Independent Verification",
+      "summary": "Phase 6 independent verification.",
+      "bytes": 8517
+    },
+    {
+      "file": "50-phase-7-blind-review.md",
+      "heading": "### Phase 7: Blind Adversarial Review",
+      "summary": "Phase 7 blind adversarial review.",
+      "bytes": 11335
+    },
+    {
+      "file": "60-lifecycle-and-review-loop.md",
+      "heading": "## Site Lifecycle After The Initial Pass",
+      "summary": "Post-baseline lifecycle and the required review loop.",
+      "bytes": 10127
+    },
+    {
+      "file": "70-browser-evidence-and-completion.md",
+      "heading": "## Browser Evidence Gate",
+      "summary": "Browser evidence gate and the completion contract.",
+      "bytes": 9320
+    },
+    {
+      "file": "80-drupal-architecture.md",
+      "heading": "## Build Order",
+      "summary": "Build order, Drupal CMS baseline, architecture defaults, parity, recipe fit, and content modeling.",
+      "bytes": 19288
+    },
+    {
+      "file": "85-quality-requirements.md",
+      "heading": "## SEO And Discovery",
+      "summary": "SEO, editorial experience, anonymous forms, accessibility, and regulated content.",
+      "bytes": 7023
+    },
+    {
+      "file": "90-verification-and-decisions.md",
+      "heading": "## Required Verification",
+      "summary": "Required verification, scoped gap list, open decisions, and route smoke checks.",
+      "bytes": 14311
+    },
+    {
+      "file": "95-stop-conditions-and-outputs.md",
+      "heading": "## Stop Conditions",
+      "summary": "Stop conditions and required outputs.",
+      "bytes": 1634
+    }
+  ]
+}

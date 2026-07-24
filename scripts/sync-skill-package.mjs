@@ -57,9 +57,14 @@ function parseArgs(argv) {
 
 function copyPlan(assetsOnly) {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));
+  const contractManifest = JSON.parse(readFileSync(join(repoRoot, 'contract', 'manifest.json'), 'utf8'));
   const plan = [
     { source: join(repoRoot, 'gates.json'), destination: join(skillRoot, 'gates.json') },
     { source: join(repoRoot, 'AGENTS.md.template'), destination: join(skillRoot, 'references', 'build-contract.md') },
+    ...['manifest.json', ...contractManifest.parts.map(({ file }) => file)].map((name) => ({
+      source: join(repoRoot, 'contract', name),
+      destination: join(skillRoot, 'references', 'contract', name)
+    })),
     { source: join(repoRoot, 'USAGE.md'), destination: join(skillRoot, 'references', 'USAGE.md') },
     { source: join(repoRoot, 'docs', 'output-inventory.md'), destination: join(skillRoot, 'references', 'output-inventory.md') },
     { source: join(repoRoot, 'docs', 'recommended-agent-skills.md'), destination: join(skillRoot, 'references', 'recommended-agent-skills.md') },

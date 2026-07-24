@@ -1,0 +1,46 @@
+### Phase 6: Independent Verification
+
+Before final handoff, run a fresh independent verification pass whose job is to falsify the mechanical completion claims against the live Drupal site and current packet.
+
+Before the preliminary live verifier, bootstrap the exact live Drupal surface into a non-passing worksheet instead of hand-shaping hundreds of census rows:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --draft
+```
+
+Edit `review-packet/live-surface-reconciliation-draft.json` and explicitly disposition every row. `recommendedDisposition` and `candidatePacketReferences` are navigation aids only; the command never copies them into claim-bearing fields. Public declarations still require a specific non-empty `file#section` reference. Non-public exclusions still require a named owner, rationale, and real packet-local evidence. New or materially changed surfaces reset to unresolved, and deleted packet rows remain stale until acknowledged. When the worksheet is resolved, run `node [KIT_LOCAL_PATH]/scripts/reconcile.mjs --packet review-packet --materialize`. Materialization reruns the live census, refuses unresolved or stale rows with exit `2`, and changes only `drupal-readback.json.liveSurfaceReconciliation`. It does not set `readbackComplete`, recreate reviewer evidence, or authorize completion.
+
+Then run the default live verifier once against the finished builder state. Exit `2` is expected while independent and blind review evidence is still pending, but the report must confirm a clean, authoritative target and emit `review-packet/evidence/live-verification.json` with a complete build-state fingerprint. Seed only the original brief, acceptance criteria, and explicit source-of-truth references in the blind-review stub, then create the review handoff:
+
+```bash
+node [KIT_LOCAL_PATH]/scripts/review-handoff.mjs --packet review-packet
+```
+
+Add `--independent-credential-label <lowercase-id>` or `--blind-credential-label <lowercase-id>` only for credentials supplied to that reviewer out of band; never pass a password, token, cookie, or other credential value. The command writes one non-authoritative root handoff plus two strict reviewer projections: `review-packet/evidence/review-handoff.json`, `review-packet/evidence/review-handoff-independent.json`, and `review-packet/evidence/review-handoff-blind.json`. The root binds the exact target origin, Drupal site UUID, front-page/config identity, site-state fingerprint, preliminary packet-evidence fingerprint, and reviewer-input fingerprint. The independent projection binds every allowed file by project-relative path, byte size, and SHA-256 digest. The blind projection contains only the original brief, acceptance criteria, explicit source truth, target URLs, restricted primary-route rows, and out-of-band credential labels; packet-local brief and source files are byte-bound too. Target, admin, and primary-route URLs remain bound to the root target origin while explicit source-truth URLs may use the source origin. Secret-like paths, symlinks or realpath escapes, malformed or unknown fields, excessive filesystem entries/files/bytes/depth, and declared input roots outside the bounded packet/evidence contract fail closed before file bytes are read. The files are builder-writable and self-attested, have no completion or reviewer-identity authority, and never contain or write either reviewer artifact, a verdict, a completion claim, credentials, or `drupal-readback.json`.
+
+Use a separate subagent, new agent context, review-only task, or fresh checklist context when the runtime supports it. The verifier should be a context that did not build the site. If the runtime has no separate-agent feature, emulate the separation by starting a new verifier note that reads only `AGENTS.md`, the live URLs, credentials needed for editor checks, and the current `review-packet/`; do not let the builder's summary stand in for evidence. Record any same-context fallback as degraded independence in `review-packet/independent-verification.json`.
+
+Give the independent verifier only `review-packet/evidence/review-handoff-independent.json` and the files bound in its `allowedInputs`; do not give that reviewer the root handoff, blind projection, unlisted implementation files, prior conversation, summaries, or older reviewer output. The projection carries the root manifest path and exact `handoffDigest`; the verifier must copy that reference into `independent-verification.json.reviewHandoff`. The final verifier re-discovers the complete declared packet/evidence input set, rejects additions or omissions, re-hashes every input, and checks the stable reviewer-input fingerprint before accepting the record. Editor probes must be reversed before the review artifact is finalized so the target returns to the handed-off state. If the target, input membership, or input bytes change after handoff, regenerate the bundle and rerun independent verification.
+
+The verifier must try to break each claimed gate, not confirm it politely. It should inspect the live Drupal site and packet for:
+
+- per-route item counts and collection completeness, especially listings, grids, search/discovery pages, detail pages, media pages, and legal/footer pages;
+- every declared collection ownership ledger row, including source/target count reconciliation, View/collection ownership, and editor add-a-row evidence;
+- rendered media and embed presence, including iframes, videos, posters, thumbnails, documents, alt text, fallback states, and provider links;
+- raw embed/source-markup findings in editorial fields and whether `off-road-inventory.md` records them;
+- footer, menu, legal, privacy, search, contact, target-required route, and source-intent link resolution;
+- placeholder, lorem ipsum, starter content, default Drupal CMS content, disconnected Canvas starter pages, Canvas placeholder copy, stale route evidence, and live test pages;
+- wrong front page, wrong route owner, route drift disposition gaps, duplicate aliases, raw `/node/*` leaks, unexpected public 200 routes, and missing redirects;
+- first-fold and brand-defining asset parity for primary routes;
+- composition model fidelity for flexible landing-like routes, including proof that the actual target owner matches the declared owner or a target-bound accepted deviation, section ownership, expected editor actions, and public-output proof;
+- Canvas component model fidelity when Canvas is used, including component inventory, slots, typed props, entity/media/View references, monolithic component detection, string-blob prop detection, hardcoded Twig literals, and repeatable-section ownership;
+- non-admin editor add-a-row/add-a-node tasks for every custom public bundle, every repeating public bundle, and every declared collection, proving new content can enter the expected View, listing, detail route, menu, or Canvas composition without code changes;
+- next-cycle extensibility for every recurring public model: discover date, datetime, year, season, period, and taxonomy dimensions; then use the same least-privilege non-admin editor to create or select a value beyond the latest current cycle, publish future-dated content, prove anonymous output, and remove the probe with zero content, revision, alias, or term residue. Use structured N/A only when machine-backed discovery finds no such dimension;
+- cold-reader label checks for editor-facing content type labels;
+- source-owned public strings, content, or navigation that exist only in Twig, import scripts, or static markup;
+- field-output falsification for every load-bearing field and every field claimed to affect anonymous output, plus evidence-backed editor-only dispositions.
+- direct database cleanup, table purges, alias resets, or destructive import cleanup recorded as local-only off-road work.
+
+Produce `review-packet/independent-verification.json`. Every passing completion claim must name at least one non-empty packet-local `verifierEvidence` file produced by the independent check. Every failure or blocked check must name the completion claim it falsifies, the live evidence, the expected evidence, and the next fix. The builder must fix failing claims and rerun verification before calling the site complete.
+
+This gate can prove that packet claims are current, but it cannot prove the user got what they asked for. A packet verifier pass, route matrix pass, config-clean pass, media-count pass, or self-authored checklist is not sufficient to call the site complete.

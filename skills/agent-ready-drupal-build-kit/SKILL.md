@@ -53,8 +53,10 @@ Repeat `--recipe` and `--package` only for candidates derived from the source au
 
 Before changing the site, read these installed references completely:
 
-1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
+1. `references/contract/00-orientation.md` — build scope, the operating contract, the required local stack, and the starting commands.
 2. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
+
+The rest of the operating contract is split by phase under `references/contract/`. Read the part for the phase you are entering and re-read that part, not the whole document: the full contract is over 100 KB, so re-reading it on every phase transition spends far more context than it returns. `references/contract/manifest.json` lists every part with a one-line summary of what it covers. `references/build-contract.md` remains the complete concatenated contract; use it for whole-document search or human review, not as the routine read.
 
 Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: live Canvas component discovery and guarded headless page authoring, editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
 
@@ -187,4 +189,5 @@ Everything required at runtime is inside this skill directory:
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
 - `assets/browser-runtime/` contains the pinned add-on/image manifest and the narrow last-sorting DDEV override template.
+- `references/contract/` contains the build contract split into per-phase parts, with `manifest.json` as the index. Read the part for the current phase.
 - `references/` contains the complete build contract, output inventory, parity specification, playbook, disposable assembly and reproduction contracts, command cookbook, and companion-skill guidance.

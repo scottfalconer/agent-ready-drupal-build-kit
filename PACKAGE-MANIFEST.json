@@ -9,24 +9,25 @@
   "containsLocalPaths": false,
   "launchReady": false,
   "includedPaths": [
-    "START.md",
-    "README.md",
-    "USAGE.md",
-    "LICENSE",
-    "SECURITY.md",
-    "CONTRIBUTING.md",
     ".github/",
     "AGENTS.md.template",
-    "gates.json",
-    "package.json",
+    "CONTRIBUTING.md",
+    "LICENSE",
     "PACKAGE-MANIFEST.json",
+    "README.md",
+    "SECURITY.md",
+    "START.md",
+    "USAGE.md",
     "assets/",
     "bin/",
+    "contract/",
     "docs/",
+    "gates.json",
+    "package.json",
     "scripts/",
     "skills/",
-    "tests/",
     "templates/",
+    "tests/",
     "vendor/"
   ],
   "keyAdditions": [
@@ -118,7 +119,8 @@
     "Pattern-map architecture guards for managed media, menu ownership, collection Views, custom controllers, marker modules, and raw rendering",
     "Regulated-content governance guardrails for source/review status, disclosures, product/detail route QA, source-intent aliases, search, and SEO metadata",
     "LICENSE",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "Build contract split into per-phase parts under contract/, indexed by contract/manifest.json and concatenated into AGENTS.md.template by scripts/build-contract.mjs, so an agent reads the part for its current phase instead of the whole 100 KB document"
   ],
   "evidenceScope": "This public package contains instructions, templates, gate vocabulary, a default live-target verifier, and a structural packet linter. Real runs produce their own source capture, target, QA, parity, and review evidence."
 }
