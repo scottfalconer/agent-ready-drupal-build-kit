@@ -551,3 +551,174 @@ process.stdout.write(process.env.FAKE_LIVE_SURFACE + '\\n');
   assert.equal(readback.liveSurfaceReconciliation.reconciliationComplete, true);
   assert.equal('canvas_capability' in readback.liveSurfaceReconciliation.countsByKind, false);
 });
+
+// --- Upgrade path -----------------------------------------------------------
+// Projects that ran reconcile before control kinds were excluded have a
+// worksheet and/or a drupal-readback.json disposition that still names
+// canvas_capability:runtime. The current census no longer emits it, so it must
+// be pruned from every carry-forward source instead of stranding the project on
+// "stale surface acknowledgment required" forever.
+
+function preFixDraft({ acknowledgedRemoved = false, stale = false, dropKind = false } = {}) {
+  const full = inventory([publicBundle(), privateView(), canvasCapability(false)]);
+  const draft = refreshLiveSurfaceDraft(full);
+  if (!stale) {
+    assert.ok(
+      draft.items.some((row) => row.key === 'canvas_capability:runtime'),
+      'fixture must reproduce a pre-fix worksheet that lists the control kind'
+    );
+    if (dropKind) {
+      for (const row of draft.items) {
+        if (row.key === 'canvas_capability:runtime') delete row.kind;
+      }
+    }
+    return draft;
+  }
+  draft.items = draft.items.filter((row) => row.key !== 'canvas_capability:runtime');
+  draft.staleItems = [{
+    key: 'canvas_capability:runtime',
+    kind: 'canvas_capability',
+    observedFingerprint: '',
+    observed: {},
+    previousDisposition: { status: 'unresolved', packetReferences: [], owner: '', rationale: '', evidence: [] },
+    acknowledgedRemoved
+  }];
+  return draft;
+}
+
+const upgradeInventory = () =>
+  reconcilableLiveSurface(inventory([publicBundle(), privateView(), canvasCapability(false)]));
+
+test('a pre-fix worksheet listing the control kind does not strand the upgrade as a stale surface', () => {
+  const draft = refreshLiveSurfaceDraft(upgradeInventory(), { priorDraft: preFixDraft() });
+
+  assert.equal(draft.staleItems.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.unresolved.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.items.some((row) => row.kind === 'canvas_capability'), false);
+  assert.equal(draft.summary.stale, 0);
+});
+
+test('a pre-fix worksheet that already demoted the control kind to an unacknowledged stale row is pruned', () => {
+  const draft = refreshLiveSurfaceDraft(upgradeInventory(), { priorDraft: preFixDraft({ stale: true }) });
+
+  assert.equal(draft.staleItems.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.unresolved.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.summary.stale, 0);
+});
+
+test('a pre-fix readback disposition for the control kind does not resurrect it as a stale surface', () => {
+  const draft = refreshLiveSurfaceDraft(upgradeInventory(), {
+    readbackReconciliation: {
+      inventoryFingerprint: `sha256:${'a'.repeat(64)}`,
+      countsByKind: { bundle: 1, view_display: 1, canvas_capability: 1 },
+      declarations: [{ key: 'canvas_capability:runtime', kind: 'canvas_capability', packetReferences: ['pattern-map.json#canvas'] }],
+      exclusions: []
+    }
+  });
+
+  assert.equal(draft.staleItems.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.unresolved.some((row) => row.key === 'canvas_capability:runtime'), false);
+});
+
+test('a control-kind row that lost its kind field is still recognized by its key prefix', () => {
+  const draft = refreshLiveSurfaceDraft(upgradeInventory(), { priorDraft: preFixDraft({ dropKind: true }) });
+
+  assert.equal(draft.staleItems.some((row) => row.key === 'canvas_capability:runtime'), false);
+  assert.equal(draft.unresolved.some((row) => row.key === 'canvas_capability:runtime'), false);
+});
+
+test('a genuinely removed non-control surface still requires stale acknowledgment', () => {
+  // Guard against the prune being too broad: only control kinds may be dropped.
+  const priorDraft = refreshLiveSurfaceDraft(inventory([publicBundle(), privateView(), canvasCapability(false)]));
+  const shrunk = reconcilableLiveSurface(inventory([publicBundle(), canvasCapability(false)]));
+  const draft = refreshLiveSurfaceDraft(shrunk, { priorDraft });
+
+  assert.deepEqual(draft.staleItems.map((row) => row.key), ['view_display:content:page_admin']);
+  assert.ok(draft.unresolved.some((row) =>
+    row.key === 'view_display:content:page_admin' && row.reasons.includes('stale_surface_acknowledgment_required')));
+});
+
+test('CLI upgrades a project whose worksheet and readback were written before the control-kind exclusion', () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'live-surface-canvas-upgrade-'));
+  const packetDir = join(projectRoot, 'review-packet');
+  const fakeBin = join(projectRoot, 'fake-bin');
+  mkdirSync(join(projectRoot, '.ddev'), { recursive: true });
+  mkdirSync(join(packetDir, 'evidence', 'live-surface'), { recursive: true });
+  mkdirSync(fakeBin);
+  writeFileSync(
+    join(projectRoot, '.ddev', 'config.yaml'),
+    'name: reconcile-canvas-upgrade\ntype: drupal11\ndocroot: web\n'
+  );
+  writeFileSync(join(packetDir, 'pattern-map.json'), '{"contentTypes":[{"machineName":"page"}]}\n');
+  writeFileSync(join(packetDir, 'evidence', 'live-surface', 'admin-view.txt'), 'Administrative-only View.\n');
+
+  const live = inventory([publicBundle(), privateView(), canvasCapability(false)]);
+
+  // Exactly what a pre-fix run left on disk: a worksheet listing all three
+  // surfaces, and a readback disposition that includes the control kind.
+  const legacyDraft = resolveDraft(refreshLiveSurfaceDraft(live));
+  writeFileSync(
+    join(packetDir, 'live-surface-reconciliation-draft.json'),
+    `${JSON.stringify(legacyDraft, null, 2)}\n`
+  );
+  const readbackPath = join(packetDir, 'drupal-readback.json');
+  writeFileSync(readbackPath, `${JSON.stringify({
+    schemaVersion: 'public-kit.drupal-readback.1',
+    site: 'https://fixture.ddev.site',
+    checkedAt: 'preserved',
+    liveSurfaceReconciliation: {
+      schemaVersion: 'public-kit.live-surface-reconciliation.1',
+      inventoryFingerprint: live.fingerprint,
+      countsByKind: live.countsByKind,
+      declarations: [
+        { key: 'bundle:node:page', kind: 'bundle', packetReferences: ['pattern-map.json#contentTypes'] },
+        { key: 'canvas_capability:runtime', kind: 'canvas_capability', packetReferences: ['pattern-map.json#canvas'] }
+      ],
+      exclusions: [{
+        key: 'view_display:content:page_admin',
+        kind: 'view_display',
+        owner: 'site maintainer',
+        rationale: 'Administrative-only View.',
+        evidence: ['evidence/live-surface/admin-view.txt']
+      }],
+      reconciliationComplete: true,
+      blockers: []
+    },
+    readbackComplete: false,
+    blockers: ['preserved']
+  }, null, 2)}\n`);
+
+  const fakeDdev = join(fakeBin, 'ddev');
+  writeFileSync(fakeDdev, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] !== 'drush' || args[1] !== 'php:eval') process.exit(1);
+process.stdout.write(process.env.FAKE_LIVE_SURFACE + '\\n');
+`);
+  chmodSync(fakeDdev, 0o755);
+  const environment = {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FAKE_LIVE_SURFACE: JSON.stringify(live)
+  };
+
+  // Before the upgrade prune this reported:
+  //   Unresolved live surface canvas_capability:runtime: stale surface acknowledgment required.
+  const materialized = spawnSync(process.execPath, [reconcileScript, '--materialize'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    env: environment
+  });
+  assert.equal(materialized.status, 0, materialized.stderr);
+  assert.doesNotMatch(materialized.stderr, /canvas_capability:runtime/);
+
+  const readback = JSON.parse(readFileSync(readbackPath, 'utf8'));
+  assert.equal(readback.liveSurfaceReconciliation.reconciliationComplete, true);
+  assert.equal('canvas_capability' in readback.liveSurfaceReconciliation.countsByKind, false);
+  assert.equal(
+    readback.liveSurfaceReconciliation.declarations.some((row) => row.key === 'canvas_capability:runtime'),
+    false
+  );
+  // The materialized result must still satisfy the strict validator run against
+  // the FULL census, which continues to emit the control kind.
+  assert.deepEqual(liveSurfaceReconciliationErrors(live, readback.liveSurfaceReconciliation, packetDir), []);
+});

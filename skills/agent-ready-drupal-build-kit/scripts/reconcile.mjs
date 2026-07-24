@@ -17,6 +17,7 @@ import {
   findDrupalDdevRoot,
   inspectDrupalLiveSurface,
   liveSurfaceReconciliationErrors,
+  RECONCILIATION_CONTROL_KINDS,
   reconcilableLiveSurface
 } from './verify.mjs';
 
@@ -234,7 +235,7 @@ function readbackDispositions(reconciliation) {
       })
     });
   }
-  return dispositions;
+  return dropControlKinds(dispositions);
 }
 
 function assertInventory(inventory) {
@@ -312,6 +313,31 @@ function recommendedDisposition(item) {
   return item?.publicSurface === false || item?.publicEditorialRoot === false ? 'exclude' : 'declare';
 }
 
+// A row's kind, falling back to the `<kind>:<id>` key prefix so a legacy or
+// hand-edited row that lost its kind field is still recognized.
+function surfaceKind(key, kind) {
+  const declared = String(kind ?? '').trim();
+  if (declared) return declared;
+  const text = String(key ?? '');
+  const separator = text.indexOf(':');
+  return separator > 0 ? text.slice(0, separator) : '';
+}
+
+// Worksheets and readback reconciliations written before control kinds were
+// excluded still carry a `canvas_capability:runtime` row. The current census
+// no longer emits it, so carrying it forward would strand it as a stale
+// surface that needs an acknowledgment it can never legitimately get. Drop
+// control-kind rows from every carry-forward source, exactly as the inventory
+// filter drops them from the live side.
+function dropControlKinds(map) {
+  for (const [key, row] of map) {
+    if (RECONCILIATION_CONTROL_KINDS.has(surfaceKind(key, row?.kind))) {
+      map.delete(key);
+    }
+  }
+  return map;
+}
+
 function normalizePriorDraft(draft) {
   if (!draft) return { active: new Map(), stale: new Map() };
   if (draft?.schemaVersion !== DRAFT_SCHEMA) {
@@ -338,7 +364,9 @@ function normalizePriorDraft(draft) {
     }
     stale.set(key, row);
   }
-  return { active, stale };
+  // Prune after the duplicate/missing-key validation above so an upgrade never
+  // silently relaxes worksheet structural checks.
+  return { active: dropControlKinds(active), stale: dropControlKinds(stale) };
 }
 
 function invalidationRecord(disposition, reason) {
