@@ -26,7 +26,7 @@ import {
   readBoundedJsonFile,
   validatePacket
 } from './verify-packet.mjs';
-import { reviewHandoffStateErrors } from './review-handoff.mjs';
+import { reviewHandoffStateErrors, VERIFIER_OUTPUT_PACKET_PATHS } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
   captureBeforeConsentNetwork,
@@ -310,16 +310,11 @@ function sha256(value) {
 
 function packetEvidenceManifest(packetDir, outPath = '') {
   const excluded = new Set([
-    'evidence/live-verification.json',
-    'evidence/packet-verification.json',
+    // Shared with the review-handoff enumerators so the three cannot drift.
+    ...VERIFIER_OUTPUT_PACKET_PATHS,
     'evidence/review-handoff.json',
     'evidence/review-handoff-independent.json',
-    'evidence/review-handoff-blind.json',
-    // Bounded companions written beside the reports above. Like the reports,
-    // they are verifier output rather than packet evidence, so they must not
-    // change the packet fingerprint between runs.
-    'evidence/live-verification.summary.json',
-    'evidence/packet-verification.summary.json'
+    'evidence/review-handoff-blind.json'
   ]);
   const absoluteOut = outPath ? resolve(outPath) : '';
   if (absoluteOut && pathIsInside(packetDir, absoluteOut)) {
@@ -1812,8 +1807,10 @@ export function liveTargetBudgetCompletionBlocker(
  * truncated read to get it. This carries the fields agents actually query --
  * derived from what they ask for in practice: drupalRuntime, errors,
  * beforeConsentNetworkCapture, buildState, status, sourceSurfaceCensus,
- * packetVerification, gateResults and the route checks -- with every list
- * bounded and its omission stated.
+ * packetVerification, gateResults and the route checks. The finding lists are
+ * bounded and state their omission; gate rows are reduced to outcome only and
+ * route checks to tallies. agentContinuation and the budget blocks are carried
+ * verbatim because they are already small and fixed-shape.
  *
  * It is diagnostic only. It authorizes nothing, and the full report remains the
  * single source of truth for every claim.
@@ -1831,9 +1828,12 @@ export function buildVerificationSummary(report, { fullReportPath = '', maxItems
     const items = list(value).map((entry) => boundedSummaryText(entry));
     return { total: items.length, shown: Math.min(items.length, maxItems), omitted: Math.max(0, items.length - maxItems), items: items.slice(0, maxItems) };
   };
-  const tally = (rows, ok) => {
+  // Counts an explicit `passed === true` only. A renamed or missing field must
+  // read as "not passed"; the previous predicate used a field the verifier never
+  // emits and therefore reported a 100% pass rate on a fully failing run.
+  const tally = (rows) => {
     const all = list(rows);
-    const passed = all.filter((row) => ok(row)).length;
+    const passed = all.filter((row) => row?.passed === true).length;
     return { total: all.length, passed, failed: all.length - passed };
   };
   const gateRows = list(report?.gateResults).length ? list(report?.gateResults) : list(report?.packetVerification?.gateResults);
@@ -1862,8 +1862,8 @@ export function buildVerificationSummary(report, { fullReportPath = '', maxItems
       status: row?.status ?? '',
       errorCount: Number.isInteger(row?.errorCount) ? row.errorCount : list(row?.errors).length
     })),
-    routeChecks: tally(report?.routeChecks, (row) => row?.ok !== false),
-    targetRequiredRouteChecks: tally(report?.targetRequiredRouteChecks, (row) => row?.ok !== false),
+    routeChecks: tally(report?.routeChecks),
+    targetRequiredRouteChecks: tally(report?.targetRequiredRouteChecks),
     budgets: {
       sourceSurfaceCensus: report?.sourceSurfaceCensus?.budget,
       liveHttp: report?.liveHttpBudget,
@@ -1872,10 +1872,12 @@ export function buildVerificationSummary(report, { fullReportPath = '', maxItems
     },
     buildState: { fingerprint: report?.buildState?.fingerprint ?? '' },
     drupalRuntime: report?.drupalRuntime && {
-      site: report.drupalRuntime.site,
-      uuid: report.drupalRuntime.uuid,
+      baseUrl: report.drupalRuntime.baseUrl,
+      siteUuid: report.drupalRuntime.siteUuid,
+      confirmed: report.drupalRuntime.confirmed,
       frontPage: report.drupalRuntime.frontPage,
-      configClean: report.drupalRuntime.configClean,
+      configStatusClean: report.drupalRuntime.configStatusClean,
+      configSyncMatchesHead: report.drupalRuntime.configSyncMatchesHead,
       configSyncDirectory: report.drupalRuntime.configSyncDirectory
     },
     sourceSurfaceCensus: report?.sourceSurfaceCensus && {
@@ -1898,11 +1900,13 @@ export function summaryPathFor(reportPath) {
 }
 
 // Never let a diagnostic artifact break a verification run.
+let lastSummaryPath = '';
 async function writeVerificationSummary(report, reportPath) {
   const summaryPath = summaryPathFor(reportPath);
   try {
     const summary = buildVerificationSummary(report, { fullReportPath: reportPath });
     await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    lastSummaryPath = summaryPath;
     return summaryPath;
   } catch (error) {
     process.stderr.write(`Verification summary could not be written (${error.message}); the full report is unaffected.\n`);
@@ -15106,7 +15110,9 @@ async function main() {
 
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
-    process.stderr.write(`Bounded summary (read this first): ${summaryPathFor(args.out)}\n`);
+    if (lastSummaryPath) {
+      process.stderr.write(`Bounded summary (read this first): ${lastSummaryPath}\n`);
+    }
     for (const error of report.errors) {
       process.stderr.write(`- ${error}\n`);
     }

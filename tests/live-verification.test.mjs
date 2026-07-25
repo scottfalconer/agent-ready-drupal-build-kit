@@ -54,6 +54,7 @@ import {
   perGateResults,
   validatePacket
 } from '../bin/verify-packet.mjs';
+import { VERIFIER_OUTPUT_PACKET_PATHS } from '../bin/review-handoff.mjs';
 import { customMutableIdentityResultFingerprint } from '../bin/custom-mutable-identity-audit.mjs';
 import {
   CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
@@ -11290,10 +11291,17 @@ function summaryFixture(errorCount = 400) {
     gateResults: Array.from({ length: 38 }, (_, i) => ({
       gateId: `G-TEST-${i}`, status: 'fail', errors: ['a', 'b', 'c']
     })),
-    routeChecks: [{ ok: true }, { ok: false }],
-    targetRequiredRouteChecks: [],
+    // Field names must match what bin/verify.mjs actually emits. A fabricated
+    // fixture previously let the summary report a 100% route pass rate on a
+    // fully failing run, because it invented `.ok` where the verifier emits
+    // `.passed`.
+    routeChecks: [{ passed: true }, { passed: false }, {}],
+    targetRequiredRouteChecks: [{ passed: true }],
     buildState: { fingerprint: 'sha256:abc' },
-    drupalRuntime: { site: 'https://x.ddev.site', uuid: 'u', configClean: true },
+    drupalRuntime: {
+      baseUrl: 'https://x.ddev.site/', siteUuid: 'bb3c4bce', confirmed: true,
+      configStatusClean: true, configSyncMatchesHead: true, configSyncDirectory: 'config/sync'
+    },
     sourceSurfaceCensus: { status: 'passed', budget: { routeCount: 12 }, discoveredPublicPaths: ['/a', '/b'], errors: [] }
   };
 }
@@ -11325,8 +11333,9 @@ test('the summary carries the fields agents actually query, and no gate error te
   for (const row of summary.gateResults) {
     assert.deepEqual(Object.keys(row).sort(), ['errorCount', 'gateId', 'status']);
   }
-  assert.equal(summary.routeChecks.total, 2);
-  assert.equal(summary.routeChecks.failed, 1);
+  assert.equal(summary.routeChecks.total, 3);
+  assert.equal(summary.routeChecks.passed, 1, 'only an explicit passed:true counts as a pass');
+  assert.equal(summary.routeChecks.failed, 2, 'a missing passed field must count as failed, not passed');
 });
 
 test('the summary never claims authority of its own', () => {
@@ -11349,4 +11358,44 @@ test('the summary path is a sibling of the report', () => {
   assert.equal(summaryPathFor('review-packet/evidence/live-verification.json'),
     'review-packet/evidence/live-verification.summary.json');
   assert.equal(summaryPathFor('/tmp/out.json'), '/tmp/out.summary.json');
+});
+
+test('the summary projects only fields the verifier actually emits', () => {
+  // Root cause of two earlier defects: the projection referenced .ok, .site,
+  // .uuid and .configClean, none of which exist on a report. They vanished
+  // silently through JSON.stringify, so the summary omitted the very runtime
+  // facts it exists to surface and reported every route as passing.
+  const summary = buildVerificationSummary(summaryFixture(3), { fullReportPath: 'r.json' });
+  for (const key of ['baseUrl', 'siteUuid', 'confirmed', 'configStatusClean', 'configSyncDirectory']) {
+    assert.ok(key in summary.drupalRuntime, `drupalRuntime.${key} must survive the projection`);
+    assert.notEqual(summary.drupalRuntime[key], undefined, `drupalRuntime.${key} must not be silently dropped`);
+  }
+  assert.equal(summary.drupalRuntime.siteUuid, 'bb3c4bce');
+  assert.equal(summary.drupalRuntime.configStatusClean, true);
+});
+
+test('a failing route set can never be summarized as passing', () => {
+  const report = summaryFixture(1);
+  report.routeChecks = Array.from({ length: 13 }, () => ({ passed: false, errors: ['boom'] }));
+  const summary = buildVerificationSummary(report, { fullReportPath: 'r.json' });
+  assert.deepEqual(summary.routeChecks, { total: 13, passed: 0, failed: 13 });
+});
+
+test('every packet-file enumerator excludes the same verifier outputs', () => {
+  // Three separate enumerators walk the packet: the evidence manifest in
+  // verify.mjs, REVIEW_OUTPUT_PREFIXES, and the preliminary handoff
+  // fingerprint. A summary written into the packet must be invisible to all
+  // three, or the fingerprints drift on every run and completion becomes
+  // permanently unreachable.
+  for (const path of [
+    'evidence/live-verification.json',
+    'evidence/live-verification.summary.json',
+    'evidence/packet-verification.json',
+    'evidence/packet-verification.summary.json'
+  ]) {
+    assert.ok(
+      VERIFIER_OUTPUT_PACKET_PATHS.includes(path),
+      `${path} must be in the shared verifier-output list every enumerator consumes`
+    );
+  }
 });

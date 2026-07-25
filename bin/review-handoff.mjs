@@ -53,19 +53,24 @@ const FORBIDDEN_AUTHORITY_KEYS = new Set([
   'reviewerIdentity',
   'verdict'
 ]);
+// Packet paths that are verifier OUTPUT, not packet evidence. They are rewritten
+// on every verification, so any enumerator that fingerprints or hands off packet
+// contents must exclude them or its fingerprint drifts on every run. Three
+// separate enumerators need this list; keep it here so a fourth cannot drift.
+export const VERIFIER_OUTPUT_PACKET_PATHS = Object.freeze([
+  'evidence/live-verification.json',
+  'evidence/live-verification.summary.json',
+  'evidence/packet-verification.json',
+  'evidence/packet-verification.summary.json'
+]);
+
 const REVIEW_OUTPUT_PREFIXES = [
   'independent-verification.json',
   'blind-adversarial-review.json',
   'evidence/independent-verification/',
   'evidence/blind-adversarial-review/',
   'evidence/lifecycle/',
-  'evidence/live-verification.json',
-  'evidence/packet-verification.json',
-  // Bounded companions written beside the reports above. They are verifier
-  // output regenerated on every run, not reviewer input, so including them
-  // would invalidate the handoff fingerprint after each verification.
-  'evidence/live-verification.summary.json',
-  'evidence/packet-verification.summary.json',
+  ...VERIFIER_OUTPUT_PACKET_PATHS,
   PROJECTION_PATHS.independent,
   PROJECTION_PATHS.blind,
   `${HANDOFF_PATH}`
@@ -497,8 +502,7 @@ export function reviewHandoffPreliminaryPacketFingerprint(packetDir) {
           visit(path, depth + 1);
         } else if (metadata.isFile()) {
           if (![
-            'evidence/live-verification.json',
-            'evidence/packet-verification.json',
+            ...VERIFIER_OUTPUT_PACKET_PATHS,
             HANDOFF_PATH,
             PROJECTION_PATHS.independent,
             PROJECTION_PATHS.blind
