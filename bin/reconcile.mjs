@@ -197,7 +197,7 @@ function normalizedDisposition(value = {}) {
   };
 }
 
-function readbackDispositions(reconciliation) {
+function readbackDispositions(reconciliation, liveKeys = null) {
   if (!reconciliation || typeof reconciliation !== 'object' || Array.isArray(reconciliation)) {
     return new Map();
   }
@@ -235,7 +235,7 @@ function readbackDispositions(reconciliation) {
       })
     });
   }
-  return dropControlKinds(dispositions);
+  return dropControlKinds(dispositions, liveKeys);
 }
 
 function assertInventory(inventory) {
@@ -334,8 +334,13 @@ function surfaceKind(key, kind) {
 // control-kind filter landed in the same commit, so no released version could
 // write a readback declaring a control kind. It is pruned anyway to keep both
 // carry-forward sources symmetric.
-function dropControlKinds(map) {
+function dropControlKinds(map, liveKeys = null) {
   for (const [key, row] of map) {
+    // A row whose key is still present in the current census is not a stranded
+    // control-kind row; it is a mislabelled row for a real surface. Keep it so
+    // the normal kind-mismatch path records its authored disposition as
+    // invalidated history instead of discarding it silently.
+    if (liveKeys && liveKeys.has(key)) continue;
     if (RECONCILIATION_CONTROL_KINDS.has(surfaceKind(key, row?.kind))) {
       map.delete(key);
     }
@@ -343,7 +348,7 @@ function dropControlKinds(map) {
   return map;
 }
 
-function normalizePriorDraft(draft) {
+function normalizePriorDraft(draft, liveKeys = null) {
   if (!draft) return { active: new Map(), stale: new Map() };
   if (draft?.schemaVersion !== DRAFT_SCHEMA) {
     throw new Error(`${DRAFT_FILENAME} must use schemaVersion ${DRAFT_SCHEMA}.`);
@@ -371,7 +376,7 @@ function normalizePriorDraft(draft) {
   }
   // Prune after the duplicate/missing-key validation above so an upgrade never
   // silently relaxes worksheet structural checks.
-  return { active: dropControlKinds(active), stale: dropControlKinds(stale) };
+  return { active: dropControlKinds(active, liveKeys), stale: dropControlKinds(stale, liveKeys) };
 }
 
 function invalidationRecord(disposition, reason) {
@@ -403,8 +408,9 @@ export function refreshLiveSurfaceDraft(inventory, {
   readbackReconciliation = null
 } = {}) {
   assertInventory(inventory);
-  const prior = normalizePriorDraft(priorDraft);
-  const readback = readbackDispositions(readbackReconciliation);
+  const currentKeys = new Set(inventory.items.map((item) => String(item.key)));
+  const prior = normalizePriorDraft(priorDraft, currentKeys);
+  const readback = readbackDispositions(readbackReconciliation, currentKeys);
   const readbackMatchesCurrent =
     String(readbackReconciliation?.inventoryFingerprint ?? '') === String(inventory.fingerprint);
   const liveKeys = new Set(inventory.items.map((item) => String(item.key)));

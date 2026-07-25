@@ -761,3 +761,45 @@ test('the control-kind prune is scoped to exactly the canvas_capability namespac
   assert.deepEqual(staleKeys, keep.map((row) => row.key).sort(), 'only the control kind may be pruned');
   assert.equal(staleKeys.includes('canvas_capability:runtime'), false);
 });
+
+test('a mislabelled row for a live surface keeps its authored disposition as history', () => {
+  // Relabelling a real surface's kind to a control kind must not delete the
+  // authored owner/rationale/evidence. The key is still live, so it is a
+  // mislabel, not a stranded control-kind row, and the normal kind-mismatch
+  // path must record it as invalidated history.
+  const live = reconcilableLiveSurface(inventory([publicBundle(), canvasCapability(false)]));
+  const priorDraft = {
+    schemaVersion: 'public-kit.live-surface-reconciliation-draft.1',
+    scope: 'live_surface',
+    authority: 'non_passing_work_queue',
+    inventoryFingerprint: live.fingerprint,
+    countsByKind: live.countsByKind,
+    items: [{
+      key: 'bundle:node:page',
+      kind: 'canvas_capability',
+      observedFingerprint: 'sha256:stale',
+      dispositionBasisFingerprint: 'sha256:stale',
+      observed: {},
+      disposition: {
+        status: 'exclude',
+        packetReferences: [],
+        owner: 'site maintainer',
+        rationale: 'Authored rationale that must survive.',
+        evidence: ['evidence/live-surface/admin-view.txt']
+      },
+      invalidatedDisposition: null
+    }],
+    staleItems: [],
+    unresolved: [],
+    summary: { live: 1, unresolved: 0, invalidated: 0, stale: 0 }
+  };
+
+  const draft = refreshLiveSurfaceDraft(live, { priorDraft });
+  const row = draft.items.find((item) => item.key === 'bundle:node:page');
+
+  assert.ok(row, 'the live surface must still be present');
+  assert.equal(row.kind, 'bundle', 'the row is re-derived from the live census, not the mislabel');
+  assert.ok(row.invalidatedDisposition, 'the authored disposition must be preserved as history');
+  assert.equal(row.invalidatedDisposition.disposition.rationale, 'Authored rationale that must survive.');
+  assert.equal(draft.staleItems.length, 0, 'a live surface must never be demoted to stale');
+});
