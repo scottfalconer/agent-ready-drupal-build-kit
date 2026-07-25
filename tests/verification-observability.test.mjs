@@ -1126,8 +1126,9 @@ test('formatFailureFamilies states how many groups it withheld', () => {
   const errors = Array.from({ length: 25 }, (_, index) => `Distinct failure kind ${'z'.repeat(index + 1)}.`);
   const output = formatFailureFamilies(errors, 'report.json', { maxFamilies: 5 });
 
-  assert.match(output, /25 errors in 25 groups \(showing 5\)/);
-  assert.match(output, /\.\.\. 20 more groups not shown; see report\.json/);
+  assert.match(output, /25 errors in 25 groups \(showing the 5 largest\)/);
+  // The withheld line must state the hidden ERROR count, not only the group count.
+  assert.match(output, /\.\.\. 20 more groups holding 20 errors not shown; see report\.json/);
 });
 
 test('formatFailureFamilies bounds a single overlong finding', () => {
@@ -1140,4 +1141,49 @@ test('formatFailureFamilies bounds a single overlong finding', () => {
 test('formatFailureFamilies emits nothing when there are no errors', () => {
   assert.equal(formatFailureFamilies([], 'report.json'), '');
   assert.equal(formatFailureFamilies(undefined, 'report.json'), '');
+});
+
+test('terminal grouping shows the largest groups, not the first-seen ones', () => {
+  // First-seen order spent the visible slots on one-off findings and hid the
+  // root causes the grouping exists to surface: on a real 159-error report, 44
+  // errors including a 39x group sat behind the withheld line.
+  const errors = [
+    ...Array.from({ length: 5 }, (_, i) => `singleton failure kind ${'q'.repeat(i + 1)}`),
+    ...Array.from({ length: 40 }, (_, i) => `route /r${i} shares one root cause`)
+  ];
+  const output = formatFailureFamilies(errors, 'r.json', { maxFamilies: 3 });
+
+  assert.match(output, /- 40x route/, 'the 40-instance group must be shown');
+  assert.match(output, /showing the 3 largest/);
+});
+
+test('the withheld line states how many errors are hidden, not just how many groups', () => {
+  const errors = [
+    ...Array.from({ length: 10 }, (_, i) => `big group route /r${i}`),
+    ...Array.from({ length: 6 }, (_, i) => `distinct one-off ${'z'.repeat(i + 1)}`)
+  ];
+  const output = formatFailureFamilies(errors, 'r.json', { maxFamilies: 2 });
+
+  const withheld = output.split('\n').find((line) => line.startsWith('- ...'));
+  assert.ok(withheld, 'a withheld line must be present');
+  assert.match(withheld, /more groups holding \d+ errors not shown/);
+  // 16 errors total, 2 groups shown (the 10x group + one singleton) => 5 hidden.
+  assert.match(withheld, /holding 5 errors/);
+});
+
+test('group ordering is deterministic when counts tie', () => {
+  const errors = ['alpha /a', 'alpha /b', 'beta /a', 'beta /b', 'gamma /a', 'gamma /b'];
+  const first = formatFailureFamilies(errors, 'r.json', { maxFamilies: 2 });
+  const second = formatFailureFamilies(errors, 'r.json', { maxFamilies: 2 });
+  assert.equal(first, second);
+  assert.match(first, /- 2x alpha/, 'equal counts must fall back to first-seen order');
+});
+
+test('no error is lost when groups are withheld', () => {
+  const errors = Array.from({ length: 200 }, (_, i) => `kind ${i % 25} route /r${i}`);
+  const output = formatFailureFamilies(errors, 'r.json', { maxFamilies: 5 });
+  const shown = [...output.matchAll(/^- (\d+)x /gm)].reduce((a, m) => a + Number(m[1]), 0)
+    + output.split('\n').filter((l) => /^- (?!\.\.\.)/.test(l) && !/^- \d+x /.test(l)).length;
+  const hidden = Number((output.match(/holding (\d+) errors/) || [0, 0])[1]);
+  assert.equal(shown + hidden, errors.length, 'shown instances plus hidden instances must equal the input');
 });

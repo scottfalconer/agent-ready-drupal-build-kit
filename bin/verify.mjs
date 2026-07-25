@@ -1816,7 +1816,15 @@ export function formatFailureFamilies(errors, reportPath, {
   const list = (Array.isArray(errors) ? errors : []).map((error) => String(error).trim()).filter(Boolean);
   if (list.length === 0) return '';
   const families = groupByBlockerFamily(list, { maxExamples });
-  const shown = families.slice(0, maxFamilies);
+  // Show the biggest groups. First-seen order would spend the visible slots on
+  // one-off findings and hide exactly the root causes this grouping exists to
+  // surface; insertion order breaks ties so output stays deterministic.
+  const shown = families
+    .map((family, index) => ({ family, index }))
+    .sort((left, right) => right.family.count - left.family.count || left.index - right.index)
+    .slice(0, maxFamilies)
+    .map(({ family }) => family);
+  const hiddenInstances = list.length - shown.reduce((total, family) => total + family.count, 0);
   const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
   // Individual findings can carry long provenance lists. The report holds the
   // full text, so bound each terminal line the same way blocker messages are
@@ -1824,7 +1832,7 @@ export function formatFailureFamilies(errors, reportPath, {
   const line = (text) => boundedUtf8(text, MAX_CLI_FAILURE_LINE_BYTES);
   const lines = [
     `${plural(list.length, 'error')} in ${plural(families.length, 'group')}` +
-    `${families.length > shown.length ? ` (showing ${shown.length})` : ''}; full detail: ${reportPath}`
+    `${families.length > shown.length ? ` (showing the ${shown.length} largest)` : ''}; full detail: ${reportPath}`
   ];
   for (const family of shown) {
     if (family.count === 1) {
@@ -1842,7 +1850,11 @@ export function formatFailureFamilies(errors, reportPath, {
   }
   const omittedGroups = families.length - shown.length;
   if (omittedGroups > 0) {
-    lines.push(`- ... ${plural(omittedGroups, 'more group')} not shown; see ${reportPath}`);
+    // State the hidden ERROR count, not just the group count: a reader cannot
+    // judge what was withheld from a group tally alone.
+    lines.push(
+      `- ... ${plural(omittedGroups, 'more group')} holding ${plural(hiddenInstances, 'error')} not shown; see ${reportPath}`
+    );
   }
   return `${lines.join('\n')}\n`;
 }
