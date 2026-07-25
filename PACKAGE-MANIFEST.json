@@ -9,6 +9,7 @@
   "containsLocalPaths": false,
   "launchReady": false,
   "includedPaths": [
+    ".gitattributes",
     ".github/",
     "AGENTS.md.template",
     "CONTRIBUTING.md",

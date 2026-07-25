@@ -138,3 +138,50 @@ test('SKILL.md names a read trigger for every non-mandatory part', () => {
     );
   }
 });
+
+test('--write repairs a stale manifest byte count', () => {
+  // The failure message tells contributors to run --write. If --write cannot
+  // repair every drift it reports, that instruction is a dead end.
+  const manifestPath = join(contractRoot, 'manifest.json');
+  const original = readFileSync(manifestPath, 'utf8');
+  try {
+    const corrupted = JSON.parse(original);
+    corrupted.parts[3].bytes = 1;
+    writeFileSync(manifestPath, `${JSON.stringify(corrupted, null, 2)}\n`);
+
+    execFileSync(process.execPath, [join(repoRoot, 'scripts', 'build-contract.mjs'), '--write'], {
+      cwd: repoRoot, encoding: 'utf8'
+    });
+
+    const repaired = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const actual = Buffer.byteLength(readFileSync(join(contractRoot, repaired.parts[3].file)));
+    assert.equal(repaired.parts[3].bytes, actual, '--write must refresh recorded byte counts');
+  } finally {
+    writeFileSync(manifestPath, original);
+  }
+});
+
+test('a CRLF part fails with an actionable message', () => {
+  // Joined byte-for-byte, so a CRLF part silently breaks the round trip. The
+  // previous error compared two identically-rendered headings and read as
+  // nonsense.
+  const part = join(contractRoot, manifest.parts[0].file);
+  const original = readFileSync(part, 'utf8');
+  try {
+    writeFileSync(part, original.replace(/\n/g, '\r\n'));
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'build-contract.mjs'), '--check'], {
+      cwd: repoRoot, encoding: 'utf8'
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /CRLF line endings/);
+    assert.match(result.stderr, /LF/);
+  } finally {
+    writeFileSync(part, original);
+  }
+});
+
+test('the repository pins contract parts to LF', () => {
+  const attributes = readFileSync(join(repoRoot, '.gitattributes'), 'utf8');
+  assert.match(attributes, /contract\/\*\.md\s+text eol=lf/);
+  assert.match(attributes, /AGENTS\.md\.template text eol=lf/);
+});

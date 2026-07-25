@@ -1,0 +1,5 @@
+# Keep the generated contract byte-stable across platforms: it is joined
+# byte-for-byte, so a CRLF checkout would break the round trip.
+contract/*.md   text eol=lf
+contract/*.json text eol=lf
+AGENTS.md.template text eol=lf

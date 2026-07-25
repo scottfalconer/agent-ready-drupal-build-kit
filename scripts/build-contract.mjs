@@ -72,6 +72,12 @@ export function composeContract() {
   assertNoOrphanParts(manifest);
   const bodies = manifest.parts.map(({ file, heading }) => {
     const body = readFileSync(join(contractRoot, file), 'utf8');
+    if (body.includes('\r\n')) {
+      throw new Error(
+        `contract/${file} has CRLF line endings. The contract is joined byte-for-byte, so parts must use LF. ` +
+        'Re-save the file with LF endings (the repository .gitattributes keeps contract/*.md as LF).'
+      );
+    }
     const firstLine = body.split('\n', 1)[0];
     if (firstLine !== heading) {
       throw new Error(`contract/${file} must start with its manifest heading "${heading}" but starts with "${firstLine}".`);
@@ -89,6 +95,21 @@ function main() {
 
   if (options.mode === 'write') {
     writeFileSync(generatedPath, composed);
+    // Keep the manifest's recorded byte counts current. Without this, editing a
+    // part leaves a stale count that --check accepts but `npm test` rejects,
+    // so the documented fix command would not actually fix the tree.
+    const manifest = readManifest();
+    let manifestChanged = false;
+    for (const part of manifest.parts) {
+      const bytes = Buffer.byteLength(readFileSync(join(contractRoot, part.file)));
+      if (part.bytes !== bytes) {
+        part.bytes = bytes;
+        manifestChanged = true;
+      }
+    }
+    if (manifestChanged) {
+      writeFileSync(join(contractRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    }
   }
 
   const current = readFileSync(generatedPath, 'utf8');
