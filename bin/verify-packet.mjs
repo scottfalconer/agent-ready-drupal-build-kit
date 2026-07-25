@@ -388,9 +388,13 @@ export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
     .filter((gate) => isJsonObject(gate) && String(gate.id ?? '').trim())
     .map((gate) => {
       const gateErrors = findings.get(gate.id) ?? [];
+      // Live-run cause first. It is the shared reason the run failed, and a gate
+      // with more than MAX_GATE_RESULT_ERRORS findings of its own would
+      // otherwise truncate it away entirely -- so the highest-volume gates, the
+      // ones most likely to be read first, would stop naming the cause.
       const errors = gate.checkedBy === 'human' || liveRunErrors.length === 0
         ? gateErrors
-        : [...new Set([...gateErrors, ...liveRunErrors])];
+        : [...new Set([...liveRunErrors, ...gateErrors])];
       const evaluated = mode === 'live'
         ? gate.checkedBy !== 'human'
         : PACKET_EXECUTED_GATE_IDS.has(gate.id);

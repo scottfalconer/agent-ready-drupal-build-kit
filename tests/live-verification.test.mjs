@@ -11297,12 +11297,17 @@ test('bounding per-gate findings can never change a gate status', () => {
       for (const row of perGateResults(gates, messages, { mode })) {
         // status is derived from the complete list; an emitted-but-bounded list
         // must never be empty when the gate actually failed.
+        // Accounting must hold for every row regardless of status.
+        assert.equal(row.errors.length + row.omittedErrorCount, row.errorCount,
+          `${row.gateId} must account for every finding`);
         if (row.status === 'fail') {
           assert.ok(row.errorCount > 0, `${row.gateId} failed with no findings`);
           assert.ok(row.errors.length > 0, `${row.gateId} failed but emitted no example`);
-        } else {
+        } else if (row.status === 'pass' || row.status === 'not_evaluated') {
           assert.equal(row.errorCount, 0, `${row.gateId} is ${row.status} but has findings`);
         }
+        // human_review rows are deliberately excluded: a human gate keeps its
+        // own findings and is labelled human_review regardless of their count.
       }
     }
   }
@@ -11315,4 +11320,15 @@ test('bounded gate findings still name the shared live failure', () => {
   assert.equal(row.status, 'fail');
   assert.match(row.errors.join('\n'), /Live target route verification failed/);
   assert.equal(row.omittedErrorCount, 0, 'a single finding is never omitted');
+
+  // The shape that can actually truncate the shared cause: a gate carrying far
+  // more findings of its own than the emitted bound.
+  const busy = perGateResults(gates, [
+    'G-VERIFY-02 Live target route verification failed.',
+    ...Array.from({ length: 60 }, (_, i) => `route-matrix.json row ${i} is wrong.`)
+  ], { mode: 'live' });
+  const busyRow = busy.find((r) => r.gateId === 'G-ROUTE-01');
+  assert.ok(busyRow.errorCount > 20, 'fixture must exceed the emitted bound');
+  assert.match(busyRow.errors.join('\n'), /Live target route verification failed/,
+    'a high-volume gate must still name why the live run failed');
 });
