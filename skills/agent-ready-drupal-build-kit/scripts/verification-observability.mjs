@@ -596,33 +596,42 @@ export function boundedUtf8(value, maxBytes) {
 }
 
 /**
- * Collapses the volatile parts of a verifier message so repeated instances of
- * one underlying problem share a key.
+ * Groups verifier messages for DISPLAY ONLY.
  *
- * Deliberately conservative: it only normalizes recognized volatile families
- * (array subscripts, http(s) origins, absolute filesystem paths, and bare
- * integers). It does not stem, truncate, or fuzzy-match, so two genuinely
- * different failures never collapse into one.
+ * This is a presentation aid, not an identity function. It deliberately merges
+ * messages that differ only by which route or URL they name, so a root cause
+ * affecting many routes prints as one counted line instead of many. That means
+ * it CAN merge findings that are genuinely distinct -- two different routes
+ * failing the same check are one group here. That is acceptable only because
+ * every consumer of this grouping also prints the instance count, up to three
+ * verbatim examples, and the path to the report holding the full list.
  *
- * The motivating case is target-origin drift: one wrong origin produces one
- * error per checked route, each with a different subscript, so every rerun
- * minted a fresh blocker id and the repair loop could not tell a new problem
- * from the same one.
+ * Never derive an identity from this key. `agent-next.json` blocker ids are
+ * deliberately per-message: keying them on the family made `delta.added` and
+ * `delta.resolved` report "nothing changed" when one route was fixed while a
+ * different route in the same family newly broke.
+ *
+ * Numeric content is NOT normalized. Status codes, counts, and gate suffixes
+ * are the discriminating content of these messages, not volatile noise --
+ * normalizing them merged `G-VERIFY-01` with `G-VERIFY-02` and HTTP 404 with
+ * HTTP 500, and on real reports it produced no additional grouping at all.
  */
 export function blockerFamilyKey(message) {
   return String(message ?? '')
+    // Array subscripts: publicRouteChecks[0] and [1] are the same finding.
     .replace(/\[\s*\d+\s*\]/g, '[]')
-    // Trailing sentence punctuation is put back so it stays part of the key
-    // rather than being absorbed into the placeholder.
+    // Whole URLs, not just origins: the run consumes path and query too.
+    // Trailing sentence punctuation is put back rather than absorbed.
     .replace(/\bhttps?:\/\/[^\s,;)'"]+/gi, (match) => {
       const trimmed = match.replace(/[.,;:]+$/, '');
-      return `<origin>${match.slice(trimmed.length)}`;
+      return `<url>${match.slice(trimmed.length)}`;
     })
-    // Route and file paths, single- or multi-segment. Runs after the URL rule
-    // so it only ever sees bare paths. Requires a preceding space or start of
-    // string, so "and/or" and similar are untouched.
-    .replace(/(?<=\s|^)\/[A-Za-z0-9._~%-]*(?:\/[A-Za-z0-9._~%-]*)*/g, '<path>')
-    .replace(/\b\d+\b/g, 'N')
+    // Bare route/file paths. Runs after the URL rule so it only sees paths that
+    // are not part of a URL. Requires a preceding space or start of string, so
+    // "and/or" is untouched. The segment class excludes whitespace and common
+    // sentence punctuation rather than allow-listing ASCII, so non-ASCII route
+    // text normalizes whole instead of leaving a half-replaced key.
+    .replace(/(?<=\s|^)\/[^\s,;:)'"]*/g, '<path>')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -657,15 +666,14 @@ function blockerRecords(report, failureClass = '') {
     ...(Array.isArray(report?.errors) ? report.errors : [])
   ].map((message) => String(message).trim()).filter(Boolean);
   if (failureClass) messages.push(`Verification command failed (${failureClass}).`);
-  // One id per failure family, not per message instance. Array subscripts and
-  // origins vary between reruns of the same underlying problem; keying the id
-  // on the normalized family keeps it stable so added/removed diffs report real
-  // change instead of churn. `instanceCount` preserves the multiplicity that
-  // de-duplicating by family would otherwise hide.
-  const records = groupByBlockerFamily([...new Set(messages)]).map((family) => ({
-    id: `blocker-${observabilityFingerprint(family.key).slice('sha256:'.length, 'sha256:'.length + 12)}`,
-    message: boundedUtf8(family.representative, MAX_BLOCKER_MESSAGE_BYTES),
-    instanceCount: family.count
+  // Ids stay per-message on purpose. Keying them on the display family made
+  // `delta.added`/`delta.resolved` report "nothing changed" when one route was
+  // fixed while a different route in the same family newly broke, and made
+  // totalBlockerCount/omittedBlockerCount count families while still being
+  // documented as message counts. See blockerFamilyKey.
+  const records = [...new Set(messages)].map((message) => ({
+    id: `blocker-${observabilityFingerprint(message).slice('sha256:'.length, 'sha256:'.length + 12)}`,
+    message: boundedUtf8(message, MAX_BLOCKER_MESSAGE_BYTES)
   })).sort((left, right) => comparePortable(left.id, right.id));
   return {
     blockers: records.slice(0, MAX_AGENT_NEXT_BLOCKERS),

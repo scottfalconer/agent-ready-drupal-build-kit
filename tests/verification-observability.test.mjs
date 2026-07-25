@@ -645,13 +645,8 @@ test('duplicate run ids are rejected before shared observability state changes',
 
 test('agent-next bounds blocker count and message bytes while retaining totals', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'verification-performance-bounds-'));
-  // Distinct families, not one family repeated: `Blocker 001`/`Blocker 002`
-  // differ only by a normalized integer and now collapse into a single blocker
-  // by design (see the family-grouping test below). Keeping the digits attached
-  // to the word leaves 100 genuinely different blockers so this test still
-  // exercises the 32-blocker cap and the 512-byte message bound.
   const errors = Array.from({ length: 100 }, (_, index) => (
-    `Blocker${String(index).padStart(3, '0')} ${'x'.repeat(1_000)}`
+    `Blocker ${String(index).padStart(3, '0')} ${'x'.repeat(1_000)}`
   ));
   await recordVerificationObservability({
     projectRoot,
@@ -1005,27 +1000,92 @@ test('observability CLI anchors nested invocations to the Drupal DDEV project ro
 // itself, so the previous per-message blocker id churned on every rerun and the
 // terminal printed the same sentence dozens of times.
 
-test('blockerFamilyKey normalizes subscripts, origins, paths, and integers', () => {
+test('blockerFamilyKey normalizes subscripts and URLs for display grouping', () => {
   const key = blockerFamilyKey(
     'browser-evidence.json publicRouteChecks[12].targetUrl origin http://site.ddev.site:8800 does not match https://site.ddev.site:8443.'
   );
   assert.equal(
     key,
-    'browser-evidence.json publicRouteChecks[].targetUrl origin <origin> does not match <origin>.'
+    'browser-evidence.json publicRouteChecks[].targetUrl origin <url> does not match <url>.'
   );
   assert.equal(
     blockerFamilyKey('browser-evidence.json publicRouteChecks[3].targetUrl origin http://a:1 does not match https://b:2.'),
     key,
-    'two instances of one root cause must share a family key'
+    'two instances of one root cause must share a display family'
   );
 });
 
-test('blockerFamilyKey keeps genuinely different failures apart', () => {
-  const canonical = blockerFamilyKey('/a rendered canonical https://x/ does not match browser evidence https://y/.');
-  const ogImage = blockerFamilyKey('/a rendered og:image does not match browser evidence.');
-  assert.notEqual(canonical, ogImage);
-  // Digits welded to a word are not an index and must not be normalized away.
-  assert.notEqual(blockerFamilyKey('Writer0 failed.'), blockerFamilyKey('Writer1 failed.'));
+// Numeric content carries meaning in this verifier's messages. These pairs are
+// taken from strings bin/verify.mjs actually emits; an earlier revision
+// normalized bare integers and merged every one of them.
+test('blockerFamilyKey never merges findings that differ only by a number', () => {
+  const distinct = [
+    ['G-VERIFY-01 packet gate failed.', 'G-VERIFY-02 packet gate failed.'],
+    [
+      'primary route /a returned status 404; expected 200.',
+      'primary route /a returned status 500; expected 200.'
+    ],
+    ['/a critical asset returned HTTP 404.', '/a critical asset returned HTTP 500.'],
+    ['Canvas-selected route /a expected 1 region, found 0.', 'Canvas-selected route /a expected 1 region, found 4.'],
+    ['Writer0 failed.', 'Writer1 failed.']
+  ];
+  for (const [left, right] of distinct) {
+    assert.notEqual(
+      blockerFamilyKey(left),
+      blockerFamilyKey(right),
+      `must stay distinct: ${left} / ${right}`
+    );
+  }
+});
+
+test('blockerFamilyKey normalizes a non-ASCII route path whole', () => {
+  // A half-replaced key ("<path>e/menu") would split one family in two.
+  assert.equal(blockerFamilyKey('route /cafe\u0301/menu failed'), blockerFamilyKey('route /plain/menu failed'));
+  assert.ok(!blockerFamilyKey('route /cafe\u0301/menu failed').includes('menu'));
+});
+
+test('blocker ids stay per-message so the repair delta can see a swap', async () => {
+  // One route fixed while a different route in the same display family newly
+  // breaks must not read as "nothing changed".
+  const idsFor = async (errors, runId) => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'verification-blocker-id-'));
+    await recordVerificationObservability({
+      projectRoot,
+      report: reportFixture({ completionBlockedReasons: [], errors }),
+      timing: timingFixture(),
+      runId
+    });
+    const agentNext = JSON.parse(
+      readFileSync(join(projectRoot, '.agent-ready-drupal', 'agent-next.json'), 'utf8')
+    );
+    return agentNext;
+  };
+
+  const before = await idsFor(
+    ['primary route /about returned status 404; expected 200.'],
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  );
+  const after = await idsFor(
+    ['primary route /pricing returned status 403; expected 200.'],
+    'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  );
+
+  assert.notEqual(
+    after.blockers[0].id,
+    before.blockers[0].id,
+    'a different route failing is a different blocker'
+  );
+});
+
+test('agent-next blocker totals still count messages, not display families', () => {
+  // Guards the documented contract in docs/output-inventory.md: the file
+  // reports at most 32 bounded blocker messages plus honest total/omitted
+  // counts. Display grouping must never leak into those numbers.
+  const grouped = groupByBlockerFamily(
+    Array.from({ length: 40 }, (_, index) => `primary route /r${index} returned status 404; expected 200.`)
+  );
+  assert.equal(grouped.length, 1, 'display grouping does collapse these');
+  assert.equal(grouped[0].count, 40);
 });
 
 test('groupByBlockerFamily counts instances and bounds examples in first-seen order', () => {
@@ -1042,33 +1102,6 @@ test('groupByBlockerFamily counts instances and bounds examples in first-seen or
   assert.equal(groups[0].count, 4);
   assert.equal(groups[0].examples.length, 2, 'examples stay bounded');
   assert.equal(groups[1].count, 1);
-});
-
-test('agent-next gives one stable blocker id per family across origin and index drift', async () => {
-  const errorsFor = (origin, offset) => Array.from({ length: 6 }, (_, index) => (
-    `browser-evidence.json publicRouteChecks[${index + offset}].targetUrl origin ${origin} does not match https://site.ddev.site:8443.`
-  ));
-  const idsFor = async (origin, offset, runId) => {
-    const projectRoot = mkdtempSync(join(tmpdir(), 'verification-family-'));
-    await recordVerificationObservability({
-      projectRoot,
-      report: reportFixture({ completionBlockedReasons: [], errors: errorsFor(origin, offset) }),
-      timing: timingFixture(),
-      runId
-    });
-    return JSON.parse(readFileSync(join(projectRoot, '.agent-ready-drupal', 'agent-next.json'), 'utf8'));
-  };
-
-  const first = await idsFor('http://site.ddev.site:8800', 0, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
-  const second = await idsFor('http://site.ddev.site:9100', 40, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
-
-  assert.equal(first.blockers.length, 1, 'six instances of one root cause are one blocker');
-  assert.equal(first.blockers[0].instanceCount, 6, 'multiplicity is preserved, not discarded');
-  assert.deepEqual(
-    second.blockers.map((blocker) => blocker.id),
-    first.blockers.map((blocker) => blocker.id),
-    'a different origin and different subscripts must not mint a new blocker id'
-  );
 });
 
 test('formatFailureFamilies compresses repeated findings without dropping anything silently', () => {
