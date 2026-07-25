@@ -51,7 +51,9 @@ import {
   sha256 as stateSha256
 } from './state-fingerprint.mjs';
 import {
+  boundedUtf8,
   createPhaseRecorder,
+  groupByBlockerFamily,
   recordVerificationObservability
 } from './verification-observability.mjs';
 import {
@@ -118,6 +120,9 @@ export const SOURCE_SURFACE_LIMITS = Object.freeze({
 });
 const MAX_SOURCE_SURFACE_ROUTES = 8_192;
 const MAX_SOURCE_CLI_FINDINGS = 20;
+const MAX_CLI_FAILURE_FAMILIES = 20;
+const MAX_CLI_FAILURE_EXAMPLES = 3;
+const MAX_CLI_FAILURE_LINE_BYTES = 300;
 const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -1791,6 +1796,55 @@ export function liveTargetBudgetCompletionBlocker(
     resolutionClass: 'external',
     verifierConfirmedExternal: true
   };
+}
+
+/**
+ * Renders `report.errors` for the terminal as counted failure groups instead of
+ * one line per error.
+ *
+ * A single root cause (e.g. one wrong target origin) can produce one error per
+ * checked route, so the previous line-per-error listing printed the same
+ * sentence dozens of times. Grouping preserves every distinct problem and the
+ * multiplicity of each, and always names the report path holding full detail.
+ * Nothing is dropped silently: both the per-group remainder and the omitted
+ * group count are stated.
+ */
+export function formatFailureFamilies(errors, reportPath, {
+  maxFamilies = MAX_CLI_FAILURE_FAMILIES,
+  maxExamples = MAX_CLI_FAILURE_EXAMPLES
+} = {}) {
+  const list = (Array.isArray(errors) ? errors : []).map((error) => String(error).trim()).filter(Boolean);
+  if (list.length === 0) return '';
+  const families = groupByBlockerFamily(list, { maxExamples });
+  const shown = families.slice(0, maxFamilies);
+  const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+  // Individual findings can carry long provenance lists. The report holds the
+  // full text, so bound each terminal line the same way blocker messages are
+  // bounded rather than letting one finding dominate the summary.
+  const line = (text) => boundedUtf8(text, MAX_CLI_FAILURE_LINE_BYTES);
+  const lines = [
+    `${plural(list.length, 'error')} in ${plural(families.length, 'group')}` +
+    `${families.length > shown.length ? ` (showing ${shown.length})` : ''}; full detail: ${reportPath}`
+  ];
+  for (const family of shown) {
+    if (family.count === 1) {
+      lines.push(`- ${line(family.representative)}`);
+      continue;
+    }
+    lines.push(`- ${family.count}x ${line(family.representative)}`);
+    for (const example of family.examples.slice(1)) {
+      lines.push(`    e.g. ${line(example)}`);
+    }
+    const remaining = family.count - family.examples.length;
+    if (remaining > 0) {
+      lines.push(`    ... ${plural(remaining, 'more instance')} in this group`);
+    }
+  }
+  const omittedGroups = families.length - shown.length;
+  if (omittedGroups > 0) {
+    lines.push(`- ... ${plural(omittedGroups, 'more group')} not shown; see ${reportPath}`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 export function formatSourceSurfaceProgress(event = {}) {
@@ -14987,9 +15041,7 @@ async function main() {
 
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
-    for (const error of report.errors) {
-      process.stderr.write(`- ${error}\n`);
-    }
+    process.stderr.write(formatFailureFamilies(report.errors, args.out));
     if (!args.packetOnly) {
       process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     }

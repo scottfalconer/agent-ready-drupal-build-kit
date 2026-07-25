@@ -21,13 +21,15 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 
 import {
+  blockerFamilyKey,
   buildVerificationWorkload,
   createPhaseRecorder,
+  groupByBlockerFamily,
   observabilityFingerprint,
   recordVerificationObservability,
   summarizeVerificationRuns
 } from '../bin/verification-observability.mjs';
-import { recordObservabilitySafely } from '../bin/verify.mjs';
+import { formatFailureFamilies, recordObservabilitySafely } from '../bin/verify.mjs';
 
 const repoRoot = join(import.meta.dirname, '..');
 const observabilityModuleUrl = new URL('../bin/verification-observability.mjs', import.meta.url).href;
@@ -643,8 +645,13 @@ test('duplicate run ids are rejected before shared observability state changes',
 
 test('agent-next bounds blocker count and message bytes while retaining totals', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'verification-performance-bounds-'));
+  // Distinct families, not one family repeated: `Blocker 001`/`Blocker 002`
+  // differ only by a normalized integer and now collapse into a single blocker
+  // by design (see the family-grouping test below). Keeping the digits attached
+  // to the word leaves 100 genuinely different blockers so this test still
+  // exercises the 32-blocker cap and the 512-byte message bound.
   const errors = Array.from({ length: 100 }, (_, index) => (
-    `Blocker ${String(index).padStart(3, '0')} ${'x'.repeat(1_000)}`
+    `Blocker${String(index).padStart(3, '0')} ${'x'.repeat(1_000)}`
   ));
   await recordVerificationObservability({
     projectRoot,
@@ -990,4 +997,114 @@ test('observability CLI anchors nested invocations to the Drupal DDEV project ro
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).verification.runCount, 1);
   assert.equal(existsSync(join(nested, '.agent-ready-drupal')), false);
+});
+
+// --- Failure-family grouping ------------------------------------------------
+// One root cause (a wrong target origin) emits one error per checked route.
+// Each instance differs only by an array subscript, a route path, or the origin
+// itself, so the previous per-message blocker id churned on every rerun and the
+// terminal printed the same sentence dozens of times.
+
+test('blockerFamilyKey normalizes subscripts, origins, paths, and integers', () => {
+  const key = blockerFamilyKey(
+    'browser-evidence.json publicRouteChecks[12].targetUrl origin http://site.ddev.site:8800 does not match https://site.ddev.site:8443.'
+  );
+  assert.equal(
+    key,
+    'browser-evidence.json publicRouteChecks[].targetUrl origin <origin> does not match <origin>.'
+  );
+  assert.equal(
+    blockerFamilyKey('browser-evidence.json publicRouteChecks[3].targetUrl origin http://a:1 does not match https://b:2.'),
+    key,
+    'two instances of one root cause must share a family key'
+  );
+});
+
+test('blockerFamilyKey keeps genuinely different failures apart', () => {
+  const canonical = blockerFamilyKey('/a rendered canonical https://x/ does not match browser evidence https://y/.');
+  const ogImage = blockerFamilyKey('/a rendered og:image does not match browser evidence.');
+  assert.notEqual(canonical, ogImage);
+  // Digits welded to a word are not an index and must not be normalized away.
+  assert.notEqual(blockerFamilyKey('Writer0 failed.'), blockerFamilyKey('Writer1 failed.'));
+});
+
+test('groupByBlockerFamily counts instances and bounds examples in first-seen order', () => {
+  const groups = groupByBlockerFamily([
+    'route [1] broke',
+    'unrelated failure',
+    'route [2] broke',
+    'route [3] broke',
+    'route [4] broke'
+  ], { maxExamples: 2 });
+
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].representative, 'route [1] broke');
+  assert.equal(groups[0].count, 4);
+  assert.equal(groups[0].examples.length, 2, 'examples stay bounded');
+  assert.equal(groups[1].count, 1);
+});
+
+test('agent-next gives one stable blocker id per family across origin and index drift', async () => {
+  const errorsFor = (origin, offset) => Array.from({ length: 6 }, (_, index) => (
+    `browser-evidence.json publicRouteChecks[${index + offset}].targetUrl origin ${origin} does not match https://site.ddev.site:8443.`
+  ));
+  const idsFor = async (origin, offset, runId) => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'verification-family-'));
+    await recordVerificationObservability({
+      projectRoot,
+      report: reportFixture({ completionBlockedReasons: [], errors: errorsFor(origin, offset) }),
+      timing: timingFixture(),
+      runId
+    });
+    return JSON.parse(readFileSync(join(projectRoot, '.agent-ready-drupal', 'agent-next.json'), 'utf8'));
+  };
+
+  const first = await idsFor('http://site.ddev.site:8800', 0, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  const second = await idsFor('http://site.ddev.site:9100', 40, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+
+  assert.equal(first.blockers.length, 1, 'six instances of one root cause are one blocker');
+  assert.equal(first.blockers[0].instanceCount, 6, 'multiplicity is preserved, not discarded');
+  assert.deepEqual(
+    second.blockers.map((blocker) => blocker.id),
+    first.blockers.map((blocker) => blocker.id),
+    'a different origin and different subscripts must not mint a new blocker id'
+  );
+});
+
+test('formatFailureFamilies compresses repeated findings without dropping anything silently', () => {
+  const errors = [
+    'The resolved live target origin https://s:8443 does not match route-matrix.json targetBaseUrl http://s:8800.',
+    ...Array.from({ length: 30 }, (_, index) => (
+      `browser-evidence.json publicRouteChecks[${index}].targetUrl origin http://s:8800 does not match https://s:8443.`
+    ))
+  ];
+  const output = formatFailureFamilies(errors, 'review-packet/evidence/live-verification.json');
+
+  assert.match(output, /^31 errors in 2 groups; full detail: review-packet\/evidence\/live-verification\.json$/m);
+  assert.match(output, /- 30x browser-evidence\.json publicRouteChecks\[0\]/);
+  assert.match(output, /\.\.\. 27 more instances in this group/, 'per-group remainder is stated');
+  assert.ok(
+    Buffer.byteLength(output) < Buffer.byteLength(errors.map((error) => `- ${error}\n`).join('')) / 2,
+    'grouped output must be materially smaller than a line per error'
+  );
+});
+
+test('formatFailureFamilies states how many groups it withheld', () => {
+  const errors = Array.from({ length: 25 }, (_, index) => `Distinct failure kind ${'z'.repeat(index + 1)}.`);
+  const output = formatFailureFamilies(errors, 'report.json', { maxFamilies: 5 });
+
+  assert.match(output, /25 errors in 25 groups \(showing 5\)/);
+  assert.match(output, /\.\.\. 20 more groups not shown; see report\.json/);
+});
+
+test('formatFailureFamilies bounds a single overlong finding', () => {
+  const output = formatFailureFamilies([`Long finding ${'y'.repeat(5_000)}`], 'report.json');
+  for (const line of output.split('\n')) {
+    assert.ok(Buffer.byteLength(line) < 400, 'no terminal line may be dominated by one finding');
+  }
+});
+
+test('formatFailureFamilies emits nothing when there are no errors', () => {
+  assert.equal(formatFailureFamilies([], 'report.json'), '');
+  assert.equal(formatFailureFamilies(undefined, 'report.json'), '');
 });

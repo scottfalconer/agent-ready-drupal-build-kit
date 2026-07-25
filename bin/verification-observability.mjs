@@ -33,6 +33,7 @@ const LOCAL_STATE_LOCK_RETRY_MS = 20;
 const LOCAL_STATE_OWNER_WAIT_MS = 500;
 const MAX_AGENT_NEXT_BLOCKERS = 32;
 const MAX_BLOCKER_MESSAGE_BYTES = 512;
+const MAX_BLOCKER_FAMILY_EXAMPLES = 3;
 const MAX_JSON_FILE_BYTES = 1024 * 1024;
 const MAX_JSONL_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_RECORDS = 256;
@@ -584,7 +585,7 @@ async function writeTextAtomic(path, value) {
   }
 }
 
-function boundedUtf8(value, maxBytes) {
+export function boundedUtf8(value, maxBytes) {
   const text = String(value ?? '');
   if (Buffer.byteLength(text) <= maxBytes) return text;
   const suffix = '…';
@@ -594,6 +595,61 @@ function boundedUtf8(value, maxBytes) {
   return `${bounded.replace(/\uFFFD+$/u, '')}${suffix}`;
 }
 
+/**
+ * Collapses the volatile parts of a verifier message so repeated instances of
+ * one underlying problem share a key.
+ *
+ * Deliberately conservative: it only normalizes recognized volatile families
+ * (array subscripts, http(s) origins, absolute filesystem paths, and bare
+ * integers). It does not stem, truncate, or fuzzy-match, so two genuinely
+ * different failures never collapse into one.
+ *
+ * The motivating case is target-origin drift: one wrong origin produces one
+ * error per checked route, each with a different subscript, so every rerun
+ * minted a fresh blocker id and the repair loop could not tell a new problem
+ * from the same one.
+ */
+export function blockerFamilyKey(message) {
+  return String(message ?? '')
+    .replace(/\[\s*\d+\s*\]/g, '[]')
+    // Trailing sentence punctuation is put back so it stays part of the key
+    // rather than being absorbed into the placeholder.
+    .replace(/\bhttps?:\/\/[^\s,;)'"]+/gi, (match) => {
+      const trimmed = match.replace(/[.,;:]+$/, '');
+      return `<origin>${match.slice(trimmed.length)}`;
+    })
+    // Route and file paths, single- or multi-segment. Runs after the URL rule
+    // so it only ever sees bare paths. Requires a preceding space or start of
+    // string, so "and/or" and similar are untouched.
+    .replace(/(?<=\s|^)\/[A-Za-z0-9._~%-]*(?:\/[A-Za-z0-9._~%-]*)*/g, '<path>')
+    .replace(/\b\d+\b/g, 'N')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Groups messages by family, preserving input order of first appearance.
+ * Returns one record per family with its count and bounded examples.
+ */
+export function groupByBlockerFamily(messages, { maxExamples = MAX_BLOCKER_FAMILY_EXAMPLES } = {}) {
+  const families = new Map();
+  for (const raw of messages) {
+    const message = String(raw ?? '').trim();
+    if (!message) continue;
+    const key = blockerFamilyKey(message);
+    const existing = families.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (existing.examples.length < maxExamples && !existing.examples.includes(message)) {
+        existing.examples.push(message);
+      }
+    } else {
+      families.set(key, { key, count: 1, representative: message, examples: [message] });
+    }
+  }
+  return [...families.values()];
+}
+
 function blockerRecords(report, failureClass = '') {
   const messages = [
     ...(Array.isArray(report?.completionBlockedReasons) ? report.completionBlockedReasons : []),
@@ -601,9 +657,15 @@ function blockerRecords(report, failureClass = '') {
     ...(Array.isArray(report?.errors) ? report.errors : [])
   ].map((message) => String(message).trim()).filter(Boolean);
   if (failureClass) messages.push(`Verification command failed (${failureClass}).`);
-  const records = [...new Set(messages)].map((message) => ({
-    id: `blocker-${observabilityFingerprint(message).slice('sha256:'.length, 'sha256:'.length + 12)}`,
-    message: boundedUtf8(message, MAX_BLOCKER_MESSAGE_BYTES)
+  // One id per failure family, not per message instance. Array subscripts and
+  // origins vary between reruns of the same underlying problem; keying the id
+  // on the normalized family keeps it stable so added/removed diffs report real
+  // change instead of churn. `instanceCount` preserves the multiplicity that
+  // de-duplicating by family would otherwise hide.
+  const records = groupByBlockerFamily([...new Set(messages)]).map((family) => ({
+    id: `blocker-${observabilityFingerprint(family.key).slice('sha256:'.length, 'sha256:'.length + 12)}`,
+    message: boundedUtf8(family.representative, MAX_BLOCKER_MESSAGE_BYTES),
+    instanceCount: family.count
   })).sort((left, right) => comparePortable(left.id, right.id));
   return {
     blockers: records.slice(0, MAX_AGENT_NEXT_BLOCKERS),
