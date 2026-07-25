@@ -323,12 +323,17 @@ function surfaceKind(key, kind) {
   return separator > 0 ? text.slice(0, separator) : '';
 }
 
-// Worksheets and readback reconciliations written before control kinds were
-// excluded still carry a `canvas_capability:runtime` row. The current census
-// no longer emits it, so carrying it forward would strand it as a stale
-// surface that needs an acknowledgment it can never legitimately get. Drop
-// control-kind rows from every carry-forward source, exactly as the inventory
-// filter drops them from the live side.
+// Worksheets written before control kinds were excluded still carry a
+// `canvas_capability:runtime` row. The current census no longer emits it, so
+// carrying it forward would strand it as a stale surface needing an
+// acknowledgment it can never legitimately get. Drop control-kind rows from
+// every carry-forward source, exactly as the inventory filter drops them from
+// the live side.
+//
+// The readback path is defensive only: the census row and the validator's
+// control-kind filter landed in the same commit, so no released version could
+// write a readback declaring a control kind. It is pruned anyway to keep both
+// carry-forward sources symmetric.
 function dropControlKinds(map) {
   for (const [key, row] of map) {
     if (RECONCILIATION_CONTROL_KINDS.has(surfaceKind(key, row?.kind))) {

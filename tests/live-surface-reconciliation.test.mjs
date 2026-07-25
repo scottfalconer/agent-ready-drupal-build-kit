@@ -722,3 +722,42 @@ process.stdout.write(process.env.FAKE_LIVE_SURFACE + '\\n');
   // the FULL census, which continues to emit the control kind.
   assert.deepEqual(liveSurfaceReconciliationErrors(live, readback.liveSurfaceReconciliation, packetDir), []);
 });
+
+test('the control-kind prune is scoped to exactly the canvas_capability namespace', () => {
+  // The key-prefix fallback must not swallow sibling Canvas kinds, multi-colon
+  // keys, case variants, or a leading-colon key.
+  const keep = [
+    { key: 'canvas_page:home', kind: 'canvas_page' },
+    { key: 'canvas_component:hero', kind: 'canvas_component' },
+    { key: 'canvas_capabilityX:runtime', kind: 'canvas_capabilityX' },
+    // Multi-colon key; deliberately not the live publicBundle() key, so it is
+    // genuinely removed rather than reconciled as a current surface.
+    { key: 'bundle:node:article', kind: 'bundle' },
+    { key: 'CANVAS_CAPABILITY:runtime', kind: 'CANVAS_CAPABILITY' },
+    { key: ':canvas_capability', kind: '' },
+    { key: 'nocolonkey', kind: '' }
+  ];
+  const priorDraft = {
+    schemaVersion: 'public-kit.live-surface-reconciliation-draft.1',
+    scope: 'live_surface',
+    authority: 'non_passing_work_queue',
+    inventoryFingerprint: `sha256:${'a'.repeat(64)}`,
+    countsByKind: {},
+    items: [],
+    staleItems: [
+      ...keep.map((row) => ({ ...row, acknowledgedRemoved: false })),
+      { key: 'canvas_capability:runtime', kind: 'canvas_capability', acknowledgedRemoved: false }
+    ],
+    unresolved: [],
+    summary: { live: 0, unresolved: 0, invalidated: 0, stale: keep.length + 1 }
+  };
+
+  const draft = refreshLiveSurfaceDraft(
+    reconcilableLiveSurface(inventory([publicBundle(), canvasCapability(false)])),
+    { priorDraft }
+  );
+  const staleKeys = draft.staleItems.map((row) => row.key).sort();
+
+  assert.deepEqual(staleKeys, keep.map((row) => row.key).sort(), 'only the control kind may be pruned');
+  assert.equal(staleKeys.includes('canvas_capability:runtime'), false);
+});
