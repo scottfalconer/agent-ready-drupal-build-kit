@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,8 +52,24 @@ export function readManifest() {
   return manifest;
 }
 
+// A part on disk that no manifest entry references would be shipped by
+// `npm pack` while contributing nothing to the generated contract. `npm test`
+// catches it; check for it here too so `prepack` refuses to publish one.
+function assertNoOrphanParts(manifest) {
+  const listed = new Set(manifest.parts.map(({ file }) => file));
+  const orphans = readdirSync(contractRoot)
+    .filter((name) => name.endsWith('.md') && !listed.has(name))
+    .sort();
+  if (orphans.length > 0) {
+    throw new Error(
+      `contract/ has parts that contract/manifest.json does not list:\n${orphans.map((name) => `- ${name}`).join('\n')}`
+    );
+  }
+}
+
 export function composeContract() {
   const manifest = readManifest();
+  assertNoOrphanParts(manifest);
   const bodies = manifest.parts.map(({ file, heading }) => {
     const body = readFileSync(join(contractRoot, file), 'utf8');
     const firstLine = body.split('\n', 1)[0];

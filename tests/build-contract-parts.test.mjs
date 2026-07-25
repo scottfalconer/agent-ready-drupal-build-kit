@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -77,4 +77,64 @@ test('SKILL.md routes agents to the phase part rather than the whole contract', 
   assert.match(skill, /references\/contract\/manifest\.json/);
   // The complete document must stay discoverable for search and human review.
   assert.match(skill, /references\/build-contract\.md/);
+});
+
+test('build-contract --check rejects a part the manifest does not list', () => {
+  // prepack must refuse to publish an unreferenced contract fragment.
+  const orphan = join(contractRoot, '99-orphan-probe.md');
+  writeFileSync(orphan, '## Orphan Probe\n');
+  try {
+    const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'build-contract.mjs'), '--check'], {
+      cwd: repoRoot,
+      encoding: 'utf8'
+    });
+    assert.notEqual(result.status, 0, 'an orphan part must fail --check');
+    assert.match(result.stderr, /does not list/);
+    assert.match(result.stderr, /99-orphan-probe\.md/);
+  } finally {
+    rmSync(orphan, { force: true });
+  }
+});
+
+test('SKILL.md keeps every gate-bearing contract part in the mandatory read list', () => {
+  // The split must not downgrade the completion, verification, and stop-condition
+  // rules from "always read" to "read if you happen to route there".
+  const skill = readFileSync(
+    join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
+    'utf8'
+  );
+  const mandatory = skill.slice(
+    skill.indexOf('Before changing the site, read these installed references completely:'),
+    skill.indexOf('The remaining seven parts')
+  );
+  for (const part of [
+    '00-orientation.md',
+    '10-phase-1-introspection.md',
+    '70-browser-evidence-and-completion.md',
+    '90-verification-and-decisions.md',
+    '95-stop-conditions-and-outputs.md'
+  ]) {
+    assert.ok(mandatory.includes(part), `${part} must stay in the mandatory read list`);
+  }
+});
+
+test('SKILL.md names a read trigger for every non-mandatory part', () => {
+  const skill = readFileSync(
+    join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
+    'utf8'
+  );
+  const mandatory = new Set([
+    '00-orientation.md',
+    '10-phase-1-introspection.md',
+    '70-browser-evidence-and-completion.md',
+    '90-verification-and-decisions.md',
+    '95-stop-conditions-and-outputs.md'
+  ]);
+  for (const { file } of manifest.parts) {
+    if (mandatory.has(file)) continue;
+    assert.ok(
+      skill.includes(`\`${file}\``),
+      `${file} is neither mandatory nor given a "when to read" trigger in SKILL.md`
+    );
+  }
 });
