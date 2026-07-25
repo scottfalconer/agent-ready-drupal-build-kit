@@ -72,6 +72,9 @@ const COMPLETION_CLAIM_GATES = new Set([
 ]);
 const MAX_COMPLETION_EVIDENCE_SPAN_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUTURE_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
+// Per-gate emitted findings. Gates share evidence files, so one finding is
+// legitimately attributed to several gates; only the stored copies are bounded.
+const MAX_GATE_RESULT_ERRORS = 20;
 const ROUTE_ROLES = new Set([
   'homepage',
   'landing',
@@ -391,6 +394,8 @@ export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
       const evaluated = mode === 'live'
         ? gate.checkedBy !== 'human'
         : PACKET_EXECUTED_GATE_IDS.has(gate.id);
+      // Status is derived from the COMPLETE finding list, before bounding, so
+      // the emitted row can never disagree with the gate's real outcome.
       const status = gate.checkedBy === 'human'
         ? 'human_review'
         : errors.length > 0
@@ -403,7 +408,14 @@ export function perGateResults(gates, messages, { mode = 'packet' } = {}) {
         evaluator: MACHINE_GATE_EVALUATORS[gate.id] ?? 'human-record',
         evaluatorCompleted: evaluated,
         status,
-        errors
+        // Several gates share one evidence file (7 share browser-evidence.json,
+        // 6 share route-matrix.json), and a finding that names that file is
+        // attributed to every one of them. The attribution is correct; storing
+        // the full text under each gate is not. Bound the emitted list and state
+        // the omission, matching how this codebase bounds every other list.
+        errorCount: errors.length,
+        omittedErrorCount: Math.max(0, errors.length - MAX_GATE_RESULT_ERRORS),
+        errors: errors.slice(0, MAX_GATE_RESULT_ERRORS)
       };
     });
 }
