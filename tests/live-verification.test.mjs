@@ -40,7 +40,9 @@ import {
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
   reconcileLifecycleContinuation,
-  verifyLive
+  verifyLive,
+  buildVerificationSummary,
+  summaryPathFor
 } from '../bin/verify.mjs';
 import {
   BUILD_TYPES,
@@ -11266,4 +11268,85 @@ test('negative-route and consent dispositions fail closed without named packet-l
     true,
     evidencedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
+});
+
+// --- Bounded report summary -------------------------------------------------
+// The authoritative report runs to millions of bytes; agents that only need the
+// current state were paying a large truncated read to get it.
+
+function summaryFixture(errorCount = 400) {
+  return {
+    checkedAt: '2026-07-25T00:00:00.000Z',
+    verificationMode: 'live',
+    verdict: 'blocked',
+    valid: false,
+    completeLocalRebuildClaimAllowed: false,
+    currentSiteClaimAllowed: false,
+    agentContinuation: { requiredAction: 'repair-and-reverify', shouldContinue: true },
+    errors: Array.from({ length: errorCount }, (_, i) => `route /r${i} failed with a long message ${'x'.repeat(200)}`),
+    warnings: ['one warning'],
+    completionBlockedReasons: ['blocked for a reason'],
+    currentStateBlockedReasons: [],
+    gateResults: Array.from({ length: 38 }, (_, i) => ({
+      gateId: `G-TEST-${i}`, status: 'fail', errors: ['a', 'b', 'c']
+    })),
+    routeChecks: [{ ok: true }, { ok: false }],
+    targetRequiredRouteChecks: [],
+    buildState: { fingerprint: 'sha256:abc' },
+    drupalRuntime: { site: 'https://x.ddev.site', uuid: 'u', configClean: true },
+    sourceSurfaceCensus: { status: 'passed', budget: { routeCount: 12 }, discoveredPublicPaths: ['/a', '/b'], errors: [] }
+  };
+}
+
+test('the report summary stays small enough to read whole', () => {
+  const summary = buildVerificationSummary(summaryFixture(2000), { fullReportPath: 'r.json' });
+  const bytes = Buffer.byteLength(JSON.stringify(summary, null, 2));
+  assert.ok(bytes < 32_768, `summary must stay small; was ${bytes} bytes`);
+});
+
+test('every bounded list in the summary reconciles and states its omission', () => {
+  const summary = buildVerificationSummary(summaryFixture(400), { fullReportPath: 'r.json' });
+  for (const key of ['errors', 'warnings', 'completionBlockedReasons', 'currentStateBlockedReasons']) {
+    const block = summary[key];
+    assert.equal(block.shown, block.items.length, `${key} shown must match items emitted`);
+    assert.equal(block.total, block.shown + block.omitted, `${key} must account for every entry`);
+  }
+  assert.equal(summary.errors.total, 400);
+  assert.ok(summary.errors.omitted > 0, 'a large error set must report omissions, not hide them');
+});
+
+test('the summary carries the fields agents actually query, and no gate error text', () => {
+  const summary = buildVerificationSummary(summaryFixture(5), { fullReportPath: 'r.json' });
+  for (const key of ['verdict', 'valid', 'claims', 'agentContinuation', 'errors', 'buildState',
+    'drupalRuntime', 'sourceSurfaceCensus', 'gateResults', 'routeChecks', 'budgets']) {
+    assert.ok(key in summary, `summary must carry .${key}`);
+  }
+  assert.equal(summary.gateResults.length, 38);
+  for (const row of summary.gateResults) {
+    assert.deepEqual(Object.keys(row).sort(), ['errorCount', 'gateId', 'status']);
+  }
+  assert.equal(summary.routeChecks.total, 2);
+  assert.equal(summary.routeChecks.failed, 1);
+});
+
+test('the summary never claims authority of its own', () => {
+  const summary = buildVerificationSummary(summaryFixture(1), { fullReportPath: 'review-packet/evidence/live-verification.json' });
+  assert.equal(summary.authority, 'diagnostic_only');
+  assert.equal(summary.fullReport, 'review-packet/evidence/live-verification.json');
+  assert.equal(summary.schemaVersion, 'public-kit.live-verification-summary.1');
+  // It must mirror the report's claims rather than soften them.
+  assert.equal(summary.claims.completeLocalRebuildClaimAllowed, false);
+  assert.equal(summary.valid, false);
+});
+
+test('a malformed report cannot make the summary builder throw', () => {
+  for (const bad of [null, undefined, {}, { errors: 'not-an-array' }, { gateResults: 7 }, { routeChecks: null }]) {
+    assert.doesNotThrow(() => buildVerificationSummary(bad, {}));
+  }
+});
+
+test('the summary path is a sibling of the report', () => {
+  assert.equal(summaryPathFor('review-packet/evidence/live-verification.json'),
+    'review-packet/evidence/live-verification.summary.json');
+  assert.equal(summaryPathFor('/tmp/out.json'), '/tmp/out.summary.json');
 });

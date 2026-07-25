@@ -118,6 +118,10 @@ export const SOURCE_SURFACE_LIMITS = Object.freeze({
 });
 const MAX_SOURCE_SURFACE_ROUTES = 8_192;
 const MAX_SOURCE_CLI_FINDINGS = 20;
+// Bounded companion to the full verification report.
+const LIVE_VERIFICATION_SUMMARY_SCHEMA = 'public-kit.live-verification-summary.1';
+const MAX_SUMMARY_ITEMS = 25;
+const MAX_SUMMARY_TEXT_BYTES = 300;
 const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -310,11 +314,18 @@ function packetEvidenceManifest(packetDir, outPath = '') {
     'evidence/packet-verification.json',
     'evidence/review-handoff.json',
     'evidence/review-handoff-independent.json',
-    'evidence/review-handoff-blind.json'
+    'evidence/review-handoff-blind.json',
+    // Bounded companions written beside the reports above. Like the reports,
+    // they are verifier output rather than packet evidence, so they must not
+    // change the packet fingerprint between runs.
+    'evidence/live-verification.summary.json',
+    'evidence/packet-verification.summary.json'
   ]);
   const absoluteOut = outPath ? resolve(outPath) : '';
   if (absoluteOut && pathIsInside(packetDir, absoluteOut)) {
-    excluded.add(relative(packetDir, absoluteOut).split(sep).join('/'));
+    const relativeOut = relative(packetDir, absoluteOut).split(sep).join('/');
+    excluded.add(relativeOut);
+    excluded.add(summaryPathFor(relativeOut));
   }
   const files = [];
   const visit = (directory) => {
@@ -1791,6 +1802,112 @@ export function liveTargetBudgetCompletionBlocker(
     resolutionClass: 'external',
     verifierConfirmedExternal: true
   };
+}
+
+/**
+ * Builds the bounded companion to the full verification report.
+ *
+ * The full report is the authority and is unchanged; a real one runs to
+ * millions of bytes, so an agent that needs the current state pays a large
+ * truncated read to get it. This carries the fields agents actually query --
+ * derived from what they ask for in practice: drupalRuntime, errors,
+ * beforeConsentNetworkCapture, buildState, status, sourceSurfaceCensus,
+ * packetVerification, gateResults and the route checks -- with every list
+ * bounded and its omission stated.
+ *
+ * It is diagnostic only. It authorizes nothing, and the full report remains the
+ * single source of truth for every claim.
+ */
+function boundedSummaryText(value) {
+  const text = String(value ?? '');
+  if (Buffer.byteLength(text) <= MAX_SUMMARY_TEXT_BYTES) return text;
+  let cut = Buffer.from(text).subarray(0, MAX_SUMMARY_TEXT_BYTES - 1).toString('utf8');
+  return `${cut.replace(/\uFFFD+$/u, '')}\u2026`;
+}
+
+export function buildVerificationSummary(report, { fullReportPath = '', maxItems = MAX_SUMMARY_ITEMS } = {}) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const bounded = (value) => {
+    const items = list(value).map((entry) => boundedSummaryText(entry));
+    return { total: items.length, shown: Math.min(items.length, maxItems), omitted: Math.max(0, items.length - maxItems), items: items.slice(0, maxItems) };
+  };
+  const tally = (rows, ok) => {
+    const all = list(rows);
+    const passed = all.filter((row) => ok(row)).length;
+    return { total: all.length, passed, failed: all.length - passed };
+  };
+  const gateRows = list(report?.gateResults).length ? list(report?.gateResults) : list(report?.packetVerification?.gateResults);
+  return {
+    schemaVersion: LIVE_VERIFICATION_SUMMARY_SCHEMA,
+    authority: 'diagnostic_only',
+    fullReport: fullReportPath,
+    checkedAt: report?.checkedAt ?? '',
+    verificationMode: report?.verificationMode ?? '',
+    verdict: report?.verdict ?? '',
+    valid: report?.valid === true,
+    claims: {
+      completeLocalRebuildClaimAllowed: report?.completeLocalRebuildClaimAllowed === true,
+      completeLocalBuildFromBriefClaimAllowed: report?.completeLocalBuildFromBriefClaimAllowed === true,
+      currentSiteClaimAllowed: report?.currentSiteClaimAllowed === true,
+      launchReady: report?.launchReady === true
+    },
+    agentContinuation: report?.agentContinuation,
+    errors: bounded(report?.errors),
+    warnings: bounded(report?.warnings),
+    completionBlockedReasons: bounded(report?.completionBlockedReasons),
+    currentStateBlockedReasons: bounded(report?.currentStateBlockedReasons),
+    // Gate outcome only. The finding text lives once under errors.
+    gateResults: gateRows.map((row) => ({
+      gateId: row?.gateId ?? row?.id ?? '',
+      status: row?.status ?? '',
+      errorCount: Number.isInteger(row?.errorCount) ? row.errorCount : list(row?.errors).length
+    })),
+    routeChecks: tally(report?.routeChecks, (row) => row?.ok !== false),
+    targetRequiredRouteChecks: tally(report?.targetRequiredRouteChecks, (row) => row?.ok !== false),
+    budgets: {
+      sourceSurfaceCensus: report?.sourceSurfaceCensus?.budget,
+      liveHttp: report?.liveHttpBudget,
+      liveRoute: report?.liveRouteBudget,
+      globalChrome: report?.globalChromeCapture?.budget
+    },
+    buildState: { fingerprint: report?.buildState?.fingerprint ?? '' },
+    drupalRuntime: report?.drupalRuntime && {
+      site: report.drupalRuntime.site,
+      uuid: report.drupalRuntime.uuid,
+      frontPage: report.drupalRuntime.frontPage,
+      configClean: report.drupalRuntime.configClean,
+      configSyncDirectory: report.drupalRuntime.configSyncDirectory
+    },
+    sourceSurfaceCensus: report?.sourceSurfaceCensus && {
+      status: report.sourceSurfaceCensus.status,
+      routeCount: report.sourceSurfaceCensus.budget?.routeCount,
+      discoveredPublicPathCount: list(report.sourceSurfaceCensus.discoveredPublicPaths).length,
+      errors: bounded(report.sourceSurfaceCensus.errors)
+    },
+    beforeConsentNetworkCapture: report?.beforeConsentNetworkCapture && {
+      status: report.beforeConsentNetworkCapture.status,
+      routeCount: list(report.beforeConsentNetworkCapture.routes).length,
+      errors: bounded(report.beforeConsentNetworkCapture.errors)
+    }
+  };
+}
+
+export function summaryPathFor(reportPath) {
+  const parsed = String(reportPath ?? '');
+  return parsed.replace(/\.json$/i, '') + '.summary.json';
+}
+
+// Never let a diagnostic artifact break a verification run.
+async function writeVerificationSummary(report, reportPath) {
+  const summaryPath = summaryPathFor(reportPath);
+  try {
+    const summary = buildVerificationSummary(report, { fullReportPath: reportPath });
+    await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    return summaryPath;
+  } catch (error) {
+    process.stderr.write(`Verification summary could not be written (${error.message}); the full report is unaffected.\n`);
+    return '';
+  }
 }
 
 export function formatSourceSurfaceProgress(event = {}) {
@@ -14954,6 +15071,7 @@ async function main() {
       await observabilityRecorder.measure('report-write', async () => {
         await mkdir(dirname(args.out), { recursive: true });
         await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+        await writeVerificationSummary(report, args.out);
       });
     } catch (error) {
       reportInterruptedShadowExperiment(args.reuseMode, 'report persistence');
@@ -14983,10 +15101,12 @@ async function main() {
   } else {
     await mkdir(dirname(args.out), { recursive: true });
     await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+    await writeVerificationSummary(report, args.out);
   }
 
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
+    process.stderr.write(`Bounded summary (read this first): ${summaryPathFor(args.out)}\n`);
     for (const error of report.errors) {
       process.stderr.write(`- ${error}\n`);
     }

@@ -61,6 +61,11 @@ const REVIEW_OUTPUT_PREFIXES = [
   'evidence/lifecycle/',
   'evidence/live-verification.json',
   'evidence/packet-verification.json',
+  // Bounded companions written beside the reports above. They are verifier
+  // output regenerated on every run, not reviewer input, so including them
+  // would invalidate the handoff fingerprint after each verification.
+  'evidence/live-verification.summary.json',
+  'evidence/packet-verification.summary.json',
   PROJECTION_PATHS.independent,
   PROJECTION_PATHS.blind,
   `${HANDOFF_PATH}`
