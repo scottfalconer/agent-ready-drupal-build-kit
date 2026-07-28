@@ -17,6 +17,7 @@ import {
   findDrupalDdevRoot,
   inspectDrupalLiveSurface,
   liveSurfaceReconciliationErrors,
+  RECONCILIATION_CONTROL_KINDS,
   reconcilableLiveSurface
 } from './verify.mjs';
 
@@ -196,7 +197,7 @@ function normalizedDisposition(value = {}) {
   };
 }
 
-function readbackDispositions(reconciliation) {
+function readbackDispositions(reconciliation, liveKeys = null) {
   if (!reconciliation || typeof reconciliation !== 'object' || Array.isArray(reconciliation)) {
     return new Map();
   }
@@ -234,7 +235,7 @@ function readbackDispositions(reconciliation) {
       })
     });
   }
-  return dispositions;
+  return dropControlKinds(dispositions, liveKeys);
 }
 
 function assertInventory(inventory) {
@@ -312,7 +313,47 @@ function recommendedDisposition(item) {
   return item?.publicSurface === false || item?.publicEditorialRoot === false ? 'exclude' : 'declare';
 }
 
-function normalizePriorDraft(draft) {
+// Derive the structural kind from the canonical `<kind>:<id>` key.
+function keySurfaceKind(key) {
+  const text = String(key ?? '');
+  const separator = text.indexOf(':');
+  return separator > 0 ? text.slice(0, separator) : '';
+}
+
+// Worksheets written before control kinds were excluded still carry a
+// `canvas_capability:runtime` row. The current census no longer emits it, so
+// carrying it forward would strand it as a stale surface needing an
+// acknowledgment it can never legitimately get. Drop control-kind rows from
+// every carry-forward source, exactly as the inventory filter drops them from
+// the live side.
+//
+// The readback path is defensive only: the census row and the validator's
+// control-kind filter landed in the same commit, so no released version could
+// write a readback declaring a control kind. It is pruned anyway to keep both
+// carry-forward sources symmetric.
+function dropControlKinds(map, liveKeys = null) {
+  for (const [key, row] of map) {
+    // A row whose key is still present in the current census is not a stranded
+    // control-kind row; it is a mislabelled row for a real surface. Keep it so
+    // the normal kind-mismatch path records its authored disposition as
+    // invalidated history instead of discarding it silently.
+    if (liveKeys && liveKeys.has(key)) continue;
+    const keyKind = keySurfaceKind(key);
+    const declaredKind = String(row?.kind ?? '').trim();
+    // Only prune a structurally consistent control row. A mismatched key/kind
+    // may be malformed or hand-edited, so retain it for the normal fail-closed
+    // stale/invalidation path instead of silently deleting authored history.
+    if (
+      RECONCILIATION_CONTROL_KINDS.has(keyKind) &&
+      (!declaredKind || declaredKind === keyKind)
+    ) {
+      map.delete(key);
+    }
+  }
+  return map;
+}
+
+function normalizePriorDraft(draft, liveKeys = null) {
   if (!draft) return { active: new Map(), stale: new Map() };
   if (draft?.schemaVersion !== DRAFT_SCHEMA) {
     throw new Error(`${DRAFT_FILENAME} must use schemaVersion ${DRAFT_SCHEMA}.`);
@@ -338,7 +379,9 @@ function normalizePriorDraft(draft) {
     }
     stale.set(key, row);
   }
-  return { active, stale };
+  // Prune after the duplicate/missing-key validation above so an upgrade never
+  // silently relaxes worksheet structural checks.
+  return { active: dropControlKinds(active, liveKeys), stale: dropControlKinds(stale, liveKeys) };
 }
 
 function invalidationRecord(disposition, reason) {
@@ -370,8 +413,9 @@ export function refreshLiveSurfaceDraft(inventory, {
   readbackReconciliation = null
 } = {}) {
   assertInventory(inventory);
-  const prior = normalizePriorDraft(priorDraft);
-  const readback = readbackDispositions(readbackReconciliation);
+  const currentKeys = new Set(inventory.items.map((item) => String(item.key)));
+  const prior = normalizePriorDraft(priorDraft, currentKeys);
+  const readback = readbackDispositions(readbackReconciliation, currentKeys);
   const readbackMatchesCurrent =
     String(readbackReconciliation?.inventoryFingerprint ?? '') === String(inventory.fingerprint);
   const liveKeys = new Set(inventory.items.map((item) => String(item.key)));
