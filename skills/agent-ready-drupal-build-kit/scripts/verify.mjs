@@ -26,7 +26,7 @@ import {
   readBoundedJsonFile,
   validatePacket
 } from './verify-packet.mjs';
-import { reviewHandoffStateErrors } from './review-handoff.mjs';
+import { reviewHandoffStateErrors, VERIFIER_OUTPUT_PACKET_PATHS } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
   captureBeforeConsentNetwork,
@@ -120,6 +120,10 @@ export const SOURCE_SURFACE_LIMITS = Object.freeze({
 });
 const MAX_SOURCE_SURFACE_ROUTES = 8_192;
 const MAX_SOURCE_CLI_FINDINGS = 20;
+// Bounded companion to the full verification report.
+const LIVE_VERIFICATION_SUMMARY_SCHEMA = 'public-kit.live-verification-summary.1';
+const MAX_SUMMARY_ITEMS = 25;
+const MAX_SUMMARY_TEXT_BYTES = 300;
 const MAX_CLI_FAILURE_FAMILIES = 20;
 const MAX_CLI_FAILURE_EXAMPLES = 3;
 const MAX_CLI_FAILURE_LINE_BYTES = 300;
@@ -311,15 +315,17 @@ function sha256(value) {
 
 function packetEvidenceManifest(packetDir, outPath = '') {
   const excluded = new Set([
-    'evidence/live-verification.json',
-    'evidence/packet-verification.json',
+    // Shared with the review-handoff enumerators so the three cannot drift.
+    ...VERIFIER_OUTPUT_PACKET_PATHS,
     'evidence/review-handoff.json',
     'evidence/review-handoff-independent.json',
     'evidence/review-handoff-blind.json'
   ]);
   const absoluteOut = outPath ? resolve(outPath) : '';
   if (absoluteOut && pathIsInside(packetDir, absoluteOut)) {
-    excluded.add(relative(packetDir, absoluteOut).split(sep).join('/'));
+    const relativeOut = relative(packetDir, absoluteOut).split(sep).join('/');
+    excluded.add(relativeOut);
+    excluded.add(summaryPathFor(relativeOut));
   }
   const files = [];
   const visit = (directory) => {
@@ -1796,6 +1802,149 @@ export function liveTargetBudgetCompletionBlocker(
     resolutionClass: 'external',
     verifierConfirmedExternal: true
   };
+}
+
+/**
+ * Builds the bounded companion to the full verification report.
+ *
+ * The full report is the authority and is unchanged; a real one runs to
+ * millions of bytes, so an agent that needs the current state pays a large
+ * truncated read to get it. This carries the fields agents actually query --
+ * derived from what they ask for in practice: drupalRuntime, errors,
+ * beforeConsentNetworkCapture, buildState, status, sourceSurfaceCensus,
+ * packetVerification, gateResults and the route checks. The finding lists are
+ * bounded and state their omission; gate rows are reduced to outcome only and
+ * route checks to tallies. agentContinuation and the budget blocks are carried
+ * verbatim because they are already small and fixed-shape.
+ *
+ * It is diagnostic only. It authorizes nothing, and the full report remains the
+ * single source of truth for every claim.
+ */
+function boundedSummaryText(value) {
+  const text = String(value ?? '');
+  if (Buffer.byteLength(text) <= MAX_SUMMARY_TEXT_BYTES) return text;
+  let cut = Buffer.from(text).subarray(0, MAX_SUMMARY_TEXT_BYTES - 1).toString('utf8');
+  return `${cut.replace(/\uFFFD+$/u, '')}\u2026`;
+}
+
+export function buildVerificationSummary(report, { fullReportPath = '', maxItems = MAX_SUMMARY_ITEMS } = {}) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const bounded = (value) => {
+    const items = list(value).map((entry) => boundedSummaryText(entry));
+    return { total: items.length, shown: Math.min(items.length, maxItems), omitted: Math.max(0, items.length - maxItems), items: items.slice(0, maxItems) };
+  };
+  // Counts an explicit `passed === true` only. A renamed or missing field must
+  // read as "not passed"; the previous predicate used a field the verifier never
+  // emits and therefore reported a 100% pass rate on a fully failing run.
+  const tally = (rows) => {
+    const all = list(rows);
+    const passed = all.filter((row) => row?.passed === true).length;
+    return { total: all.length, passed, failed: all.length - passed };
+  };
+  const gateRows = list(report?.gateResults).length ? list(report?.gateResults) : list(report?.packetVerification?.gateResults);
+  return {
+    schemaVersion: LIVE_VERIFICATION_SUMMARY_SCHEMA,
+    authority: 'diagnostic_only',
+    fullReport: fullReportPath,
+    checkedAt: report?.checkedAt ?? '',
+    verificationMode: report?.verificationMode ?? '',
+    verdict: report?.verdict ?? '',
+    valid: report?.valid === true,
+    claims: {
+      completeLocalRebuildClaimAllowed: report?.completeLocalRebuildClaimAllowed === true,
+      completeLocalBuildFromBriefClaimAllowed: report?.completeLocalBuildFromBriefClaimAllowed === true,
+      currentSiteClaimAllowed: report?.currentSiteClaimAllowed === true,
+      launchReady: report?.launchReady === true
+    },
+    agentContinuation: report?.agentContinuation,
+    errors: bounded(report?.errors),
+    warnings: bounded(report?.warnings),
+    completionBlockedReasons: bounded(report?.completionBlockedReasons),
+    currentStateBlockedReasons: bounded(report?.currentStateBlockedReasons),
+    // Gate outcome only. The finding text lives once under errors.
+    gateResults: gateRows.map((row) => ({
+      gateId: row?.gateId ?? row?.id ?? '',
+      status: row?.status ?? '',
+      errorCount: Number.isInteger(row?.errorCount) ? row.errorCount : list(row?.errors).length
+    })),
+    routeChecks: tally(report?.routeChecks),
+    targetRequiredRouteChecks: tally(report?.targetRequiredRouteChecks),
+    budgets: {
+      sourceSurfaceCensus: report?.sourceSurfaceCensus?.budget,
+      liveHttp: report?.liveHttpBudget,
+      liveRoute: report?.liveRouteBudget,
+      globalChrome: report?.globalChromeCapture?.budget
+    },
+    buildState: { fingerprint: report?.buildState?.fingerprint ?? '' },
+    drupalRuntime: report?.drupalRuntime && {
+      baseUrl: report.drupalRuntime.baseUrl,
+      siteUuid: report.drupalRuntime.siteUuid,
+      confirmed: report.drupalRuntime.confirmed,
+      frontPage: report.drupalRuntime.frontPage,
+      configStatusClean: report.drupalRuntime.configStatusClean,
+      configSyncMatchesHead: report.drupalRuntime.configSyncMatchesHead,
+      configSyncDirectory: report.drupalRuntime.configSyncDirectory
+    },
+    sourceSurfaceCensus: report?.sourceSurfaceCensus && {
+      status: report.sourceSurfaceCensus.status,
+      routeCount: report.sourceSurfaceCensus.budget?.routeCount,
+      discoveredPublicPathCount: list(report.sourceSurfaceCensus.discoveredPublicPaths).length,
+      errors: bounded(report.sourceSurfaceCensus.errors)
+    },
+    beforeConsentNetworkCapture: report?.beforeConsentNetworkCapture && {
+      status: report.beforeConsentNetworkCapture.status,
+      routeCount: list(report.beforeConsentNetworkCapture.routes).length,
+      errors: bounded(report.beforeConsentNetworkCapture.errors)
+    }
+  };
+}
+
+export function summaryPathFor(reportPath) {
+  const parsed = String(reportPath ?? '');
+  return parsed.replace(/\.json$/i, '') + '.summary.json';
+}
+
+export function verificationCliReportAnnouncement(report, {
+  packetOnly = false,
+  reportPath = '',
+  summaryPath = ''
+} = {}) {
+  const completionClaimAllowed =
+    report?.completeLocalRebuildClaimAllowed === true ||
+    report?.completeLocalBuildFromBriefClaimAllowed === true;
+  const outcome = report?.valid !== true
+    ? 'failure'
+    : packetOnly
+      ? 'packet-only-success'
+      : completionClaimAllowed && report?.currentSiteClaimAllowed === true
+        ? 'live-success'
+        : 'machine-incomplete';
+  const lines = [];
+  if (summaryPath) {
+    lines.push(`Bounded diagnostic summary (read this first): ${summaryPath}`);
+  }
+  lines.push(`Authoritative full report: ${reportPath}`);
+  return {
+    outcome,
+    channel: outcome === 'failure' || outcome === 'machine-incomplete' ? 'stderr' : 'stdout',
+    text: `${lines.join('\n')}\n`
+  };
+}
+
+// Never let a diagnostic artifact break a verification run.
+let lastSummaryPath = '';
+async function writeVerificationSummary(report, reportPath) {
+  const summaryPath = summaryPathFor(reportPath);
+  lastSummaryPath = '';
+  try {
+    const summary = buildVerificationSummary(report, { fullReportPath: reportPath });
+    await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    lastSummaryPath = summaryPath;
+    return summaryPath;
+  } catch (error) {
+    process.stderr.write(`Verification summary could not be written (${error.message}); the full report is unaffected.\n`);
+    return '';
+  }
 }
 
 /**
@@ -15055,6 +15204,7 @@ async function main() {
       await observabilityRecorder.measure('report-write', async () => {
         await mkdir(dirname(args.out), { recursive: true });
         await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+        await writeVerificationSummary(report, args.out);
       });
     } catch (error) {
       reportInterruptedShadowExperiment(args.reuseMode, 'report persistence');
@@ -15084,10 +15234,18 @@ async function main() {
   } else {
     await mkdir(dirname(args.out), { recursive: true });
     await writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`);
+    await writeVerificationSummary(report, args.out);
   }
 
-  if (!report.valid) {
-    process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
+  const cliAnnouncement = verificationCliReportAnnouncement(report, {
+    packetOnly: args.packetOnly,
+    reportPath: args.out,
+    summaryPath: lastSummaryPath
+  });
+  process[cliAnnouncement.channel].write(cliAnnouncement.text);
+
+  if (cliAnnouncement.outcome === 'failure') {
+    process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed.\n`);
     process.stderr.write(formatFailureFamilies(report.errors, args.out));
     if (!args.packetOnly) {
       process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
@@ -15095,12 +15253,9 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (args.packetOnly) {
-    process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
-  } else if (
-    (report.completeLocalRebuildClaimAllowed || report.completeLocalBuildFromBriefClaimAllowed) &&
-    report.currentSiteClaimAllowed
-  ) {
+  if (cliAnnouncement.outcome === 'packet-only-success') {
+    process.stdout.write('Packet structure valid; packet-only verification never authorizes completion.\n');
+  } else if (cliAnnouncement.outcome === 'live-success') {
     const independence = report.packetVerification?.completionEvidence?.independence ?? {};
     const independenceSummary = [
       ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
@@ -15117,7 +15272,7 @@ async function main() {
     const recordedStatusLabel = report.claimScope === 'complete-local-build-from-brief'
       ? 'local-build'
       : 'local-rebuild';
-    process.stdout.write(`Live target and packet verification passed; ${claimDescription} machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded ${recordedStatusLabel} operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote} Report: ${args.out}\n`);
+    process.stdout.write(`Live target and packet verification passed; ${claimDescription} machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded ${recordedStatusLabel} operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote}\n`);
   } else {
     const baselineNote = report.lifecycle?.initialBaseline?.status === 'passed'
       ? ' The create-once, integrity-checked initial baseline remains passed; the current derived state is not yet verified.'
@@ -15130,7 +15285,7 @@ async function main() {
     const reason = completionClaimAllowed && !report.currentSiteClaimAllowed
       ? `Full ${claimDescription} checks passed, but the changed current state is not classified and lifecycle-verified.`
       : `Live target checks passed, but ${claimDescription} machine authorization remains blocked by required machine evidence.`;
-    process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
+    process.stderr.write(`${reason}${baselineNote}\n`);
     process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     const sourceFindings = Array.isArray(report.sourceSurfaceCensus?.errors)
       ? report.sourceSurfaceCensus.errors
