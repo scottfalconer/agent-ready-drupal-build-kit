@@ -40,7 +40,10 @@ import {
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
   reconcileLifecycleContinuation,
-  verifyLive
+  verifyLive,
+  buildVerificationSummary,
+  summaryPathFor,
+  verificationCliReportAnnouncement
 } from '../bin/verify.mjs';
 import {
   BUILD_TYPES,
@@ -52,6 +55,7 @@ import {
   perGateResults,
   validatePacket
 } from '../bin/verify-packet.mjs';
+import { VERIFIER_OUTPUT_PACKET_PATHS } from '../bin/review-handoff.mjs';
 import { customMutableIdentityResultFingerprint } from '../bin/custom-mutable-identity-audit.mjs';
 import {
   CUSTOM_ENTITY_OUTPUT_AUDIT_SCHEMA,
@@ -11267,6 +11271,196 @@ test('negative-route and consent dispositions fail closed without named packet-l
     evidencedReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 });
+
+// --- Bounded report summary -------------------------------------------------
+// The authoritative report runs to millions of bytes; agents that only need the
+// current state were paying a large truncated read to get it.
+
+function summaryFixture(errorCount = 400) {
+  return {
+    checkedAt: '2026-07-25T00:00:00.000Z',
+    verificationMode: 'live',
+    verdict: 'blocked',
+    valid: false,
+    completeLocalRebuildClaimAllowed: false,
+    currentSiteClaimAllowed: false,
+    agentContinuation: { requiredAction: 'repair-and-reverify', shouldContinue: true },
+    errors: Array.from({ length: errorCount }, (_, i) => `route /r${i} failed with a long message ${'x'.repeat(200)}`),
+    warnings: ['one warning'],
+    completionBlockedReasons: ['blocked for a reason'],
+    currentStateBlockedReasons: [],
+    gateResults: Array.from({ length: 38 }, (_, i) => ({
+      gateId: `G-TEST-${i}`, status: 'fail', errors: ['a', 'b', 'c']
+    })),
+    // Field names must match what bin/verify.mjs actually emits. A fabricated
+    // fixture previously let the summary report a 100% route pass rate on a
+    // fully failing run, because it invented `.ok` where the verifier emits
+    // `.passed`.
+    routeChecks: [{ passed: true }, { passed: false }, {}],
+    targetRequiredRouteChecks: [{ passed: true }],
+    buildState: { fingerprint: 'sha256:abc' },
+    drupalRuntime: {
+      baseUrl: 'https://x.ddev.site/', siteUuid: 'bb3c4bce', confirmed: true,
+      configStatusClean: true, configSyncMatchesHead: true, configSyncDirectory: 'config/sync'
+    },
+    sourceSurfaceCensus: { status: 'passed', budget: { routeCount: 12 }, discoveredPublicPaths: ['/a', '/b'], errors: [] }
+  };
+}
+
+test('the report summary stays small enough to read whole', () => {
+  const summary = buildVerificationSummary(summaryFixture(2000), { fullReportPath: 'r.json' });
+  const bytes = Buffer.byteLength(JSON.stringify(summary, null, 2));
+  assert.ok(bytes < 32_768, `summary must stay small; was ${bytes} bytes`);
+});
+
+test('every bounded list in the summary reconciles and states its omission', () => {
+  const summary = buildVerificationSummary(summaryFixture(400), { fullReportPath: 'r.json' });
+  for (const key of ['errors', 'warnings', 'completionBlockedReasons', 'currentStateBlockedReasons']) {
+    const block = summary[key];
+    assert.equal(block.shown, block.items.length, `${key} shown must match items emitted`);
+    assert.equal(block.total, block.shown + block.omitted, `${key} must account for every entry`);
+  }
+  assert.equal(summary.errors.total, 400);
+  assert.ok(summary.errors.omitted > 0, 'a large error set must report omissions, not hide them');
+});
+
+test('the summary carries the fields agents actually query, and no gate error text', () => {
+  const summary = buildVerificationSummary(summaryFixture(5), { fullReportPath: 'r.json' });
+  for (const key of ['verdict', 'valid', 'claims', 'agentContinuation', 'errors', 'buildState',
+    'drupalRuntime', 'sourceSurfaceCensus', 'gateResults', 'routeChecks', 'budgets']) {
+    assert.ok(key in summary, `summary must carry .${key}`);
+  }
+  assert.equal(summary.gateResults.length, 38);
+  for (const row of summary.gateResults) {
+    assert.deepEqual(Object.keys(row).sort(), ['errorCount', 'gateId', 'status']);
+  }
+  assert.equal(summary.routeChecks.total, 3);
+  assert.equal(summary.routeChecks.passed, 1, 'only an explicit passed:true counts as a pass');
+  assert.equal(summary.routeChecks.failed, 2, 'a missing passed field must count as failed, not passed');
+});
+
+test('the summary never claims authority of its own', () => {
+  const summary = buildVerificationSummary(summaryFixture(1), { fullReportPath: 'review-packet/evidence/live-verification.json' });
+  assert.equal(summary.authority, 'diagnostic_only');
+  assert.equal(summary.fullReport, 'review-packet/evidence/live-verification.json');
+  assert.equal(summary.schemaVersion, 'public-kit.live-verification-summary.1');
+  // It must mirror the report's claims rather than soften them.
+  assert.equal(summary.claims.completeLocalRebuildClaimAllowed, false);
+  assert.equal(summary.valid, false);
+});
+
+test('a malformed report cannot make the summary builder throw', () => {
+  for (const bad of [null, undefined, {}, { errors: 'not-an-array' }, { gateResults: 7 }, { routeChecks: null }]) {
+    assert.doesNotThrow(() => buildVerificationSummary(bad, {}));
+  }
+});
+
+test('the summary path is a sibling of the report', () => {
+  assert.equal(summaryPathFor('review-packet/evidence/live-verification.json'),
+    'review-packet/evidence/live-verification.summary.json');
+  assert.equal(summaryPathFor('/tmp/out.json'), '/tmp/out.summary.json');
+});
+
+test('the CLI advertises the diagnostic summary before the authoritative report for every persisted outcome', () => {
+  const outcomes = [
+    {
+      expected: 'failure',
+      channel: 'stderr',
+      packetOnly: false,
+      report: { valid: false }
+    },
+    {
+      expected: 'packet-only-success',
+      channel: 'stdout',
+      packetOnly: true,
+      report: { valid: true }
+    },
+    {
+      expected: 'live-success',
+      channel: 'stdout',
+      packetOnly: false,
+      report: {
+        valid: true,
+        completeLocalRebuildClaimAllowed: true,
+        currentSiteClaimAllowed: true
+      }
+    },
+    {
+      expected: 'machine-incomplete',
+      channel: 'stderr',
+      packetOnly: false,
+      report: { valid: true }
+    }
+  ];
+
+  for (const fixture of outcomes) {
+    const announcement = verificationCliReportAnnouncement(fixture.report, {
+      packetOnly: fixture.packetOnly,
+      reportPath: 'review-packet/evidence/live-verification.json',
+      summaryPath: 'review-packet/evidence/live-verification.summary.json'
+    });
+    assert.equal(announcement.outcome, fixture.expected);
+    assert.equal(announcement.channel, fixture.channel);
+    const summaryIndex = announcement.text.indexOf('Bounded diagnostic summary (read this first):');
+    const reportIndex = announcement.text.indexOf('Authoritative full report:');
+    assert.ok(summaryIndex >= 0, `${fixture.expected} must advertise the summary`);
+    assert.ok(reportIndex > summaryIndex, `${fixture.expected} must name the full report after the summary`);
+  }
+});
+
+test('the CLI keeps the authoritative report visible when diagnostic summary persistence fails', () => {
+  const announcement = verificationCliReportAnnouncement({ valid: false }, {
+    reportPath: 'review-packet/evidence/live-verification.json'
+  });
+
+  assert.doesNotMatch(announcement.text, /diagnostic summary/i);
+  assert.match(
+    announcement.text,
+    /^Authoritative full report: review-packet\/evidence\/live-verification\.json\n$/
+  );
+});
+
+test('the summary projects only fields the verifier actually emits', () => {
+  // Root cause of two earlier defects: the projection referenced .ok, .site,
+  // .uuid and .configClean, none of which exist on a report. They vanished
+  // silently through JSON.stringify, so the summary omitted the very runtime
+  // facts it exists to surface and reported every route as passing.
+  const summary = buildVerificationSummary(summaryFixture(3), { fullReportPath: 'r.json' });
+  for (const key of ['baseUrl', 'siteUuid', 'confirmed', 'configStatusClean', 'configSyncDirectory']) {
+    assert.ok(key in summary.drupalRuntime, `drupalRuntime.${key} must survive the projection`);
+    assert.notEqual(summary.drupalRuntime[key], undefined, `drupalRuntime.${key} must not be silently dropped`);
+  }
+  assert.equal(summary.drupalRuntime.siteUuid, 'bb3c4bce');
+  assert.equal(summary.drupalRuntime.configStatusClean, true);
+});
+
+test('a failing route set can never be summarized as passing', () => {
+  const report = summaryFixture(1);
+  report.routeChecks = Array.from({ length: 13 }, () => ({ passed: false, errors: ['boom'] }));
+  const summary = buildVerificationSummary(report, { fullReportPath: 'r.json' });
+  assert.deepEqual(summary.routeChecks, { total: 13, passed: 0, failed: 13 });
+});
+
+test('every packet-file enumerator excludes the same verifier outputs', () => {
+  // Three separate enumerators walk the packet: the evidence manifest in
+  // verify.mjs, REVIEW_OUTPUT_PREFIXES, and the preliminary handoff
+  // fingerprint. A summary written into the packet must be invisible to all
+  // three, or the fingerprints drift on every run and completion becomes
+  // permanently unreachable.
+  for (const path of [
+    'evidence/live-verification.json',
+    'evidence/live-verification.summary.json',
+    'evidence/packet-verification.json',
+    'evidence/packet-verification.summary.json'
+  ]) {
+    assert.ok(
+      VERIFIER_OUTPUT_PACKET_PATHS.includes(path),
+      `${path} must be in the shared verifier-output list every enumerator consumes`
+    );
+  }
+});
+
+// --- Bounded per-gate findings ---------------------------------------------
 
 test('per-gate findings are bounded with an honest omission count', () => {
   const gates = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8'));

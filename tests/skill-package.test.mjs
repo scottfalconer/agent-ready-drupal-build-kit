@@ -10,6 +10,7 @@ import {
   readFileSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -536,11 +537,44 @@ test('initializer runs from a copy containing only the installed skill directory
   ], { cwd: root, encoding: 'utf8' });
   assert.equal(packetOnly.status, 0, packetOnly.stderr);
   assert.match(packetOnly.stdout, /packet-only verification never authorizes completion/);
+  const packetSummaryLabel = 'Bounded diagnostic summary (read this first):';
+  const packetReportLabel = 'Authoritative full report:';
+  assert.ok(
+    packetOnly.stdout.indexOf(packetSummaryLabel) >= 0,
+    'packet-only success must advertise its bounded summary'
+  );
+  assert.ok(
+    packetOnly.stdout.indexOf(packetReportLabel) > packetOnly.stdout.indexOf(packetSummaryLabel),
+    'packet-only success must name its authoritative report after the summary'
+  );
   const packetReport = JSON.parse(
     readFileSync(join(root, 'review-packet', 'evidence', 'packet-verification.json'), 'utf8')
   );
   assert.equal(packetReport.verificationMode, 'packet-only');
   assert.equal(packetReport.completeLocalRebuildClaimAllowed, false);
+  const packetSummary = JSON.parse(
+    readFileSync(join(root, 'review-packet', 'evidence', 'packet-verification.summary.json'), 'utf8')
+  );
+  assert.equal(packetSummary.authority, 'diagnostic_only');
+  assert.equal(packetSummary.fullReport, 'review-packet/evidence/packet-verification.json');
+
+  unlinkSync(join(root, 'review-packet', 'route-matrix.json'));
+  const failedPacketOnly = spawnSync(process.execPath, [
+    join(installedSkill, 'scripts', 'verify.mjs'),
+    '--packet',
+    'review-packet',
+    '--packet-only'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.equal(failedPacketOnly.status, 1, failedPacketOnly.stderr);
+  assert.ok(
+    failedPacketOnly.stderr.indexOf(packetSummaryLabel) >= 0,
+    'packet-only failure must advertise its bounded summary'
+  );
+  assert.ok(
+    failedPacketOnly.stderr.indexOf(packetReportLabel) >
+      failedPacketOnly.stderr.indexOf(packetSummaryLabel),
+    'packet-only failure must name its authoritative report after the summary'
+  );
 });
 
 test('installed skill runtime matches canonical root assets and verifiers', () => {
