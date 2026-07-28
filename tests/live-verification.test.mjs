@@ -42,7 +42,8 @@ import {
   reconcileLifecycleContinuation,
   verifyLive,
   buildVerificationSummary,
-  summaryPathFor
+  summaryPathFor,
+  verificationCliReportAnnouncement
 } from '../bin/verify.mjs';
 import {
   BUILD_TYPES,
@@ -11358,6 +11359,65 @@ test('the summary path is a sibling of the report', () => {
   assert.equal(summaryPathFor('review-packet/evidence/live-verification.json'),
     'review-packet/evidence/live-verification.summary.json');
   assert.equal(summaryPathFor('/tmp/out.json'), '/tmp/out.summary.json');
+});
+
+test('the CLI advertises the diagnostic summary before the authoritative report for every persisted outcome', () => {
+  const outcomes = [
+    {
+      expected: 'failure',
+      channel: 'stderr',
+      packetOnly: false,
+      report: { valid: false }
+    },
+    {
+      expected: 'packet-only-success',
+      channel: 'stdout',
+      packetOnly: true,
+      report: { valid: true }
+    },
+    {
+      expected: 'live-success',
+      channel: 'stdout',
+      packetOnly: false,
+      report: {
+        valid: true,
+        completeLocalRebuildClaimAllowed: true,
+        currentSiteClaimAllowed: true
+      }
+    },
+    {
+      expected: 'machine-incomplete',
+      channel: 'stderr',
+      packetOnly: false,
+      report: { valid: true }
+    }
+  ];
+
+  for (const fixture of outcomes) {
+    const announcement = verificationCliReportAnnouncement(fixture.report, {
+      packetOnly: fixture.packetOnly,
+      reportPath: 'review-packet/evidence/live-verification.json',
+      summaryPath: 'review-packet/evidence/live-verification.summary.json'
+    });
+    assert.equal(announcement.outcome, fixture.expected);
+    assert.equal(announcement.channel, fixture.channel);
+    const summaryIndex = announcement.text.indexOf('Bounded diagnostic summary (read this first):');
+    const reportIndex = announcement.text.indexOf('Authoritative full report:');
+    assert.ok(summaryIndex >= 0, `${fixture.expected} must advertise the summary`);
+    assert.ok(reportIndex > summaryIndex, `${fixture.expected} must name the full report after the summary`);
+  }
+});
+
+test('the CLI keeps the authoritative report visible when diagnostic summary persistence fails', () => {
+  const announcement = verificationCliReportAnnouncement({ valid: false }, {
+    reportPath: 'review-packet/evidence/live-verification.json'
+  });
+
+  assert.doesNotMatch(announcement.text, /diagnostic summary/i);
+  assert.match(
+    announcement.text,
+    /^Authoritative full report: review-packet\/evidence\/live-verification\.json\n$/
+  );
 });
 
 test('the summary projects only fields the verifier actually emits', () => {

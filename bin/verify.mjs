@@ -1899,10 +1899,38 @@ export function summaryPathFor(reportPath) {
   return parsed.replace(/\.json$/i, '') + '.summary.json';
 }
 
+export function verificationCliReportAnnouncement(report, {
+  packetOnly = false,
+  reportPath = '',
+  summaryPath = ''
+} = {}) {
+  const completionClaimAllowed =
+    report?.completeLocalRebuildClaimAllowed === true ||
+    report?.completeLocalBuildFromBriefClaimAllowed === true;
+  const outcome = report?.valid !== true
+    ? 'failure'
+    : packetOnly
+      ? 'packet-only-success'
+      : completionClaimAllowed && report?.currentSiteClaimAllowed === true
+        ? 'live-success'
+        : 'machine-incomplete';
+  const lines = [];
+  if (summaryPath) {
+    lines.push(`Bounded diagnostic summary (read this first): ${summaryPath}`);
+  }
+  lines.push(`Authoritative full report: ${reportPath}`);
+  return {
+    outcome,
+    channel: outcome === 'failure' || outcome === 'machine-incomplete' ? 'stderr' : 'stdout',
+    text: `${lines.join('\n')}\n`
+  };
+}
+
 // Never let a diagnostic artifact break a verification run.
 let lastSummaryPath = '';
 async function writeVerificationSummary(report, reportPath) {
   const summaryPath = summaryPathFor(reportPath);
+  lastSummaryPath = '';
   try {
     const summary = buildVerificationSummary(report, { fullReportPath: reportPath });
     await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
@@ -15108,11 +15136,15 @@ async function main() {
     await writeVerificationSummary(report, args.out);
   }
 
-  if (!report.valid) {
-    process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
-    if (lastSummaryPath) {
-      process.stderr.write(`Bounded summary (read this first): ${lastSummaryPath}\n`);
-    }
+  const cliAnnouncement = verificationCliReportAnnouncement(report, {
+    packetOnly: args.packetOnly,
+    reportPath: args.out,
+    summaryPath: lastSummaryPath
+  });
+  process[cliAnnouncement.channel].write(cliAnnouncement.text);
+
+  if (cliAnnouncement.outcome === 'failure') {
+    process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed.\n`);
     for (const error of report.errors) {
       process.stderr.write(`- ${error}\n`);
     }
@@ -15122,12 +15154,9 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (args.packetOnly) {
-    process.stdout.write(`Packet structure valid; packet-only verification never authorizes completion. Report: ${args.out}\n`);
-  } else if (
-    (report.completeLocalRebuildClaimAllowed || report.completeLocalBuildFromBriefClaimAllowed) &&
-    report.currentSiteClaimAllowed
-  ) {
+  if (cliAnnouncement.outcome === 'packet-only-success') {
+    process.stdout.write('Packet structure valid; packet-only verification never authorizes completion.\n');
+  } else if (cliAnnouncement.outcome === 'live-success') {
     const independence = report.packetVerification?.completionEvidence?.independence ?? {};
     const independenceSummary = [
       ...new Set([independence.independentVerification, independence.blindAdversarialReview].filter(Boolean))
@@ -15144,7 +15173,7 @@ async function main() {
     const recordedStatusLabel = report.claimScope === 'complete-local-build-from-brief'
       ? 'local-build'
       : 'local-rebuild';
-    process.stdout.write(`Live target and packet verification passed; ${claimDescription} machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded ${recordedStatusLabel} operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote} Report: ${args.out}\n`);
+    process.stdout.write(`Live target and packet verification passed; ${claimDescription} machine claim authorized for the lifecycle-verified current state (independence evidence: ${independenceSummary}; recorded ${recordedStatusLabel} operator/maintainer status: ${recordedHumanStatus}, self-attested record only).${lifecycleNote}\n`);
   } else {
     const baselineNote = report.lifecycle?.initialBaseline?.status === 'passed'
       ? ' The create-once, integrity-checked initial baseline remains passed; the current derived state is not yet verified.'
@@ -15157,7 +15186,7 @@ async function main() {
     const reason = completionClaimAllowed && !report.currentSiteClaimAllowed
       ? `Full ${claimDescription} checks passed, but the changed current state is not classified and lifecycle-verified.`
       : `Live target checks passed, but ${claimDescription} machine authorization remains blocked by required machine evidence.`;
-    process.stderr.write(`${reason}${baselineNote} Report: ${args.out}\n`);
+    process.stderr.write(`${reason}${baselineNote}\n`);
     process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     const sourceFindings = Array.isArray(report.sourceSurfaceCensus?.errors)
       ? report.sourceSurfaceCensus.errors

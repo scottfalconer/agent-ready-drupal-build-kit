@@ -46,6 +46,7 @@ The verifier writes these files under `review-packet/evidence/`; agents do not c
 
 - `live-verification.json` from the default live-target-and-packet run.
 - `packet-verification.json` from an explicit packet-only lint run.
+- `live-verification.summary.json` and `packet-verification.summary.json` are bounded, diagnostic-only companions written beside those full reports. Read the summary first during repair loops, then use the corresponding full report as the authoritative verifier record. The summaries cannot authorize completion and are excluded from packet and reviewer-input fingerprints.
 - `assembly-verification.json` from the optional launch-only `G-ASSEMBLY-01` runner. It proves a provenance-bound first application, two verifier-selected interrupted prefixes with verifier-owned database/file restoration, durable persistence and opaque entity-identity invariants, exact no-op reruns, and live-applicable extension survival entirely inside an exact-HEAD disposable clone. It is explicitly non-authoritative for the default handoff verdict. See [disposable-assembly.md](disposable-assembly.md).
 - `reproduction-verification.json` from an optional verifier-owned, exact-HEAD disposable DDEV run for `G-REPRO-01`. It is stronger maintainer/launch evidence and is explicitly non-authoritative for the default handoff verdict. See [disposable-reproduction.md](disposable-reproduction.md).
 
