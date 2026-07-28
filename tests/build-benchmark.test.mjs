@@ -363,6 +363,7 @@ test('high-error diagnosis scenario keeps the measured host agent opaque and tru
   assert.notEqual(codexVersionOption, -1);
   assert.equal(prepare.argv[codexVersionOption + 1], '{var:codexVersion}');
   assert.equal(scenario.variables.codexVersion, '0.142.5');
+  assert.equal(scenario.variables.model, 'gpt-5.4');
 
   const install = scenario.commands.build.find(({ argv }) => argv.includes('install'));
   const agent = scenario.commands.build.find(({ adapter }) => adapter === 'codex-jsonl-v1');

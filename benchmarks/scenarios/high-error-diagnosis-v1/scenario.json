@@ -22,7 +22,7 @@
   },
   "variables": {
     "codexVersion": "0.142.5",
-    "model": "gpt-5.6-sol",
+    "model": "gpt-5.4",
     "reasoningEffort": "high",
     "serviceTier": "default"
   },
