@@ -60,7 +60,7 @@ Before changing the site, read these installed references completely:
 5. `references/contract/95-stop-conditions-and-outputs.md` — stop conditions and required outputs.
 6. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
 
-Those five contract parts are ~44 KB and cover every rule that decides whether this run can be called complete. Read them before building, not at handoff.
+Those five contract parts total 54,897 bytes (about 54 KiB) in the current manifest. They keep orientation plus the global browser-evidence, completion, verification, stop-condition, and required-output controls in the upfront read. Read them before building, not at handoff. Phase- and topic-specific requirements remain mandatory when their trigger below applies.
 
 The remaining seven parts are pulled in as the work reaches them. `references/contract/manifest.json` is the index: it lists every part with a one-line summary of what that part covers. Consult the manifest and read the part you need rather than re-reading the whole document — the full contract is over 100 KB, so re-reading all of it at each transition spends far more context than it returns.
 

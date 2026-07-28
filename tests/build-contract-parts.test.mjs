@@ -96,9 +96,9 @@ test('build-contract --check rejects a part the manifest does not list', () => {
   }
 });
 
-test('SKILL.md keeps every gate-bearing contract part in the mandatory read list', () => {
-  // The split must not downgrade the completion, verification, and stop-condition
-  // rules from "always read" to "read if you happen to route there".
+test('SKILL.md keeps orientation and global completion controls in the mandatory read list', () => {
+  // Keep global controls upfront without implying that phase- and topic-specific
+  // requirements can be skipped when their routing trigger applies.
   const skill = readFileSync(
     join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
     'utf8'
@@ -107,21 +107,37 @@ test('SKILL.md keeps every gate-bearing contract part in the mandatory read list
     skill.indexOf('Before changing the site, read these installed references completely:'),
     skill.indexOf('The remaining seven parts')
   );
-  for (const part of [
+  const mandatoryParts = [
     '00-orientation.md',
     '10-phase-1-introspection.md',
     '70-browser-evidence-and-completion.md',
     '90-verification-and-decisions.md',
     '95-stop-conditions-and-outputs.md'
-  ]) {
+  ];
+  for (const part of mandatoryParts) {
     assert.ok(mandatory.includes(part), `${part} must stay in the mandatory read list`);
   }
+  const mandatoryBytes = manifest.parts
+    .filter(({ file }) => mandatoryParts.includes(file))
+    .reduce((total, { bytes }) => total + bytes, 0);
+  assert.ok(
+    mandatory.includes(`${mandatoryBytes.toLocaleString('en-US')} bytes`),
+    'the mandatory-read size in SKILL.md must match the manifest'
+  );
+  assert.match(
+    mandatory,
+    /Phase- and topic-specific requirements remain mandatory when their trigger below applies\./
+  );
 });
 
-test('SKILL.md names a read trigger for every non-mandatory part', () => {
+test('SKILL.md gives every phase- or topic-specific part a mandatory read trigger', () => {
   const skill = readFileSync(
     join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
     'utf8'
+  );
+  const triggerTable = skill.slice(
+    skill.indexOf('| read this part | when |'),
+    skill.indexOf('`references/build-contract.md` remains')
   );
   const mandatory = new Set([
     '00-orientation.md',
@@ -133,8 +149,8 @@ test('SKILL.md names a read trigger for every non-mandatory part', () => {
   for (const { file } of manifest.parts) {
     if (mandatory.has(file)) continue;
     assert.ok(
-      skill.includes(`\`${file}\``),
-      `${file} is neither mandatory nor given a "when to read" trigger in SKILL.md`
+      triggerTable.includes(`\`${file}\``),
+      `${file} is not given a mandatory "when to read" trigger in SKILL.md`
     );
   }
 });
@@ -180,8 +196,27 @@ test('a CRLF part fails with an actionable message', () => {
   }
 });
 
-test('the repository pins contract parts to LF', () => {
-  const attributes = readFileSync(join(repoRoot, '.gitattributes'), 'utf8');
-  assert.match(attributes, /contract\/\*\.md\s+text eol=lf/);
-  assert.match(attributes, /AGENTS\.md\.template text eol=lf/);
+test('Git keeps canonical and mirrored contract surfaces LF when core.autocrlf is enabled', () => {
+  const contractSurfaces = [
+    'AGENTS.md.template',
+    'contract/manifest.json',
+    ...manifest.parts.map(({ file }) => `contract/${file}`),
+    'skills/agent-ready-drupal-build-kit/references/build-contract.md',
+    'skills/agent-ready-drupal-build-kit/references/contract/manifest.json',
+    ...manifest.parts.map(
+      ({ file }) => `skills/agent-ready-drupal-build-kit/references/contract/${file}`
+    )
+  ];
+  const result = spawnSync(
+    'git',
+    ['-c', 'core.autocrlf=true', 'check-attr', 'eol', '--', ...contractSurfaces],
+    { cwd: repoRoot, encoding: 'utf8' }
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const eolByPath = new Map(
+    result.stdout.trim().split('\n').map((line) => line.split(': eol: '))
+  );
+  for (const path of contractSurfaces) {
+    assert.equal(eolByPath.get(path), 'lf', `${path} must stay LF under core.autocrlf`);
+  }
 });

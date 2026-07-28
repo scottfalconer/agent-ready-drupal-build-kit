@@ -3,3 +3,6 @@
 contract/*.md   text eol=lf
 contract/*.json text eol=lf
 AGENTS.md.template text eol=lf
+skills/agent-ready-drupal-build-kit/references/build-contract.md text eol=lf
+skills/agent-ready-drupal-build-kit/references/contract/*.md text eol=lf
+skills/agent-ready-drupal-build-kit/references/contract/*.json text eol=lf
