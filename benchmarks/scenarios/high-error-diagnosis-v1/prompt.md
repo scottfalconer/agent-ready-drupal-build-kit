@@ -46,6 +46,15 @@ directory's parent path; relative paths below are sufficient.
    Replace the counts and bracketed values with evidence-backed values. The
    diagnosis must remain diagnostic-only and smaller than 4 KiB.
 
+   Use these exact definitions:
+   - `errorCount` is the length of the authoritative report's top-level
+     `errors` array. Do not sum per-gate `errorCount` values.
+   - `failingGateCount` is the number of authoritative `gateResults` rows whose
+     `status` is `fail`.
+   - `dominantEvidenceFile` is the review-packet filename mentioned by the
+     greatest number of top-level `errors` strings; break a tie
+     lexicographically by filename.
+
 Do not change `AGENTS.md`, `benchmark-brief.md`, `composer.json`, the installed
 skill, `.benchmark-runtime/read-diagnostic.mjs`, or anything in
 `review-packet`. Do not run a second verifier or a different verifier command.

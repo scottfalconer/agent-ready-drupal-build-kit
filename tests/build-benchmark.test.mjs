@@ -400,6 +400,8 @@ test('high-error diagnosis scenario keeps the measured host agent opaque and tru
   assert.match(prompt, /Do not repair/);
   assert.match(prompt, /diagnostic-only/);
   assert.match(prompt, /Do not run `pwd`/);
+  assert.match(prompt, /Do not sum per-gate `errorCount` values/);
+  assert.match(prompt, /top-level `errors` strings/);
   const adapter = readFileSync(resolve(scenarioDir, 'adapter.mjs'), 'utf8');
   assert.match(adapter, /Do not run \\`pwd\\`/);
   assert.match(adapter, /helperCommands\.length === readEvents\.length/);
