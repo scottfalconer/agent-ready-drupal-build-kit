@@ -938,7 +938,8 @@ function evaluate(options) {
 
     const readEvents = parseReadEvents(join(realWorkspace, READ_EVENTS));
     const helperCommands = commands.filter(({ text }) => (
-      /\.benchmark-runtime\/read-diagnostic\.mjs\b/.test(text)
+      /\.benchmark-runtime\/read-diagnostic\.mjs\b/.test(text) &&
+      (text.includes(ARM_REPORT) || text.includes(ARM_SUMMARY))
     ));
     const helperSequencePass =
       helperCommands.length === readEvents.length &&

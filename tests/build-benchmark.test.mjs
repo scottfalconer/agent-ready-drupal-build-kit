@@ -405,6 +405,7 @@ test('high-error diagnosis scenario keeps the measured host agent opaque and tru
   const adapter = readFileSync(resolve(scenarioDir, 'adapter.mjs'), 'utf8');
   assert.match(adapter, /Do not run \\`pwd\\`/);
   assert.match(adapter, /helperCommands\.length === readEvents\.length/);
+  assert.match(adapter, /text\.includes\(ARM_REPORT\) \|\| text\.includes\(ARM_SUMMARY\)/);
   assert.doesNotMatch(adapter, /readEvents\.length\s*<=\s*2/);
   for (const name of ['adapter.mjs', 'read-diagnostic.mjs', 'README.md']) {
     const path = resolve(scenarioDir, name);
