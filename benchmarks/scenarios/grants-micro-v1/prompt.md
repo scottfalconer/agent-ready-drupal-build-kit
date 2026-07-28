@@ -46,7 +46,11 @@ perform a blind review, add a custom module or theme, persist helper/source
 code, create aliases or unrelated durable content, alter pre-existing entities,
 add unrelated configuration or features, or wait for human input. Do not create
 temporary users, nodes, aliases, or other durable entities as access or editor
-probes. Keep the implementation configuration-and-content-only. If a
+probes. Pathauto may create aliases automatically when Grant nodes are saved:
+before the final verification, query `path_alias` for only the three Grant
+node paths, remove any aliases for those exact paths, leave every pre-existing
+alias untouched, and verify that no Grant alias remains. Keep the implementation
+configuration-and-content-only. If a
 requirement cannot be met, leave precise evidence in the packet and explain it
 in your final response. Otherwise finish the complete bounded slice in this one
 fresh turn.

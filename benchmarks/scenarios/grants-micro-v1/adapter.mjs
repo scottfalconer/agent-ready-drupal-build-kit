@@ -325,16 +325,20 @@ if ($view && $pageDisplayId !== '') {
         $values = is_array($value) ? array_values($value) : [$value];
         $values = array_values(array_unique(array_map('strval', $values)));
         sort($values);
+        $operator = (string) ($filter['operator'] ?? '');
         $viewFiltersGrant =
           $values === ['grant'] &&
-          ($filter['operator'] ?? '') === 'in' &&
+          ($filter['plugin_id'] ?? '') === 'bundle' &&
+          ($operator === '' || $operator === 'in') &&
           ($filter['exposed'] ?? false) === false;
       }
       if (($filter['field'] ?? '') === 'status') {
         $value = $filter['value'] ?? NULL;
+        $operator = (string) ($filter['operator'] ?? '');
         $viewFiltersPublished =
           ($value === 1 || $value === '1' || $value === TRUE) &&
-          ($filter['operator'] ?? '') === '=' &&
+          ($filter['plugin_id'] ?? '') === 'boolean' &&
+          ($operator === '' || $operator === '=') &&
           ($filter['exposed'] ?? false) === false;
       }
     }

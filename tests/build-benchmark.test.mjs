@@ -340,6 +340,8 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   assert.doesNotMatch(grantsAdapter, /\$expectedGrantAliases|\$grantAliasByTitle/);
   assert.match(grantsAdapter, /facts\.grantAliasCount === 0/);
   assert.match(grantsAdapter, /boundedGrantsViewStructurePass\(facts\)/);
+  assert.match(grantsAdapter, /\(\$operator === '' \|\| \$operator === 'in'\)/);
+  assert.match(grantsAdapter, /\(\$operator === '' \|\| \$operator === '='\)/);
 
   const agentCommand = scenario.commands.build.find(({ adapter }) => adapter === 'codex-jsonl-v1');
   const sandboxIndex = agentCommand.argv.indexOf('--sandbox');
@@ -352,6 +354,8 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   assert.match(prompt, /pre-existing entities/);
   assert.match(prompt, /Do not create\s+temporary users, nodes, aliases/);
   assert.match(prompt, /Do not add other fields, filters, sorts/);
+  assert.match(prompt, /Pathauto may create aliases automatically/);
+  assert.match(prompt, /verify that no Grant alias remains/);
 });
 
 test('Grants View structure accepts only the bounded page and handler contract', () => {
