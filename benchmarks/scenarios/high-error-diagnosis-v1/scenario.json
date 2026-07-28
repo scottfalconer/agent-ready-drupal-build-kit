@@ -100,6 +100,7 @@
           "--json",
           "--ephemeral",
           "--ignore-user-config",
+          "--skip-git-repo-check",
           "--model",
           "{var:model}",
           "--config",

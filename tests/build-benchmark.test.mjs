@@ -369,6 +369,7 @@ test('high-error diagnosis scenario keeps the measured host agent opaque and tru
   assert.equal(install.measurementRole, 'harness');
   assert.equal(agent.measurementRole, 'product');
   assert.equal(agent.cwd, '{workspace}');
+  assert.ok(agent.argv.includes('--skip-git-repo-check'));
   assert.deepEqual(
     Object.keys(agent.env).sort(),
     [
