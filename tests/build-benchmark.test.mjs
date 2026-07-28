@@ -29,6 +29,7 @@ import {
 } from '../scripts/benchmark-builds.mjs';
 import {
   boundedConfigDeltaPass,
+  boundedGrantsViewStructurePass,
   buildInvariantProjection,
   clearGeneratedRuntimeTrees,
   configOnlyPathViolations,
@@ -141,6 +142,7 @@ function benchmarkRun({
   ordinal,
   armId,
   durationMs,
+  outcomeDurationMs = durationMs,
   totalTokens,
   toolOutputBytes,
   outcomeFingerprint = 'sha256:same-quality',
@@ -158,7 +160,7 @@ function benchmarkRun({
       exclusionReasons: eligible ? [] : ['fixture-failure']
     },
     timing: {
-      measuredOutcomeWallClockMs: durationMs,
+      measuredOutcomeWallClockMs: outcomeDurationMs,
       measuredBuildWallClockMs: durationMs,
       measuredProductWallClockMs: durationMs,
       measuredHarnessWallClockMs: 0
@@ -182,6 +184,8 @@ function benchmarkRun({
 function balancedRuns({
   baselineMs = [1_000, 1_100],
   candidateMs = [800, 700],
+  baselineOutcomeMs = baselineMs,
+  candidateOutcomeMs = candidateMs,
   baselineTokens = 1_000,
   candidateTokens = 700,
   baselineToolBytes = 2_000,
@@ -193,6 +197,7 @@ function balancedRuns({
       ordinal: 1,
       armId: 'baseline',
       durationMs: baselineMs[0],
+      outcomeDurationMs: baselineOutcomeMs[0],
       totalTokens: baselineTokens,
       toolOutputBytes: baselineToolBytes
     }),
@@ -200,6 +205,7 @@ function balancedRuns({
       ordinal: 2,
       armId: 'candidate',
       durationMs: candidateMs[0],
+      outcomeDurationMs: candidateOutcomeMs[0],
       totalTokens: candidateTokens,
       toolOutputBytes: candidateToolBytes,
       outcomeFingerprint: candidateFingerprint
@@ -208,6 +214,7 @@ function balancedRuns({
       ordinal: 3,
       armId: 'candidate',
       durationMs: candidateMs[1],
+      outcomeDurationMs: candidateOutcomeMs[1],
       totalTokens: candidateTokens,
       toolOutputBytes: candidateToolBytes,
       outcomeFingerprint: candidateFingerprint
@@ -216,6 +223,7 @@ function balancedRuns({
       ordinal: 4,
       armId: 'baseline',
       durationMs: baselineMs[1],
+      outcomeDurationMs: baselineOutcomeMs[1],
       totalTokens: baselineTokens,
       toolOutputBytes: baselineToolBytes
     })
@@ -329,8 +337,9 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   );
   const grantsAdapter = readFileSync(resolve(scenarioDir, 'adapter.mjs'), 'utf8');
   assert.match(grantsAdapter, /actualDdevVersion !== verifiedSeed\.manifest\.ddevVersion/);
-  assert.match(grantsAdapter, /\$expectedGrantAliases\[\s*'\/node\/'/);
-  assert.match(grantsAdapter, /\$entityTypeId === 'path_alias'/);
+  assert.doesNotMatch(grantsAdapter, /\$expectedGrantAliases|\$grantAliasByTitle/);
+  assert.match(grantsAdapter, /facts\.grantAliasCount === 0/);
+  assert.match(grantsAdapter, /boundedGrantsViewStructurePass\(facts\)/);
 
   const agentCommand = scenario.commands.build.find(({ adapter }) => adapter === 'codex-jsonl-v1');
   const sandboxIndex = agentCommand.argv.indexOf('--sandbox');
@@ -342,6 +351,48 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   assert.match(prompt, /basic_editorial/);
   assert.match(prompt, /pre-existing entities/);
   assert.match(prompt, /Do not create\s+temporary users, nodes, aliases/);
+  assert.match(prompt, /Do not add other fields, filters, sorts/);
+});
+
+test('Grants View structure accepts only the bounded page and handler contract', () => {
+  const boundedFacts = {
+    grantsPageDisplayId: 'page_1',
+    grantsViewDisplayIds: ['default', 'page_1'],
+    grantsViewDisplayPlugins: {
+      default: 'default',
+      page_1: 'page'
+    },
+    grantsViewHandlerIds: {
+      arguments: [],
+      empty: [],
+      fields: ['field_application_deadline', 'field_grant_amount', 'title'],
+      filters: ['status', 'type'],
+      footer: [],
+      header: [],
+      relationships: [],
+      sorts: []
+    }
+  };
+  assert.equal(boundedGrantsViewStructurePass(boundedFacts), true);
+
+  for (const mutate of [
+    (facts) => {
+      facts.grantsViewDisplayIds.push('block_1');
+      facts.grantsViewDisplayPlugins.block_1 = 'block';
+    },
+    (facts) => facts.grantsViewHandlerIds.fields.push('body'),
+    (facts) => facts.grantsViewHandlerIds.filters.push('created'),
+    (facts) => facts.grantsViewHandlerIds.sorts.push('title'),
+    (facts) => facts.grantsViewHandlerIds.arguments.push('nid'),
+    (facts) => facts.grantsViewHandlerIds.relationships.push('uid'),
+    (facts) => facts.grantsViewHandlerIds.header.push('area_text_custom'),
+    (facts) => facts.grantsViewHandlerIds.footer.push('result'),
+    (facts) => facts.grantsViewHandlerIds.empty.push('area_text_custom')
+  ]) {
+    const extraStructure = structuredClone(boundedFacts);
+    mutate(extraStructure);
+    assert.equal(boundedGrantsViewStructurePass(extraStructure), false);
+  }
 });
 
 test('high-error diagnosis scenario keeps the measured host agent opaque and trusted-only', () => {
@@ -877,8 +928,21 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
   assert.equal(improved.qualityComparable, true);
   assert.equal(improved.minimumSampleMet, true);
   assert.equal(improved.thresholdsMet, true);
+  assert.equal(improved.productTimingCoverageComplete, true);
+  assert.equal(improved.outcomeTimingCoverageComplete, true);
+  assert.equal(improved.productTimeNonRegressionMet, true);
+  assert.equal(improved.outcomeTimeNonRegressionMet, true);
+  assert.equal(improved.speedNonRegressionMet, true);
+  assert.equal(improved.productMedianImprovementMs, improved.medianImprovementMs);
+  assert.equal(improved.productMedianImprovementPercent, improved.medianImprovementPercent);
   assert.equal(improved.pairedDeltas.length, 2);
   assert.equal(improved.pairedDeltas.every(({ eligible, improvementMs }) => eligible && improvementMs > 0), true);
+  assert.equal(
+    improved.pairedDeltas.every(({ improvementMs, productImprovementMs }) => (
+      improvementMs === productImprovementMs
+    )),
+    true
+  );
 
   const qualityMismatch = summarizeExperiment(
     experimentFixture(),
@@ -923,6 +987,70 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
   assert.equal(efficiencyOnly.efficiency.toolOutputDecision, 'improved');
   assert.equal(efficiencyOnly.efficiency.toolOutputImprovementPercent, 50);
   assert.equal(efficiencyOnly.efficiency.anyImprovement, true);
+  assert.equal(efficiencyOnly.productTimeNonRegressionMet, true);
+  assert.equal(efficiencyOnly.outcomeTimeNonRegressionMet, true);
+  assert.equal(efficiencyOnly.speedNonRegressionMet, true);
+
+  const outcomeTradeoff = summarizeExperiment(
+    experimentFixture(),
+    balancedRuns({
+      baselineMs: [1_000, 1_000],
+      candidateMs: [950, 950],
+      baselineOutcomeMs: [1_100, 1_100],
+      candidateOutcomeMs: [1_400, 1_400],
+      baselineTokens: 1_000,
+      candidateTokens: 500
+    })
+  );
+  assert.equal(outcomeTradeoff.decision, 'tradeoff');
+  assert.equal(outcomeTradeoff.productTimeNonRegressionMet, true);
+  assert.equal(outcomeTradeoff.outcomeTimeNonRegressionMet, false);
+  assert.equal(outcomeTradeoff.speedNonRegressionMet, false);
+  assert.equal(outcomeTradeoff.productMedianImprovementMs, 50);
+  assert.equal(outcomeTradeoff.outcomeMedianImprovementMs, -300);
+  assert.equal(outcomeTradeoff.outcomeMedianRegressionMs, 300);
+  assert.deepEqual(
+    outcomeTradeoff.reasons,
+    ['outcome-time-regressed-beyond-efficiency-tolerance']
+  );
+
+  const speedThresholdCannotHideOutcomeRegression = summarizeExperiment(
+    experimentFixture(),
+    balancedRuns({
+      baselineMs: [2_000, 2_000],
+      candidateMs: [1_000, 1_000],
+      baselineOutcomeMs: [2_100, 2_100],
+      candidateOutcomeMs: [2_600, 2_600],
+      baselineTokens: 1_000,
+      candidateTokens: 1_000,
+      baselineToolBytes: 2_000,
+      candidateToolBytes: 2_000
+    })
+  );
+  assert.equal(speedThresholdCannotHideOutcomeRegression.thresholdsMet, true);
+  assert.equal(speedThresholdCannotHideOutcomeRegression.decision, 'regressed');
+  assert.deepEqual(
+    speedThresholdCannotHideOutcomeRegression.reasons,
+    ['outcome-time-regressed-beyond-tolerance']
+  );
+
+  const missingOutcomeRuns = balancedRuns({
+    baselineMs: [1_000, 1_000],
+    candidateMs: [1_000, 1_000],
+    baselineTokens: 1_000,
+    candidateTokens: 500
+  });
+  for (const run of missingOutcomeRuns.filter(({ order }) => order.armId === 'candidate')) {
+    delete run.timing.measuredOutcomeWallClockMs;
+  }
+  const missingOutcome = summarizeExperiment(experimentFixture(), missingOutcomeRuns);
+  assert.equal(missingOutcome.decision, 'tradeoff');
+  assert.equal(missingOutcome.outcomeTimingCoverageComplete, false);
+  assert.equal(missingOutcome.outcomeTimeNonRegressionMet, false);
+  assert.deepEqual(
+    missingOutcome.reasons,
+    ['outcome-time-non-regression-not-measured']
+  );
 
   const pairRegression = summarizeExperiment(
     experimentFixture(),
@@ -947,7 +1075,10 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
   );
   assert.equal(speedTradeoff.decision, 'tradeoff');
   assert.equal(speedTradeoff.speedNonRegressionMet, false);
-  assert.deepEqual(speedTradeoff.reasons, ['speed-regressed-beyond-efficiency-tolerance']);
+  assert.deepEqual(speedTradeoff.reasons, [
+    'product-time-regressed-beyond-efficiency-tolerance',
+    'outcome-time-regressed-beyond-efficiency-tolerance'
+  ]);
 
   const speedRegression = summarizeExperiment(
     experimentFixture(),
@@ -963,7 +1094,10 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
   assert.equal(speedRegression.decision, 'regressed');
   assert.equal(speedRegression.speedNonRegressionMet, false);
   assert.equal(speedRegression.efficiency.anyImprovement, false);
-  assert.deepEqual(speedRegression.reasons, ['speed-regressed-beyond-tolerance']);
+  assert.deepEqual(speedRegression.reasons, [
+    'product-time-regressed-beyond-tolerance',
+    'outcome-time-regressed-beyond-tolerance'
+  ]);
 
   const equalEfficiency = summarizeExperiment(
     experimentFixture({

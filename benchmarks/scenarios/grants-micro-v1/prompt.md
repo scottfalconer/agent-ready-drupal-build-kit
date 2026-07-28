@@ -25,8 +25,10 @@ Implement every requirement below as real Drupal configuration and content:
 4. Create a Drupal View with machine name `grants` and a page at `/grants`.
    Filter it to published Grant nodes only. Configure visible View fields for
    title, amount, and deadline, rendering the decimal with two fraction digits
-   and the date as `Y-m-d`. The rendered page must visibly contain every exact
-   title, amount, and deadline listed above.
+   and the date as `Y-m-d`. Use only the default display and this one page
+   display. Do not add other fields, filters, sorts, arguments, relationships,
+   headers, footers, or empty-text handlers. The rendered page must visibly
+   contain every exact title, amount, and deadline listed above.
 5. Add Grant to the existing `basic_editorial` workflow. On the existing
    `content_editor` role, add only the permissions needed to create Grant
    content and edit its own Grant content; retain its existing draft/publish

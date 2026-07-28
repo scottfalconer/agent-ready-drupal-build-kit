@@ -1184,10 +1184,10 @@ function medianAbsoluteDeviation(values) {
 function armSummary(runs, armId) {
   const selected = runs.filter((run) => !run.order.warmup && run.order.armId === armId);
   const eligible = selected.filter((run) => run.eligibility.eligible);
-  const productValues = eligible.map((run) => run.timing.measuredProductWallClockMs);
-  const outcomeValues = eligible.map((run) => run.timing.measuredOutcomeWallClockMs);
-  const buildValues = eligible.map((run) => run.timing.measuredBuildWallClockMs);
-  const harnessValues = eligible.map((run) => run.timing.measuredHarnessWallClockMs);
+  const productValues = eligible.map((run) => run.timing.measuredProductWallClockMs).filter(Number.isFinite);
+  const outcomeValues = eligible.map((run) => run.timing.measuredOutcomeWallClockMs).filter(Number.isFinite);
+  const buildValues = eligible.map((run) => run.timing.measuredBuildWallClockMs).filter(Number.isFinite);
+  const harnessValues = eligible.map((run) => run.timing.measuredHarnessWallClockMs).filter(Number.isFinite);
   const contextRows = eligible.map((run) => ({
     inputTokens: run.context?.usage?.inputTokens,
     cachedInputTokens: run.context?.usage?.cachedInputTokens,
@@ -1207,6 +1207,8 @@ function armSummary(runs, armId) {
     scheduledRuns: selected.length,
     eligibleRuns: eligible.length,
     successRate: selected.length ? eligible.length / selected.length : 0,
+    productTimingMeasuredRuns: productValues.length,
+    outcomeTimingMeasuredRuns: outcomeValues.length,
     medianProductWallClockMs: median(productValues),
     medianOutcomeWallClockMs: median(outcomeValues),
     medianBuildWallClockMs: median(buildValues),
@@ -1248,15 +1250,43 @@ function pairedDeltas(runs) {
       pairs.push({ pair: index / 2 + 1, eligible: false, baselineRunId: baseline.runId, candidateRunId: candidate.runId, reason: 'run-ineligible' });
       continue;
     }
+    if (
+      !Number.isFinite(baseline.timing.measuredProductWallClockMs) ||
+      !Number.isFinite(candidate.timing.measuredProductWallClockMs)
+    ) {
+      pairs.push({
+        pair: index / 2 + 1,
+        eligible: false,
+        baselineRunId: baseline.runId,
+        candidateRunId: candidate.runId,
+        reason: 'product-time-not-measured'
+      });
+      continue;
+    }
     const improvementMs = baseline.timing.measuredProductWallClockMs - candidate.timing.measuredProductWallClockMs;
+    const outcomeImprovementMs = (
+      Number.isFinite(baseline.timing.measuredOutcomeWallClockMs) &&
+      Number.isFinite(candidate.timing.measuredOutcomeWallClockMs)
+    )
+      ? baseline.timing.measuredOutcomeWallClockMs - candidate.timing.measuredOutcomeWallClockMs
+      : null;
     pairs.push({
       pair: index / 2 + 1,
       eligible: true,
       baselineRunId: baseline.runId,
       candidateRunId: candidate.runId,
       improvementMs,
+      productImprovementMs: improvementMs,
       improvementPercent: baseline.timing.measuredProductWallClockMs > 0
         ? improvementMs / baseline.timing.measuredProductWallClockMs * 100
+        : null,
+      productImprovementPercent: baseline.timing.measuredProductWallClockMs > 0
+        ? improvementMs / baseline.timing.measuredProductWallClockMs * 100
+        : null,
+      outcomeImprovementMs,
+      outcomeImprovementPercent: outcomeImprovementMs !== null &&
+          baseline.timing.measuredOutcomeWallClockMs > 0
+        ? outcomeImprovementMs / baseline.timing.measuredOutcomeWallClockMs * 100
         : null
     });
   }
@@ -1275,13 +1305,28 @@ export function summarizeExperiment(experiment, runs) {
   );
   const minimumMet = baseline.eligibleRuns >= experiment.minimumValidRunsPerArm &&
     candidate.eligibleRuns >= experiment.minimumValidRunsPerArm;
+  const productTimingCoverageComplete =
+    baseline.productTimingMeasuredRuns === baseline.eligibleRuns &&
+    candidate.productTimingMeasuredRuns === candidate.eligibleRuns;
+  const outcomeTimingCoverageComplete =
+    baseline.outcomeTimingMeasuredRuns === baseline.eligibleRuns &&
+    candidate.outcomeTimingMeasuredRuns === candidate.eligibleRuns;
   const improvementMs = baseline.medianProductWallClockMs !== null && candidate.medianProductWallClockMs !== null
     ? baseline.medianProductWallClockMs - candidate.medianProductWallClockMs
     : null;
   const improvementPercent = improvementMs !== null && baseline.medianProductWallClockMs > 0
     ? improvementMs / baseline.medianProductWallClockMs * 100
     : null;
-  const thresholdsMet = improvementMs !== null &&
+  const outcomeImprovementMs = baseline.medianOutcomeWallClockMs !== null &&
+      candidate.medianOutcomeWallClockMs !== null
+    ? baseline.medianOutcomeWallClockMs - candidate.medianOutcomeWallClockMs
+    : null;
+  const outcomeImprovementPercent = outcomeImprovementMs !== null &&
+      baseline.medianOutcomeWallClockMs > 0
+    ? outcomeImprovementMs / baseline.medianOutcomeWallClockMs * 100
+    : null;
+  const thresholdsMet = productTimingCoverageComplete &&
+    improvementMs !== null &&
     improvementMs >= experiment.thresholds.minimumMedianImprovementMs &&
     improvementPercent >= experiment.thresholds.minimumMedianImprovementPercent &&
     (!experiment.thresholds.requireEveryPairFaster || (
@@ -1329,11 +1374,39 @@ export function summarizeExperiment(experiment, runs) {
   const medianRegressionPercent = improvementPercent === null
     ? null
     : Math.max(0, -improvementPercent);
-  const speedRegressed =
+  const outcomeMedianRegressionMs = outcomeImprovementMs === null
+    ? null
+    : Math.max(0, -outcomeImprovementMs);
+  const outcomeMedianRegressionPercent = outcomeImprovementPercent === null
+    ? null
+    : Math.max(0, -outcomeImprovementPercent);
+  const productTimeNonRegressionMet =
+    productTimingCoverageComplete &&
+    medianRegressionMs !== null &&
+    medianRegressionPercent !== null &&
+    medianRegressionMs <= experiment.thresholds.maximumMedianRegressionMs &&
+    medianRegressionPercent <= experiment.thresholds.maximumMedianRegressionPercent;
+  const outcomeTimeNonRegressionMet =
+    outcomeTimingCoverageComplete &&
+    outcomeMedianRegressionMs !== null &&
+    outcomeMedianRegressionPercent !== null &&
+    outcomeMedianRegressionMs <= experiment.thresholds.maximumMedianRegressionMs &&
+    outcomeMedianRegressionPercent <= experiment.thresholds.maximumMedianRegressionPercent;
+  const speedNonRegressionMet =
+    productTimeNonRegressionMet &&
+    outcomeTimeNonRegressionMet;
+  const productTimeRegressed =
+    !productTimingCoverageComplete ||
     medianRegressionMs === null ||
     medianRegressionPercent === null ||
     medianRegressionMs > experiment.thresholds.maximumMedianRegressionMs ||
     medianRegressionPercent > experiment.thresholds.maximumMedianRegressionPercent;
+  const outcomeTimeRegressed =
+    !outcomeTimingCoverageComplete ||
+    outcomeMedianRegressionMs === null ||
+    outcomeMedianRegressionPercent === null ||
+    outcomeMedianRegressionMs > experiment.thresholds.maximumMedianRegressionMs ||
+    outcomeMedianRegressionPercent > experiment.thresholds.maximumMedianRegressionPercent;
   let decision = 'not-improved';
   const reasons = [];
   if (!minimumMet) {
@@ -1345,15 +1418,26 @@ export function summarizeExperiment(experiment, runs) {
   } else if (baseline.successRate !== 1 || candidate.successRate !== 1) {
     decision = 'quality-or-execution-failures';
     reasons.push('not-all-measured-runs-eligible');
-  } else if (thresholdsMet) {
+  } else if (thresholdsMet && outcomeTimeNonRegressionMet) {
     decision = 'improved';
-  } else if (speedRegressed) {
-    if (efficiencyImproved) {
-      decision = 'tradeoff';
-      reasons.push('speed-regressed-beyond-efficiency-tolerance');
-    } else {
-      decision = 'regressed';
-      reasons.push('speed-regressed-beyond-tolerance');
+  } else if (productTimeRegressed || outcomeTimeRegressed) {
+    decision = efficiencyImproved ? 'tradeoff' : 'regressed';
+    const reasonSuffix = efficiencyImproved
+      ? 'regressed-beyond-efficiency-tolerance'
+      : 'regressed-beyond-tolerance';
+    if (!productTimingCoverageComplete || medianRegressionMs === null || medianRegressionPercent === null) {
+      reasons.push('product-time-non-regression-not-measured');
+    } else if (productTimeRegressed) {
+      reasons.push(`product-time-${reasonSuffix}`);
+    }
+    if (
+      !outcomeTimingCoverageComplete ||
+      outcomeMedianRegressionMs === null ||
+      outcomeMedianRegressionPercent === null
+    ) {
+      reasons.push('outcome-time-non-regression-not-measured');
+    } else if (outcomeTimeRegressed) {
+      reasons.push(`outcome-time-${reasonSuffix}`);
     }
   } else if (efficiencyImproved) {
     decision = 'efficiency-improved';
@@ -1371,7 +1455,20 @@ export function summarizeExperiment(experiment, runs) {
     qualityComparable: comparableQuality,
     minimumSampleMet: minimumMet,
     thresholdsMet,
-    speedNonRegressionMet: !speedRegressed,
+    productTimingCoverageComplete,
+    outcomeTimingCoverageComplete,
+    productTimeNonRegressionMet,
+    outcomeTimeNonRegressionMet,
+    speedNonRegressionMet,
+    productMedianImprovementMs: improvementMs,
+    productMedianImprovementPercent: improvementPercent,
+    productMedianRegressionMs: medianRegressionMs,
+    productMedianRegressionPercent: medianRegressionPercent,
+    outcomeMedianImprovementMs: outcomeImprovementMs,
+    outcomeMedianImprovementPercent: outcomeImprovementPercent,
+    outcomeMedianRegressionMs,
+    outcomeMedianRegressionPercent,
+    // Backward-compatible aliases for the product-role timing comparison.
     medianRegressionMs,
     medianRegressionPercent,
     efficiency: {

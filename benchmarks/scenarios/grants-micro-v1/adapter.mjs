@@ -88,8 +88,8 @@ const OUTCOME_LABELS = Object.freeze({
   grantConfigurationParityPass: 'The complete active and sync configuration sets were not identical, or the focused Grant configs were absent.',
   boundedConfigDeltaPass: 'The final config changed names or values outside the explicit Grant, workflow, and content-editor contract.',
   grantEditorialGovernancePass: 'The Grant workflow, editor widgets, displays, or bounded content-editor permissions were not configured.',
-  preexistingDurableStatePass: 'Pre-existing nodes, users, taxonomy, media, aliases, files, blocks, redirects, or menu content changed.',
-  grantsViewDefinitionPass: 'The active grants View did not own /grants with node and Grant filters.',
+  preexistingDurableStatePass: 'Pre-existing nodes, users, taxonomy, media, aliases, files, blocks, redirects, or menu content changed, or a Grant alias was created.',
+  grantsViewDefinitionPass: 'The active grants View did not exactly own the bounded /grants page, display, and handler contract.',
   grantsViewExecutionPass: 'Executing the grants View did not return exactly the three required Grant nodes.',
   publishedGrantContentPass: 'Exactly the three required published Grant nodes were not present.',
   grantsListingHttpPass: 'The /grants page did not return successfully.',
@@ -108,7 +108,8 @@ This is a bounded benchmark brief, not a general site-completion claim.
   \`field_application_deadline\` fields. Both are required, single-value fields
   with visible editor widgets and public display formatters.
 - BR-003: Provide a Drupal View with machine name \`grants\` and page path
-  \`/grants\`.
+  \`/grants\`, exactly three visible fields and published-Grant filters,
+  without extra displays or handlers.
 - BR-004: Publish exactly three Grant nodes with these values:
   - Community Garden Starter Grant: 2500.00, 2026-09-30
   - Neighborhood Resilience Grant: 7500.00, 2026-10-15
@@ -160,6 +161,17 @@ foreach (\Drupal::entityTypeManager()->getStorage('node')->loadMultiple($allIds)
   ];
 }
 usort($grantRows, static fn(array $a, array $b): int => strcmp($a['title'], $b['title']));
+$grantPaths = array_map(
+  static fn(int|string $id): string => '/node/' . $id,
+  array_values($allIds),
+);
+$grantAliasCount = 0;
+if ($grantPaths !== []) {
+  $grantAliasCount = count(\Drupal::entityQuery('path_alias')
+    ->accessCheck(FALSE)
+    ->condition('path', $grantPaths, 'IN')
+    ->execute());
+}
 
 $normalizeConfig = static function (mixed $value) use (&$normalizeConfig): mixed {
   if (!is_array($value)) {
@@ -249,6 +261,7 @@ $editorPermissionsPass =
 $view = \Drupal\views\Views::getView('grants');
 $viewData = \Drupal::config('views.view.grants')->getRawData();
 $viewPaths = [];
+$viewDisplayPlugins = [];
 $matchingPageDisplayIds = [];
 $pageDisplayId = '';
 $viewStorageEnabled = $view ? (bool) $view->storage->status() : false;
@@ -257,6 +270,7 @@ $viewDisplayEnabled = false;
 $viewExecutePass = false;
 if ($view) {
   foreach (($viewData['display'] ?? []) as $displayId => $display) {
+    $viewDisplayPlugins[(string) $displayId] = (string) ($display['display_plugin'] ?? '');
     if (($display['display_plugin'] ?? '') !== 'page' || !$view->setDisplay($displayId)) {
       continue;
     }
@@ -270,6 +284,7 @@ if ($view) {
     }
   }
 }
+ksort($viewDisplayPlugins);
 if (count($matchingPageDisplayIds) === 1) {
   $pageDisplayId = $matchingPageDisplayIds[0];
 }
@@ -278,10 +293,28 @@ $viewResultRows = [];
 $viewFiltersGrant = false;
 $viewFiltersPublished = false;
 $viewFieldsPass = false;
+$viewHandlerIds = [
+  'arguments' => NULL,
+  'empty' => NULL,
+  'fields' => NULL,
+  'filters' => NULL,
+  'footer' => NULL,
+  'header' => NULL,
+  'relationships' => NULL,
+  'sorts' => NULL,
+];
 if ($view && $pageDisplayId !== '') {
   $viewSetDisplayPass = $view->setDisplay($pageDisplayId);
   if ($viewSetDisplayPass) {
     $viewDisplayEnabled = (bool) $view->display_handler->isEnabled();
+    foreach (array_keys($viewHandlerIds) as $handlerType) {
+      $handlers = $view->display_handler->getOption($handlerType);
+      if (is_array($handlers)) {
+        $ids = array_map('strval', array_keys($handlers));
+        sort($ids);
+        $viewHandlerIds[$handlerType] = $ids;
+      }
+    }
     $filters = $view->display_handler->getOption('filters') ?? [];
     foreach ($filters as $filter) {
       if (($filter['table'] ?? '') !== 'node_field_data') {
@@ -292,18 +325,40 @@ if ($view && $pageDisplayId !== '') {
         $values = is_array($value) ? array_values($value) : [$value];
         $values = array_values(array_unique(array_map('strval', $values)));
         sort($values);
-        $viewFiltersGrant = $values === ['grant'];
+        $viewFiltersGrant =
+          $values === ['grant'] &&
+          ($filter['operator'] ?? '') === 'in' &&
+          ($filter['exposed'] ?? false) === false;
       }
       if (($filter['field'] ?? '') === 'status') {
         $value = $filter['value'] ?? NULL;
-        $viewFiltersPublished = $value === 1 || $value === '1' || $value === TRUE;
+        $viewFiltersPublished =
+          ($value === 1 || $value === '1' || $value === TRUE) &&
+          ($filter['operator'] ?? '') === '=' &&
+          ($filter['exposed'] ?? false) === false;
       }
     }
     $fields = $view->display_handler->getOption('fields') ?? [];
+    $titleField = $fields['title'] ?? [];
+    $amountField = $fields['field_grant_amount'] ?? [];
+    $deadlineField = $fields['field_application_deadline'] ?? [];
     $viewFieldsPass =
-      isset($fields['title'], $fields['field_grant_amount'], $fields['field_application_deadline']) &&
-      ($fields['field_grant_amount']['exclude'] ?? false) === false &&
-      ($fields['field_application_deadline']['exclude'] ?? false) === false;
+      ($titleField['table'] ?? '') === 'node_field_data' &&
+      ($titleField['field'] ?? '') === 'title' &&
+      ($titleField['plugin_id'] ?? '') === 'field' &&
+      ($titleField['exclude'] ?? false) === false &&
+      ($amountField['table'] ?? '') === 'node__field_grant_amount' &&
+      ($amountField['field'] ?? '') === 'field_grant_amount' &&
+      ($amountField['plugin_id'] ?? '') === 'field' &&
+      ($amountField['exclude'] ?? false) === false &&
+      ($amountField['type'] ?? '') === 'number_decimal' &&
+      (string) ($amountField['settings']['scale'] ?? '') === '2' &&
+      ($deadlineField['table'] ?? '') === 'node__field_application_deadline' &&
+      ($deadlineField['field'] ?? '') === 'field_application_deadline' &&
+      ($deadlineField['plugin_id'] ?? '') === 'field' &&
+      ($deadlineField['exclude'] ?? false) === false &&
+      ($deadlineField['type'] ?? '') === 'datetime_custom' &&
+      ($deadlineField['settings']['date_format'] ?? '') === 'Y-m-d';
     $viewExecutePass = $view->execute($pageDisplayId);
     if ($viewExecutePass) {
       foreach ($view->result as $row) {
@@ -349,10 +404,14 @@ echo json_encode([
   'grantCount' => count($allIds),
   'publishedGrantCount' => count($publishedIds),
   'grantRows' => $grantRows,
+  'grantAliasCount' => $grantAliasCount,
   'grantsViewExists' => (bool) $view,
   'grantsViewStorageEnabled' => $viewStorageEnabled,
   'grantsViewBaseTable' => $viewData['base_table'] ?? '',
   'grantsViewPaths' => $viewPaths,
+  'grantsViewDisplayIds' => array_keys($viewDisplayPlugins),
+  'grantsViewDisplayPlugins' => $viewDisplayPlugins,
+  'grantsViewHandlerIds' => $viewHandlerIds,
   'grantsMatchingPageDisplayCount' => count($matchingPageDisplayIds),
   'grantsPageDisplayId' => $pageDisplayId,
   'grantsViewSetDisplayPass' => $viewSetDisplayPass,
@@ -427,22 +486,6 @@ $entityTypes = [
   'taxonomy_term',
   'user',
 ];
-$grantAliasByTitle = [
-  'Community Garden Starter Grant' => '/community-garden-starter-grant',
-  'Neighborhood Resilience Grant' => '/neighborhood-resilience-grant',
-  'Youth Arts Access Grant' => '/youth-arts-access-grant',
-];
-$expectedGrantAliases = [];
-$grantIds = \Drupal::entityQuery('node')
-  ->accessCheck(FALSE)
-  ->condition('type', 'grant')
-  ->execute();
-foreach (\Drupal::entityTypeManager()->getStorage('node')->loadMultiple($grantIds) as $grantNode) {
-  $expectedAlias = $grantAliasByTitle[$grantNode->label()] ?? NULL;
-  if ($expectedAlias !== NULL) {
-    $expectedGrantAliases['/node/' . $grantNode->id()] = $expectedAlias;
-  }
-}
 $durableEntities = [];
 $entityTypeManager = \Drupal::entityTypeManager();
 foreach ($entityTypes as $entityTypeId) {
@@ -454,12 +497,6 @@ foreach ($entityTypes as $entityTypeId) {
   $rows = [];
   foreach ($storage->loadMultiple($ids) as $entity) {
     if ($entityTypeId === 'node' && $entity->bundle() === 'grant') {
-      continue;
-    }
-    if (
-      $entityTypeId === 'path_alias' &&
-      ($expectedGrantAliases[$entity->getPath()] ?? NULL) === $entity->getAlias()
-    ) {
       continue;
     }
     $rows[] = [
@@ -894,6 +931,46 @@ function sortedUniqueStrings(values) {
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function boundedGrantsViewStructurePass(facts) {
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) {
+    return false;
+  }
+  const pageDisplayId = facts.grantsPageDisplayId;
+  const displayPlugins = facts.grantsViewDisplayPlugins;
+  const handlerIds = facts.grantsViewHandlerIds;
+  if (
+    typeof pageDisplayId !== 'string' ||
+    pageDisplayId === '' ||
+    !displayPlugins ||
+    typeof displayPlugins !== 'object' ||
+    Array.isArray(displayPlugins) ||
+    !handlerIds ||
+    typeof handlerIds !== 'object' ||
+    Array.isArray(handlerIds)
+  ) {
+    return false;
+  }
+  const exactIds = (actual, expected) => (
+    Array.isArray(actual) &&
+    sameJson([...actual].sort(), [...expected].sort())
+  );
+  return (
+    exactIds(facts.grantsViewDisplayIds, ['default', pageDisplayId]) &&
+    displayPlugins.default === 'default' &&
+    displayPlugins[pageDisplayId] === 'page' &&
+    Object.keys(displayPlugins).length === 2 &&
+    exactIds(handlerIds.fields, [
+      'field_application_deadline',
+      'field_grant_amount',
+      'title'
+    ]) &&
+    exactIds(handlerIds.filters, ['status', 'type']) &&
+    ['arguments', 'empty', 'footer', 'header', 'relationships', 'sorts'].every(
+      (handlerType) => exactIds(handlerIds[handlerType], [])
+    )
+  );
 }
 
 function configDelta(before, after) {
@@ -2117,6 +2194,7 @@ function rowsMatchRequiredValues(rows, { requireGrantBundle = false } = {}) {
 function evaluate(options) {
   const outcomes = Object.fromEntries(Object.keys(OUTCOME_LABELS).map((name) => [name, false]));
   const blockers = [];
+  let grantAliasesAbsentPass = false;
   const workspace = existingDirectory(requiredOption(options, '--workspace'), '--workspace');
   const runDir = existingDirectory(requiredOption(options, '--run-dir'), '--run-dir');
   const evaluatorKit = existingDirectory(requiredOption(options, '--evaluator-kit'), '--evaluator-kit');
@@ -2166,6 +2244,7 @@ function evaluate(options) {
       { cwd: workspace, timeoutMs: 5 * 60 * 1000 }
     );
     const facts = lastJsonObject(result.stdout, 'Drupal facts check');
+    grantAliasesAbsentPass = facts.grantAliasCount === 0;
     outcomes.grantContentTypePass = facts.grantTypeExists === true;
     outcomes.grantFieldsPass =
       facts.amountFieldType === 'decimal' &&
@@ -2197,7 +2276,8 @@ function evaluate(options) {
       facts.grantsRouteName === `view.grants.${facts.grantsPageDisplayId}` &&
       facts.grantsViewFiltersGrant === true &&
       facts.grantsViewFiltersPublished === true &&
-      facts.grantsViewFieldsPass === true;
+      facts.grantsViewFieldsPass === true &&
+      boundedGrantsViewStructurePass(facts);
     outcomes.grantsViewExecutionPass =
       facts.grantsViewExecutePass === true &&
       rowsMatchRequiredValues(facts.grantsViewResultRows, { requireGrantBundle: true });
@@ -2224,7 +2304,7 @@ function evaluate(options) {
     outcomes.preexistingDurableStatePass = sameJson(
       owner.baselineState?.durableEntities,
       finalState.durableEntities
-    );
+    ) && grantAliasesAbsentPass;
   } catch (error) {
     blockers.push(`Bounded state comparison failed: ${error.message}`);
   }

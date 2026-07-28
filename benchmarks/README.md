@@ -47,10 +47,12 @@ without a shell. The four phases are:
 4. `cleanup`: stop or unlist generated services even after a failed run.
 
 The primary outcome timer starts with the first build command and ends when the
-independent evaluator exits. The speed decision uses product-role time, while
-total build, fixed harness, and end-to-end outcome time remain visible. This
-keeps full-tree hashing and independent evaluation from diluting the product
-comparison.
+independent evaluator exits. The speed threshold uses product-role time, while
+total build, fixed harness, and end-to-end outcome time remain separate. A
+positive decision also requires the end-to-end outcome median to stay within
+the declared non-regression tolerance. This keeps full-tree hashing and
+independent evaluation from diluting the product comparison without hiding an
+operational slowdown.
 
 `measurementBoundary` describes that contiguous build-plus-evaluator outcome
 interval. Product time is the sum of commands marked `measurementRole:
@@ -160,12 +162,17 @@ that guard is enabled.
 
 Wall time, model tokens, and agent-visible tool-output bytes are separate
 decision dimensions. `efficiency-improved` means token and/or tool-output cost
-cleared its threshold while product time stayed within the scenario's explicit
-non-regression tolerance; it is not a speed win. A token win paired with a
-material slowdown is `tradeoff`, not a positive headline. The default token and
-tool-output thresholds are each 10%; equality never counts as an efficiency
-improvement. A material slowdown without a compensating efficiency win is
-`regressed` and returns a nonzero status. Quality and sample-size gates still apply.
+cleared its threshold while both product-role and end-to-end outcome medians
+stayed within the scenario's explicit non-regression tolerance; it is not a
+speed win. `productTimeNonRegressionMet` and
+`outcomeTimeNonRegressionMet` report those checks independently, while
+`speedNonRegressionMet` is their conjunction. The legacy
+`medianImprovement*` and `medianRegression*` fields remain product-role aliases.
+A token win paired with a material slowdown in either timing boundary is
+`tradeoff`, not a positive headline. The default token and tool-output
+thresholds are each 10%; equality never counts as an efficiency improvement. A
+material slowdown without a compensating efficiency win is `regressed` and
+returns a nonzero status. Quality and sample-size gates still apply.
 Rendered-string command attribution is labelled heuristic; exact argv events
 remain exact.
 
@@ -182,9 +189,11 @@ The Grants micro-build is a bounded functional/editorial non-regression layer.
 It requires complete active/export parity in the frozen seed and final build,
 the exact eight added config filenames plus only the role and workflow changes,
 durable pre-existing state, required/cardinality/widgets/displays, workflow and
-editor permissions, rendered values, committed bytes, and packet validity. It
-does not establish browser, accessibility, migration completeness, or general
-build-kit quality.
+editor permissions, no Grant aliases, one default and one `/grants` page
+display, exact field/filter handler sets with no sort or extra handler
+collections, rendered values, committed bytes, and packet validity. It does not
+establish browser, accessibility, migration completeness, or general build-kit
+quality.
 Verifier-output PRs also require a same-state high-error diagnosis
 scenario that actually invokes the optimized live-verifier/report paths.
 

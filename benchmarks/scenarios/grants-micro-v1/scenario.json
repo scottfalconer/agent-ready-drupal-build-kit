@@ -18,7 +18,7 @@
   },
   "quality": {
     "mode": "exact",
-    "contract": "Both arms must independently pass the same bounded Grant model, editorial governance, complete active-versus-exported config parity, exact seed-relative config delta, pre-existing durable-state preservation, rendered-listing, protected-tree, clean-Git, and evaluator-kit packet-only outcomes."
+    "contract": "Both arms must independently pass the same bounded Grant model, editorial governance, complete active-versus-exported config parity, exact seed-relative config delta, pre-existing durable-state preservation with no Grant aliases, exact bounded /grants View display and handler structure, rendered-listing, protected-tree, clean-Git, and evaluator-kit packet-only outcomes."
   },
   "variables": {
     "seedProject": null,

@@ -50,11 +50,12 @@ raise these thresholds for long or expensive builds.
 
 The primary speed comparison excludes commands explicitly classified as fixed
 benchmark harness work. Total build time, harness time, independent evaluation,
-and end-to-end outcome time remain recorded as operational non-regression
-signals. A token/tool-output result can be `efficiency-improved` when the
-product-time median remains within the declared non-regression tolerance; a
-material slowdown with an efficiency win is a `tradeoff`, while a slowdown
-without one is `regressed`.
+and end-to-end outcome time remain recorded separately. A positive speed or
+token/tool-output result also requires the end-to-end outcome median to remain
+within the declared non-regression tolerance. A token/tool-output result can be
+`efficiency-improved` only when both product-role and end-to-end outcome medians
+pass that check. A material slowdown at either boundary with an efficiency win
+is a `tradeoff`, while a slowdown without one is `regressed`.
 
 The scenario `measurementBoundary` names the contiguous interval from the first
 build command through evaluator completion. Product time is a separate sum of
@@ -99,3 +100,8 @@ For the current verifier-output changes, run both layers:
   verifier and measures stderr, report/summary reads, raw tool output, tokens,
   and product time while a fixed evaluator proves identical verdict and gate
   fingerprints.
+
+The Grants projection rejects aliases for the three Grant nodes and rejects
+additional View displays or field, filter, sort, argument, relationship,
+header, footer, and empty-text handlers beyond the explicit `/grants` listing
+contract.
