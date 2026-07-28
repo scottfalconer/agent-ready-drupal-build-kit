@@ -550,7 +550,7 @@ test('installed skill runtime matches canonical root assets and verifiers', () =
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /is in sync \(73 files\)/);
+  assert.match(result.stdout, /is in sync \(86 files\)/);
   const canonicalObservability = join(repoRoot, 'bin', 'verification-observability.mjs');
   const installedObservability = join(skillRoot, 'scripts', 'verification-observability.mjs');
   assert.ok(
@@ -676,7 +676,7 @@ test('sync checker reports drift and write mode repairs bytes and executable bit
     encoding: 'utf8'
   });
   assert.equal(repair.status, 0, repair.stderr);
-  assert.match(repair.stdout, /Skill package synced \(73 files\)/);
+  assert.match(repair.stdout, /Skill package synced \(86 files\)/);
   assert.equal(readFileSync(copiedGates, 'utf8'), readFileSync(join(isolatedRepo, 'gates.json'), 'utf8'));
   assert.notEqual(statSync(copiedVerifier).mode & 0o111, 0);
   assert.ok(readFileSync(copiedObservability).equals(readFileSync(

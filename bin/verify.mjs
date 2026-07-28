@@ -51,7 +51,9 @@ import {
   sha256 as stateSha256
 } from './state-fingerprint.mjs';
 import {
+  boundedUtf8,
   createPhaseRecorder,
+  groupByBlockerFamily,
   recordVerificationObservability
 } from './verification-observability.mjs';
 import {
@@ -118,6 +120,9 @@ export const SOURCE_SURFACE_LIMITS = Object.freeze({
 });
 const MAX_SOURCE_SURFACE_ROUTES = 8_192;
 const MAX_SOURCE_CLI_FINDINGS = 20;
+const MAX_CLI_FAILURE_FAMILIES = 20;
+const MAX_CLI_FAILURE_EXAMPLES = 3;
+const MAX_CLI_FAILURE_LINE_BYTES = 300;
 const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -1791,6 +1796,67 @@ export function liveTargetBudgetCompletionBlocker(
     resolutionClass: 'external',
     verifierConfirmedExternal: true
   };
+}
+
+/**
+ * Renders `report.errors` for the terminal as counted failure groups instead of
+ * one line per error.
+ *
+ * A single root cause (e.g. one wrong target origin) can produce one error per
+ * checked route, so the previous line-per-error listing printed the same
+ * sentence dozens of times. Grouping preserves every distinct problem and the
+ * multiplicity of each, and always names the report path holding full detail.
+ * Nothing is dropped silently: both the per-group remainder and the omitted
+ * group count are stated.
+ */
+export function formatFailureFamilies(errors, reportPath, {
+  maxFamilies = MAX_CLI_FAILURE_FAMILIES,
+  maxExamples = MAX_CLI_FAILURE_EXAMPLES
+} = {}) {
+  const list = (Array.isArray(errors) ? errors : []).map((error) => String(error).trim()).filter(Boolean);
+  if (list.length === 0) return '';
+  const families = groupByBlockerFamily(list, { maxExamples });
+  // Show the biggest groups. First-seen order would spend the visible slots on
+  // one-off findings and hide exactly the root causes this grouping exists to
+  // surface; insertion order breaks ties so output stays deterministic.
+  const shown = families
+    .map((family, index) => ({ family, index }))
+    .sort((left, right) => right.family.count - left.family.count || left.index - right.index)
+    .slice(0, maxFamilies)
+    .map(({ family }) => family);
+  const hiddenInstances = list.length - shown.reduce((total, family) => total + family.count, 0);
+  const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+  // Individual findings can carry long provenance lists. The report holds the
+  // full text, so bound each terminal line the same way blocker messages are
+  // bounded rather than letting one finding dominate the summary.
+  const line = (text) => boundedUtf8(text, MAX_CLI_FAILURE_LINE_BYTES);
+  const lines = [
+    `${plural(list.length, 'error')} in ${plural(families.length, 'group')}` +
+    `${families.length > shown.length ? ` (showing the ${shown.length} largest)` : ''}; full detail: ${reportPath}`
+  ];
+  for (const family of shown) {
+    if (family.count === 1) {
+      lines.push(`- ${line(family.representative)}`);
+      continue;
+    }
+    lines.push(`- ${family.count}x ${line(family.representative)}`);
+    for (const example of family.examples.slice(1)) {
+      lines.push(`    e.g. ${line(example)}`);
+    }
+    const remaining = family.count - family.examples.length;
+    if (remaining > 0) {
+      lines.push(`    ... ${plural(remaining, 'more instance')} in this group`);
+    }
+  }
+  const omittedGroups = families.length - shown.length;
+  if (omittedGroups > 0) {
+    // State the hidden ERROR count, not just the group count: a reader cannot
+    // judge what was withheld from a group tally alone.
+    lines.push(
+      `- ... ${plural(omittedGroups, 'more group')} holding ${plural(hiddenInstances, 'error')} not shown; see ${reportPath}`
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 export function formatSourceSurfaceProgress(event = {}) {
@@ -5650,6 +5716,41 @@ function nonEmptyPacketFile(packetDir, reference, { requireFragment = false, evi
   }
 }
 
+// Control-kind surfaces are inspected by dedicated availability gates (e.g. the
+// Canvas/Experience Builder capability probe), not by the general live-surface
+// reconciliation. `liveSurfaceReconciliationErrors` excludes them from the
+// reconcilable set, so the reconcile worksheet must exclude them too — otherwise
+// a control-kind row is surfaced for disposition that the validator can never
+// accept (declaring/excluding it reports "packet-only … not present in the
+// current Drupal census", while dropping it fails the draft-matches-inventory
+// check). Keep this the single source of truth shared with reconcile.mjs.
+export const RECONCILIATION_CONTROL_KINDS = new Set(['canvas_capability']);
+
+/**
+ * Returns the live-surface census view used for reconciliation, with
+ * control-kind surfaces removed from `items`/`itemCount`/`countsByKind`. The
+ * census `fingerprint` is preserved because it identifies the full live surface
+ * and must still match the reconciliation's recorded fingerprint.
+ */
+export function reconcilableLiveSurface(inventory) {
+  if (!inventory || typeof inventory !== 'object' || !Array.isArray(inventory.items)) {
+    return inventory;
+  }
+  const items = inventory.items.filter(
+    (item) => !RECONCILIATION_CONTROL_KINDS.has(String(item?.kind ?? ''))
+  );
+  if (items.length === inventory.items.length) {
+    return inventory;
+  }
+  const countsByKind = inventory.countsByKind && typeof inventory.countsByKind === 'object' && !Array.isArray(inventory.countsByKind)
+    ? Object.fromEntries(
+        Object.entries(inventory.countsByKind)
+          .filter(([kind]) => !RECONCILIATION_CONTROL_KINDS.has(String(kind)))
+      )
+    : inventory.countsByKind;
+  return { ...inventory, items, itemCount: items.length, countsByKind };
+}
+
 export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, packetDir) {
   const errors = [];
   const push = (message) => {
@@ -5676,7 +5777,7 @@ export function liveSurfaceReconciliationErrors(liveInventory, reconciliation, p
   if (String(reconciliation.inventoryFingerprint ?? '') !== String(liveInventory.fingerprint ?? '')) {
     push('drupal-readback.json liveSurfaceReconciliation inventoryFingerprint does not match the current live-derived Drupal surface.');
   }
-  const reconciliationControlKinds = new Set(['canvas_capability']);
+  const reconciliationControlKinds = RECONCILIATION_CONTROL_KINDS;
   const expectedCounts = liveInventory?.countsByKind && typeof liveInventory.countsByKind === 'object'
     ? Object.fromEntries(
         Object.entries(liveInventory.countsByKind)
@@ -14987,9 +15088,7 @@ async function main() {
 
   if (!report.valid) {
     process.stderr.write(`${args.packetOnly ? 'Packet' : 'Live target'} verification failed. Report: ${args.out}\n`);
-    for (const error of report.errors) {
-      process.stderr.write(`- ${error}\n`);
-    }
+    process.stderr.write(formatFailureFamilies(report.errors, args.out));
     if (!args.packetOnly) {
       process.stderr.write(`Agent action: ${report.agentContinuation.instruction}\n`);
     }

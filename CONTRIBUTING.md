@@ -4,6 +4,19 @@ Contributions should preserve the kit's evidence discipline.
 
 For a bug, confusing first run, or focused proposal, [open an issue](https://github.com/scottfalconer/agent-ready-drupal-build-kit/issues) with the affected command or document, what you expected, and what happened. Do not attach private source content, credentials, or a generated customer review packet.
 
+## Editing The Build Contract
+
+`AGENTS.md.template` is **generated**. Do not edit it directly — `node scripts/build-contract.mjs --write` overwrites it from `contract/`, and a direct edit will be silently discarded.
+
+Edit the relevant part under `contract/` instead, then run:
+
+```bash
+node scripts/build-contract.mjs --write
+node scripts/sync-skill-package.mjs --write
+```
+
+`contract/manifest.json` lists the parts in order and carries each part's byte count; `--write` regenerates the combined file, and `npm test` fails if the two drift. Add a new part by adding the file and listing it in the manifest.
+
 ## Requirements
 
 - Keep examples fictional or explicitly permissioned.
