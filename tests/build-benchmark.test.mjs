@@ -341,6 +341,7 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   assert.match(prompt, /required, single-value fields/);
   assert.match(prompt, /basic_editorial/);
   assert.match(prompt, /pre-existing entities/);
+  assert.match(prompt, /Do not create\s+temporary users, nodes, aliases/);
 });
 
 test('high-error diagnosis scenario keeps the measured host agent opaque and trusted-only', () => {

@@ -42,7 +42,9 @@ Do not replace Drupal entities or the View with static HTML. Do not fetch or
 update the installed kit, switch projects, run the authoritative live verifier,
 perform a blind review, add a custom module or theme, persist helper/source
 code, create aliases or unrelated durable content, alter pre-existing entities,
-add unrelated configuration or features, or wait for human input. Keep the
-implementation configuration-and-content-only. If a requirement cannot be met,
-leave precise evidence in the packet and explain it in your final response.
-Otherwise finish the complete bounded slice in this one fresh turn.
+add unrelated configuration or features, or wait for human input. Do not create
+temporary users, nodes, aliases, or other durable entities as access or editor
+probes. Keep the implementation configuration-and-content-only. If a
+requirement cannot be met, leave precise evidence in the packet and explain it
+in your final response. Otherwise finish the complete bounded slice in this one
+fresh turn.
