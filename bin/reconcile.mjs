@@ -313,11 +313,8 @@ function recommendedDisposition(item) {
   return item?.publicSurface === false || item?.publicEditorialRoot === false ? 'exclude' : 'declare';
 }
 
-// A row's kind, falling back to the `<kind>:<id>` key prefix so a legacy or
-// hand-edited row that lost its kind field is still recognized.
-function surfaceKind(key, kind) {
-  const declared = String(kind ?? '').trim();
-  if (declared) return declared;
+// Derive the structural kind from the canonical `<kind>:<id>` key.
+function keySurfaceKind(key) {
   const text = String(key ?? '');
   const separator = text.indexOf(':');
   return separator > 0 ? text.slice(0, separator) : '';
@@ -341,7 +338,15 @@ function dropControlKinds(map, liveKeys = null) {
     // the normal kind-mismatch path records its authored disposition as
     // invalidated history instead of discarding it silently.
     if (liveKeys && liveKeys.has(key)) continue;
-    if (RECONCILIATION_CONTROL_KINDS.has(surfaceKind(key, row?.kind))) {
+    const keyKind = keySurfaceKind(key);
+    const declaredKind = String(row?.kind ?? '').trim();
+    // Only prune a structurally consistent control row. A mismatched key/kind
+    // may be malformed or hand-edited, so retain it for the normal fail-closed
+    // stale/invalidation path instead of silently deleting authored history.
+    if (
+      RECONCILIATION_CONTROL_KINDS.has(keyKind) &&
+      (!declaredKind || declaredKind === keyKind)
+    ) {
       map.delete(key);
     }
   }

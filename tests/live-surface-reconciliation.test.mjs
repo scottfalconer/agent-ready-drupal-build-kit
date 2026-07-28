@@ -803,3 +803,77 @@ test('a mislabelled row for a live surface keeps its authored disposition as his
   assert.equal(row.invalidatedDisposition.disposition.rationale, 'Authored rationale that must survive.');
   assert.equal(draft.staleItems.length, 0, 'a live surface must never be demoted to stale');
 });
+
+test('a removed non-control surface mislabelled as a control kind fails closed across carry-forward sources', () => {
+  const live = upgradeInventory();
+  const key = 'bundle:node:article';
+  const disposition = {
+    status: 'exclude',
+    packetReferences: [],
+    owner: 'site maintainer',
+    rationale: 'Authored rationale that must survive.',
+    evidence: ['evidence/live-surface/article.txt']
+  };
+  const draftBase = {
+    schemaVersion: 'public-kit.live-surface-reconciliation-draft.1',
+    scope: 'live_surface',
+    authority: 'non_passing_work_queue',
+    inventoryFingerprint: live.fingerprint,
+    countsByKind: live.countsByKind,
+    items: [],
+    staleItems: [],
+    unresolved: [],
+    summary: { live: 0, unresolved: 0, invalidated: 0, stale: 0 }
+  };
+  const scenarios = [
+    {
+      name: 'active worksheet',
+      options: {
+        priorDraft: {
+          ...draftBase,
+          items: [{ key, kind: 'canvas_capability', disposition }]
+        }
+      }
+    },
+    {
+      name: 'stale worksheet',
+      options: {
+        priorDraft: {
+          ...draftBase,
+          staleItems: [{
+            key,
+            kind: 'canvas_capability',
+            previousDisposition: disposition,
+            acknowledgedRemoved: false
+          }]
+        }
+      }
+    },
+    {
+      name: 'readback',
+      options: {
+        readbackReconciliation: {
+          inventoryFingerprint: live.fingerprint,
+          declarations: [],
+          exclusions: [{
+            key,
+            kind: 'canvas_capability',
+            owner: disposition.owner,
+            rationale: disposition.rationale,
+            evidence: disposition.evidence
+          }]
+        }
+      }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const draft = refreshLiveSurfaceDraft(live, scenario.options);
+    const stale = draft.staleItems.find((row) => row.key === key);
+
+    assert.ok(stale, `${scenario.name} must preserve the removed surface`);
+    assert.equal(stale.previousDisposition.rationale, disposition.rationale);
+    assert.ok(draft.unresolved.some((row) =>
+      row.key === key && row.reasons.includes('stale_surface_acknowledgment_required')));
+  }
+});
