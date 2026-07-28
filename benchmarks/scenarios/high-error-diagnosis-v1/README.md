@@ -44,6 +44,11 @@ Per-run byte counts and fingerprints are retained in
 - normalized valid, verdict, complete-error, and gate-status/count
   fingerprints.
 
+Redundant helper reads do not change exact diagnosis quality. They remain
+visible in the read-event count, attributable bytes, Codex tool-output bytes,
+tokens, and wall time so the comparison can measure that inefficiency instead
+of excluding it.
+
 Do not substitute historical byte counts for a run. The mechanism gates require
 the freshly generated corpus to contain at least 300 top-level errors, one
 approximately 300-instance family, high-volume multi-gate fanout, and a fixed

@@ -952,7 +952,6 @@ function evaluate(options) {
     });
     const readMetricsPass =
       readEvents.length >= 1 &&
-      readEvents.length <= 2 &&
       helperSequencePass &&
       unauthorizedDiagnosticCommands.length === 0 &&
       readEvents.every((event) => {
