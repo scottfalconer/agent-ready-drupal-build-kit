@@ -399,7 +399,9 @@ test('high-error diagnosis scenario keeps the measured host agent opaque and tru
   assert.match(prompt, /Invoke the installed arm verifier exactly once/);
   assert.match(prompt, /Do not repair/);
   assert.match(prompt, /diagnostic-only/);
+  assert.match(prompt, /Do not run `pwd`/);
   const adapter = readFileSync(resolve(scenarioDir, 'adapter.mjs'), 'utf8');
+  assert.match(adapter, /Do not run \\`pwd\\`/);
   assert.match(adapter, /helperCommands\.length === readEvents\.length/);
   assert.doesNotMatch(adapter, /readEvents\.length\s*<=\s*2/);
   for (const name of ['adapter.mjs', 'read-diagnostic.mjs', 'README.md']) {

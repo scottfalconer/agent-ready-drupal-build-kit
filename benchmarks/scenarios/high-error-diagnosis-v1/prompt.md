@@ -5,6 +5,8 @@ packet or any other input.
 Work only in the current opaque workspace. Do not inspect parent directories,
 Git history or metadata, benchmark scheduling, authentication, environment
 credentials, host paths, or external network resources.
+Do not run `pwd`, resolve the absolute workspace path, or inspect the current
+directory's parent path; relative paths below are sufficient.
 
 1. Read the installed
    `.agents/skills/agent-ready-drupal-build-kit/SKILL.md` and only the local

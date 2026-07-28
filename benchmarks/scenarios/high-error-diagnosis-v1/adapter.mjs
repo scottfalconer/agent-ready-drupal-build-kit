@@ -385,6 +385,7 @@ Use \`.agents/skills/agent-ready-drupal-build-kit/SKILL.md\`.
 
 - The review packet and all installed inputs are immutable.
 - Run only the packet-only verifier command in the benchmark prompt.
+- Do not run \`pwd\` or resolve the absolute workspace path.
 - Do not inspect parent directories, Git metadata, credentials, host paths,
   benchmark scheduling, or external network resources.
 - Write only verifier-owned runtime output and the requested \`diagnosis.json\`.
