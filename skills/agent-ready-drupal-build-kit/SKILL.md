@@ -53,8 +53,28 @@ Repeat `--recipe` and `--package` only for candidates derived from the source au
 
 Before changing the site, read these installed references completely:
 
-1. `references/build-contract.md` — the detailed Drupal operating contract and required gates.
-2. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
+1. `references/contract/00-orientation.md` — build scope, the operating contract, the required local stack, and the starting commands.
+2. `references/contract/10-phase-1-introspection.md` — the operating-phase model the rest of the contract is organized around, Phase 1, and the structured-content, composition, and Canvas ownership gates.
+3. `references/contract/70-browser-evidence-and-completion.md` — the browser evidence gate and the completion contract.
+4. `references/contract/90-verification-and-decisions.md` — required verification, the scoped gap list, open decisions, and route smoke checks.
+5. `references/contract/95-stop-conditions-and-outputs.md` — stop conditions and required outputs.
+6. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
+
+Those five contract parts total 54,897 bytes (about 54 KiB) in the current manifest. They keep orientation plus the global browser-evidence, completion, verification, stop-condition, and required-output controls in the upfront read. Read them before building, not at handoff. Phase- and topic-specific requirements remain mandatory when their trigger below applies.
+
+The remaining seven parts are pulled in as the work reaches them. `references/contract/manifest.json` is the index: it lists every part with a one-line summary of what that part covers. Consult the manifest and read the part you need rather than re-reading the whole document — the full contract is over 100 KB, so re-reading all of it at each transition spends far more context than it returns.
+
+| read this part | when |
+| --- | --- |
+| `20-phase-2-assembly.md` | applying Recipes and assembling the site |
+| `30-phase-3-5-intent-gap-self-eval.md` | recording durable intent, the gap list, or the self-eval |
+| `40-phase-6-verification.md` | running independent verification |
+| `50-phase-7-blind-review.md` | running the blind adversarial review |
+| `60-lifecycle-and-review-loop.md` | any change after the first verified baseline, and the review loop |
+| `80-drupal-architecture.md` | build order, Drupal CMS baseline, architecture defaults, parity, recipe fit, content modeling |
+| `85-quality-requirements.md` | SEO, editorial experience, anonymous forms, accessibility, regulated content |
+
+`references/build-contract.md` remains the complete concatenated contract. Use it for whole-document search or human review, and read it in full whenever you are unsure which part governs what you are about to do.
 
 Use `references/USAGE.md`, `references/parity-spec.md`, and `references/build-playbook.md` while planning and executing the rebuild. Use `references/cookbook.md` for the worked Drush sequences, config shapes, and code snippets those requirements assume: live Canvas component discovery and guarded headless page authoring, editor-role seeding, text formats for imported HTML, import hygiene, the custom-theme block/template checklist, cache-correctness snippets, and Metatag/section-branding recipes. Read `references/recommended-agent-skills.md` before adding companion skills; install only capabilities that fit this run and record them in `review-packet/operator-run.md`.
 
@@ -187,4 +207,5 @@ Everything required at runtime is inside this skill directory:
 - `assets/templates/` contains the review-packet starting files.
 - `assets/AGENTS.block.md` is the marker-managed project instruction block.
 - `assets/browser-runtime/` contains the pinned add-on/image manifest and the narrow last-sorting DDEV override template.
+- `references/contract/` contains the build contract split into parts, with `manifest.json` as the index of what each part covers.
 - `references/` contains the complete build contract, output inventory, parity specification, playbook, disposable assembly and reproduction contracts, command cookbook, and companion-skill guidance.
