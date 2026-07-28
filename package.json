@@ -22,7 +22,7 @@
     "url": "git+https://github.com/scottfalconer/agent-ready-drupal-build-kit.git"
   },
   "scripts": {
-    "prepack": "node scripts/sync-skill-package.mjs --check --quiet",
+    "prepack": "node scripts/build-contract.mjs --check --quiet && node scripts/sync-skill-package.mjs --check --quiet",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "reconcile": "node bin/reconcile.mjs",
     "doctor": "node bin/doctor.mjs",
@@ -32,7 +32,8 @@
     "verify-assembly": "node bin/verify-assembly.mjs",
     "verify-reproduction": "node bin/verify-reproduction.mjs",
     "verification-observability": "node bin/verification-observability.mjs",
-    "lifecycle": "node bin/lifecycle.mjs"
+    "lifecycle": "node bin/lifecycle.mjs",
+    "build-contract": "node scripts/build-contract.mjs"
   },
   "bin": {
     "agent-ready-drupal-reconcile": "bin/reconcile.mjs",

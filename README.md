@@ -148,7 +148,7 @@ For the full case, see [docs/positioning.md](docs/positioning.md): who this is f
 - `START.md`: expanded quickstart and operator flow for humans who want more detail.
 - `USAGE.md`: the copy-ready canonical agent prompt and expected evidence shape.
 - `skills/agent-ready-drupal-build-kit/`: the canonical installable Agent Skill, including its in-place initializer, references, templates, gate vocabulary, and verifier.
-- `AGENTS.md.template`: the canonical detailed build contract, packaged in the installed skill as `references/build-contract.md`. The initializer adds only a concise marker-managed project block to `AGENTS.md` that points agents to the detailed contract, preserving sections managed by Drupal CMS, AI Best Practices, and the One Line Installer.
+- `contract/`: the canonical detailed build contract, kept as per-topic parts and indexed by `contract/manifest.json` so an agent reads the part governing the work in front of it. `AGENTS.md.template` is generated from these parts by `scripts/build-contract.mjs` and packaged in the installed skill as `references/build-contract.md`; edit the parts, not the generated file. The initializer adds only a concise marker-managed project block to `AGENTS.md` that points agents to the detailed contract, preserving sections managed by Drupal CMS, AI Best Practices, and the One Line Installer.
 - `gates.json`: the stable machine-readable gate vocabulary.
 - `bin/lifecycle.mjs`: the status, repair/extension, completed-change, and checkpoint lifecycle interface used after the initial rebuild passes.
 - `bin/reconcile.mjs`: a verifier-owned live-surface worksheet and guarded materializer that reduces mechanical packet shaping without accepting declarations or exclusions for the builder.
