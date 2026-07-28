@@ -39,17 +39,21 @@ per-command JSON output but no single command that returns the model.
 Wanted:
 
 - `drush model:export --format=json` covering bundles, fields, widgets, form and
-  view displays, and permissions in one bootstrap. Prior art exists but nothing
-  canonical: [drush-ops/drush#1727](https://github.com/drush-ops/drush/issues/1727)
-  and the contrib [Drush Entity](https://www.drupal.org/project/drush_entity) module.
+  view displays, and permissions in one bootstrap. Related entity-inspection
+  prior art exists in [drush-ops/drush#1727](https://github.com/drush-ops/drush/issues/1727)
+  and the contrib [Drush Entity](https://www.drupal.org/project/drush_entity)
+  module, but neither is the requested canonical whole-model export.
 - `drush config:status --format=json --with-diff`, so a drift check reports *how*
   active configuration differs rather than only *which* items differ.
 - A batched mode such as `drush batch --commands-file=cmds.json` that bootstraps
-  once and returns an array of results. Measured locally, five separate
-  `drush php:eval` invocations took 2.66 s against 0.33 s for one batched call -
-  an 8x bootstrap penalty that every automation pays today.
+  once and returns an array of results. Multi-command workflows that currently
+  bootstrap once per command may pay avoidable latency; benchmark the affected
+  command sequence rather than assuming the same multiplier for every
+  automation.
 
-Honest scope: measured across two real builds, Drush accounted for about 1% of
-large tool-output volume and roughly 38 minutes of wall time, so these are
-correctness and ergonomics wins rather than the dominant cost. See
-[agent-context-budget.md](agent-context-budget.md) for where the cost actually is.
+Honest scope: the observations that motivated these proposals found a small
+share of large tool output but measurable wall time. These are primarily
+correctness and ergonomics improvements; benchmark the affected workflow before
+making a broader performance claim. See
+[agent-context-budget.md](agent-context-budget.md) for the separate context-cost
+controls.
