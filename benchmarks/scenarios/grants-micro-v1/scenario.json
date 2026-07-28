@@ -1,0 +1,216 @@
+{
+  "schemaVersion": "public-kit.build-benchmark-scenario.1",
+  "id": "grants-micro-v1",
+  "description": "Pilot-only fresh Drupal build of a small structured Grants section, with independent runtime and packet-quality evaluation.",
+  "measurementBoundary": {
+    "start": "Immediately after prepare copies, imports, and fingerprints the frozen Drupal seed, before the timed build phase begins its fixed precheck and selected-arm initialization.",
+    "end": "After the fixed evaluator-kit process finishes its Drupal, rendered-listing, Git, and packet-only checks; the timed build-phase duration remains recorded separately."
+  },
+  "minimumValidRunsPerArm": 2,
+  "thresholds": {
+    "minimumMedianImprovementPercent": 10,
+    "minimumMedianImprovementMs": 5000,
+    "minimumTokenImprovementPercent": 10,
+    "minimumToolOutputImprovementPercent": 10,
+    "maximumMedianRegressionPercent": 5,
+    "maximumMedianRegressionMs": 30000,
+    "requireEveryPairFaster": true
+  },
+  "quality": {
+    "mode": "exact",
+    "contract": "Both arms must independently pass the same bounded Grant model, editorial governance, complete active-versus-exported config parity, exact seed-relative config delta, pre-existing durable-state preservation, rendered-listing, protected-tree, clean-Git, and evaluator-kit packet-only outcomes."
+  },
+  "variables": {
+    "seedProject": null,
+    "seedFingerprint": null,
+    "seedTreeFingerprint": null,
+    "codexVersion": "0.145.0",
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "high",
+    "serviceTier": "default"
+  },
+  "identityFiles": [
+    {
+      "id": "scenario-adapter",
+      "path": "{scenarioDir}/adapter.mjs"
+    },
+    {
+      "id": "scenario-prompt",
+      "path": "{scenarioDir}/prompt.md"
+    },
+    {
+      "id": "seed-manifest",
+      "path": "{var:seedProject}/benchmark-seed/manifest.json"
+    },
+    {
+      "id": "seed-ddev-config",
+      "path": "{var:seedProject}/.ddev/config.yaml"
+    },
+    {
+      "id": "seed-codex-image",
+      "path": "{var:seedProject}/.ddev/web-build/Dockerfile.ddev-assistant-codex"
+    },
+    {
+      "id": "seed-codex-mount",
+      "path": "{var:seedProject}/.ddev/docker-compose.ddev-assistant-codex.yaml"
+    },
+    {
+      "id": "seed-codex-hook",
+      "path": "{var:seedProject}/.ddev/config.ddev-assistant-codex.yaml"
+    },
+    {
+      "id": "seed-drupal-settings",
+      "path": "{var:seedProject}/web/sites/default/settings.php"
+    },
+    {
+      "id": "seed-ddev-settings",
+      "path": "{var:seedProject}/web/sites/default/settings.ddev.php"
+    }
+  ],
+  "runtime": {
+    "agentAdapter": "ddev-codex",
+    "codexCliVersion": "{var:codexVersion}",
+    "model": "{var:model}",
+    "reasoningEffort": "{var:reasoningEffort}",
+    "serviceTier": "{var:serviceTier}",
+    "sandbox": "trusted-revision-disposable-ddev",
+    "credentialPolicy": "One complete Codex auth.json copy is agent-readable only during the measured turn, then revoked; use pre-reviewed trusted kit revisions only.",
+    "isolationPolicy": "SSH agent, credential-like environment variables, shared DDEV cache, and shared DDEV network are removed; model API egress remains."
+  },
+  "commands": {
+    "prepare": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "prepare",
+          "--seed-project",
+          "{var:seedProject}",
+          "--seed-fingerprint",
+          "{var:seedFingerprint}",
+          "--seed-tree-fingerprint",
+          "{var:seedTreeFingerprint}",
+          "--codex-version",
+          "{var:codexVersion}",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--experiment-id",
+          "{experimentId}",
+          "--run-id",
+          "{runId}"
+        ],
+        "cwd": "{runDir}",
+        "timeoutMs": 1800000
+      }
+    ],
+    "build": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "precheck",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000,
+        "measurementRole": "harness"
+      },
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "install",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--arm-kit",
+          "{armKit}"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000,
+        "measurementRole": "product"
+      },
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "seal",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000,
+        "measurementRole": "harness"
+      },
+      {
+        "argv": [
+          "ddev",
+          "codex",
+          "exec",
+          "--json",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--model",
+          "{var:model}",
+          "--config",
+          "model_reasoning_effort=\"{var:reasoningEffort}\"",
+          "--config",
+          "service_tier=\"{var:serviceTier}\"",
+          "--sandbox",
+          "danger-full-access",
+          "--cd",
+          "/var/www/html",
+          "-"
+        ],
+        "cwd": "{workspace}",
+        "stdinFile": "{scenarioDir}/prompt.md",
+        "timeoutMs": 10800000,
+        "adapter": "codex-jsonl-v1"
+      }
+    ],
+    "evaluate": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "evaluate",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--evaluator-kit",
+          "{evaluatorKit}"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 1800000
+      }
+    ],
+    "cleanup": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "cleanup",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--experiment-id",
+          "{experimentId}",
+          "--run-id",
+          "{runId}"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000
+      }
+    ]
+  }
+}

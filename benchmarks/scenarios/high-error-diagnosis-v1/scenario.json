@@ -1,0 +1,169 @@
+{
+  "schemaVersion": "public-kit.build-benchmark-scenario.1",
+  "id": "high-error-diagnosis-v1",
+  "description": "Same-state diagnosis benchmark for verifier terminal grouping, bounded per-gate findings, and summary-first progressive reads on a deterministic 300-primary-route invalid packet.",
+  "measurementBoundary": {
+    "start": "Immediately after prepare creates and fingerprints the packet, before the timed build phase installs the selected arm skill and starts one fresh host Codex diagnosis turn.",
+    "end": "After the fixed evaluator kit independently verifies a pristine packet copy and validates authoritative parity, read order, bounded diagnosis correctness, and immutable inputs."
+  },
+  "minimumValidRunsPerArm": 2,
+  "thresholds": {
+    "minimumMedianImprovementPercent": 10,
+    "minimumMedianImprovementMs": 3000,
+    "minimumTokenImprovementPercent": 10,
+    "minimumToolOutputImprovementPercent": 10,
+    "maximumMedianRegressionPercent": 5,
+    "maximumMedianRegressionMs": 30000,
+    "requireEveryPairFaster": true
+  },
+  "quality": {
+    "mode": "exact",
+    "contract": "Both arms must diagnose the same immutable invalid packet, invoke their own packet-only verifier exactly once, preserve identical normalized valid, verdict, complete-error, and gate-status/count fingerprints against one fixed evaluator, follow the verifier-announced diagnostic read order, and write the same bounded diagnosis."
+  },
+  "variables": {
+    "codexVersion": "0.142.5",
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "high",
+    "serviceTier": "default"
+  },
+  "identityFiles": [
+    {
+      "id": "scenario-adapter",
+      "path": "{scenarioDir}/adapter.mjs"
+    },
+    {
+      "id": "scenario-prompt",
+      "path": "{scenarioDir}/prompt.md"
+    },
+    {
+      "id": "diagnostic-reader",
+      "path": "{scenarioDir}/read-diagnostic.mjs"
+    }
+  ],
+  "runtime": {
+    "agentAdapter": "host-codex",
+    "codexCliVersion": "{var:codexVersion}",
+    "model": "{var:model}",
+    "reasoningEffort": "{var:reasoningEffort}",
+    "serviceTier": "{var:serviceTier}",
+    "sandbox": "host-workspace-write",
+    "credentialPolicy": "Pre-reviewed trusted kit revisions only: host auth remains readable and common credential variables are blanked. Logged forbidden command patterns fail as defense in depth, not proof no read occurred.",
+    "isolationPolicy": "The runner provides only opaque workspace inputs. Host workspace-write limits writes, not all reads; commands are audited for parent, evaluator, Git, credential, and network access."
+  },
+  "commands": {
+    "prepare": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "prepare",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--evaluator-kit",
+          "{evaluatorKit}",
+          "--codex-version",
+          "{var:codexVersion}",
+          "--experiment-id",
+          "{experimentId}",
+          "--run-id",
+          "{runId}"
+        ],
+        "cwd": "{runDir}",
+        "timeoutMs": 300000
+      }
+    ],
+    "build": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "install",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--arm-kit",
+          "{armKit}",
+          "--reader",
+          "{scenarioDir}/read-diagnostic.mjs"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000,
+        "measurementRole": "harness"
+      },
+      {
+        "argv": [
+          "codex",
+          "exec",
+          "--json",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--model",
+          "{var:model}",
+          "--config",
+          "model_reasoning_effort=\"{var:reasoningEffort}\"",
+          "--config",
+          "service_tier=\"{var:serviceTier}\"",
+          "--sandbox",
+          "workspace-write",
+          "-"
+        ],
+        "cwd": "{workspace}",
+        "stdinFile": "{scenarioDir}/prompt.md",
+        "timeoutMs": 3600000,
+        "adapter": "codex-jsonl-v1",
+        "measurementRole": "product",
+        "env": {
+          "AWS_ACCESS_KEY_ID": "",
+          "AWS_SECRET_ACCESS_KEY": "",
+          "AWS_SESSION_TOKEN": "",
+          "GH_TOKEN": "",
+          "GITHUB_TOKEN": "",
+          "GOOGLE_APPLICATION_CREDENTIALS": "",
+          "NPM_TOKEN": "",
+          "SSH_AUTH_SOCK": ""
+        }
+      }
+    ],
+    "evaluate": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "evaluate",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--evaluator-kit",
+          "{evaluatorKit}",
+          "--codex-log",
+          "{runDir}/logs/build-02.stdout.log"
+        ],
+        "cwd": "{workspace}",
+        "timeoutMs": 300000
+      }
+    ],
+    "cleanup": [
+      {
+        "argv": [
+          "node",
+          "{scenarioDir}/adapter.mjs",
+          "cleanup",
+          "--workspace",
+          "{workspace}",
+          "--run-dir",
+          "{runDir}",
+          "--experiment-id",
+          "{experimentId}",
+          "--run-id",
+          "{runId}"
+        ],
+        "cwd": "{runDir}",
+        "timeoutMs": 30000
+      }
+    ]
+  }
+}
