@@ -40,9 +40,10 @@ one historical report size.
 2. **Derive status before bounding.** A gate's outcome must come from the
    complete finding list; only the stored copy is bounded. Bounding must never
    be able to empty a non-empty list.
-3. **Do not store the same text under several keys.** Gates share evidence
-   files, so one finding can legitimately be attributed to several gates.
-   Preserve that attribution, but do not copy the full text into every gate row.
+3. **Do not replicate complete finding sets under several keys.** Gates share
+   evidence files, so one finding can legitimately be attributed to several
+   gates. Preserve that attribution and a bounded set of examples, but do not
+   copy the complete unbounded finding text into every gate row.
 4. **A new file in the review packet is not free.** Packet contents are
    fingerprinted and bound into review handoffs. Add every regenerated verifier
    output to the shared `VERIFIER_OUTPUT_PACKET_PATHS` list consumed by all
