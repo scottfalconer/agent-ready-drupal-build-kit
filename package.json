@@ -32,6 +32,7 @@
     "verify-assembly": "node bin/verify-assembly.mjs",
     "verify-reproduction": "node bin/verify-reproduction.mjs",
     "verification-observability": "node bin/verification-observability.mjs",
+    "benchmark:builds": "node scripts/benchmark-builds.mjs",
     "lifecycle": "node bin/lifecycle.mjs",
     "build-contract": "node scripts/build-contract.mjs"
   },
