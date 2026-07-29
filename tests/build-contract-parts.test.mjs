@@ -79,6 +79,70 @@ test('SKILL.md routes agents to the phase part rather than the whole contract', 
   assert.match(skill, /references\/build-contract\.md/);
 });
 
+test('SKILL.md makes required reference and packet reads truncation-safe', () => {
+  const skill = readFileSync(
+    join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
+    'utf8'
+  );
+  const readPolicy = skill.slice(
+    skill.indexOf('Keep reads truncation-safe.'),
+    skill.indexOf('The remaining seven parts')
+  );
+  assert.match(readPolicy, /exactly one mandatory reference per command/i);
+  assert.match(readPolicy, /check its byte count in a size-only command/i);
+  assert.match(readPolicy, /do not combine the size probe with a content read/i);
+  assert.match(readPolicy, /larger than 20 KiB/i);
+  assert.match(readPolicy, /sequential, non-overlapping chunks/i);
+  assert.match(readPolicy, /until EOF/i);
+  assert.match(readPolicy, /Do not concatenate required references/i);
+  assert.match(readPolicy, /Never bulk-dump `review-packet\/`/i);
+  assert.match(readPolicy, /bounded path-and-size or JSON-key inventory first/i);
+  assert.match(readPolicy, /Do not reread unchanged chunks/i);
+});
+
+test('SKILL.md routes packet lint through the bounded packet-only summary', () => {
+  const skill = readFileSync(
+    join(repoRoot, 'skills', 'agent-ready-drupal-build-kit', 'SKILL.md'),
+    'utf8'
+  );
+  const packetLint = skill.slice(
+    skill.indexOf('The packet-only verifier is a structural lint'),
+    skill.indexOf('Do not call the rebuild complete')
+  );
+  assert.match(
+    packetLint,
+    /scripts\/verify\.mjs --packet review-packet --packet-only/
+  );
+  assert.doesNotMatch(
+    packetLint,
+    /scripts\/verify-packet\.mjs --packet review-packet/
+  );
+  assert.match(packetLint, /packet-verification\.summary\.json/);
+  assert.match(packetLint, /read this bounded diagnostic summary first/i);
+});
+
+test('canonical agent workflow surfaces prefer the bounded packet-only route', () => {
+  const directPacketCommand = /node [^`\n]*verify-packet\.mjs --packet review-packet/;
+  const surfaces = [
+    'START.md',
+    'docs/agent-workflow.md',
+    'docs/method.md',
+    'docs/output-inventory.md',
+    'contract/50-phase-7-blind-review.md',
+    'skills/agent-ready-drupal-build-kit/SKILL.md'
+  ];
+  for (const file of surfaces) {
+    const body = readFileSync(join(repoRoot, file), 'utf8');
+    assert.match(body, /verify\.mjs/);
+    assert.match(body, /--packet-only/);
+    assert.doesNotMatch(
+      body,
+      directPacketCommand,
+      `${file} must route packet lint through verify.mjs --packet-only`
+    );
+  }
+});
+
 test('build-contract --check rejects a part the manifest does not list', () => {
   // prepack must refuse to publish an unreferenced contract fragment.
   const orphan = join(contractRoot, '99-orphan-probe.md');

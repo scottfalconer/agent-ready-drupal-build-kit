@@ -146,7 +146,7 @@ Once a strongly bound initial baseline exists, that original claim remains passe
 
 Intrinsic state and environment evidence are separate. Tracked config, portable runtime code, effective active config/schema facts, declared editorial entities and revisions, managed public assets, stable route semantics, and bounded critical same-origin rendered-asset byte digests participate in the Drupal state fingerprint. Target origin/raw response evidence, verifier identity, third-party asset bytes, and a digest-only machine-local environment binding are retained beside it but do not turn a local port or override change into a Drupal content change.
 
-`scripts/verify-packet.mjs` and `verify.mjs --packet-only` are structural lint only. Packet-only data and injected test runtimes cannot authorize a complete rebuild claim.
+`verify.mjs --packet review-packet --packet-only` is the preferred structural-lint entrypoint because it writes a bounded diagnostic summary beside the authoritative full report and advertises the summary first. The compatibility `verify-packet.mjs` entrypoint runs the same packet validator but does not write that summary. Neither path, packet-only data, nor injected test runtimes can authorize a complete rebuild claim.
 
 The default `verify.mjs` exits zero only when it authorizes the complete-local-rebuild machine claim. It exits `2` with report `verdict: machine-incomplete` when packet and live-target validation are valid but required machine evidence is incomplete, and exits `1` when packet or live-target validation fails. Pending or recorded human status does not change those outcomes.
 

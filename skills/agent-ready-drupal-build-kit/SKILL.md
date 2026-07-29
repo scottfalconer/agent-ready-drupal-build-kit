@@ -62,6 +62,8 @@ Before changing the site, read these installed references completely:
 
 Those five contract parts total 54,897 bytes (about 54 KiB) in the current manifest. They keep orientation plus the global browser-evidence, completion, verification, stop-condition, and required-output controls in the upfront read. Read them before building, not at handoff. Phase- and topic-specific requirements remain mandatory when their trigger below applies.
 
+Keep reads truncation-safe. Read one file at a time, including exactly one mandatory reference per command. When a file's size is unknown, check its byte count in a size-only command before reading content; do not combine the size probe with a content read. For any file larger than 20 KiB, read it completely in sequential, non-overlapping chunks of about 20 KiB until EOF. Do not concatenate required references into one command. Never bulk-dump `review-packet/`; inspect a bounded path-and-size or JSON-key inventory first, then read only the files needed for the current work. Do not reread unchanged chunks. These bounds control tool output; they never make a required reference, gate, packet artifact, or evidence optional.
+
 The remaining seven parts are pulled in as the work reaches them. `references/contract/manifest.json` is the index: it lists every part with a one-line summary of what that part covers. Consult the manifest and read the part you need rather than re-reading the whole document — the full contract is over 100 KB, so re-reading all of it at each transition spends far more context than it returns.
 
 | read this part | when |
@@ -151,10 +153,12 @@ For each passing independent claim, create packet-local JSON evidence using `sch
 The packet-only verifier is a structural lint and can never authorize a complete rebuild claim:
 
 ```bash
-node .agents/skills/agent-ready-drupal-build-kit/scripts/verify-packet.mjs --packet review-packet
+node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet --packet-only
 ```
 
-If `--target-url URL` is supplied, it must match the current DDEV origin. The verifier does not use an unrelated remote target and never follows redirects across origins.
+This runs the same packet validator as the compatibility `verify-packet.mjs` entrypoint, writes the authoritative `packet-verification.json`, and also writes `packet-verification.summary.json`. Read this bounded diagnostic summary first during repair loops; open the full report only for details the summary does not contain.
+
+Packet-only mode does not accept `--target-url`. On a default live-verifier run, any supplied `--target-url URL` must match the current DDEV origin. The verifier does not use an unrelated remote target and never follows redirects across origins.
 
 Do not call the rebuild complete unless the default verifier inspected the intended live target and its final report authorizes the claim. A structurally valid but incomplete packet is useful handoff evidence, not proof that the site is done. Complete-local-rebuild status is separate from production readiness and launch approval.
 
