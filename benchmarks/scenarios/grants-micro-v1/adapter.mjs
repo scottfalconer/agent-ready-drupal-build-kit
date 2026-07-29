@@ -262,6 +262,17 @@ $view = \Drupal\views\Views::getView('grants');
 $viewData = \Drupal::config('views.view.grants')->getRawData();
 $viewPaths = [];
 $viewDisplayPlugins = [];
+$viewRawHandlerIds = [];
+$viewHandlerTypes = [
+  'arguments',
+  'empty',
+  'fields',
+  'filters',
+  'footer',
+  'header',
+  'relationships',
+  'sorts',
+];
 $matchingPageDisplayIds = [];
 $pageDisplayId = '';
 $viewStorageEnabled = $view ? (bool) $view->storage->status() : false;
@@ -270,7 +281,26 @@ $viewDisplayEnabled = false;
 $viewExecutePass = false;
 if ($view) {
   foreach (($viewData['display'] ?? []) as $displayId => $display) {
-    $viewDisplayPlugins[(string) $displayId] = (string) ($display['display_plugin'] ?? '');
+    $displayId = (string) $displayId;
+    $viewDisplayPlugins[$displayId] = (string) ($display['display_plugin'] ?? '');
+    $rawOptions = is_array($display['display_options'] ?? NULL)
+      ? $display['display_options']
+      : [];
+    $viewRawHandlerIds[$displayId] = [];
+    foreach ($viewHandlerTypes as $handlerType) {
+      if (!array_key_exists($handlerType, $rawOptions)) {
+        $viewRawHandlerIds[$displayId][$handlerType] = NULL;
+        continue;
+      }
+      $rawHandlers = $rawOptions[$handlerType];
+      if (!is_array($rawHandlers)) {
+        $viewRawHandlerIds[$displayId][$handlerType] = FALSE;
+        continue;
+      }
+      $ids = array_map('strval', array_keys($rawHandlers));
+      sort($ids);
+      $viewRawHandlerIds[$displayId][$handlerType] = $ids;
+    }
     if (($display['display_plugin'] ?? '') !== 'page' || !$view->setDisplay($displayId)) {
       continue;
     }
@@ -285,6 +315,7 @@ if ($view) {
   }
 }
 ksort($viewDisplayPlugins);
+ksort($viewRawHandlerIds);
 if (count($matchingPageDisplayIds) === 1) {
   $pageDisplayId = $matchingPageDisplayIds[0];
 }
@@ -293,16 +324,7 @@ $viewResultRows = [];
 $viewFiltersGrant = false;
 $viewFiltersPublished = false;
 $viewFieldsPass = false;
-$viewHandlerIds = [
-  'arguments' => NULL,
-  'empty' => NULL,
-  'fields' => NULL,
-  'filters' => NULL,
-  'footer' => NULL,
-  'header' => NULL,
-  'relationships' => NULL,
-  'sorts' => NULL,
-];
+$viewHandlerIds = array_fill_keys($viewHandlerTypes, NULL);
 if ($view && $pageDisplayId !== '') {
   $viewSetDisplayPass = $view->setDisplay($pageDisplayId);
   if ($viewSetDisplayPass) {
@@ -415,6 +437,7 @@ echo json_encode([
   'grantsViewPaths' => $viewPaths,
   'grantsViewDisplayIds' => array_keys($viewDisplayPlugins),
   'grantsViewDisplayPlugins' => $viewDisplayPlugins,
+  'grantsViewRawHandlerIds' => $viewRawHandlerIds,
   'grantsViewHandlerIds' => $viewHandlerIds,
   'grantsMatchingPageDisplayCount' => count($matchingPageDisplayIds),
   'grantsPageDisplayId' => $pageDisplayId,
@@ -943,6 +966,7 @@ export function boundedGrantsViewStructurePass(facts) {
   }
   const pageDisplayId = facts.grantsPageDisplayId;
   const displayPlugins = facts.grantsViewDisplayPlugins;
+  const rawHandlerIds = facts.grantsViewRawHandlerIds;
   const handlerIds = facts.grantsViewHandlerIds;
   if (
     typeof pageDisplayId !== 'string' ||
@@ -950,6 +974,9 @@ export function boundedGrantsViewStructurePass(facts) {
     !displayPlugins ||
     typeof displayPlugins !== 'object' ||
     Array.isArray(displayPlugins) ||
+    !rawHandlerIds ||
+    typeof rawHandlerIds !== 'object' ||
+    Array.isArray(rawHandlerIds) ||
     !handlerIds ||
     typeof handlerIds !== 'object' ||
     Array.isArray(handlerIds)
@@ -960,18 +987,51 @@ export function boundedGrantsViewStructurePass(facts) {
     Array.isArray(actual) &&
     sameJson([...actual].sort(), [...expected].sort())
   );
+  const exactFieldIds = [
+    'field_application_deadline',
+    'field_grant_amount',
+    'title'
+  ];
+  const emptyHandlerTypes = [
+    'arguments',
+    'empty',
+    'footer',
+    'header',
+    'relationships',
+    'sorts'
+  ];
+  const defaultRawHandlers = rawHandlerIds.default;
+  const pageRawHandlers = rawHandlerIds[pageDisplayId];
+  if (
+    !defaultRawHandlers ||
+    typeof defaultRawHandlers !== 'object' ||
+    Array.isArray(defaultRawHandlers) ||
+    !pageRawHandlers ||
+    typeof pageRawHandlers !== 'object' ||
+    Array.isArray(pageRawHandlers)
+  ) {
+    return false;
+  }
   return (
     exactIds(facts.grantsViewDisplayIds, ['default', pageDisplayId]) &&
     displayPlugins.default === 'default' &&
     displayPlugins[pageDisplayId] === 'page' &&
     Object.keys(displayPlugins).length === 2 &&
-    exactIds(handlerIds.fields, [
-      'field_application_deadline',
-      'field_grant_amount',
-      'title'
-    ]) &&
+    Object.keys(rawHandlerIds).length === 2 &&
+    exactIds(defaultRawHandlers.fields, exactFieldIds) &&
+    exactIds(defaultRawHandlers.filters, ['status', 'type']) &&
+    emptyHandlerTypes.every(
+      (handlerType) => exactIds(defaultRawHandlers[handlerType], [])
+    ) &&
+    [...emptyHandlerTypes, 'fields', 'filters'].every(
+      (handlerType) => (
+        pageRawHandlers[handlerType] === null ||
+        exactIds(pageRawHandlers[handlerType], [])
+      )
+    ) &&
+    exactIds(handlerIds.fields, exactFieldIds) &&
     exactIds(handlerIds.filters, ['status', 'type']) &&
-    ['arguments', 'empty', 'footer', 'header', 'relationships', 'sorts'].every(
+    emptyHandlerTypes.every(
       (handlerType) => exactIds(handlerIds[handlerType], [])
     )
   );
@@ -1181,6 +1241,34 @@ function ddevProjectName(experimentId, runId) {
     throw new Error('Unable to derive a valid DDEV project name from the experiment and run IDs.');
   }
   return value;
+}
+
+function benchmarkDatabaseVolumeName(projectName) {
+  if (!/^arb-grants-[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?-[0-9a-f]{10}$/.test(projectName)) {
+    throw new Error('Refusing to derive a database volume outside the generated Grants benchmark namespace.');
+  }
+  return `${projectName}-mariadb`;
+}
+
+export function benchmarkDatabaseVolumeOwnershipPass(volume, projectName) {
+  let expectedName;
+  try {
+    expectedName = benchmarkDatabaseVolumeName(projectName);
+  } catch {
+    return false;
+  }
+  return (
+    volume &&
+    typeof volume === 'object' &&
+    !Array.isArray(volume) &&
+    volume.Name === expectedName &&
+    volume.Driver === 'local' &&
+    volume.Scope === 'local' &&
+    volume.Labels &&
+    typeof volume.Labels === 'object' &&
+    !Array.isArray(volume.Labels) &&
+    volume.Labels['com.docker.compose.project'] === `ddev-${projectName}`
+  );
 }
 
 function ddevConfigName(workspace) {
@@ -1620,6 +1708,35 @@ function removeOwnedContainers(owner, workspace) {
       { cwd: workspace, timeoutMs: 60_000 }
     );
   }
+}
+
+function removeOwnedDatabaseVolume(owner, workspace) {
+  const volumeName = benchmarkDatabaseVolumeName(owner.projectName);
+  const inspected = commandResult(
+    'docker',
+    ['volume', 'inspect', volumeName],
+    { cwd: workspace, timeoutMs: 60_000 }
+  );
+  if (inspected.error || inspected.status !== 0) {
+    if (!inspected.error && /no such volume/i.test(inspected.stderr ?? '')) {
+      return false;
+    }
+    throw new Error(`Unable to inspect owned database volume: ${resultDetail(inspected)}`);
+  }
+  const volumes = parseJson(inspected.stdout, 'Docker database-volume inspection');
+  if (
+    !Array.isArray(volumes) ||
+    volumes.length !== 1 ||
+    !benchmarkDatabaseVolumeOwnershipPass(volumes[0], owner.projectName)
+  ) {
+    throw new Error('The database volume identity does not match the generated benchmark owner.');
+  }
+  runChecked(
+    'docker',
+    ['volume', 'rm', volumeName],
+    { cwd: workspace, timeoutMs: 60_000 }
+  );
+  return true;
 }
 
 function assertContainerCredentialRevoked(owner, workspace) {
@@ -2517,11 +2634,12 @@ function cleanup(options) {
       ['stop', expectedProjectName, '--unlist', '--skip-hooks'],
       { cwd: workspace, timeoutMs: 5 * 60 * 1000 }
     );
+    removeOwnedDatabaseVolume(owner, workspace);
   } catch (error) {
     removeOwnedContainers(owner, workspace);
     throw error;
   }
-  process.stdout.write('DDEV project stopped and unlisted.\n');
+  process.stdout.write('DDEV project stopped and unlisted; owned database volume removed or already absent.\n');
 }
 
 function fingerprint(options) {

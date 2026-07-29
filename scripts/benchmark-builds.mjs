@@ -334,6 +334,12 @@ export function parseSequence(value = 'ABBA') {
   ) {
     throw new Error('Sequence must balance AB and BA pair orientations.');
   }
+  for (let index = 0; index < compact.length; index += 4) {
+    const block = compact.slice(index, index + 4);
+    if (!['ABBA', 'BAAB'].includes(block)) {
+      throw new Error('Each four-run block must use ABBA or BAAB ordering.');
+    }
+  }
   return [...compact];
 }
 
@@ -656,10 +662,34 @@ export function parseCodexJsonl(value) {
       metrics.unsupportedEventCount += 1;
       continue;
     }
+    if (
+      item.type === 'file_change' &&
+      (
+        !Array.isArray(item.changes) ||
+        item.changes.some((change) => (
+          !change ||
+          typeof change !== 'object' ||
+          Array.isArray(change) ||
+          typeof change.kind !== 'string' ||
+          typeof change.path !== 'string'
+        ))
+      )
+    ) {
+      metrics.unsupportedEventCount += 1;
+      continue;
+    }
     if (item.type === 'agent_message') metrics.agentMessageBytes += textBytes(item.text ?? item.content);
-    if (['command_execution', 'mcp_tool_call', 'web_search'].includes(item.type)) {
+    if (['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type)) {
       metrics.toolCallCount += 1;
-      const output = item.aggregated_output ?? item.output ?? item.result ?? '';
+      const output = item.type === 'file_change'
+        ? canonicalJson({
+            changes: item.changes.map((change) => ({
+              kind: change.kind,
+              path: change.path
+            })),
+            status: String(item.status ?? '')
+          })
+        : item.aggregated_output ?? item.output ?? item.result ?? '';
       metrics.toolOutputBytes += textBytes(typeof output === 'string' ? output : canonicalJson(output));
       if (item.status === 'failed' || (Number.isFinite(item.exit_code) && item.exit_code !== 0)) metrics.failedToolCallCount += 1;
       if (item.type === 'command_execution') {

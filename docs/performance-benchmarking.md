@@ -32,12 +32,14 @@ Do not promote evidence up this ladder without running the next layer.
 - Provision and warm dependencies before the timed agent boundary, while still
   recording preparation time.
 - Use a fresh workspace and fresh agent thread for every measured run.
-- Run arms sequentially in balanced ABBA blocks. Preserve failures rather than
-  retrying or silently excluding them.
+- Run arms sequentially in four-run `ABBA` or `BAAB` blocks. Preserve failures
+  rather than retrying or silently excluding them.
 - Measure outer process wall time through independent evaluation, and retain
   agent-only build time separately. Do not sum overlapping verifier phases.
 - Store missing usage or timing as `null`, never zero.
 - Keep raw JSONL and command logs local. Publish bounded metrics and hashes.
+- Count completed command, MCP, and web output plus canonical completed
+  file-change metadata in the agent-visible tool-output metric.
 - Grade both arms with the same candidate evaluator after the timed run.
 - For fresh builds, compare normalized outcomes rather than volatile site UUID,
   timestamp, path, DDEV origin, or evidence identity.
@@ -70,6 +72,9 @@ environment, and SSH-agent surfaces, then makes one complete `auth.json` copy
 available only for the measured turn. Before evaluation it removes the credential seed,
 discards both mutable service containers, and starts fresh containers from the
 protected project definition.
+After the evaluator emits its quality projection, cleanup validates and removes
+only the exact generated DDEV MariaDB volume. The workspace and file evidence
+remain; the disposable live database does not.
 
 That boundary still assumes pre-reviewed trusted kit revisions: the measured
 agent can read its own auth during the turn and model API egress remains. It is
@@ -103,5 +108,5 @@ For the current verifier-output changes, run both layers:
 
 The Grants projection rejects aliases for the three Grant nodes and rejects
 additional View displays or field, filter, sort, argument, relationship,
-header, footer, and empty-text handlers beyond the explicit `/grants` listing
-contract.
+header, footer, and empty-text handlers in either raw display configuration or
+the effective `/grants` page beyond the explicit listing contract.

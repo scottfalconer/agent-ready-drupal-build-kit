@@ -28,6 +28,7 @@ import {
   validateScenario
 } from '../scripts/benchmark-builds.mjs';
 import {
+  benchmarkDatabaseVolumeOwnershipPass,
   boundedConfigDeltaPass,
   boundedGrantsViewStructurePass,
   buildInvariantProjection,
@@ -340,6 +341,8 @@ test('grants micro production scenario binds frozen inputs, runtime, and externa
   assert.doesNotMatch(grantsAdapter, /\$expectedGrantAliases|\$grantAliasByTitle/);
   assert.match(grantsAdapter, /facts\.grantAliasCount === 0/);
   assert.match(grantsAdapter, /boundedGrantsViewStructurePass\(facts\)/);
+  assert.match(grantsAdapter, /removeOwnedDatabaseVolume\(owner, workspace\)/);
+  assert.match(grantsAdapter, /\['volume', 'rm', volumeName\]/);
   assert.match(grantsAdapter, /\(\$operator === '' \|\| \$operator === 'in'\)/);
   assert.match(grantsAdapter, /\(\$operator === '' \|\| \$operator === '='\)/);
 
@@ -366,6 +369,28 @@ test('Grants View structure accepts only the bounded page and handler contract',
       default: 'default',
       page_1: 'page'
     },
+    grantsViewRawHandlerIds: {
+      default: {
+        arguments: [],
+        empty: [],
+        fields: ['field_application_deadline', 'field_grant_amount', 'title'],
+        filters: ['status', 'type'],
+        footer: [],
+        header: [],
+        relationships: [],
+        sorts: []
+      },
+      page_1: {
+        arguments: null,
+        empty: null,
+        fields: null,
+        filters: null,
+        footer: null,
+        header: null,
+        relationships: null,
+        sorts: null
+      }
+    },
     grantsViewHandlerIds: {
       arguments: [],
       empty: [],
@@ -391,12 +416,56 @@ test('Grants View structure accepts only the bounded page and handler contract',
     (facts) => facts.grantsViewHandlerIds.relationships.push('uid'),
     (facts) => facts.grantsViewHandlerIds.header.push('area_text_custom'),
     (facts) => facts.grantsViewHandlerIds.footer.push('result'),
-    (facts) => facts.grantsViewHandlerIds.empty.push('area_text_custom')
+    (facts) => facts.grantsViewHandlerIds.empty.push('area_text_custom'),
+    (facts) => facts.grantsViewRawHandlerIds.default.sorts.push('title'),
+    (facts) => facts.grantsViewRawHandlerIds.page_1.fields = ['title']
   ]) {
     const extraStructure = structuredClone(boundedFacts);
     mutate(extraStructure);
     assert.equal(boundedGrantsViewStructurePass(extraStructure), false);
   }
+});
+
+test('benchmark database-volume ownership requires the exact generated name and Compose label', () => {
+  const projectName = 'arb-grants-grants-micro-v1-ms58iqc9-9c2b663441';
+  const owned = {
+    Name: `${projectName}-mariadb`,
+    Driver: 'local',
+    Scope: 'local',
+    Labels: {
+      'com.docker.compose.project': `ddev-${projectName}`
+    }
+  };
+  assert.equal(benchmarkDatabaseVolumeOwnershipPass(owned, projectName), true);
+  assert.equal(
+    benchmarkDatabaseVolumeOwnershipPass(
+      { ...owned, Name: 'arbk-speed-seed-mariadb' },
+      projectName
+    ),
+    false
+  );
+  assert.equal(
+    benchmarkDatabaseVolumeOwnershipPass(
+      {
+        ...owned,
+        Labels: { 'com.docker.compose.project': 'ddev-arbk-speed-seed' }
+      },
+      projectName
+    ),
+    false
+  );
+  assert.equal(
+    benchmarkDatabaseVolumeOwnershipPass(owned, 'arbk-speed-seed'),
+    false
+  );
+  assert.equal(
+    benchmarkDatabaseVolumeOwnershipPass({ ...owned, Driver: 'remote' }, projectName),
+    false
+  );
+  assert.equal(
+    benchmarkDatabaseVolumeOwnershipPass({ ...owned, Scope: 'global' }, projectName),
+    false
+  );
 });
 
 test('high-error diagnosis scenario keeps the measured host agent opaque and trusted-only', () => {
@@ -721,6 +790,11 @@ test('parseSequence and buildSchedule preserve balanced ABBA blocks and balanced
   assert.throws(() => parseSequence('AAAB'), /equal A and B/);
   assert.throws(() => parseSequence('AABB'), /adjacent pair/);
   assert.throws(() => parseSequence('ABAB'), /balance AB and BA/);
+  assert.throws(() => parseSequence('ABAB-BABA'), /ABBA or BAAB/);
+  assert.deepEqual(
+    parseSequence('BAAB-ABBA'),
+    ['B', 'A', 'A', 'B', 'A', 'B', 'B', 'A']
+  );
 });
 
 test('canonicalJson and sha256 are stable across object key order', () => {
@@ -802,6 +876,16 @@ test('parseCodexJsonl counts UTF-8 bytes, usage, tools, reads, and fresh-thread 
     {
       type: 'item.completed',
       item: {
+        type: 'file_change',
+        changes: [
+          { path: '/workspace/review-packet/evidence.json', kind: 'add' }
+        ],
+        status: 'completed'
+      }
+    },
+    {
+      type: 'item.completed',
+      item: {
         type: 'web_search',
         output: 'oops',
         status: 'failed'
@@ -821,7 +905,7 @@ test('parseCodexJsonl counts UTF-8 bytes, usage, tools, reads, and fresh-thread 
   const metrics = parseCodexJsonl(jsonl);
 
   assert.equal(metrics.coverage, 'complete');
-  assert.equal(metrics.eventCount, 8);
+  assert.equal(metrics.eventCount, 9);
   assert.equal(metrics.threadStartedCount, 1);
   assert.equal(metrics.turnCompletedCount, 1);
   assert.equal(metrics.usageComplete, true);
@@ -831,9 +915,15 @@ test('parseCodexJsonl counts UTF-8 bytes, usage, tools, reads, and fresh-thread 
     Buffer.byteLength('αβ\n') +
       Buffer.byteLength('summary ✓') +
       Buffer.byteLength(canonicalJson({ message: 'é' })) +
+      Buffer.byteLength(canonicalJson({
+        changes: [
+          { kind: 'add', path: '/workspace/review-packet/evidence.json' }
+        ],
+        status: 'completed'
+      })) +
       Buffer.byteLength('oops')
   );
-  assert.equal(metrics.toolCallCount, 4);
+  assert.equal(metrics.toolCallCount, 5);
   assert.equal(metrics.failedToolCallCount, 1);
   assert.equal(metrics.commandAttributionCoverage, 'heuristic');
   assert.equal(metrics.heuristicCommandCount, 1);
@@ -874,6 +964,17 @@ test('parseCodexJsonl counts UTF-8 bytes, usage, tools, reads, and fresh-thread 
   assert.equal(futureTool.coverage, 'partial');
   assert.equal(futureTool.unsupportedEventCount, 1);
   assert.equal(futureTool.toolOutputBytes, 0);
+
+  const malformedFileChange = parseCodexJsonl(JSON.stringify({
+    type: 'item.completed',
+    item: {
+      type: 'file_change',
+      status: 'completed'
+    }
+  }));
+  assert.equal(malformedFileChange.coverage, 'partial');
+  assert.equal(malformedFileChange.unsupportedEventCount, 1);
+  assert.equal(malformedFileChange.toolOutputBytes, 0);
 });
 
 test('parseQuality requires nonempty boolean outcomes and derives validity exactly', () => {

@@ -68,6 +68,12 @@ complete `auth.json` copy only for the measured Codex turn. Before using project
 commands for evaluation, it removes the host credential seed, discards both
 mutable service containers through externally validated Docker labels, and
 starts fresh containers from the protected project definition.
+After the evaluator emits its quality projection, cleanup stops and unlists the
+generated DDEV project, then removes only its exact `-mariadb` volume after
+validating the generated project namespace, local driver/scope, exact volume
+name, and exact Compose project label. A mismatch fails cleanup and aborts later
+runs. The committed workspace and file evidence remain, but the disposable live
+database is not retained.
 
 This is not an untrusted-code sandbox: the measured agent can read its own
 Codex auth while the turn is active, and model API egress remains. Use only
@@ -143,10 +149,11 @@ node scripts/benchmark-builds.mjs run \
 
 `ABBA` is a pilot with two measured runs per arm. `ABBA-BAAB` supplies four per
 arm and is the minimum recommended sequence for a stronger scenario-specific
-claim. Run sequentially so DDEV, browser, disk, and provider contention do not
-become arm-specific. Warm-ups are balanced and must pass; any failed warm-up or
-cleanup aborts later runs and produces no comparison. Never delete or silently
-rerun an invalid experiment.
+claim. Every four-run block must be `ABBA` or `BAAB`; looser alternating
+sequences are rejected. Run sequentially so DDEV, browser, disk, and provider
+contention do not become arm-specific. Warm-ups are balanced and must pass; any
+failed warm-up or cleanup aborts later runs and produces no comparison. Never
+delete or silently rerun an invalid experiment.
 
 Recompute the aggregate report without rerunning builds:
 
@@ -173,6 +180,9 @@ A token win paired with a material slowdown in either timing boundary is
 thresholds are each 10%; equality never counts as an efficiency improvement. A
 material slowdown without a compensating efficiency win is `regressed` and
 returns a nonzero status. Quality and sample-size gates still apply.
+Tool-output bytes cover completed command, MCP, and web-search output plus a
+canonical projection of completed file-change metadata; raw JSONL bytes remain
+recorded separately.
 Rendered-string command attribution is labelled heuristic; exact argv events
 remain exact.
 
@@ -190,8 +200,9 @@ It requires complete active/export parity in the frozen seed and final build,
 the exact eight added config filenames plus only the role and workflow changes,
 durable pre-existing state, required/cardinality/widgets/displays, workflow and
 editor permissions, no Grant aliases, one default and one `/grants` page
-display, exact field/filter handler sets with no sort or extra handler
-collections, rendered values, committed bytes, and packet validity. It does not
+display, exact raw default-owned and effective field/filter handler sets with
+no page overrides, sort, or extra handler collections, rendered values,
+committed bytes, and packet validity. It does not
 establish browser, accessibility, migration completeness, or general build-kit
 quality.
 Verifier-output PRs also require a same-state high-error diagnosis
