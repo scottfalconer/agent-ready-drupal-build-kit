@@ -155,6 +155,14 @@ contention do not become arm-specific. Warm-ups are balanced and must pass; any
 failed warm-up or cleanup aborts later runs and produces no comparison. Never
 delete or silently rerun an invalid experiment.
 
+The runner also monitors wall and monotonic clocks across the contiguous
+measured interval, from immediately after preparation through evaluation. A
+scheduler interval over 60 seconds records the gap and active phase, classifies
+the run with `scheduler-gap-detected`, runs cleanup, aborts later runs, and
+produces no comparison. Claim-grade runs should still begin on stable AC power.
+On macOS, `caffeinate` can reduce accidental sleep, but it does not replace the
+recorded gap check.
+
 Recompute the aggregate report without rerunning builds:
 
 ```bash
@@ -182,9 +190,22 @@ material slowdown without a compensating efficiency win is `regressed` and
 returns a nonzero status. Quality and sample-size gates still apply.
 Tool-output bytes cover completed command, MCP, and web-search output plus a
 canonical projection of completed file-change metadata; raw JSONL bytes remain
-recorded separately.
+recorded separately. Token and tool-output decisions each fail closed to
+`not-measured` unless their own eligible-run coverage is complete.
 Rendered-string command attribution is labelled heuristic; exact argv events
 remain exact.
+
+Each arm also includes diagnostic `observedCostPerValidOutcome`. Its numerator
+charges every scheduled non-warm-up attempt, including ineligible failures, and
+its denominator counts only fully eligible, independently valid quality
+outcomes. Tokens, tool-output bytes, and product wall time report separate
+`complete`, `partial`, or `none` coverage, alongside outcome and total wall
+time. Token coverage requires complete usage, tool-output coverage requires a
+complete event projection, and timing coverage rejects contaminated attempts.
+Totals and per-valid-outcome values fail closed to `null` unless every
+scheduled attempt has the resource metric; zero valid outcomes also yields a
+`null` per-outcome value. This field does not change thresholds or the
+benchmark decision.
 
 ## Evidence boundary
 

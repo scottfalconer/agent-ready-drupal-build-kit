@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   buildSchedule,
@@ -24,6 +24,7 @@ import {
   parseQuality,
   parseSequence,
   sha256,
+  startSchedulerGapMonitor,
   summarizeExperiment,
   validateScenario
 } from '../scripts/benchmark-builds.mjs';
@@ -158,15 +159,20 @@ function benchmarkRun({
     },
     eligibility: {
       eligible,
-      exclusionReasons: eligible ? [] : ['fixture-failure']
+      exclusionReasons: eligible ? [] : ['fixture-failure'],
+      contaminationFlags: []
     },
     timing: {
       measuredOutcomeWallClockMs: outcomeDurationMs,
       measuredBuildWallClockMs: durationMs,
       measuredProductWallClockMs: durationMs,
-      measuredHarnessWallClockMs: 0
+      measuredHarnessWallClockMs: 0,
+      totalWallClockMs: outcomeDurationMs + 100,
+      schedulerGap: null
     },
     context: {
+      coverage: 'complete',
+      usageComplete: true,
       usage: {
         inputTokens: totalTokens - 10,
         cachedInputTokens: 10,
@@ -177,6 +183,7 @@ function benchmarkRun({
       toolCallCount: 3
     },
     quality: {
+      valid: true,
       outcomeFingerprint
     }
   };
@@ -840,6 +847,81 @@ test('new experiment output rejects a symlinked ancestor before creating evidenc
   }
 });
 
+test('scheduler gap monitor fails only above the threshold and fires once', () => {
+  let wallClockMs = 0;
+  let monotonicClockMs = 0;
+  let tick;
+  let clearCount = 0;
+  let detections = 0;
+  let evidence;
+  const stopMonitor = startSchedulerGapMonitor({
+    intervalMs: 5_000,
+    thresholdMs: 60_000,
+    wallClock: () => wallClockMs,
+    monotonicClock: () => monotonicClockMs,
+    setIntervalFn: (callback, intervalMs) => {
+      assert.equal(intervalMs, 5_000);
+      tick = callback;
+      return 'fake-timer';
+    },
+    clearIntervalFn: (timer) => {
+      assert.equal(timer, 'fake-timer');
+      clearCount += 1;
+    },
+    onGap: (value) => {
+      detections += 1;
+      evidence = value;
+    }
+  });
+  wallClockMs = 60_000;
+  monotonicClockMs = 60_000;
+  tick();
+  assert.equal(detections, 0);
+  wallClockMs += 60_001;
+  monotonicClockMs += 5_000;
+  tick();
+  tick();
+  stopMonitor();
+  assert.equal(detections, 1);
+  assert.equal(clearCount, 1);
+  assert.deepEqual(evidence, {
+    heartbeatIntervalMs: 5_000,
+    thresholdMs: 60_000,
+    observedWallClockIntervalMs: 60_001,
+    observedMonotonicIntervalMs: 5_000
+  });
+});
+
+test('scheduler gap monitor samples once on stop so a wake-up tail cannot escape', () => {
+  let wallClockMs = 0;
+  let monotonicClockMs = 0;
+  let clearCount = 0;
+  const detections = [];
+  const stopMonitor = startSchedulerGapMonitor({
+    intervalMs: 5_000,
+    thresholdMs: 60_000,
+    wallClock: () => wallClockMs,
+    monotonicClock: () => monotonicClockMs,
+    setIntervalFn: () => 'tail-timer',
+    clearIntervalFn: (timer) => {
+      assert.equal(timer, 'tail-timer');
+      clearCount += 1;
+    },
+    onGap: (evidence) => detections.push(evidence)
+  });
+  wallClockMs = 60_001;
+  monotonicClockMs = 60_001;
+  stopMonitor();
+  stopMonitor();
+  assert.equal(clearCount, 1);
+  assert.deepEqual(detections, [{
+    heartbeatIntervalMs: 5_000,
+    thresholdMs: 60_000,
+    observedWallClockIntervalMs: 60_001,
+    observedMonotonicIntervalMs: 60_001
+  }]);
+});
+
 test('parseCodexJsonl counts UTF-8 bytes, usage, tools, reads, and fresh-thread signals', () => {
   const events = [
     { type: 'thread.started', thread_id: 'fresh-thread' },
@@ -1038,6 +1120,8 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
   assert.equal(improved.productTimeNonRegressionMet, true);
   assert.equal(improved.outcomeTimeNonRegressionMet, true);
   assert.equal(improved.speedNonRegressionMet, true);
+  assert.equal(improved.efficiency.tokenCoverageComplete, true);
+  assert.equal(improved.efficiency.toolOutputCoverageComplete, true);
   assert.equal(improved.productMedianImprovementMs, improved.medianImprovementMs);
   assert.equal(improved.productMedianImprovementPercent, improved.medianImprovementPercent);
   assert.equal(improved.pairedDeltas.length, 2);
@@ -1047,6 +1131,141 @@ test('summarizeExperiment gates speed on samples and quality while reporting eff
       improvementMs === productImprovementMs
     )),
     true
+  );
+  assert.deepEqual(improved.arms.baseline.observedCostPerValidOutcome, {
+    diagnosticOnly: true,
+    scheduledAttempts: 2,
+    validOutcomes: 2,
+    resources: {
+      totalTokens: {
+        coverage: 'complete',
+        measuredAttempts: 2,
+        total: 2_000,
+        perValidOutcome: 1_000
+      },
+      toolOutputBytes: {
+        coverage: 'complete',
+        measuredAttempts: 2,
+        total: 4_000,
+        perValidOutcome: 2_000
+      },
+      productWallClockMs: {
+        coverage: 'complete',
+        measuredAttempts: 2,
+        total: 2_100,
+        perValidOutcome: 1_050
+      },
+      outcomeWallClockMs: {
+        coverage: 'complete',
+        measuredAttempts: 2,
+        total: 2_100,
+        perValidOutcome: 1_050
+      },
+      totalWallClockMs: {
+        coverage: 'complete',
+        measuredAttempts: 2,
+        total: 2_300,
+        perValidOutcome: 1_150
+      }
+    }
+  });
+
+  const failedAttemptRuns = balancedRuns();
+  failedAttemptRuns.find(({ runId }) => runId === '004-baseline').eligibility = {
+    eligible: false,
+    exclusionReasons: ['fixture-failure'],
+    contaminationFlags: []
+  };
+  const failedAttempt = summarizeExperiment(experimentFixture(), failedAttemptRuns);
+  assert.equal(
+    failedAttempt.arms.baseline.observedCostPerValidOutcome.resources.totalTokens.perValidOutcome,
+    2_000
+  );
+  assert.equal(
+    failedAttempt.arms.baseline.observedCostPerValidOutcome.resources.productWallClockMs.perValidOutcome,
+    2_100
+  );
+
+  const incompleteCostRuns = balancedRuns();
+  incompleteCostRuns.find(({ runId }) => runId === '004-baseline').context.usageComplete = false;
+  const incompleteCost = summarizeExperiment(experimentFixture(), incompleteCostRuns);
+  assert.deepEqual(
+    incompleteCost.arms.baseline.observedCostPerValidOutcome.resources.totalTokens,
+    {
+      coverage: 'partial',
+      measuredAttempts: 1,
+      total: null,
+      perValidOutcome: null
+    }
+  );
+  assert.equal(incompleteCost.efficiency.tokenCoverageComplete, false);
+  assert.equal(incompleteCost.efficiency.tokenDecision, 'not-measured');
+  assert.equal(incompleteCost.efficiency.tokenImprovementPercent, null);
+
+  const noTokenCoverageRuns = balancedRuns();
+  for (const run of noTokenCoverageRuns.filter(({ order }) => order.armId === 'baseline')) {
+    run.context.usageComplete = false;
+  }
+  const noTokenCoverage = summarizeExperiment(experimentFixture(), noTokenCoverageRuns);
+  assert.deepEqual(
+    noTokenCoverage.arms.baseline.observedCostPerValidOutcome.resources.totalTokens,
+    {
+      coverage: 'none',
+      measuredAttempts: 0,
+      total: null,
+      perValidOutcome: null
+    }
+  );
+
+  const noValidOutcomeRuns = balancedRuns();
+  for (const run of noValidOutcomeRuns.filter(({ order }) => order.armId === 'candidate')) {
+    run.eligibility = {
+      eligible: false,
+      exclusionReasons: ['fixture-failure'],
+      contaminationFlags: []
+    };
+  }
+  const noValidOutcome = summarizeExperiment(experimentFixture(), noValidOutcomeRuns);
+  assert.equal(noValidOutcome.arms.candidate.observedCostPerValidOutcome.validOutcomes, 0);
+  assert.equal(
+    noValidOutcome.arms.candidate.observedCostPerValidOutcome.resources.totalTokens.coverage,
+    'complete'
+  );
+  assert.equal(
+    noValidOutcome.arms.candidate.observedCostPerValidOutcome.resources.totalTokens.perValidOutcome,
+    null
+  );
+
+  const missingToolOutputRuns = balancedRuns();
+  missingToolOutputRuns.find(({ runId }) => runId === '003-candidate').context.coverage = 'partial';
+  const missingToolOutput = summarizeExperiment(experimentFixture(), missingToolOutputRuns);
+  assert.equal(missingToolOutput.efficiency.toolOutputCoverageComplete, false);
+  assert.equal(missingToolOutput.efficiency.toolOutputDecision, 'not-measured');
+  assert.equal(missingToolOutput.efficiency.toolOutputImprovementPercent, null);
+  assert.equal(
+    missingToolOutput.arms.candidate.observedCostPerValidOutcome.resources.toolOutputBytes.coverage,
+    'partial'
+  );
+  assert.equal(
+    missingToolOutput.arms.candidate.observedCostPerValidOutcome.resources.totalTokens.coverage,
+    'partial'
+  );
+  assert.equal(
+    missingToolOutput.arms.candidate.observedCostPerValidOutcome.resources.totalTokens.perValidOutcome,
+    null
+  );
+
+  const contaminatedTimingRuns = balancedRuns();
+  contaminatedTimingRuns.find(({ runId }) => runId === '003-candidate')
+    .eligibility.contaminationFlags.push('fixture-contamination');
+  const contaminatedTiming = summarizeExperiment(experimentFixture(), contaminatedTimingRuns);
+  assert.equal(
+    contaminatedTiming.arms.candidate.observedCostPerValidOutcome.resources.productWallClockMs.coverage,
+    'partial'
+  );
+  assert.equal(
+    contaminatedTiming.arms.candidate.observedCostPerValidOutcome.resources.totalWallClockMs.perValidOutcome,
+    null
   );
 
   const qualityMismatch = summarizeExperiment(
@@ -1344,6 +1563,11 @@ test('CLI runs a reusable two-arm experiment with fake lifecycle commands', { ti
     const comparison = JSON.parse(readFileSync(resolve(experimentDir, 'comparison.json'), 'utf8'));
     assert.equal(experiment.status, 'completed');
     assert.equal(experiment.schedule.length, 4);
+    assert.deepEqual(experiment.schedulerMonitor, {
+      mode: 'built-in',
+      heartbeatIntervalMs: 5_000,
+      thresholdMs: 60_000
+    });
     assert.deepEqual(experiment.scenario.identityInputs[0], {
       id: 'benchmark-runner',
       bytes: readFileSync(localRunnerPath).length,
@@ -1400,6 +1624,26 @@ test('CLI runs a reusable two-arm experiment with fake lifecycle commands', { ti
     assert.match(projectionReport.stderr, /context projection does not match raw Codex evidence/);
     writeFileSync(runPath, originalRun);
 
+    const schedulerGapTamper = JSON.parse(originalRun);
+    schedulerGapTamper.timing.schedulerGap = {
+      detectedAt: new Date().toISOString(),
+      phaseId: 'evaluate-01',
+      heartbeatIntervalMs: 5_000,
+      thresholdMs: 60_000,
+      observedWallClockIntervalMs: 61_000,
+      observedMonotonicIntervalMs: 61_000
+    };
+    schedulerGapTamper.resultFingerprint = recomputeRunFingerprint(schedulerGapTamper);
+    writeFileSync(runPath, `${JSON.stringify(schedulerGapTamper, null, 2)}\n`);
+    const schedulerGapReport = spawnSync(process.execPath, [
+      localRunnerPath,
+      'report',
+      '--experiment', experimentDir
+    ], { cwd: repoRoot, encoding: 'utf8' });
+    assert.notEqual(schedulerGapReport.status, 0);
+    assert.match(schedulerGapReport.stderr, /contains a scheduler gap/);
+    writeFileSync(runPath, originalRun);
+
     const originalRunValue = JSON.parse(originalRun);
     const codexRecord = originalRunValue.timing.phases.find(
       ({ command }) => command.adapter === 'codex-jsonl-v1'
@@ -1439,6 +1683,237 @@ test('CLI runs a reusable two-arm experiment with fake lifecycle commands', { ti
     ], { cwd: repoRoot, encoding: 'utf8' });
     assert.notEqual(runnerMismatchReport.status, 0);
     assert.match(runnerMismatchReport.stderr, /does not match the experiment runner identity/);
+  }
+  finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('scheduler gap aborts the measured interval after cleanup without a comparison', { timeout: 30_000 }, () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), 'build-benchmark-gap-test-'));
+  const scenarioRoot = resolve(temporaryRoot, 'scenario');
+  const agentPath = resolve(scenarioRoot, 'agent.mjs');
+  const evaluatorPath = resolve(scenarioRoot, 'evaluate.mjs');
+  const cleanupPath = resolve(scenarioRoot, 'cleanup.mjs');
+  const helperPath = resolve(temporaryRoot, 'run-with-gap.mjs');
+  const boundaryHelperPath = resolve(temporaryRoot, 'run-with-boundary-gap.mjs');
+  const scenarioPath = resolve(scenarioRoot, 'scenario.json');
+  const experimentDir = resolve(temporaryRoot, 'experiment');
+  const boundaryExperimentDir = resolve(temporaryRoot, 'boundary-experiment');
+  const kitPath = resolve(temporaryRoot, 'kit');
+  try {
+    mkdirSync(scenarioRoot);
+    mkdirSync(kitPath);
+    writeFileSync(resolve(kitPath, 'README.md'), '# Scheduler gap fixture\n');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: kitPath });
+    execFileSync('git', ['add', 'README.md'], { cwd: kitPath });
+    execFileSync('git', [
+      '-c', 'user.name=Benchmark Test',
+      '-c', 'user.email=benchmark-test@example.invalid',
+      'commit', '-m', 'fixture'
+    ], { cwd: kitPath });
+    writeFileSync(agentPath, [
+      'const events = [',
+      "  { type: 'thread.started', thread_id: 'fresh-gap' },",
+      "  { type: 'turn.started' },",
+      "  { type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 25, reasoning_output_tokens: 5 } }",
+      '];',
+      "process.stdout.write(`${events.map(JSON.stringify).join('\\n')}\\n`);"
+    ].join('\n'));
+    writeFileSync(evaluatorPath, [
+      'setTimeout(() => process.stdout.write(JSON.stringify({',
+      "  schemaVersion: 'public-kit.build-benchmark-quality.1',",
+      '  valid: true,',
+      '  outcomes: { functionalPass: true },',
+      '  blockers: []',
+      '})), 5_000);'
+    ].join('\n'));
+    writeFileSync(cleanupPath, [
+      "import { writeFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "writeFileSync(resolve(process.argv[2], 'cleanup-ran.txt'), 'yes\\n');",
+      'process.exitCode = 7;'
+    ].join('\n'));
+    const scenario = scenarioFixture({
+      id: 'scheduler-gap-abort',
+      description: 'Prove scheduler contamination aborts after cleanup without a comparison.',
+      minimumValidRunsPerArm: 1,
+      commands: {
+        prepare: [],
+        build: [{
+          argv: [process.execPath, agentPath],
+          cwd: '{workspace}',
+          adapter: 'codex-jsonl-v1'
+        }],
+        evaluate: [{
+          argv: [process.execPath, evaluatorPath],
+          cwd: '{workspace}'
+        }],
+        cleanup: [{
+          argv: [process.execPath, cleanupPath, '{runDir}'],
+          cwd: '{runDir}'
+        }]
+      }
+    });
+    writeFileSync(scenarioPath, `${JSON.stringify(scenario, null, 2)}\n`);
+    const runOptions = {
+      scenario: scenarioPath,
+      'baseline-kit': kitPath,
+      'candidate-kit': kitPath,
+      'evaluator-kit': kitPath,
+      output: experimentDir,
+      sequence: 'ABBA',
+      'warmups-per-arm': '0',
+      vars: {}
+    };
+    writeFileSync(helperPath, [
+      `import { runCommand } from ${JSON.stringify(pathToFileURL(runnerPath).href)};`,
+      `const options = ${JSON.stringify(runOptions)};`,
+      'const status = await runCommand(options, {',
+      '  schedulerGapMonitorFactory: ({ activePhaseId, onGap }) => {',
+      '    let stopped = false;',
+      '    const timer = setInterval(() => {',
+      "      if (stopped || activePhaseId() !== 'evaluate-01') return;",
+      '      stopped = true;',
+      '      clearInterval(timer);',
+      '      onGap({',
+      '        heartbeatIntervalMs: 5000,',
+      '        thresholdMs: 60000,',
+      '        observedWallClockIntervalMs: 61000,',
+      '        observedMonotonicIntervalMs: 61000',
+      '      });',
+      '    }, 1);',
+      '    return () => {',
+      '      if (stopped) return;',
+      '      stopped = true;',
+      '      clearInterval(timer);',
+      '    };',
+      '  }',
+      '});',
+      'process.exitCode = status;'
+    ].join('\n'));
+
+    const result = spawnSync(process.execPath, [helperPath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 30_000
+    });
+    assert.equal(result.status, 2, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /aborted after a scheduler gap/);
+    assert.match(result.stderr, /Cleanup also failed/);
+    const runDir = resolve(experimentDir, 'runs', '001-trial');
+    const run = JSON.parse(readFileSync(resolve(runDir, 'run.json'), 'utf8'));
+    const evaluator = run.timing.phases.find(({ id }) => id === 'evaluate-01');
+    assert.equal(evaluator.status, 'scheduler_gap');
+    assert.equal(evaluator.process.timedOut, false);
+    assert.equal(typeof evaluator.process.schedulerGap.detectedAt, 'string');
+    assert.deepEqual(
+      { ...evaluator.process.schedulerGap, detectedAt: '<dynamic>' },
+      {
+        detectedAt: '<dynamic>',
+        heartbeatIntervalMs: 5_000,
+        thresholdMs: 60_000,
+        observedWallClockIntervalMs: 61_000,
+        observedMonotonicIntervalMs: 61_000
+      }
+    );
+    assert.deepEqual(run.eligibility.exclusionReasons, [
+      'evaluation-process-failed',
+      'cleanup-failed',
+      'scheduler-gap-detected'
+    ]);
+    assert.deepEqual(run.eligibility.contaminationFlags, [
+      'scheduler-gap-detected:evaluate-01'
+    ]);
+    assert.equal(run.resultFingerprint, recomputeRunFingerprint(run));
+    assert.equal(existsSync(resolve(runDir, 'cleanup-ran.txt')), true);
+    const experiment = JSON.parse(readFileSync(resolve(experimentDir, 'experiment.json'), 'utf8'));
+    assert.equal(experiment.status, 'aborted');
+    assert.equal(experiment.schedulerMonitor.mode, 'injected-test-only');
+    assert.equal(experiment.termination.reason, 'scheduler-gap-detected');
+    assert.equal(experiment.termination.runId, '001-trial');
+    assert.equal(experiment.termination.phaseId, 'evaluate-01');
+    assert.deepEqual(experiment.termination.cleanupFailureReasons, ['cleanup-failed']);
+    assert.equal(existsSync(resolve(experimentDir, 'comparison.json')), false);
+    assert.equal(existsSync(resolve(experimentDir, 'runs', '002-trial')), false);
+
+    writeFileSync(evaluatorPath, [
+      'process.stdout.write(JSON.stringify({',
+      "  schemaVersion: 'public-kit.build-benchmark-quality.1',",
+      '  valid: true,',
+      '  outcomes: { functionalPass: true },',
+      '  blockers: []',
+      '}));'
+    ].join('\n'));
+    writeFileSync(cleanupPath, [
+      "import { writeFileSync } from 'node:fs';",
+      "import { resolve } from 'node:path';",
+      "writeFileSync(resolve(process.argv[2], 'cleanup-ran.txt'), 'yes\\n');"
+    ].join('\n'));
+    const boundaryOptions = { ...runOptions, output: boundaryExperimentDir };
+    writeFileSync(boundaryHelperPath, [
+      `import { runCommand } from ${JSON.stringify(pathToFileURL(runnerPath).href)};`,
+      `const options = ${JSON.stringify(boundaryOptions)};`,
+      'const status = await runCommand(options, {',
+      '  schedulerGapMonitorFactory: ({ activePhaseId, onGap }) => {',
+      '    let stopped = false;',
+      '    return () => {',
+      '      if (stopped) return;',
+      '      stopped = true;',
+      "      if (activePhaseId() !== null) throw new Error('Expected a measurement-boundary stop.');",
+      '      onGap({',
+      '        heartbeatIntervalMs: 5000,',
+      '        thresholdMs: 60000,',
+      '        observedWallClockIntervalMs: 61000,',
+      '        observedMonotonicIntervalMs: 61000',
+      '      });',
+      '    };',
+      '  }',
+      '});',
+      'process.exitCode = status;'
+    ].join('\n'));
+    const boundaryResult = spawnSync(process.execPath, [boundaryHelperPath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 30_000
+    });
+    assert.equal(
+      boundaryResult.status,
+      2,
+      `${boundaryResult.stdout}\n${boundaryResult.stderr}`
+    );
+    const boundaryRunDir = resolve(boundaryExperimentDir, 'runs', '001-trial');
+    const boundaryRun = JSON.parse(
+      readFileSync(resolve(boundaryRunDir, 'run.json'), 'utf8')
+    );
+    const completedEvaluator = boundaryRun.timing.phases.find(
+      ({ id }) => id === 'evaluate-01'
+    );
+    assert.equal(completedEvaluator.status, 'completed');
+    assert.equal(completedEvaluator.process.schedulerGap, undefined);
+    assert.equal(boundaryRun.timing.schedulerGap.phaseId, 'measurement-boundary');
+    assert.equal(boundaryRun.timing.schedulerGap.previousPhaseId, 'evaluate-01');
+    assert.deepEqual(boundaryRun.eligibility.exclusionReasons, [
+      'scheduler-gap-detected'
+    ]);
+    assert.deepEqual(boundaryRun.eligibility.contaminationFlags, [
+      'scheduler-gap-detected:measurement-boundary'
+    ]);
+    assert.equal(existsSync(resolve(boundaryRunDir, 'cleanup-ran.txt')), true);
+    const boundaryExperiment = JSON.parse(
+      readFileSync(resolve(boundaryExperimentDir, 'experiment.json'), 'utf8')
+    );
+    assert.equal(boundaryExperiment.status, 'aborted');
+    assert.equal(
+      boundaryExperiment.termination.phaseId,
+      'measurement-boundary'
+    );
+    assert.equal(
+      boundaryExperiment.termination.previousPhaseId,
+      'evaluate-01'
+    );
+    assert.deepEqual(boundaryExperiment.termination.cleanupFailureReasons, []);
+    assert.equal(existsSync(resolve(boundaryExperimentDir, 'comparison.json')), false);
   }
   finally {
     rmSync(temporaryRoot, { recursive: true, force: true });

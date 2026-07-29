@@ -40,6 +40,11 @@ Do not promote evidence up this ladder without running the next layer.
 - Keep raw JSONL and command logs local. Publish bounded metrics and hashes.
 - Count completed command, MCP, and web output plus canonical completed
   file-change metadata in the agent-visible tool-output metric.
+- Charge all scheduled attempts to the diagnostic cost per independently valid
+  outcome; never hide failed-run resource use by reporting eligible runs alone.
+- Monitor the complete measured build-through-evaluation interval and abort
+  without a comparison when either clock reports a scheduler interval over 60
+  seconds.
 - Grade both arms with the same candidate evaluator after the timed run.
 - For fresh builds, compare normalized outcomes rather than volatile site UUID,
   timestamp, path, DDEV origin, or evidence identity.

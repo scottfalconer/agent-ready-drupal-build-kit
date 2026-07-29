@@ -25,6 +25,13 @@ const EXPERIMENT_SCHEMA = 'public-kit.build-benchmark-experiment.1';
 const RUN_SCHEMA = 'public-kit.build-benchmark-run.1';
 const QUALITY_SCHEMA = 'public-kit.build-benchmark-quality.1';
 const COMPARISON_SCHEMA = 'public-kit.build-benchmark-comparison.1';
+const SCHEDULER_HEARTBEAT_INTERVAL_MS = 5_000;
+const SCHEDULER_GAP_THRESHOLD_MS = 60_000;
+const BUILT_IN_SCHEDULER_MONITOR = Object.freeze({
+  mode: 'built-in',
+  heartbeatIntervalMs: SCHEDULER_HEARTBEAT_INTERVAL_MS,
+  thresholdMs: SCHEDULER_GAP_THRESHOLD_MS
+});
 const AUTHORITY = Object.freeze({
   evidenceAuthority: 'none',
   diagnosticOnly: true,
@@ -60,6 +67,7 @@ const AGENT_FORBIDDEN_PLACEHOLDERS = new Set([
   'workspace'
 ]);
 let activeChild = null;
+let activeChildTimeout = null;
 let interruptionSignal = null;
 
 export function canonicalJson(value) {
@@ -437,6 +445,65 @@ function killProcessGroup(child, signal) {
   catch {}
 }
 
+export function startSchedulerGapMonitor({
+  intervalMs = SCHEDULER_HEARTBEAT_INTERVAL_MS,
+  thresholdMs = SCHEDULER_GAP_THRESHOLD_MS,
+  onGap,
+  wallClock = Date.now,
+  monotonicClock = () => performance.now(),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval
+} = {}) {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error('Scheduler heartbeat interval must be a positive finite number.');
+  }
+  if (!Number.isFinite(thresholdMs) || thresholdMs <= 0) {
+    throw new Error('Scheduler gap threshold must be a positive finite number.');
+  }
+  if (typeof onGap !== 'function') throw new Error('Scheduler gap monitor requires an onGap callback.');
+  for (const [name, value] of Object.entries({
+    wallClock,
+    monotonicClock,
+    setIntervalFn,
+    clearIntervalFn
+  })) {
+    if (typeof value !== 'function') throw new Error(`Scheduler gap monitor ${name} must be a function.`);
+  }
+  let previousWallClock = wallClock();
+  let previousMonotonic = monotonicClock();
+  let stopped = false;
+  let timer;
+  const sample = () => {
+    if (stopped) return;
+    const observedWallClock = wallClock();
+    const observedMonotonic = monotonicClock();
+    const observedWallClockIntervalMs = observedWallClock - previousWallClock;
+    const observedMonotonicIntervalMs = observedMonotonic - previousMonotonic;
+    previousWallClock = observedWallClock;
+    previousMonotonic = observedMonotonic;
+    if (
+      observedWallClockIntervalMs <= thresholdMs &&
+      observedMonotonicIntervalMs <= thresholdMs
+    ) return false;
+    stopped = true;
+    clearIntervalFn(timer);
+    onGap({
+      heartbeatIntervalMs: intervalMs,
+      thresholdMs,
+      observedWallClockIntervalMs: Math.round(observedWallClockIntervalMs * 1000) / 1000,
+      observedMonotonicIntervalMs: Math.round(observedMonotonicIntervalMs * 1000) / 1000
+    });
+    return true;
+  };
+  timer = setIntervalFn(sample, intervalMs);
+  return () => {
+    if (stopped) return;
+    if (sample()) return;
+    stopped = true;
+    clearIntervalFn(timer);
+  };
+}
+
 async function runProcess(spec, { phase, index, context }) {
   const command = resolvedCommand(spec, context, phase);
   mkdirSync(command.cwd, { recursive: true });
@@ -485,6 +552,7 @@ async function runProcess(spec, { phase, index, context }) {
       killProcessGroup(child, 'SIGTERM');
       hardKill = setTimeout(() => killProcessGroup(child, 'SIGKILL'), 10_000);
     }, command.timeoutMs);
+    activeChildTimeout = timer;
     child.on('error', (error) => {
       infrastructureError ??= error;
     });
@@ -495,7 +563,10 @@ async function runProcess(spec, { phase, index, context }) {
       clearTimeout(timer);
       clearTimeout(hardKill);
       closeOutputs();
-      if (activeChild === child) activeChild = null;
+      if (activeChild === child) {
+        activeChild = null;
+        activeChildTimeout = null;
+      }
       resolveProcess({ code: code ?? (timedOut ? 124 : 1), signal: signal ?? '', timedOut });
     });
     if (command.stdinFile) {
@@ -828,12 +899,23 @@ function environmentProjection() {
   return { ...value, fingerprint: sha256(canonicalJson(value)) };
 }
 
-async function runPhase(phase, specs, context, state) {
+async function runPhase(phase, specs, context, state, {
+  onCommandStart = () => {},
+  onCommandFinish = () => {}
+} = {}) {
   const phaseStarted = performance.now();
   const records = [];
   for (let index = 0; index < specs.length; index += 1) {
     if (interruptionSignal && phase !== 'cleanup') throw new Error(`Benchmark interrupted by ${interruptionSignal}.`);
-    const record = await runProcess(specs[index], { phase, index, context });
+    const phaseId = `${phase}-${String(index + 1).padStart(2, '0')}`;
+    onCommandStart(phaseId);
+    let record;
+    try {
+      record = await runProcess(specs[index], { phase, index, context });
+    }
+    finally {
+      onCommandFinish(phaseId);
+    }
     records.push(record);
     state.timing.phases.push(record);
     atomicJson(resolve(context.runDir, 'run.json'), state);
@@ -880,6 +962,7 @@ function experimentFingerprint(experiment) {
   delete identity.createdAt;
   delete identity.completedAt;
   delete identity.status;
+  delete identity.termination;
   delete identity.fingerprint;
   return sha256(canonicalJson(identity));
 }
@@ -990,6 +1073,15 @@ function validateExperimentEvidence(experiment, runs, { experimentDir = null } =
   if (experiment.schemaVersion !== EXPERIMENT_SCHEMA) throw new Error('Unsupported experiment schema.');
   if (canonicalJson(experiment.authority) !== canonicalJson(AUTHORITY)) throw new Error('Experiment authority contract changed.');
   if (experiment.fingerprint !== experimentFingerprint(experiment)) throw new Error('Experiment fingerprint does not match the preserved identity.');
+  if (experiment.status === 'completed' && experiment.termination !== undefined) {
+    throw new Error('A completed experiment must not retain a termination record.');
+  }
+  if (
+    experiment.status === 'completed' &&
+    canonicalJson(experiment.schedulerMonitor) !== canonicalJson(BUILT_IN_SCHEDULER_MONITOR)
+  ) {
+    throw new Error('A completed experiment must use the built-in scheduler monitor.');
+  }
   if (!Array.isArray(experiment.schedule) || experiment.schedule.length !== runs.length) {
     throw new Error('Experiment schedule and preserved runs differ.');
   }
@@ -1004,6 +1096,9 @@ function validateExperimentEvidence(experiment, runs, { experimentDir = null } =
     if (canonicalJson(run.order) !== canonicalJson(expected)) throw new Error(`Run ${run.runId} does not match its scheduled order.`);
     if (ordinals.has(run.order.ordinal)) throw new Error(`Duplicate run ordinal ${run.order.ordinal}.`);
     ordinals.add(run.order.ordinal);
+    if (experiment.status === 'completed' && run.timing?.schedulerGap !== null) {
+      throw new Error(`Completed experiment run ${run.runId} contains a scheduler gap.`);
+    }
     if (run.resultFingerprint !== runFingerprint(run)) throw new Error(`Run ${run.runId} fingerprint does not match its preserved evidence.`);
     if (experimentDir) verifyRecordedArtifacts(experimentDir, run);
   });
@@ -1019,7 +1114,18 @@ function identitySourceChanged(source) {
   return bytes.length !== source.bytes || sha256(bytes) !== source.sha256;
 }
 
-async function executeRun({ experiment, scenario, scenarioDir, experimentDir, order, arm, evaluatorKit, variables, identitySources }) {
+async function executeRun({
+  experiment,
+  scenario,
+  scenarioDir,
+  experimentDir,
+  order,
+  arm,
+  evaluatorKit,
+  variables,
+  identitySources,
+  schedulerGapMonitorFactory
+}) {
   const runId = `${String(order.ordinal).padStart(3, '0')}-trial`;
   const runDir = resolve(experimentDir, 'runs', runId);
   const workspace = resolve(runDir, 'workspace');
@@ -1067,6 +1173,7 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
       measuredProductWallClockMs: null,
       measuredHarnessWallClockMs: null,
       measuredOutcomeWallClockMs: null,
+      schedulerGap: null,
       phases: []
     },
     context: null,
@@ -1082,6 +1189,20 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
   let cleanup;
   let unexpected;
   let measuredStarted;
+  let activeMeasuredPhaseId = null;
+  let lastMeasuredPhaseId = null;
+  let schedulerGapEvidence = null;
+  let schedulerGapHardKill;
+  let stopSchedulerGapMonitor;
+  const measuredPhaseHooks = {
+    onCommandStart: (phaseId) => {
+      activeMeasuredPhaseId = phaseId;
+      lastMeasuredPhaseId = phaseId;
+    },
+    onCommandFinish: (phaseId) => {
+      if (activeMeasuredPhaseId === phaseId) activeMeasuredPhaseId = null;
+    }
+  };
   try {
     if (identitySources.some(identitySourceChanged)) throw new Error('A scenario identity input changed before the run.');
     const beforeIdentity = gitIdentity(arm.path);
@@ -1099,7 +1220,37 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
     if (!prepare.passed) state.eligibility.exclusionReasons.push('prepare-failed');
     if (prepare.passed) {
       measuredStarted = performance.now();
-      build = await runPhase('build', scenario.commands.build, context, state);
+      stopSchedulerGapMonitor = schedulerGapMonitorFactory({
+        activePhaseId: () => activeMeasuredPhaseId,
+        onGap: (gap) => {
+          if (schedulerGapEvidence) return;
+          schedulerGapEvidence = {
+            detectedAt: now(),
+            phaseId: activeMeasuredPhaseId ?? 'measurement-boundary',
+            ...(activeMeasuredPhaseId === null && lastMeasuredPhaseId
+              ? { previousPhaseId: lastMeasuredPhaseId }
+              : {}),
+            ...gap
+          };
+          const child = activeChild;
+          if (child) {
+            clearTimeout(activeChildTimeout);
+            activeChildTimeout = null;
+            killProcessGroup(child, 'SIGTERM');
+            schedulerGapHardKill = setTimeout(() => killProcessGroup(child, 'SIGKILL'), 10_000);
+          }
+        }
+      });
+      if (typeof stopSchedulerGapMonitor !== 'function') {
+        throw new Error('schedulerGapMonitorFactory must return a stop function.');
+      }
+      build = await runPhase(
+        'build',
+        scenario.commands.build,
+        context,
+        state,
+        measuredPhaseHooks
+      );
       state.timing.measuredBuildWallClockMs = build.durationMs;
       state.timing.measuredProductWallClockMs = Math.round(
         build.records
@@ -1114,7 +1265,13 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
       if (!build.passed) state.eligibility.exclusionReasons.push('build-failed');
     }
     if (build?.passed) {
-      evaluate = await runPhase('evaluate', scenario.commands.evaluate, context, state);
+      evaluate = await runPhase(
+        'evaluate',
+        scenario.commands.evaluate,
+        context,
+        state,
+        measuredPhaseHooks
+      );
       if (!evaluate.passed) state.eligibility.exclusionReasons.push('evaluation-process-failed');
       else {
         state.timing.measuredOutcomeWallClockMs = Math.round((performance.now() - measuredStarted) * 1000) / 1000;
@@ -1146,6 +1303,23 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
   }
   finally {
     try {
+      stopSchedulerGapMonitor?.();
+    }
+    catch (error) {
+      state.eligibility.exclusionReasons.push('scheduler-monitor-error');
+      state.eligibility.contaminationFlags.push(error.message);
+    }
+    clearTimeout(schedulerGapHardKill);
+    if (schedulerGapEvidence) {
+      state.timing.schedulerGap = schedulerGapEvidence;
+      const phaseRecord = state.timing.phases.find(({ id }) => id === schedulerGapEvidence.phaseId);
+      if (phaseRecord) {
+        phaseRecord.status = 'scheduler_gap';
+        const { phaseId, ...processEvidence } = schedulerGapEvidence;
+        phaseRecord.process.schedulerGap = processEvidence;
+      }
+    }
+    try {
       cleanup = await runPhase('cleanup', scenario.commands.cleanup, context, state);
       if (!cleanup.passed) state.eligibility.exclusionReasons.push('cleanup-failed');
     }
@@ -1175,6 +1349,12 @@ async function executeRun({ experiment, scenario, scenarioDir, experimentDir, or
   }
   if (identitySources.some(identitySourceChanged)) {
     state.eligibility.exclusionReasons.push('scenario-identity-input-mutated');
+  }
+  if (state.timing.schedulerGap) {
+    state.eligibility.exclusionReasons.push('scheduler-gap-detected');
+    state.eligibility.contaminationFlags.push(
+      `scheduler-gap-detected:${state.timing.schedulerGap.phaseId}`
+    );
   }
   try {
     const evaluatorAfterIdentity = gitIdentity(evaluatorKit);
@@ -1211,6 +1391,82 @@ function medianAbsoluteDeviation(values) {
   return center === null ? null : median(values.map((value) => Math.abs(value - center)));
 }
 
+function observedResourceCost(selected, validOutcomes, readValue) {
+  const values = selected.map(readValue).filter((value) => Number.isFinite(value) && value >= 0);
+  const coverage = values.length === 0
+    ? 'none'
+    : values.length === selected.length
+      ? 'complete'
+      : 'partial';
+  const total = coverage === 'complete'
+    ? values.reduce((sum, value) => sum + value, 0)
+    : null;
+  return {
+    coverage,
+    measuredAttempts: values.length,
+    total,
+    perValidOutcome: total !== null && validOutcomes > 0
+      ? total / validOutcomes
+      : null
+  };
+}
+
+function observedCostPerValidOutcome(selected) {
+  const validOutcomes = selected.filter((run) => (
+    run.eligibility.eligible &&
+    Array.isArray(run.eligibility?.contaminationFlags) &&
+    run.eligibility.contaminationFlags.length === 0 &&
+    run.quality?.valid === true &&
+    typeof run.quality?.outcomeFingerprint === 'string'
+  )).length;
+  return {
+    diagnosticOnly: true,
+    scheduledAttempts: selected.length,
+    validOutcomes,
+    resources: {
+      totalTokens: observedResourceCost(
+        selected,
+        validOutcomes,
+        (run) => run.context?.coverage === 'complete' &&
+            run.context?.usageComplete === true
+          ? run.context?.usage?.totalTokens
+          : null
+      ),
+      toolOutputBytes: observedResourceCost(
+        selected,
+        validOutcomes,
+        (run) => run.context?.coverage === 'complete'
+          ? run.context?.toolOutputBytes
+          : null
+      ),
+      productWallClockMs: observedResourceCost(
+        selected,
+        validOutcomes,
+        (run) => Array.isArray(run.eligibility?.contaminationFlags) &&
+            run.eligibility.contaminationFlags.length === 0
+          ? run.timing?.measuredProductWallClockMs
+          : null
+      ),
+      outcomeWallClockMs: observedResourceCost(
+        selected,
+        validOutcomes,
+        (run) => Array.isArray(run.eligibility?.contaminationFlags) &&
+            run.eligibility.contaminationFlags.length === 0
+          ? run.timing?.measuredOutcomeWallClockMs
+          : null
+      ),
+      totalWallClockMs: observedResourceCost(
+        selected,
+        validOutcomes,
+        (run) => Array.isArray(run.eligibility?.contaminationFlags) &&
+            run.eligibility.contaminationFlags.length === 0
+          ? run.timing?.totalWallClockMs
+          : null
+      )
+    }
+  };
+}
+
 function armSummary(runs, armId) {
   const selected = runs.filter((run) => !run.order.warmup && run.order.armId === armId);
   const eligible = selected.filter((run) => run.eligibility.eligible);
@@ -1219,6 +1475,8 @@ function armSummary(runs, armId) {
   const buildValues = eligible.map((run) => run.timing.measuredBuildWallClockMs).filter(Number.isFinite);
   const harnessValues = eligible.map((run) => run.timing.measuredHarnessWallClockMs).filter(Number.isFinite);
   const contextRows = eligible.map((run) => ({
+    coverage: run.context?.coverage,
+    usageComplete: run.context?.usageComplete,
     inputTokens: run.context?.usage?.inputTokens,
     cachedInputTokens: run.context?.usage?.cachedInputTokens,
     outputTokens: run.context?.usage?.outputTokens,
@@ -1245,7 +1503,14 @@ function armSummary(runs, armId) {
     medianHarnessWallClockMs: median(harnessValues),
     medianAbsoluteDeviationMs: medianAbsoluteDeviation(productValues),
     context: {
-      measuredRuns: contextRows.filter(({ totalTokens }) => Number.isFinite(totalTokens)).length,
+      measuredRuns: contextRows.filter(({ coverage, totalTokens, usageComplete }) => (
+        coverage === 'complete' &&
+        usageComplete === true &&
+        Number.isFinite(totalTokens)
+      )).length,
+      toolOutputMeasuredRuns: contextRows.filter(({ coverage, toolOutputBytes }) => (
+        coverage === 'complete' && Number.isFinite(toolOutputBytes)
+      )).length,
       medianInputTokens: median(contextRows.map(({ inputTokens }) => inputTokens).filter(Number.isFinite)),
       medianCachedInputTokens: median(contextRows.map(({ cachedInputTokens }) => cachedInputTokens).filter(Number.isFinite)),
       medianUncachedInputTokens: median(contextRows.map(({ uncachedInputTokens }) => uncachedInputTokens).filter(Number.isFinite)),
@@ -1260,6 +1525,7 @@ function armSummary(runs, armId) {
         contextRows.map(({ commandAttributionCoverage }) => commandAttributionCoverage).filter(Boolean)
       )].sort()
     },
+    observedCostPerValidOutcome: observedCostPerValidOutcome(selected),
     outcomeFingerprints: [...new Set(eligible.map((run) => run.quality?.outcomeFingerprint).filter(Boolean))],
     exclusionReasons: selected.flatMap((run) => run.eligibility.exclusionReasons.map((reason) => ({ runId: run.runId, reason })))
   };
@@ -1367,11 +1633,11 @@ export function summarizeExperiment(experiment, runs) {
       ? (baselineValue - candidateValue) / baselineValue * 100
       : null
   );
-  const tokenImprovementPercent = percentReduction(
+  const observedTokenImprovementPercent = percentReduction(
     baseline.context.medianTotalTokens,
     candidate.context.medianTotalTokens
   );
-  const toolOutputImprovementPercent = percentReduction(
+  const observedToolOutputImprovementPercent = percentReduction(
     baseline.context.medianToolOutputBytes,
     candidate.context.medianToolOutputBytes
   );
@@ -1379,6 +1645,15 @@ export function summarizeExperiment(experiment, runs) {
     baseline.successRate === 1 && candidate.successRate === 1;
   const tokenCoverageComplete = baseline.context.measuredRuns === baseline.eligibleRuns &&
     candidate.context.measuredRuns === candidate.eligibleRuns;
+  const toolOutputCoverageComplete =
+    baseline.context.toolOutputMeasuredRuns === baseline.eligibleRuns &&
+    candidate.context.toolOutputMeasuredRuns === candidate.eligibleRuns;
+  const tokenImprovementPercent = tokenCoverageComplete
+    ? observedTokenImprovementPercent
+    : null;
+  const toolOutputImprovementPercent = toolOutputCoverageComplete
+    ? observedToolOutputImprovementPercent
+    : null;
   const tokenDecision = !qualityAndSampleGate
     ? 'not-eligible'
     : !tokenCoverageComplete
@@ -1391,7 +1666,7 @@ export function summarizeExperiment(experiment, runs) {
         : 'not-improved';
   const toolOutputDecision = !qualityAndSampleGate
     ? 'not-eligible'
-    : toolOutputImprovementPercent === null
+    : !toolOutputCoverageComplete || toolOutputImprovementPercent === null
       ? 'not-measured'
       : toolOutputImprovementPercent > 0 &&
           toolOutputImprovementPercent >= experiment.thresholds.minimumToolOutputImprovementPercent
@@ -1506,6 +1781,7 @@ export function summarizeExperiment(experiment, runs) {
       tokenCoverageComplete,
       tokenImprovementPercent,
       toolOutputDecision,
+      toolOutputCoverageComplete,
       toolOutputImprovementPercent,
       anyImprovement: efficiencyImproved
     },
@@ -1573,7 +1849,14 @@ replace the authoritative verifier and independent quality evaluator.
 `;
 }
 
-async function runCommand(options) {
+export async function runCommand(
+  options,
+  { schedulerGapMonitorFactory = startSchedulerGapMonitor } = {}
+) {
+  if (typeof schedulerGapMonitorFactory !== 'function') {
+    throw new Error('schedulerGapMonitorFactory must be a function.');
+  }
+  const schedulerMonitorOverride = schedulerGapMonitorFactory !== startSchedulerGapMonitor;
   for (const required of ['scenario', 'baseline-kit', 'candidate-kit', 'evaluator-kit', 'output']) {
     if (!options[required]) throw new Error(`--${required} is required.`);
   }
@@ -1681,6 +1964,9 @@ async function runCommand(options) {
     },
     environment,
     runtime,
+    schedulerMonitor: schedulerMonitorOverride
+      ? { ...BUILT_IN_SCHEDULER_MONITOR, mode: 'injected-test-only' }
+      : { ...BUILT_IN_SCHEDULER_MONITOR },
     schedule,
     quality: scenario.quality,
     minimumValidRunsPerArm: scenario.minimumValidRunsPerArm,
@@ -1701,7 +1987,8 @@ async function runCommand(options) {
       arm: arms[order.armId],
       evaluatorKit,
       variables,
-      identitySources
+      identitySources,
+      schedulerGapMonitorFactory
     });
     runs.push(run);
     const outcome = run.eligibility.eligible ? 'eligible' : `ineligible (${run.eligibility.exclusionReasons.join(', ')})`;
@@ -1713,6 +2000,27 @@ async function runCommand(options) {
       process.stderr.write(`Benchmark stopped after ${interruptionSignal}; preserved runs remain local and no comparison was issued.\n`);
       return interruptionSignal === 'SIGINT' ? 130 : 143;
     }
+    const cleanupFailureReasons = run.eligibility.exclusionReasons.filter((reason) => (
+      reason === 'cleanup-failed' || reason === 'cleanup-runner-error'
+    ));
+    if (run.timing.schedulerGap) {
+      experiment.status = 'aborted';
+      experiment.completedAt = now();
+      experiment.termination = {
+        reason: 'scheduler-gap-detected',
+        runId: run.runId,
+        cleanupFailureReasons,
+        ...run.timing.schedulerGap
+      };
+      atomicJson(resolve(experimentDir, 'experiment.json'), experiment);
+      const cleanupNotice = cleanupFailureReasons.length
+        ? ' Cleanup also failed; inspect and remove owned runtime residue before another experiment.'
+        : '';
+      process.stderr.write(
+        `Benchmark aborted after a scheduler gap.${cleanupNotice} Preserved runs remain local and no comparison was issued.\n`
+      );
+      return 2;
+    }
     if (order.warmup && !run.eligibility.eligible) {
       experiment.status = 'aborted';
       experiment.completedAt = now();
@@ -1722,18 +2030,30 @@ async function runCommand(options) {
       );
       return 2;
     }
-    if (
-      run.eligibility.exclusionReasons.includes('cleanup-failed') ||
-      run.eligibility.exclusionReasons.includes('cleanup-runner-error')
-    ) {
+    if (cleanupFailureReasons.length) {
       experiment.status = 'aborted';
       experiment.completedAt = now();
+      experiment.termination = {
+        reason: 'cleanup-failed',
+        runId: run.runId,
+        cleanupFailureReasons
+      };
       atomicJson(resolve(experimentDir, 'experiment.json'), experiment);
       process.stderr.write(
         'Benchmark aborted after cleanup failure; later runs were not started and no comparison was issued.\n'
       );
       return 2;
     }
+  }
+  if (schedulerMonitorOverride) {
+    experiment.status = 'aborted';
+    experiment.completedAt = now();
+    experiment.termination = { reason: 'scheduler-monitor-override' };
+    atomicJson(resolve(experimentDir, 'experiment.json'), experiment);
+    process.stderr.write(
+      'Benchmark aborted because a test-only scheduler monitor cannot produce a comparison.\n'
+    );
+    return 2;
   }
   experiment.status = 'completed';
   experiment.completedAt = now();
