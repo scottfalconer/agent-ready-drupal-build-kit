@@ -89,6 +89,8 @@ test('SKILL.md makes required reference and packet reads truncation-safe', () =>
     skill.indexOf('The remaining seven parts')
   );
   assert.match(readPolicy, /exactly one mandatory reference per command/i);
+  assert.match(readPolicy, /check its byte count in a size-only command/i);
+  assert.match(readPolicy, /do not combine the size probe with a content read/i);
   assert.match(readPolicy, /larger than 20 KiB/i);
   assert.match(readPolicy, /sequential, non-overlapping chunks/i);
   assert.match(readPolicy, /until EOF/i);
