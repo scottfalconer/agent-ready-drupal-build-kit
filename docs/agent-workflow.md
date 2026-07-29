@@ -30,7 +30,7 @@
 - Use `.agents/skills/agent-ready-drupal-build-kit/gates.json` as the stable gate vocabulary.
 - Verify the packet is internally consistent.
 - Run independent verification against the live Drupal site and packet before handoff.
-- Treat `scripts/verify-packet.mjs`, packet-authored values, and injected test runtimes as diagnostic only; they cannot certify the site.
+- For structural lint only, add `--packet-only` to the default verifier and read its bounded summary first. Packet-authored values and injected test runtimes remain diagnostic only; they cannot certify the site.
 - Verify generated recipe material only as recipe material.
 - Verify lab application only as lab proof.
 - Verify production target evidence only from production-equivalent targets.

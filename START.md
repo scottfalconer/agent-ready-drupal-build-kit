@@ -149,7 +149,7 @@ The canonical output list is in [gates.json](gates.json) and [docs/output-invent
 ddev exec node .agents/skills/agent-ready-drupal-build-kit/scripts/verify.mjs --packet review-packet
 ```
 
-Use `scripts/verify-packet.mjs` only for explicit packet-only lint. Packet-only success never authorizes a complete rebuild claim.
+For explicit packet-only lint, add `--packet-only` to that verifier command and read its bounded summary first. Packet-only success never authorizes a complete rebuild claim.
 
 An explicit verifier target must match one of the current project's authoritative DDEV web origins. Configured custom FQDNs qualify; service URLs such as Mailpit do not. Exit `0` authorizes the active typed machine claim—`complete-local-rebuild` or `complete-local-build-from-brief`—exit `2` means required machine evidence is incomplete, and exit `1` means packet or live-target validation failed. The report also carries `recordedHumanGateStatus`, but those builder-writable names and choices are self-attested status only and do not affect the machine verdict. Authenticated human approval, production readiness, and launch approval remain separate.
 
