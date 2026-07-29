@@ -277,6 +277,19 @@ test('validateScenario normalizes safe commands and rejects shells and unknown p
     })),
     /unknown placeholder \{unknownPath\}/
   );
+
+  assert.throws(
+    () => validateScenario(scenarioFixture({
+      commands: {
+        build: [{
+          argv: [process.execPath, '-e', 'process.stdout.write("")'],
+          adapter: 'codex-jsonl-v1',
+          env: { OPENAI_API_KEY: 'must-not-reach-agent' }
+        }]
+      }
+    })),
+    /may only blank variables; measured agent inheritance is runner-owned \(OPENAI_API_KEY\)/
+  );
 });
 
 test('grants micro production scenario binds frozen inputs, runtime, and external run ownership', () => {
@@ -1479,6 +1492,10 @@ test('CLI runs a reusable two-arm experiment with fake lifecycle commands', { ti
       "import { resolve } from 'node:path';",
       'const workspace = process.cwd();',
       "if (!existsSync(resolve(workspace, 'prepared.txt'))) process.exit(3);",
+      "for (const name of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CLOUDFLARE_API_TOKEN', 'AZURE_CLIENT_SECRET', 'PGPASSWORD', 'MYSQL_PWD', 'DEPLOY_KEY', 'DATABASE_URL']) {",
+      '  if (process.env[name] !== undefined) process.exit(5);',
+      '}',
+      "if (process.env.NO_COLOR !== 'benchmark-safe-marker') process.exit(6);",
       'const events = [',
       "  { type: 'thread.started', thread_id: 'fresh-opaque' },",
       "  { type: 'turn.started' },",
@@ -1554,7 +1571,19 @@ test('CLI runs a reusable two-arm experiment with fake lifecycle commands', { ti
     ], {
       cwd: repoRoot,
       encoding: 'utf8',
-      timeout: 60_000
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        OPENAI_API_KEY: 'ambient-openai-credential',
+        ANTHROPIC_API_KEY: 'ambient-anthropic-credential',
+        CLOUDFLARE_API_TOKEN: 'ambient-cloudflare-credential',
+        AZURE_CLIENT_SECRET: 'ambient-azure-credential',
+        PGPASSWORD: 'ambient-postgres-credential',
+        MYSQL_PWD: 'ambient-mysql-credential',
+        DEPLOY_KEY: 'ambient-deploy-credential',
+        DATABASE_URL: 'postgresql://user:password@example.invalid/database',
+        NO_COLOR: 'benchmark-safe-marker'
+      }
     });
 
     assert.match(stdout, /Starting 1\/4: baseline/);

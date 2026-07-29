@@ -66,6 +66,47 @@ const AGENT_FORBIDDEN_PLACEHOLDERS = new Set([
   'runOrdinal',
   'workspace'
 ]);
+const AGENT_INHERITED_ENVIRONMENT_NAMES = new Set([
+  'APPDATA',
+  'CODEX_HOME',
+  'CODEX_PERMISSION_PROFILE',
+  'CODEX_SANDBOX',
+  'CODEX_SANDBOX_NETWORK_DISABLED',
+  'COLORTERM',
+  'COMSPEC',
+  'DDEV_NONINTERACTIVE',
+  'DDEV_NO_INSTRUMENTATION',
+  'DOCKER_CONTEXT',
+  'DOCKER_HOST',
+  'HOMEDRIVE',
+  'HOME',
+  'HOMEPATH',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LOCALAPPDATA',
+  'LOGNAME',
+  'NO_COLOR',
+  'PATH',
+  'PATHEXT',
+  'SHELL',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'SYSTEMROOT',
+  'TEMP',
+  'TERM',
+  'TMP',
+  'TMPDIR',
+  'TZ',
+  'USER',
+  'USERPROFILE',
+  'WINDIR',
+  'XDG_CACHE_HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_RUNTIME_DIR',
+  'XDG_STATE_HOME'
+]);
 let activeChild = null;
 let activeChildTimeout = null;
 let interruptionSignal = null;
@@ -215,6 +256,13 @@ function parseCommand(command, phase, index) {
             `commands.${phase}[${index}] must not expose {${match[1]}} to the measured agent.`
           );
         }
+      }
+    }
+    for (const [name, value] of Object.entries(command.env ?? {})) {
+      if (value !== '') {
+        throw new Error(
+          `commands.${phase}[${index}].env may only blank variables; measured agent inheritance is runner-owned (${name}).`
+        );
       }
     }
   }
@@ -531,10 +579,15 @@ async function runProcess(spec, { phase, index, context }) {
   const result = await new Promise((resolveProcess) => {
     let child;
     try {
+      const inheritedEnvironment = command.adapter === 'codex-jsonl-v1'
+        ? Object.fromEntries(
+          Object.entries(process.env).filter(([name]) => AGENT_INHERITED_ENVIRONMENT_NAMES.has(name))
+        )
+        : process.env;
       child = spawn(command.argv[0], command.argv.slice(1), {
         cwd: command.cwd,
         detached: process.platform !== 'win32',
-        env: { ...process.env, ...command.env, PWD: command.cwd },
+        env: { ...inheritedEnvironment, ...command.env, PWD: command.cwd },
         stdio: ['pipe', stdoutFd, stderrFd]
       });
       activeChild = child;

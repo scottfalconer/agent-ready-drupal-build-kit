@@ -47,7 +47,7 @@
     "reasoningEffort": "{var:reasoningEffort}",
     "serviceTier": "{var:serviceTier}",
     "sandbox": "host-workspace-write",
-    "credentialPolicy": "Pre-reviewed trusted kit revisions only: host auth remains readable and common credential variables are blanked. Logged forbidden command patterns fail as defense in depth, not proof no read occurred.",
+    "credentialPolicy": "Pre-reviewed trusted kit revisions only: host auth is readable. Runner uses a small environment allowlist; common credentials are blanked. Command checks are defense in depth, not proof.",
     "isolationPolicy": "The runner provides only opaque workspace inputs. Host workspace-write limits writes, not all reads; commands are audited for parent, evaluator, Git, credential, and network access."
   },
   "commands": {

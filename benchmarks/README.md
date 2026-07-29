@@ -92,6 +92,11 @@ Commands adapted as `codex-jsonl-v1` must use the opaque `{workspace}` as their
 working directory and cannot receive arm, kit, run, experiment, repository, or
 host-workspace placeholders through argv, stdin, or environment. Scenario
 adapters must also keep experiment evidence outside the agent-visible runtime.
+The runner gives these agent commands a small, runner-owned environment
+allowlist and permits scenario environment overrides only when they blank a
+name. This is defense in depth for trusted scenarios, not an untrusted-code
+sandbox: required model authentication may still be available through an
+intentionally mounted or home-directory credential file.
 
 Quality mode is `exact`: both arms must produce the same normalized outcome
 fingerprint. Fresh-build evaluators must remove volatile run identity while
