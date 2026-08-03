@@ -1047,6 +1047,9 @@ function collectorExpression(contract, mobile) {
       'form input,form select,form textarea,form button'
     )].filter(publiclyVisibleControl);
     formControlOverflow.controls = Math.max(0, publicControlCandidates.length - publicFormControlLimits.maxControls);
+    const publicForms = [...new Set(publicControlCandidates.map((element) => element.form).filter(Boolean))];
+    const formOrdinals = new Map(publicForms.map((form, index) => [form, index + 1]));
+    const nextControlOrdinal = new Map();
     const controlOccurrences = new Map();
     const publicFormControls = publicControlCandidates
       .slice(0, publicFormControlLimits.maxControls)
@@ -1103,6 +1106,9 @@ function collectorExpression(contract, mobile) {
         const accessibleIdentity = accessibleLabel.normalize('NFKC').toLowerCase();
         const occurrence = (controlOccurrences.get(accessibleIdentity) || 0) + 1;
         controlOccurrences.set(accessibleIdentity, occurrence);
+        const formOrdinal = formOrdinals.get(element.form);
+        const controlOrdinal = (nextControlOrdinal.get(formOrdinal) || 0) + 1;
+        nextControlOrdinal.set(formOrdinal, controlOrdinal);
         const rawOptions = tag === 'select' ? [...element.options] : [];
         if (rawOptions.length > publicFormControlLimits.maxOptionsPerControl) {
           formControlOverflow.optionControls += 1;
@@ -1118,6 +1124,8 @@ function collectorExpression(contract, mobile) {
         return {
           accessibleIdentity,
           occurrence,
+          formOrdinal,
+          controlOrdinal,
           kind,
           visibleLabel,
           required: element.matches(':required') || String(element.getAttribute('aria-required') || '').toLowerCase() === 'true',
@@ -1132,7 +1140,7 @@ function collectorExpression(contract, mobile) {
     const publicFormEvidence = {
       schemaVersion: 'public-kit.public-form-controls.1',
       limits: publicFormControlLimits,
-      formCount: new Set(publicControlCandidates.map((element) => element.form).filter(Boolean)).size,
+      formCount: publicForms.length,
       controlCount: publicControlCandidates.length,
       controls: publicFormControls,
       overflow: formControlOverflow
@@ -1782,12 +1790,17 @@ function observedPublicFormControls(signals, side) {
     const identity = String(control?.accessibleIdentity ?? '');
     const visibleLabel = String(control?.visibleLabel ?? '');
     const occurrence = Number(control?.occurrence);
+    const formOrdinal = Number(control?.formOrdinal);
+    const controlOrdinal = Number(control?.controlOrdinal);
     const kind = String(control?.kind ?? '');
     const options = Array.isArray(control?.options) ? control.options : [];
     if (Object.hasOwn(control ?? {}, 'name') || Object.hasOwn(control ?? {}, 'value')) {
       errors.push(`${side} public-form control ${controlIndex + 1} contains a private implementation name or value`);
     }
-    if (!identity || identity.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength) {
+    if (identity.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has an unbounded accessible identity`);
+    }
+    if (!identity && side === 'target') {
       errors.push(`${side} public-form control ${controlIndex + 1} lacks a bounded accessible identity`);
     }
     if (identity && identity !== identity.normalize('NFKC').toLowerCase()) {
@@ -1795,6 +1808,15 @@ function observedPublicFormControls(signals, side) {
     }
     if (!Number.isSafeInteger(occurrence) || occurrence <= 0) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid identity occurrence`);
+    }
+    if (
+      !Number.isSafeInteger(formOrdinal) ||
+      formOrdinal <= 0 ||
+      formOrdinal > evidence.formCount ||
+      !Number.isSafeInteger(controlOrdinal) ||
+      controlOrdinal <= 0
+    ) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has an invalid bounded structural ordinal`);
     }
     if (!/^(?:input_[a-z0-9_-]+|select_(?:single|multiple)|textarea|button_[a-z0-9_-]+)$/.test(kind)) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid native kind`);
@@ -1846,13 +1868,15 @@ function observedPublicFormControls(signals, side) {
     ) {
       errors.push(`${side} non-select public-form control ${controlIndex + 1} has unexpected option evidence`);
     }
-    const key = `${identity}\0${occurrence}`;
+    const key = `${formOrdinal}\0${controlOrdinal}`;
     if (index.has(key)) {
-      errors.push(`${side} public-form controls duplicate accessible identity ${JSON.stringify(identity)} occurrence ${occurrence}`);
+      errors.push(`${side} public-form controls duplicate form ${formOrdinal} control ${controlOrdinal}`);
     }
     const normalized = {
       accessibleIdentity: identity,
       occurrence,
+      formOrdinal,
+      controlOrdinal,
       kind,
       visibleLabel,
       required: control?.required,
@@ -1870,6 +1894,28 @@ function observedPublicFormControls(signals, side) {
     };
     index.set(key, normalized);
     normalizedControls.push(normalized);
+  }
+  const observedFormOrdinals = [...new Set(normalizedControls.map((control) => control.formOrdinal))]
+    .sort((left, right) => left - right);
+  const expectedFormOrdinals = Array.from(
+    { length: Number.isSafeInteger(evidence.formCount) ? evidence.formCount : 0 },
+    (_value, index) => index + 1
+  );
+  if (canonicalJson(observedFormOrdinals) !== canonicalJson(expectedFormOrdinals)) {
+    errors.push(`${side} public-form evidence does not cover every observed form ordinal exactly`);
+  }
+  for (const formOrdinal of observedFormOrdinals) {
+    const observedControlOrdinals = normalizedControls
+      .filter((control) => control.formOrdinal === formOrdinal)
+      .map((control) => control.controlOrdinal)
+      .sort((left, right) => left - right);
+    const expectedControlOrdinals = Array.from(
+      { length: observedControlOrdinals.length },
+      (_value, index) => index + 1
+    );
+    if (canonicalJson(observedControlOrdinals) !== canonicalJson(expectedControlOrdinals)) {
+      errors.push(`${side} public-form ${formOrdinal} does not contain one contiguous ordered control sequence`);
+    }
   }
   const summaryValue = {
     schemaVersion: 'public-kit.public-form-controls.1',
@@ -1892,17 +1938,33 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
     errors.push(`public-form count differs: target ${target.summary.formCount}, source ${source.summary.formCount}`);
   }
   const matched = [];
+  const accessibilityImprovements = [];
   for (const [key, sourceControl] of source.index) {
     const targetControl = target.index.get(key);
-    const label = sourceControl.visibleLabel || sourceControl.accessibleIdentity;
+    const location = `form ${sourceControl.formOrdinal} control ${sourceControl.controlOrdinal}`;
+    const label = sourceControl.visibleLabel || sourceControl.accessibleIdentity || location;
     if (!targetControl) {
-      errors.push(`target is missing public-form control ${JSON.stringify(label)} occurrence ${sourceControl.occurrence}`);
+      errors.push(`target is missing public-form control at ${location} (${JSON.stringify(label)})`);
       continue;
     }
     matched.push(key);
-    for (const field of ['kind', 'visibleLabel', 'required', 'disabled', 'selected', 'defaultSelected']) {
+    if (sourceControl.accessibleIdentity) {
+      for (const field of ['accessibleIdentity', 'occurrence', 'visibleLabel']) {
+        if (canonicalJson(sourceControl[field]) !== canonicalJson(targetControl[field])) {
+          errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ${field}`);
+        }
+      }
+    } else if (targetControl.accessibleIdentity) {
+      accessibilityImprovements.push({
+        formOrdinal: sourceControl.formOrdinal,
+        controlOrdinal: sourceControl.controlOrdinal,
+        targetAccessibleIdentity: targetControl.accessibleIdentity,
+        targetVisibleLabel: targetControl.visibleLabel
+      });
+    }
+    for (const field of ['kind', 'required', 'disabled', 'selected', 'defaultSelected']) {
       if (canonicalJson(sourceControl[field]) !== canonicalJson(targetControl[field])) {
-        errors.push(`public-form control ${JSON.stringify(label)} occurrence ${sourceControl.occurrence} differs in ${field}`);
+        errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ${field}`);
       }
     }
     if (
@@ -1910,18 +1972,19 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
       sourceControl.optionCount !== targetControl.optionCount ||
       canonicalJson(sourceControl.options) !== canonicalJson(targetControl.options)
     ) {
-      errors.push(`public-form control ${JSON.stringify(label)} occurrence ${sourceControl.occurrence} differs in ordered option labels or selected, default, and disabled option state`);
+      errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ordered option labels or selected, default, and disabled option state`);
     }
   }
   for (const [key, targetControl] of target.index) {
     if (!source.index.has(key)) {
-      errors.push(`target has unexpected public-form control ${JSON.stringify(targetControl.visibleLabel || targetControl.accessibleIdentity)} occurrence ${targetControl.occurrence}`);
+      errors.push(`target has unexpected public-form control at form ${targetControl.formOrdinal} control ${targetControl.controlOrdinal} (${JSON.stringify(targetControl.visibleLabel || targetControl.accessibleIdentity)})`);
     }
   }
   return {
     source: source.summary,
     target: target.summary,
     matchedControlCount: matched.length,
+    accessibilityImprovements,
     errors
   };
 }

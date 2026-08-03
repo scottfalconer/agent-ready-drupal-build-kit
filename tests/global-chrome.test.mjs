@@ -817,12 +817,21 @@ test('computed global chrome comparison catches missing chrome, links, mobile be
 });
 
 function publicFormControlEvidence(controls = [], formCount = controls.length > 0 ? 1 : 0) {
+  const nextControlOrdinal = new Map();
+  const structurallyBoundControls = controls.map((control) => {
+    const formOrdinal = Number.isSafeInteger(control.formOrdinal) ? control.formOrdinal : 1;
+    const controlOrdinal = Number.isSafeInteger(control.controlOrdinal)
+      ? control.controlOrdinal
+      : (nextControlOrdinal.get(formOrdinal) || 0) + 1;
+    nextControlOrdinal.set(formOrdinal, controlOrdinal);
+    return { ...control, formOrdinal, controlOrdinal };
+  });
   return {
     schemaVersion: 'public-kit.public-form-controls.1',
     limits: PUBLIC_FORM_CONTROL_LIMITS,
     formCount,
-    controlCount: controls.length,
-    controls,
+    controlCount: structurallyBoundControls.length,
+    controls: structurallyBoundControls,
     overflow: { controls: 0, labels: 0, optionControls: 0 }
   };
 }
@@ -1003,6 +1012,142 @@ test('verifier-owned source and target form controls pass with exact accessible 
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.controlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.fingerprint.startsWith('sha256:')));
+});
+
+test('an unlabeled source control may gain a target accessible identity without becoming unverifiable', () => {
+  const sourceControls = [observedControl({
+    accessibleIdentity: '',
+    visibleLabel: 'Email',
+    kind: 'input_email',
+    required: true
+  })];
+  const targetControls = [observedControl({
+    accessibleIdentity: 'email address',
+    visibleLabel: 'Email address',
+    kind: 'input_email',
+    required: true
+  })];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(targetControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 1));
+  assert.ok(floor.findings.every((finding) => (
+    finding.publicFormControlParity.accessibilityImprovements[0]?.targetAccessibleIdentity === 'email address'
+  )));
+
+  const stillUnlabeled = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(stillUnlabeled.status, 'failed');
+  assert.match(stillUnlabeled.errors.join('\n'), /target public-form control 1 lacks a bounded accessible identity/i);
+});
+
+test('structural fallback still blocks a missing unlabeled source control and option drift', () => {
+  const sourceControls = [
+    observedControl({ accessibleIdentity: '', visibleLabel: 'Email', kind: 'input_email', required: true }),
+    observedControl({
+      accessibleIdentity: '',
+      occurrence: 2,
+      visibleLabel: 'Campus',
+      kind: 'select_single',
+      optionEvidence: 'observed',
+      options: [
+        { label: 'Budapest', selected: true, defaultSelected: true, disabled: false },
+        { label: 'Online', selected: false, defaultSelected: false, disabled: false }
+      ]
+    })
+  ];
+  const labeledEmail = observedControl({
+    accessibleIdentity: 'email address', visibleLabel: 'Email address', kind: 'input_email', required: true
+  });
+  const missing = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([labeledEmail])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(missing.status, 'failed');
+  assert.match(missing.errors.join('\n'), /missing public-form control at form 1 control 2/i);
+
+  const changedSelect = structuredClone(sourceControls[1]);
+  changedSelect.accessibleIdentity = 'campus';
+  changedSelect.occurrence = 1;
+  changedSelect.visibleLabel = 'Campus';
+  changedSelect.options[1].disabled = true;
+  const optionsDifferent = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([labeledEmail, changedSelect])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(optionsDifferent.status, 'failed');
+  assert.match(optionsDifferent.errors.join('\n'), /ordered option labels.*selected, default, and disabled option state/i);
+});
+
+test('structural fallback rejects reordered formerly unlabeled controls', () => {
+  const sourceControls = [
+    observedControl({ accessibleIdentity: '', visibleLabel: 'Email', kind: 'input_email' }),
+    observedControl({
+      accessibleIdentity: '', occurrence: 2, visibleLabel: 'Campus', kind: 'select_single',
+      optionEvidence: 'observed',
+      options: [{ label: 'Budapest', selected: true, defaultSelected: true, disabled: false }]
+    })
+  ];
+  const targetControls = [
+    observedControl({
+      accessibleIdentity: 'campus', visibleLabel: 'Campus', kind: 'select_single',
+      optionEvidence: 'observed',
+      options: [{ label: 'Budapest', selected: true, defaultSelected: true, disabled: false }]
+    }),
+    observedControl({ accessibleIdentity: 'email address', visibleLabel: 'Email address', kind: 'input_email' })
+  ];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(targetControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /form 1 control [12].*differs in kind/i);
 });
 
 test('verifier-owned form parity blocks kind, label, required, selection, and ordered-option drift', () => {
@@ -1568,6 +1713,9 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     assert.ok(raw.routes.every((route) => route.signals.publicFormControls.formCount === 1));
     assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 4));
     const publicControls = raw.routes[0].signals.publicFormControls.controls;
+    assert.deepEqual(publicControls.map((control) => [control.formOrdinal, control.controlOrdinal]), [
+      [1, 1], [1, 2], [1, 3], [1, 4]
+    ]);
     assert.deepEqual(publicControls.map((control) => control.accessibleIdentity), [
       'email address', 'topic', 'send me a copy', 'send'
     ]);
