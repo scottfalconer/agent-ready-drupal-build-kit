@@ -198,6 +198,23 @@
       "blockers": []
     }
   ],
+  "collectionPaginationChecks": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "sourceObject": "",
+      "initialTargetRequest": "",
+      "targetContinuationRequest": "",
+      "initialStatus": null,
+      "continuationStatus": null,
+      "initialItemIdentitySha256": "",
+      "continuationItemIdentitySha256": "",
+      "continuationStateDistinct": false,
+      "sourceContinuationEquivalent": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "anonymousFormChecks": [
     {
       "formKey": "",

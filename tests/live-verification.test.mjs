@@ -3727,6 +3727,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   browser.site = targetBaseUrl;
   browser.checkedAt = testCheckedAt;
   browser.toolOrMethod = 'browser';
+  browser.collectionPaginationChecks = [];
   browser.publicRouteChecks = ['desktop', 'mobile'].map((viewport) => {
     const desktop = viewport === 'desktop';
     return {
@@ -8100,7 +8101,8 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       expected: [
         /passing, evidence-backed per-route item counts/i,
         /passing collection ownership and editor-add-row checks/i,
-        /passing editor-add-row checks/i
+        /passing editor-add-row checks/i,
+        /accepted pagination declaration/i
       ],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'pattern-map.json'), (value) => {

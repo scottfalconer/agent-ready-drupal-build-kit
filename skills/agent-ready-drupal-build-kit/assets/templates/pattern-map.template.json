@@ -55,6 +55,17 @@
         "representativeDetailTargetPath": "",
         "detailLoadBearingFields": [],
         "detailRouteRationale": "",
+        "pagination": {
+          "sourceMode": "paged | load_more | infinite_scroll | none",
+          "sourcePageSize": null,
+          "targetMode": "paged | load_more | infinite_scroll | none",
+          "targetPageSize": null,
+          "liveViewDisplay": "views.view.VIEW_ID:DISPLAY_ID",
+          "targetContinuationRequest": "",
+          "sourceContinuationEquivalent": false,
+          "evidence": "",
+          "accepted": false
+        },
         "editorAddRowEvidence": "",
         "exceptionRationale": "",
         "accepted": false,

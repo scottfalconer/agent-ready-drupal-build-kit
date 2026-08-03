@@ -60,7 +60,7 @@ Before changing the site, read these installed references completely:
 5. `references/contract/95-stop-conditions-and-outputs.md` — stop conditions and required outputs.
 6. `references/output-inventory.md` — the artifacts and evidence the run must leave behind.
 
-Those five contract parts total 55,909 bytes (about 55 KiB) in the current manifest. They keep orientation plus the global browser-evidence, completion, verification, stop-condition, and required-output controls in the upfront read. Read them before building, not at handoff. Phase- and topic-specific requirements remain mandatory when their trigger below applies.
+Those five contract parts total 57,351 bytes (about 56 KiB) in the current manifest. They keep orientation plus the global browser-evidence, completion, verification, stop-condition, and required-output controls in the upfront read. Read them before building, not at handoff. Phase- and topic-specific requirements remain mandatory when their trigger below applies.
 
 Keep reads truncation-safe. Read one file at a time, including exactly one mandatory reference per command. When a file's size is unknown, check its byte count in a size-only command before reading content; do not combine the size probe with a content read. For any file larger than 20 KiB, read it completely in sequential, non-overlapping chunks of about 20 KiB until EOF. Do not concatenate required references into one command. Never bulk-dump `review-packet/`; inspect a bounded path-and-size or JSON-key inventory first, then read only the files needed for the current work. Do not reread unchanged chunks. These bounds control tool output; they never make a required reference, gate, packet artifact, or evidence optional.
 

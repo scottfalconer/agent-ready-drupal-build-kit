@@ -175,6 +175,7 @@ const CAPTURE_INTERACTION_ACTIONS = new Set(['click', 'press', 'fill', 'select',
 const CAPTURE_MENU_PRESS_KEYS = new Set(['Enter', 'Space']);
 const CAPTURE_MENU_STATES = new Set(['not_applicable', 'closed', 'open']);
 const CAPTURE_CONSENT_STATES = new Set(['not_applicable', 'before_consent', 'accepted', 'rejected']);
+const COLLECTION_PAGINATION_MODES = new Set(['paged', 'load_more', 'infinite_scroll', 'none']);
 const MAX_CAPTURE_INTERACTION_STEPS = 12;
 const MAX_CAPTURE_CONTENT_COUNT_ASSERTIONS = 16;
 const MAX_CAPTURE_DYNAMIC_MASKS = 8;
@@ -219,7 +220,7 @@ export const MACHINE_GATE_EVALUATORS = Object.freeze({
   'G-FORM-01': 'anonymousFormReadiness',
   'G-PARITY-01': 'addressableSurfaceParity',
   'G-CONTENT-01': 'structuredContentOwnership',
-  'G-CONTENT-02': 'collectionOwnership',
+  'G-CONTENT-02': 'collectionOwnershipAndPagination',
   'G-COMPOSITION-01': 'compositionDeclaration',
   'G-COMPOSITION-02': 'compositionFidelity',
   'G-CANVAS-01': 'canvasComponentFidelity',
@@ -924,6 +925,11 @@ function finiteNumberValue(value) {
 
 function numericValue(value) {
   return finiteNumberValue(value) ? Number(value) : null;
+}
+
+function positiveIntegerOrNull(value) {
+  const number = numericValue(value);
+  return number !== null && Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
 function successfulStatus(value) {
@@ -1998,10 +2004,13 @@ function recordMatchesRoute(record, sourcePath, targetPath) {
 
 function targetRouteForSource(routeMatrix, sourcePath) {
   const source = normalizeRouteKey(sourcePath);
-  const primary = arrayOrEmpty(routeMatrix?.primaryRoutes).find(
+  const route = [
+    ...arrayOrEmpty(routeMatrix?.primaryRoutes),
+    ...arrayOrEmpty(routeMatrix?.routes)
+  ].find(
     (route) => normalizeRouteKey(route?.sourcePath) === source
   );
-  return normalizeRouteKey(primary?.targetPath);
+  return normalizeRouteKey(route?.targetPath);
 }
 
 function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
@@ -2042,6 +2051,94 @@ function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
     }
   }
   return ledgerRows.filter((candidate) => normalizeRouteKey(candidate?.sourceRoute) === source).length === 1;
+}
+
+export function collectionPaginationRecordReasons(ledger, browserCheck, targetRoute, publicRouteChecks = []) {
+  const reasons = [];
+  const label = String(ledger?.sourceObject || ledger?.sourceRoute || 'accepted collection').trim();
+  const pagination = isJsonObject(ledger?.pagination) ? ledger.pagination : {};
+  const sourceMode = String(pagination.sourceMode ?? '').trim();
+  const targetMode = String(pagination.targetMode ?? '').trim();
+  const sourcePageSize = pagination.sourcePageSize;
+  const targetPageSize = pagination.targetPageSize;
+  const continuationRequired = sourceMode !== 'none';
+  const continuationRequest = normalizeRouteRequestKey(pagination.targetContinuationRequest);
+  const initialRequest = normalizeRouteRequestKey(targetRoute);
+  const liveViewDisplay = String(pagination.liveViewDisplay ?? '').trim();
+  const documentedSinglePageException = ledger?.collectionOwner === 'documented_exception';
+
+  if (
+    pagination.accepted !== true ||
+    !COLLECTION_PAGINATION_MODES.has(sourceMode) ||
+    !COLLECTION_PAGINATION_MODES.has(targetMode) ||
+    (sourcePageSize !== null && positiveIntegerOrNull(sourcePageSize) === null) ||
+    (targetMode !== 'none' && positiveIntegerOrNull(targetPageSize) === null) ||
+    (targetMode === 'none' && targetPageSize !== null) ||
+    (!documentedSinglePageException && !/^views\.view\.[a-z0-9_]+:[a-z0-9_]+$/.test(liveViewDisplay))
+  ) {
+    reasons.push(`pattern-map.json accepted collection ${label} needs an accepted pagination declaration with implementation-neutral source/target modes, valid observable page sizes, and an exact live View display unless it is a documented genuine single-page exception.`);
+  }
+
+  if (documentedSinglePageException && (
+    sourceMode !== 'none' ||
+    targetMode !== 'none' ||
+    liveViewDisplay ||
+    !String(ledger?.exceptionRationale ?? '').trim()
+  )) {
+    reasons.push(`pattern-map.json documented collection exception ${label} is valid only as an evidence-backed genuine single-page none disposition without a fabricated live View display.`);
+  }
+
+  if (sourceMode === 'none' && targetMode !== 'none') {
+    reasons.push(`pattern-map.json accepted single-page collection ${label} must declare target pagination mode none.`);
+  }
+  if (sourceMode !== 'none' && targetMode !== sourceMode) {
+    reasons.push(`pattern-map.json accepted collection ${label} cannot launder source pagination mode ${sourceMode || '(missing)'} into target mode ${targetMode || '(missing)'}.`);
+  }
+
+  if (continuationRequired) {
+    if (
+      !continuationRequest ||
+      continuationRequest === initialRequest ||
+      pagination.sourceContinuationEquivalent !== true
+    ) {
+      reasons.push(`pattern-map.json accepted paginated collection ${label} needs an exact, distinct target continuation request declared equivalent to the source continuation.`);
+    }
+    const initialIdentity = String(browserCheck?.initialItemIdentitySha256 ?? '').trim();
+    const continuationIdentity = String(browserCheck?.continuationItemIdentitySha256 ?? '').trim();
+    const continuationRouteCheck = defaultCaptureStateChecks(publicRouteChecks).find((check) =>
+      routeRecordRequestKey(check) === continuationRequest && check?.accepted === true
+    );
+    if (
+      !browserCheck ||
+      browserCheck.status !== 'pass' ||
+      normalizeRouteRequestKey(browserCheck.initialTargetRequest) !== initialRequest ||
+      normalizeRouteRequestKey(browserCheck.targetContinuationRequest) !== continuationRequest ||
+      numericValue(browserCheck.initialStatus) !== 200 ||
+      numericValue(browserCheck.continuationStatus) !== 200 ||
+      !HASH_RE.test(initialIdentity) ||
+      !HASH_RE.test(continuationIdentity) ||
+      initialIdentity === continuationIdentity ||
+      browserCheck.continuationStateDistinct !== true ||
+      browserCheck.sourceContinuationEquivalent !== true
+    ) {
+      reasons.push(`browser-evidence.json needs an exact successful, source-equivalent, item-distinct page-two state for accepted collection ${label}.`);
+    }
+    if (
+      !continuationRouteCheck ||
+      !String(continuationRouteCheck?.targetScreenshot ?? '').trim() ||
+      !HASH_RE.test(String(continuationRouteCheck?.captureState?.evidenceBindings?.targetScreenshotSha256 ?? ''))
+    ) {
+      reasons.push(`browser-evidence.json needs a captured publicRouteChecks row for the exact page-two request of accepted collection ${label}; the live verifier fetches that request independently.`);
+    }
+  } else if (
+    continuationRequest ||
+    pagination.sourceContinuationEquivalent !== false ||
+    (browserCheck && browserCheck.status === 'pass')
+  ) {
+    reasons.push(`pattern-map.json accepted single-page collection ${label} must use explicit none pagination without a continuation claim.`);
+  }
+
+  return reasons;
 }
 
 function editorWorkflowMatchesBundle(check, bundle) {
@@ -2489,6 +2586,7 @@ async function independentStructuredGateReasons({
   }
 
   const collectionChecks = substantiveObjects(independentVerification?.collectionOwnershipChecks);
+  const paginationChecks = substantiveObjects(browserEvidence?.collectionPaginationChecks);
   if (
     collectionEvidenceRequired &&
     (collectionChecks.length === 0 || collectionChecks.some((record) =>
@@ -2574,6 +2672,9 @@ async function independentStructuredGateReasons({
     const browserCount = browserItemCounts.find((record) =>
       recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
     );
+    const paginationCheck = paginationChecks.find((record) =>
+      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+    );
     const ledgerSourceCount = numericValue(ledger.sourceItemCount);
     const sourceCount = numericValue(reconciliation?.sourceCount);
     const renderedCount = numericValue(reconciliation?.targetRenderedCount);
@@ -2593,6 +2694,22 @@ async function independentStructuredGateReasons({
       independentEvidenceDir
     );
     const addRowEvidencePresent = addRowCheck && await nonEmptyPacketEvidence(packetDir, addRowCheck.evidence, independentEvidenceDir);
+    const paginationEvidencePresent = await nonEmptyPacketEvidence(packetDir, ledger?.pagination?.evidence);
+    const paginationBrowserEvidencePresent = paginationCheck && await nonEmptyPacketEvidence(
+      packetDir,
+      paginationCheck.evidence,
+      join(packetDir, 'evidence', 'browser')
+    );
+
+    reasons.push(...collectionPaginationRecordReasons(
+      ledger,
+      paginationCheck,
+      targetPath,
+      browserEvidence?.publicRouteChecks
+    ));
+    if (!paginationEvidencePresent || (String(ledger?.pagination?.sourceMode ?? '') !== 'none' && !paginationBrowserEvidencePresent)) {
+      reasons.push(`accepted collection ${ledger.sourceObject || sourcePath} needs packet-local pagination and continuation evidence.`);
+    }
 
     if (
       !sourcePath ||

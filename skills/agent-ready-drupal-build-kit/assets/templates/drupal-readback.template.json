@@ -40,7 +40,20 @@
     "countsByType": {},
     "items": []
   },
-  "views": [],
+  "views": [
+    {
+      "viewId": "",
+      "displayId": "",
+      "configName": "",
+      "path": "",
+      "pager": {
+        "type": "",
+        "itemsPerPage": 0,
+        "offset": 0,
+        "inheritedFromDefault": false
+      }
+    }
+  ],
   "liveSurfaceReconciliation": {
     "schemaVersion": "public-kit.live-surface-reconciliation.1",
     "inventoryFingerprint": "",

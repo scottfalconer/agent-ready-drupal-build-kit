@@ -658,7 +658,7 @@ After enabling modules or applying recipes, rebuild caches before assuming field
 
 ## Views Are Configuration
 
-A prose plan for listings is not Views parity. Views/page parity needs exported Views config, route/display proof, access checks, sorting, filters, pagination, cache behavior, and browser-rendered evidence.
+A prose plan for listings is not Views parity. Views/page parity needs exported Views config, route/display proof, access checks, sorting, filters, pagination, cache behavior, and browser-rendered evidence. For every accepted collection, record source/target continuation modes and observable page sizes, bind one exact live display unless an evidence-backed documented exception proves a genuine single-page collection, and prove a successful item-distinct continuation request when the source continues. Put that exact request in `browser-evidence.json.publicRouteChecks` so the live verifier fetches it independently. The verifier resolves inherited or overridden pager settings from live Drupal and rejects fixed-limit `some` displays, nonzero offsets, incompatible live pager modes, and paged-to-`none` mode laundering; target page size does not have to equal source page size.
 
 Listings and search-like routes should default to Views. If a custom controller replaces a View for a collection route, document why and flag it for maintainer review.
 

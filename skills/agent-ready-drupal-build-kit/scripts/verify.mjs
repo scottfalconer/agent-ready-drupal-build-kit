@@ -3807,6 +3807,19 @@ foreach ($config_factory->listAll('views.view.') as $config_name) {
       continue;
     }
     $options = is_array($display['display_options'] ?? NULL) ? $display['display_options'] : [];
+    $display_defaults = is_array($options['defaults'] ?? NULL) ? $options['defaults'] : [];
+    $pager_inherited = !array_key_exists('pager', $options) || (($display_defaults['pager'] ?? TRUE) !== FALSE);
+    $pager = $pager_inherited
+      ? (is_array($default_options['pager'] ?? NULL) ? $default_options['pager'] : [])
+      : (is_array($options['pager'] ?? NULL) ? $options['pager'] : []);
+    $pager_options = is_array($pager['options'] ?? NULL) ? $pager['options'] : [];
+    $pager_type = (string) ($pager['type'] ?? 'none');
+    $pager_items_per_page = is_numeric($pager_options['items_per_page'] ?? NULL)
+      ? (int) $pager_options['items_per_page']
+      : 0;
+    $pager_offset = is_numeric($pager_options['offset'] ?? NULL)
+      ? (int) $pager_options['offset']
+      : 0;
     $path = $normalize_path($options['path'] ?? '');
     $access = is_array($options['access'] ?? NULL)
       ? $options['access']
@@ -3826,6 +3839,12 @@ foreach ($config_factory->listAll('views.view.') as $config_name) {
       'displayId' => (string) $display_id,
       'displayPlugin' => $display_plugin,
       'path' => $path,
+      'pager' => [
+        'inheritedFromDefault' => $pager_inherited,
+        'itemsPerPage' => $pager_items_per_page,
+        'offset' => $pager_offset,
+        'type' => $pager_type,
+      ],
       'publicSurface' => $public_surface,
       'routeName' => $path !== '' ? 'view.' . $view_id . '.' . $display_id : '',
       'viewId' => $view_id,
@@ -4941,6 +4960,115 @@ export function canvasAvailabilityReconciliationErrors(patternMap = {}, runtimeA
     errors.push(
       `Build type ${buildType} requires a confirmed authorable Canvas runtime; use the constrained fallback only when the verifier confirms Canvas is absent.`
     );
+  }
+  return errors;
+}
+
+export function effectiveViewPager(view = {}, displayId = '') {
+  const displays = view?.display && typeof view.display === 'object' && !Array.isArray(view.display)
+    ? view.display
+    : {};
+  const defaultOptions = displays?.default?.display_options && typeof displays.default.display_options === 'object'
+    ? displays.default.display_options
+    : {};
+  const options = displays?.[displayId]?.display_options && typeof displays[displayId].display_options === 'object'
+    ? displays[displayId].display_options
+    : {};
+  const defaults = options?.defaults && typeof options.defaults === 'object' ? options.defaults : {};
+  const inheritedFromDefault = !Object.hasOwn(options, 'pager') || defaults.pager !== false;
+  const pager = inheritedFromDefault ? defaultOptions.pager : options.pager;
+  const pagerOptions = pager?.options && typeof pager.options === 'object' ? pager.options : {};
+  const itemsPerPage = Number(pagerOptions.items_per_page ?? 0);
+  const offset = Number(pagerOptions.offset ?? 0);
+  return {
+    inheritedFromDefault,
+    itemsPerPage: Number.isSafeInteger(itemsPerPage) ? itemsPerPage : null,
+    offset: Number.isSafeInteger(offset) ? offset : null,
+    type: String(pager?.type ?? 'none')
+  };
+}
+
+function livePagerBehaviorMode(type) {
+  const plugin = String(type ?? '').trim().toLowerCase();
+  if (['full', 'mini'].includes(plugin)) return 'paged';
+  if (plugin === 'none') return 'none';
+  if (plugin === 'some') return 'fixed_limit';
+  if (/(?:^|_)load_?more(?:_|$)|show_?more/.test(plugin)) return 'load_more';
+  if (/infinite/.test(plugin)) return 'infinite_scroll';
+  return 'unknown';
+}
+
+export function collectionPaginationReconciliationErrors(patternMap = {}, liveSurfaceInventory = {}) {
+  const ledgers = Array.isArray(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+    ? patternMap.structuredContentModel.collectionOwnershipLedger.filter((ledger) => ledger?.accepted === true)
+    : [];
+  if (ledgers.length === 0) {
+    return [];
+  }
+  if (liveSurfaceInventory?.confirmed !== true) {
+    return ['Accepted collection pagination could not be reconciled because the live Drupal surface inventory is unavailable.'];
+  }
+  const liveDisplays = new Map(
+    (Array.isArray(liveSurfaceInventory?.items) ? liveSurfaceInventory.items : [])
+      .filter((item) => item?.kind === 'view_display')
+      .map((item) => [String(item?.key ?? ''), item])
+  );
+  const errors = [];
+  for (const ledger of ledgers) {
+    const label = String(ledger?.sourceObject || ledger?.sourceRoute || 'accepted collection').trim();
+    const pagination = ledger?.pagination && typeof ledger.pagination === 'object' ? ledger.pagination : {};
+    if (ledger?.collectionOwner === 'documented_exception') {
+      continue;
+    }
+    const reference = String(pagination.liveViewDisplay ?? '').trim();
+    const match = reference.match(/^views\.view\.([a-z0-9_]+):([a-z0-9_]+)$/);
+    if (!match) {
+      errors.push(`Accepted collection ${label} does not identify one exact live View display for pagination reconciliation.`);
+      continue;
+    }
+    const item = liveDisplays.get(`view_display:${match[1]}:${match[2]}`);
+    if (!item || item.publicSurface !== true) {
+      errors.push(`Accepted collection ${label} pagination display ${reference} is not one public live View display.`);
+      continue;
+    }
+    const pager = item?.pager && typeof item.pager === 'object' ? item.pager : {};
+    const type = String(pager.type ?? '');
+    const liveMode = livePagerBehaviorMode(type);
+    const itemsPerPage = Number(pager.itemsPerPage);
+    const offset = Number(pager.offset);
+    if (
+      typeof pager.inheritedFromDefault !== 'boolean' ||
+      !Number.isSafeInteger(itemsPerPage) || itemsPerPage < 0 ||
+      !Number.isSafeInteger(offset) || offset < 0 ||
+      !type
+    ) {
+      errors.push(`Accepted collection ${label} live View pager readback is incomplete; effective type, items-per-page, offset, and inheritance are required.`);
+      continue;
+    }
+    if (offset !== 0) {
+      errors.push(`Accepted collection ${label} live View display uses fixed offset ${offset}; collection pagination must start at the first item.`);
+    }
+    if (liveMode === 'fixed_limit') {
+      errors.push(`Accepted collection ${label} live View display uses fixed-limit pager type some; it cannot represent pagination mode ${pagination.targetMode || '(missing)'}.`);
+      continue;
+    }
+    if (pagination.targetMode === 'none') {
+      if (type !== 'none') {
+        errors.push(`Accepted single-page collection ${label} declares pagination none but its live View pager type is ${type}.`);
+      }
+      continue;
+    }
+    if (liveMode === 'none' || itemsPerPage <= 0) {
+      errors.push(`Accepted paginated collection ${label} has no continuation-capable live View pager.`);
+      continue;
+    }
+    if (liveMode === 'unknown' || liveMode !== pagination.targetMode) {
+      errors.push(`Accepted collection ${label} declares target pagination mode ${pagination.targetMode || '(missing)'} but live View pager type ${type} resolves to ${liveMode}.`);
+      continue;
+    }
+    if (Number(pagination.targetPageSize) !== itemsPerPage) {
+      errors.push(`Accepted collection ${label} target page size ${pagination.targetPageSize ?? '(missing)'} does not match live View items-per-page ${itemsPerPage}.`);
+    }
   }
   return errors;
 }
@@ -14552,6 +14680,10 @@ export async function verifyLive({
     )
     : [];
   liveErrors.push(...surfaceReconciliationErrors);
+  const collectionPaginationErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'liveSurfaceInventory')
+    ? collectionPaginationReconciliationErrors(patternMap, inspectedDrupalRuntime.liveSurfaceInventory)
+    : [];
+  liveErrors.push(...collectionPaginationErrors);
   const runtimeCanvasAvailability = canvasAvailabilityFromLiveSurface(
     inspectedDrupalRuntime.liveSurfaceInventory
   );
@@ -15128,6 +15260,11 @@ export async function verifyLive({
   for (const error of canvasRouteOwnershipErrors) {
     addCompletionBlocker('canvas.route-ownership', error, {
       nextAction: 'Bind each Canvas-owned public route to exactly one published live Canvas page, its component topology, and its exact entity editor URL, then refresh evidence.'
+    });
+  }
+  for (const error of collectionPaginationErrors) {
+    addCompletionBlocker('collection.pagination', error, {
+      nextAction: 'Repair the declared collection View pager, prove a successful distinct continuation state when pagination applies, refresh evidence, and rerun the live verifier.'
     });
   }
   for (const error of observedCompositionErrors) {
