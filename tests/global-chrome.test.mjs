@@ -12,6 +12,7 @@ import {
   BEFORE_CONSENT_NETWORK_SCHEMA,
   BROWSER_CAPTURE_LIMITS,
   DEFAULT_SELENIUM_GRID_URL,
+  PUBLIC_FORM_CONTROL_LIMITS,
   SELENIUM_ADD_ON_RELEASE,
   SELENIUM_CHROMIUM_IMAGE,
   VERIFIER_AXE_SCHEMA,
@@ -815,7 +816,25 @@ test('computed global chrome comparison catches missing chrome, links, mobile be
   assert.match(comparison.errors.join('\n'), /material normalized page-height change/i);
 });
 
-function visualFloorCapture({ origin, hashSeed, structure, protectedSource = false, path = '/' }) {
+function publicFormControlEvidence(controls = [], formCount = controls.length > 0 ? 1 : 0) {
+  return {
+    schemaVersion: 'public-kit.public-form-controls.1',
+    limits: PUBLIC_FORM_CONTROL_LIMITS,
+    formCount,
+    controlCount: controls.length,
+    controls,
+    overflow: { controls: 0, labels: 0, optionControls: 0 }
+  };
+}
+
+function visualFloorCapture({
+  origin,
+  hashSeed,
+  structure,
+  protectedSource = false,
+  path = '/',
+  publicFormControls = publicFormControlEvidence()
+}) {
   const routes = ['desktop', 'mobile'].map((viewport, index) => ({
     path,
     viewport: {
@@ -837,6 +856,7 @@ function visualFloorCapture({ origin, hashSeed, structure, protectedSource = fal
       },
       layout: { normalizedPageHeight: 2400 },
       structure,
+      publicFormControls: structuredClone(publicFormControls),
       protection: {
         detected: protectedSource,
         responseStatus: protectedSource ? 403 : 200,
@@ -877,6 +897,61 @@ const composedStructure = {
   prominentActionCount: 2
 };
 
+function observedControl({
+  accessibleIdentity,
+  occurrence = 1,
+  kind = 'input_text',
+  visibleLabel = accessibleIdentity,
+  required = false,
+  disabled = false,
+  selected = null,
+  defaultSelected = null,
+  optionEvidence = 'not_applicable',
+  options = []
+}) {
+  return {
+    accessibleIdentity,
+    occurrence,
+    kind,
+    visibleLabel,
+    required,
+    disabled,
+    selected,
+    defaultSelected,
+    optionEvidence,
+    optionCount: options.length,
+    options
+  };
+}
+
+const publicContactControls = [
+  observedControl({
+    accessibleIdentity: 'email address',
+    kind: 'input_email',
+    visibleLabel: 'Email address',
+    required: true
+  }),
+  observedControl({
+    accessibleIdentity: 'topic',
+    kind: 'select_single',
+    visibleLabel: 'Topic',
+    optionEvidence: 'observed',
+    options: [
+      { label: 'General', selected: true, defaultSelected: true, disabled: false },
+      { label: 'Admissions', selected: false, defaultSelected: false, disabled: false },
+      { label: 'Archived', selected: false, defaultSelected: false, disabled: true }
+    ]
+  }),
+  observedControl({
+    accessibleIdentity: 'send me a copy',
+    kind: 'input_checkbox',
+    visibleLabel: 'Send me a copy',
+    selected: true,
+    defaultSelected: true
+  }),
+  observedControl({ accessibleIdentity: 'send', kind: 'button_submit', visibleLabel: 'Send' })
+];
+
 test('verifier-owned visual floor passes comparable composed routes at identical desktop/mobile viewports', () => {
   const floor = compareVerifierOwnedVisualFloor({
     sourceCapture: visualFloorCapture({
@@ -907,6 +982,82 @@ test('verifier-owned visual floor passes comparable composed routes at identical
   assert.equal(floor.findings.length, 2);
   assert.ok(floor.findings.every((finding) => finding.composedSource && finding.imageIdentityDistinct));
   assert.ok(floor.findings.every((finding) => finding.designLedComposition));
+});
+
+test('verifier-owned source and target form controls pass with exact accessible identity and native option state', () => {
+  const evidence = publicFormControlEvidence(publicContactControls);
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 4));
+  assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.controlCount === 4));
+  assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.fingerprint.startsWith('sha256:')));
+});
+
+test('verifier-owned form parity blocks kind, label, required, selection, and ordered-option drift', () => {
+  const targetControls = structuredClone(publicContactControls);
+  targetControls[0].kind = 'input_text';
+  targetControls[0].required = false;
+  targetControls[1].options.reverse();
+  targetControls[2].selected = false;
+  targetControls[3].visibleLabel = 'Submit';
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(publicContactControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(targetControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /differs in kind/i);
+  assert.match(floor.errors.join('\n'), /differs in required/i);
+  assert.match(floor.errors.join('\n'), /differs in selected/i);
+  assert.match(floor.errors.join('\n'), /differs in visibleLabel/i);
+  assert.match(floor.errors.join('\n'), /ordered option labels.*selected, default, and disabled option state/i);
+});
+
+test('empty or truncated select evidence cannot pass as a dynamic-options wildcard', () => {
+  const emptySelect = observedControl({
+    accessibleIdentity: 'campus',
+    kind: 'select_single',
+    visibleLabel: 'Campus',
+    optionEvidence: 'unobserved_empty'
+  });
+  const evidence = publicFormControlEvidence([emptySelect]);
+  evidence.overflow.optionControls = 1;
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /dynamic options must be populated.*empty list cannot act as a wildcard/i);
+  assert.match(floor.errors.join('\n'), /truncated evidence cannot establish parity/i);
 });
 
 test('long article structure does not become a design-led Canvas candidate from headings alone', () => {
@@ -1366,14 +1517,24 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     const missingBrand = request.url?.startsWith('/missing-brand');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><html lang="en"><head><title>Global chrome fixture</title><meta name="viewport" content="width=device-width"><style>
-      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}.menu-toggle{display:none}
+      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}.menu-toggle{display:none}.honeypot{position:absolute;left:-10000px;width:10px;height:10px}
       @media(max-width:600px){.menu-toggle{display:block}#main-nav{display:none}#main-nav.open{display:block}}
     </style></head><body>
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
       <button class="menu-toggle" aria-label="Menu" aria-controls="main-nav" aria-expanded="false"
         onclick="this.setAttribute('aria-expanded','true');document.getElementById('main-nav').classList.add('open')">Menu</button>
       <nav id="main-nav"><a href="/">Home</a><a href="/about">About</a></nav></header>
-      <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p></main>
+      <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p>
+        <form><input type="hidden" name="form_token" value="csrf-secret">
+          <label for="fixture-email">Email address</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">
+          <label for="fixture-topic">Topic</label><select id="fixture-topic" name="topic_internal">
+            <option value="general-internal" selected>General</option><option value="admissions-internal">Admissions</option><option value="archived-internal" disabled>Archived</option>
+          </select>
+          <label><input type="checkbox" name="copy_internal" checked>Send me a copy</label>
+          <input class="honeypot" aria-hidden="true" tabindex="-1" name="website_honeypot" value="honeypot-secret">
+          <button type="submit" name="operation_internal" value="send-internal">Send</button>
+        </form>
+      </main>
       <footer><a href="/legal">Legal</a><a href="mailto:team@example.com">Email</a></footer>
     </body></html>`);
   });
@@ -1404,6 +1565,21 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     assert.ok(raw.routes.every((route) => route.signals.maskedRegionCount === 1));
     assert.ok(raw.routes.every((route) => route.signals.placeholderHrefs.length === 0));
     assert.ok(raw.routes.every((route) => route.signals.meaningfulHrefs.some((link) => link.href === 'mailto:team@example.com')));
+    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.formCount === 1));
+    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 4));
+    const publicControls = raw.routes[0].signals.publicFormControls.controls;
+    assert.deepEqual(publicControls.map((control) => control.accessibleIdentity), [
+      'email address', 'topic', 'send me a copy', 'send'
+    ]);
+    assert.deepEqual(publicControls[1].options, [
+      { label: 'General', selected: true, defaultSelected: true, disabled: false },
+      { label: 'Admissions', selected: false, defaultSelected: false, disabled: false },
+      { label: 'Archived', selected: false, defaultSelected: false, disabled: true }
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(raw.routes.map((route) => route.signals.publicFormControls)),
+      /form_token|csrf-secret|email_internal|visitor-secret|general-internal|website_honeypot|honeypot-secret|operation_internal|send-internal/
+    );
     assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
     assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
     assert.equal(raw.routes.find((route) => route.path === '/' && route.viewport.name === 'mobile').signals.mobileMenu.activationWorks, true);
