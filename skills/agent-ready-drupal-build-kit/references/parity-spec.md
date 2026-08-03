@@ -25,6 +25,8 @@ A route passes only when:
 - it is not an unintended redirect;
 - it is not an access wall, login page, draft-only page, or placeholder error;
 - canonical URL and title behavior are reviewed;
+- verifier-owned source/target title and H1 observations match the route row for every accepted exact HTML path-plus-query request; intentional identity changes use one evidenced route-level disposition, while accepted non-HTML routes reconcile status and normalized content type instead of fabricated HTML identity;
+- the target does not wholly omit source forms, behavior-bearing embeds, material heading/media structure, or most substantive visible text;
 - route-level redirect and SEO decisions are recorded.
 
 When a legacy source path+query maps to a different target, parity requires a first-hop `301` or `308` ending on the exact same-origin target path+query. The only exception is a named, reasoned, packet-evidenced `noRedirectDisposition` with `accepted: true`; duplicate mapping contracts must fully agree.

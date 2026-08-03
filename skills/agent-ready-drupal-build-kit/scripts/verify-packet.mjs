@@ -5774,6 +5774,30 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
   ) {
     reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
   }
+  for (const [index, route] of routeRows.entries()) {
+    const disposition = route?.identityChangeDisposition;
+    if (disposition === undefined || disposition === null) {
+      continue;
+    }
+    const validShape = typeof disposition === 'object' && !Array.isArray(disposition) &&
+      typeof disposition.applies === 'boolean';
+    const evidencePresent = validShape && disposition.applies === true
+      ? await nonEmptyPacketEvidence(packetDir, disposition.evidence)
+      : true;
+    if (
+      !validShape ||
+      (
+        disposition.applies === true &&
+        (
+          !String(disposition.acceptedBy ?? '').trim() ||
+          !String(disposition.rationale ?? '').trim() ||
+          !evidencePresent
+        )
+      )
+    ) {
+      reasons.push(`route-matrix.json routes[${index}].identityChangeDisposition must be a narrow boolean decision and, when it applies, include a named accepter, rationale, and packet-local evidence.`);
+    }
+  }
   const mappingContracts = [];
   for (const [index, route] of routeRows.entries()) {
     const sourceRequest = normalizeRouteRequestKey(route?.sourcePath);

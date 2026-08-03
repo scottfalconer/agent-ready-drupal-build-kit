@@ -271,6 +271,7 @@ Give the independent verifier only `review-packet/evidence/review-handoff-indepe
 The verifier must try to break each claimed gate, not confirm it politely. It should inspect the live Drupal site and packet for:
 
 - per-route item counts and collection completeness, especially listings, grids, search/discovery pages, detail pages, media pages, and legal/footer pages;
+- verifier-owned identity and gross-omission checks for every accepted source/target route, not only primary visual samples: live-bind each HTML route row's source/target title and H1, preserve declared exact path-plus-query identity, and fail complete loss of source forms, behavior-bearing embeds, material headings/media, or most substantive visible text. Explicitly declared non-HTML routes remain status/content-type checked without fabricated HTML identity requirements. An intentional title/H1 change needs one narrow route-level `identityChangeDisposition` with a named accepter, rationale, and packet-local evidence; it cannot waive semantic omissions;
 - every declared collection ownership ledger row, including source/target count reconciliation, View/collection ownership, and editor add-a-row evidence;
 - rendered media and embed presence, including iframes, videos, posters, thumbnails, documents, alt text, fallback states, and provider links;
 - raw embed/source-markup findings in editorial fields and whether `off-road-inventory.md` records them;

@@ -18,6 +18,8 @@ import {
   customExtensionFiles,
   customTestMethodId,
   agentContinuation,
+  allRouteSemanticCompletionBlocker,
+  allRouteSemanticReconciliation,
   createCriticalAssetContext,
   createLiveHttpContext,
   canvasAvailabilityFromLiveSurface,
@@ -36,6 +38,7 @@ import {
   SOURCE_SURFACE_LIMITS,
   sourceSurfaceCompletionBlocker,
   sourceSurfaceLimitsForRouteCount,
+  sharedAllRouteSemanticReconciliation,
   stateBoundRuntimeFacts,
   liveSurfaceReconciliationErrors,
   yamlTreeMatchesHead,
@@ -1583,7 +1586,7 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
       return;
     }
     const links = path === '/'
-      ? '<nav><a href="/projects">Projects</a><a href="/developers">Developers</a><a href="/podcasts">Podcasts</a></nav>'
+      ? '<nav><a href="/projects">Projects</a><a href="/projects?utm_source=home&utm_campaign=spring">Tracked projects</a><a href="/projects?view=featured&utm_medium=nav">Featured projects</a><a href="/developers">Developers</a><a href="/podcasts">Podcasts</a></nav>'
       : '';
     response.writeHead(200, { 'content-type': 'text/html' });
     response.end(`<!doctype html><html><head><title>${page[0]}</title><link rel="canonical" href="${origin}${path}"></head><body><h1>${page[1]}</h1>${links}</body></html>`);
@@ -1597,10 +1600,11 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     const incomplete = await inspectSourceSurface({ routeMatrix: matrix });
     assert.equal(incomplete.status, 'blocked');
     assert.equal(incomplete.authoritative, true);
-    assert.deepEqual(incomplete.discoveredPublicPaths, ['/', '/developers', '/podcasts', '/projects']);
+    assert.deepEqual(incomplete.discoveredPublicPaths, ['/', '/developers', '/podcasts', '/projects', '/projects?view=featured']);
     assert.match(incomplete.errors.join('\n'), /source route \/projects.*no accepted source route/i);
     assert.match(incomplete.errors.join('\n'), /source route \/developers.*no accepted source route/i);
     assert.match(incomplete.errors.join('\n'), /source route \/podcasts.*no accepted source route/i);
+    assert.match(incomplete.errors.join('\n'), /source route \/projects\?view=featured.*no accepted source route/i);
     const projects = incomplete.routes.find((route) => route.path === '/projects');
     assert.deepEqual(
       {
@@ -1617,6 +1621,9 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
       }
     );
     assert.match(projects.bodySha256, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(projects.contentType, 'text/html');
+    assert.equal(projects.intrinsicSemantics.schemaVersion, 'public-kit.route-semantics.2');
+    assert.equal(projects.intrinsicSemantics.headingCount, 1);
     assert.ok(projects.provenance.some((record) => record.kind === 'rendered-link'));
     assert.ok(projects.provenance.some((record) => record.kind === 'sitemap-url'));
     assert.equal(incomplete.budget.deadlineMs, 180_000);
@@ -1661,10 +1668,24 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     for (const path of ['/projects', '/developers', '/podcasts']) {
       completeMatrix.routes.push({ sourcePath: path, accepted: true });
     }
+    completeMatrix.routes.push({ sourcePath: '/projects?view=featured', accepted: true });
     const complete = await inspectSourceSurface({ routeMatrix: completeMatrix });
     assert.equal(complete.status, 'passed', complete.errors.join('\n'));
     assert.equal(complete.errors.length, 0);
+    assert.ok(complete.routes.some((route) => route.path === '/projects?view=featured'));
+    assert.ok(complete.discoveredPublicPaths.includes('/projects?view=featured'));
+    assert.ok(complete.routes.every((route) => !route.path.includes('utm_')));
     assert.match(complete.fingerprint, /^sha256:[a-f0-9]{64}$/);
+
+    const staleNonPrimary = structuredClone(completeMatrix);
+    Object.assign(staleNonPrimary.routes.find((route) => route.sourcePath === '/projects'), {
+      sourceStatus: 201,
+      sourceFinalPath: '/wrong-final'
+    });
+    const stale = await inspectSourceSurface({ routeMatrix: staleNonPrimary });
+    assert.equal(stale.status, 'blocked');
+    assert.match(stale.errors.join('\n'), /accepted source route \/projects returned initial HTTP 200.*records 201/i);
+    assert.match(stale.errors.join('\n'), /accepted source route \/projects ended at \/projects.*records \/wrong-final/i);
 
     const bounded = await inspectSourceSurface({ routeMatrix: matrix, limits: { maxRoutes: 2 } });
     assert.equal(bounded.status, 'blocked');
@@ -1672,6 +1693,446 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     assert.ok(bounded.budget.droppedRouteCount > 0);
     assert.match(bounded.errors.join('\n'), /exceeded its 2 route limit/i);
   }, { defaultVerificationRoutes: false });
+});
+
+test('source semantics exclude inert markup and explicitly observe accepted non-HTML routes', async () => {
+  await withHttpServer((request, response) => {
+    if (request.url === '/robots.txt' || request.url === '/sitemap.xml') {
+      response.writeHead(404, { 'content-type': 'text/plain' });
+      response.end('Not found');
+      return;
+    }
+    if (request.url === '/manual.pdf') {
+      response.writeHead(200, { 'content-type': 'application/pdf' });
+      response.end('%PDF');
+      return;
+    }
+    if (request.url === '/form') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Form</title></head><body>
+        <h1>Form</h1>
+        <button type="button">Menu</button>
+        <form method="post"><input type="hidden" name="token" value="secret"><select name="topic"><option>One</option></select><button type="submit">Send</button></form>
+      </body></html>`);
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`<!doctype html><html><head><title>Home</title></head><body>
+      <h1>Home</h1><button type="button">Menu</button>
+      <!-- <h2>Old heading</h2><form><select><option>Old</option></select></form><iframe src="/old"></iframe> -->
+      <script>const oldMarkup = '<form><button>Old</button></form><video src="old.mp4"></video>';</script>
+      <template><h2>Template heading</h2><form><input name="template"></form><object data="old.pdf"></object></template>
+      <noscript><iframe src="/fallback"></iframe></noscript>
+      <svg><foreignObject><form><button>SVG</button></form></foreignObject></svg>
+      <a href="/form">Form</a><a href="/manual.pdf">Manual</a>
+    </body></html>`);
+  }, async (sourceBaseUrl) => {
+    const routeMatrix = {
+      sourceBaseUrl,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', accepted: true }],
+      routes: [
+        { sourcePath: '/', sourceStatus: 200, sourceFinalPath: '/', sourceTitle: 'Home', sourceH1: 'Home', accepted: true },
+        { sourcePath: '/form', sourceStatus: 200, sourceFinalPath: '/form', sourceTitle: 'Form', sourceH1: 'Form', accepted: true },
+        { sourcePath: '/manual.pdf', sourceStatus: 200, sourceFinalPath: '/manual.pdf', sourceTitle: '', sourceH1: '', accepted: true }
+      ],
+      sourceRouteDriftClassification: []
+    };
+    const census = await inspectSourceSurface({ routeMatrix });
+    assert.equal(census.status, 'passed', census.errors.join('\n'));
+    const home = census.routes.find((route) => route.path === '/');
+    assert.equal(home.intrinsicSemantics.headingCount, 1);
+    assert.equal(home.intrinsicSemantics.formCount, 0);
+    assert.equal(home.intrinsicSemantics.formControlCount, 0);
+    assert.equal(home.intrinsicSemantics.behaviorBearingMediaCount, 0);
+    const form = census.routes.find((route) => route.path === '/form');
+    assert.equal(form.intrinsicSemantics.formCount, 1);
+    assert.equal(form.intrinsicSemantics.formControlCount, 2);
+    const manual = census.routes.find((route) => route.path === '/manual.pdf');
+    assert.equal(manual.isHtml, false);
+    assert.equal(manual.contentType, 'application/pdf');
+    assert.equal(manual.intrinsicSemantics, null);
+
+    const mediaRoute = routeMatrix.routes.find((route) => route.sourcePath === '/manual.pdf');
+    const targetSurface = {
+      passed: true,
+      routeChecks: [{
+        requestedUrl: 'https://target.example/manual.pdf',
+        finalUrl: 'https://target.example/manual.pdf',
+        initialStatus: 200,
+        finalStatus: 200,
+        contentType: 'application/pdf',
+        isHtml: false,
+        title: '',
+        h1: '',
+        intrinsicSemantics: null
+      }]
+    };
+    const matchingMedia = allRouteSemanticReconciliation({
+      routeMatrix: { routes: [{ ...mediaRoute, targetPath: '/manual.pdf', targetTitle: '', targetH1: '' }] },
+      serverRenderedResponseSurface: targetSurface,
+      sourceSurfaceCensus: census
+    });
+    assert.equal(matchingMedia.status, 'passed', matchingMedia.errors.join('\n'));
+    assert.equal(matchingMedia.routeChecks[0].htmlSemanticComparisonApplied, false);
+    assert.equal(matchingMedia.routeChecks[0].contentTypeComparisonApplied, true);
+
+    const changedType = structuredClone(targetSurface);
+    changedType.routeChecks[0].contentType = 'application/octet-stream';
+    const mismatchingMedia = allRouteSemanticReconciliation({
+      routeMatrix: { routes: [{ ...mediaRoute, targetPath: '/manual.pdf', targetTitle: '', targetH1: '' }] },
+      serverRenderedResponseSurface: changedType,
+      sourceSurfaceCensus: census
+    });
+    assert.equal(mismatchingMedia.status, 'blocked');
+    assert.match(mismatchingMedia.errors.join('\n'), /content type changed from application\/pdf to application\/octet-stream/i);
+  }, { defaultVerificationRoutes: false });
+});
+
+test('all-route semantic reconciliation live-binds exact query identities and blocks gross omissions', () => {
+  const packetDir = mkdtempSync(join(tmpdir(), 'all-route-semantics-'));
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeFileSync(join(packetDir, 'evidence', 'identity-change.txt'), 'Accepted identity change.\n');
+  const completeSemantics = {
+    behaviorBearingMediaCount: 1,
+    formControlCount: 3,
+    formCount: 1,
+    headingCount: 3,
+    linkCount: 8,
+    mediaElementCount: 5,
+    visibleTextLength: 1200
+  };
+  const route = {
+    sourcePath: '/program?audience=parents',
+    sourceStatus: 200,
+    sourceFinalPath: '/program?audience=parents',
+    sourceTitle: 'Program',
+    sourceH1: 'Program',
+    targetPath: '/program?audience=parents',
+    targetTitle: 'Program',
+    targetH1: 'Program',
+    accepted: true
+  };
+  const sourceSurfaceCensus = {
+    authoritative: true,
+    status: 'passed',
+    routes: [{
+      path: '/program?audience=parents',
+      finalUrl: 'https://source.example/program?audience=parents',
+      initialStatus: 200,
+      contentType: 'text/html',
+      isHtml: true,
+      title: 'Program',
+      h1: 'Program',
+      intrinsicSemantics: completeSemantics
+    }]
+  };
+  const serverRenderedResponseSurface = {
+    passed: true,
+    routeChecks: [{
+      requestedUrl: 'https://target.example/program?audience=parents',
+      finalUrl: 'https://target.example/program?audience=parents',
+      initialStatus: 200,
+      finalStatus: 200,
+      contentType: 'text/html',
+      isHtml: true,
+      title: 'Program',
+      h1: 'Program',
+      intrinsicSemantics: { ...completeSemantics, visibleTextLength: 1000 }
+    }]
+  };
+  const passing = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [route] },
+    serverRenderedResponseSurface,
+    sourceSurfaceCensus
+  });
+  assert.equal(passing.status, 'passed', passing.errors.join('\n'));
+  assert.equal(passing.routeChecks[0].passed, true);
+  assert.match(passing.fingerprint, /^sha256:[a-f0-9]{64}$/);
+
+  const wrongQuery = structuredClone(sourceSurfaceCensus);
+  wrongQuery.routes[0].path = '/program?audience=students';
+  const missingExactSource = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [route] },
+    serverRenderedResponseSurface,
+    sourceSurfaceCensus: wrongQuery
+  });
+  assert.match(missingExactSource.errors.join('\n'), /exactly one verifier-owned source observation/i);
+
+  const wrongDeclaredIdentity = structuredClone(route);
+  wrongDeclaredIdentity.targetH1 = 'Menu label';
+  const wrongDeclared = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [wrongDeclaredIdentity] },
+    serverRenderedResponseSurface,
+    sourceSurfaceCensus
+  });
+  assert.match(wrongDeclared.errors.join('\n'), /targetH1 is not live-bound/i);
+
+  const changedTarget = structuredClone(serverRenderedResponseSurface);
+  changedTarget.routeChecks[0].title = 'New program title';
+  changedTarget.routeChecks[0].h1 = 'New program title';
+  const changedRoute = {
+    ...route,
+    targetTitle: 'New program title',
+    targetH1: 'New program title'
+  };
+  const undispositionedChange = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [changedRoute] },
+    serverRenderedResponseSurface: changedTarget,
+    sourceSurfaceCensus
+  });
+  assert.match(undispositionedChange.errors.join('\n'), /differ without an accepted identityChangeDisposition/i);
+  changedRoute.identityChangeDisposition = {
+    applies: true,
+    acceptedBy: 'Site owner',
+    rationale: 'The owner approved the clearer public identity.',
+    evidence: 'evidence/identity-change.txt'
+  };
+  const dispositionedChange = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [changedRoute] },
+    serverRenderedResponseSurface: changedTarget,
+    sourceSurfaceCensus
+  });
+  assert.equal(dispositionedChange.status, 'passed', dispositionedChange.errors.join('\n'));
+  assert.equal(dispositionedChange.routeChecks[0].acceptedIdentityChangeDisposition, true);
+
+  const omittedTarget = structuredClone(serverRenderedResponseSurface);
+  omittedTarget.routeChecks[0].intrinsicSemantics = {
+    behaviorBearingMediaCount: 0,
+    formControlCount: 0,
+    formCount: 0,
+    headingCount: 0,
+    linkCount: 1,
+    mediaElementCount: 0,
+    visibleTextLength: 80
+  };
+  const omissions = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [route] },
+    serverRenderedResponseSurface: omittedTarget,
+    sourceSurfaceCensus
+  });
+  assert.equal(omissions.status, 'blocked');
+  assert.match(omissions.errors.join('\n'), /source forms.*target has none/i);
+  assert.match(omissions.errors.join('\n'), /behavior-bearing media or embeds.*target has none/i);
+  assert.match(omissions.errors.join('\n'), /material heading structure.*no headings/i);
+  assert.match(omissions.errors.join('\n'), /material media.*no media elements/i);
+  assert.match(omissions.errors.join('\n'), /visible text collapsed to 80\/1200/i);
+});
+
+test('all-route form omission uses actual forms and form-associated controls', () => {
+  const route = {
+    accepted: true,
+    sourcePath: '/contact',
+    sourceStatus: 200,
+    sourceFinalPath: '/contact',
+    sourceTitle: 'Contact',
+    sourceH1: 'Contact',
+    targetPath: '/contact',
+    targetTitle: 'Contact',
+    targetH1: 'Contact'
+  };
+  const base = {
+    behaviorBearingMediaCount: 0,
+    headingCount: 1,
+    linkCount: 1,
+    mediaElementCount: 0,
+    visibleTextLength: 300
+  };
+  const reconcile = (sourceSemantics, targetSemantics) => allRouteSemanticReconciliation({
+    routeMatrix: { routes: [route] },
+    sourceSurfaceCensus: {
+      authoritative: true,
+      status: 'passed',
+      routes: [{
+        path: '/contact',
+        finalUrl: 'https://source.example/contact',
+        initialStatus: 200,
+        contentType: 'text/html',
+        isHtml: true,
+        title: 'Contact',
+        h1: 'Contact',
+        intrinsicSemantics: sourceSemantics
+      }]
+    },
+    serverRenderedResponseSurface: {
+      passed: true,
+      routeChecks: [{
+        requestedUrl: 'https://target.example/contact',
+        finalUrl: 'https://target.example/contact',
+        initialStatus: 200,
+        finalStatus: 200,
+        contentType: 'text/html',
+        isHtml: true,
+        title: 'Contact',
+        h1: 'Contact',
+        intrinsicSemantics: targetSemantics
+      }]
+    }
+  });
+
+  const unrelatedButtonOnly = reconcile(
+    { ...base, formCount: 0, formControlCount: 1 },
+    { ...base, formCount: 0, formControlCount: 0 }
+  );
+  assert.equal(unrelatedButtonOnly.status, 'passed', unrelatedButtonOnly.errors.join('\n'));
+
+  const missingFormMaskedByButton = reconcile(
+    { ...base, formCount: 1, formControlCount: 20 },
+    { ...base, formCount: 0, formControlCount: 1 }
+  );
+  assert.equal(missingFormMaskedByButton.status, 'blocked');
+  assert.match(missingFormMaskedByButton.errors.join('\n'), /source forms.*target has none/i);
+
+  const emptyTargetForm = reconcile(
+    { ...base, formCount: 1, formControlCount: 2 },
+    { ...base, formCount: 1, formControlCount: 0 }
+  );
+  assert.equal(emptyTargetForm.status, 'blocked');
+  assert.match(emptyTargetForm.errors.join('\n'), /target forms have none/i);
+});
+
+test('all-route query labels survive final report privacy sanitization without double hashing', () => {
+  const rawQuery = '?audience=parents';
+  const expectedDigest = createHash('sha256').update(rawQuery).digest('hex');
+  const doubleDigest = createHash('sha256')
+    .update(`?query-sha256=${expectedDigest}`)
+    .digest('hex');
+  const route = {
+    accepted: true,
+    sourcePath: `/program${rawQuery}`,
+    sourceStatus: 200,
+    sourceFinalPath: `/program${rawQuery}`,
+    sourceTitle: 'Program',
+    sourceH1: 'Program',
+    targetPath: `/program${rawQuery}`,
+    targetTitle: 'Changed program',
+    targetH1: 'Changed program'
+  };
+  const semantics = {
+    behaviorBearingMediaCount: 0,
+    formControlCount: 0,
+    formCount: 0,
+    headingCount: 1,
+    linkCount: 1,
+    mediaElementCount: 0,
+    visibleTextLength: 300
+  };
+  const result = allRouteSemanticReconciliation({
+    routeMatrix: { routes: [route] },
+    sourceSurfaceCensus: {
+      authoritative: true,
+      status: 'passed',
+      routes: [{
+        path: `/program${rawQuery}`,
+        finalUrl: `https://source.example/program${rawQuery}`,
+        initialStatus: 200,
+        contentType: 'text/html',
+        isHtml: true,
+        title: 'Program',
+        h1: 'Program',
+        intrinsicSemantics: semantics
+      }]
+    },
+    serverRenderedResponseSurface: {
+      passed: true,
+      routeChecks: [{
+        requestedUrl: `https://target.example/program${rawQuery}`,
+        finalUrl: `https://target.example/program${rawQuery}`,
+        initialStatus: 200,
+        finalStatus: 200,
+        contentType: 'text/html',
+        isHtml: true,
+        title: 'Changed program',
+        h1: 'Changed program',
+        intrinsicSemantics: semantics
+      }]
+    }
+  });
+  assert.equal(result.status, 'blocked');
+  const sharedResult = sharedAllRouteSemanticReconciliation(result, '/tmp/review-packet');
+  const blocker = allRouteSemanticCompletionBlocker(result);
+  const sharedBlocker = sharedAllRouteSemanticReconciliation(blocker, '/tmp/review-packet');
+  const finalJson = JSON.stringify({ sharedResult, sharedBlocker });
+  assert.match(finalJson, new RegExp(`\\?query-sha256=${expectedDigest}`));
+  assert.doesNotMatch(finalJson, /audience=parents/);
+  assert.doesNotMatch(finalJson, new RegExp(doubleDigest));
+  assert.equal(blocker.code, 'parity.all-route-semantics');
+});
+
+test('all-route semantic report bounds route rows and errors while preserving full-result totals', () => {
+  const routeCount = 250;
+  const semantics = {
+    behaviorBearingMediaCount: 0,
+    formControlCount: 0,
+    formCount: 0,
+    headingCount: 1,
+    linkCount: 1,
+    mediaElementCount: 0,
+    visibleTextLength: 300
+  };
+  const routes = [];
+  const sourceRoutes = [];
+  const targetRoutes = [];
+  for (let index = 0; index < routeCount; index += 1) {
+    const path = `/route-${index}`;
+    routes.push({
+      accepted: true,
+      sourcePath: path,
+      sourceStatus: 200,
+      sourceFinalPath: path,
+      sourceTitle: 'Source',
+      sourceH1: 'Source',
+      targetPath: path,
+      targetTitle: 'Target',
+      targetH1: 'Target'
+    });
+    sourceRoutes.push({
+      path,
+      finalUrl: `https://source.example${path}`,
+      initialStatus: 200,
+      contentType: 'text/html',
+      isHtml: true,
+      title: 'Source',
+      h1: 'Source',
+      intrinsicSemantics: semantics
+    });
+    targetRoutes.push({
+      requestedUrl: `https://target.example${path}`,
+      finalUrl: `https://target.example${path}`,
+      initialStatus: 200,
+      finalStatus: 200,
+      contentType: 'text/html',
+      isHtml: true,
+      title: 'Target',
+      h1: 'Target',
+      intrinsicSemantics: semantics
+    });
+  }
+  const result = allRouteSemanticReconciliation({
+    routeMatrix: { routes },
+    sourceSurfaceCensus: { authoritative: true, status: 'passed', routes: sourceRoutes },
+    serverRenderedResponseSurface: { passed: true, routeChecks: targetRoutes }
+  });
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.routeCount, routeCount);
+  assert.equal(result.failedRouteCount, routeCount);
+  assert.equal(result.routeCheckCount, routeCount);
+  assert.equal(result.routeChecks.length, 200);
+  assert.equal(result.omittedRouteCheckCount, 50);
+  assert.equal(result.errorCount, routeCount);
+  assert.equal(result.errors.length, 200);
+  assert.equal(result.omittedErrorCount, 50);
+  assert.match(result.routeChecksFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(result.errorsFingerprint, /^sha256:[a-f0-9]{64}$/);
+  const blocker = allRouteSemanticCompletionBlocker(result);
+  assert.equal(blocker.code, 'parity.all-route-semantics');
+  assert.equal(blocker.attemptedEvidence.length, 2);
+  assert.match(blocker.message, /failed on 250 of 250 accepted routes/i);
 });
 
 test('source crawl expansion couples every hard budget and gives an exact owner-authorized continuation', () => {
@@ -5206,6 +5667,7 @@ test('declared query route variants are fetched and state-bound distinctly while
       });
       const first = await inspect();
       assert.equal(first.liveTargetValid, true, first.errors.join('\n'));
+      assert.doesNotMatch(JSON.stringify(first), /(?:type=speaker|year=2026)/);
       assert.equal(
         first.routeChecks.filter((route) => route.targetPath.startsWith('/search'))
           .every((route) => route.actualMetadata.canonicalUrl === `${baseUrl}/search`),
@@ -6511,8 +6973,20 @@ process.stdout.write(outputs.get(command) + '\\n');
       copyTemplatePacket(packetDir);
       const routeMatrix = liveRouteMatrix(baseUrl);
       routeMatrix.sourceBaseUrl = sourceBaseUrl;
+      routeMatrix.routes[0].sourceTitle = 'Source site';
+      routeMatrix.routes[0].sourceH1 = 'Source home';
+      routeMatrix.routes[0].identityChangeDisposition = {
+        applies: true,
+        acceptedBy: 'Fixture owner',
+        rationale: 'This fixture intentionally uses different source and target identities.',
+        evidence: 'evidence/identity-change.txt'
+      };
       writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
       addQualifyingReviewEvidence(packetDir, baseUrl);
+      writeFileSync(
+        join(packetDir, 'evidence', 'identity-change.txt'),
+        'The fixture owner accepted the source-to-target identity change.\n'
+      );
       mutateText(join(packetDir, 'operator-run.md'), (text) =>
         text.replace('- [x] Repeatability accepted', '- [ ] Repeatability accepted'));
       mutateText(join(packetDir, 'maintainer-review.md'), (text) =>
@@ -6942,6 +7416,19 @@ test('completion fails closed when structured gate evidence or applicability dis
           accepted: true,
           notes: 'Representative detail route is not included in primaryRoutes.'
         });
+      }
+    },
+    {
+      name: 'route-identity-change-disposition',
+      file: 'route-matrix.json',
+      expected: /identityChangeDisposition.*named accepter.*packet-local evidence/i,
+      mutate: (value) => {
+        value.routes[0].identityChangeDisposition = {
+          applies: true,
+          acceptedBy: '',
+          rationale: 'The route identity intentionally changed.',
+          evidence: 'evidence/missing-identity-change.txt'
+        };
       }
     },
     {

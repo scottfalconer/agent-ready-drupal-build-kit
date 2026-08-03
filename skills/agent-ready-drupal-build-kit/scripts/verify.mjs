@@ -127,6 +127,9 @@ const MAX_SUMMARY_TEXT_BYTES = 300;
 const MAX_CLI_FAILURE_FAMILIES = 20;
 const MAX_CLI_FAILURE_EXAMPLES = 3;
 const MAX_CLI_FAILURE_LINE_BYTES = 300;
+const MAX_ALL_ROUTE_SEMANTIC_ERRORS = 200;
+const MAX_ALL_ROUTE_SEMANTIC_ROUTE_CHECKS = 200;
+const MAX_ALL_ROUTE_SEMANTIC_BLOCKER_EXAMPLES = 3;
 const SOURCE_PROGRESS_ROUTE_INTERVAL = 64;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
@@ -764,11 +767,23 @@ function intrinsicUrl(value, finalUrl, { asset = false } = {}) {
   }
 }
 
-function intrinsicRouteSemantics(html, finalUrl) {
+function renderedSemanticHtml(html) {
   const bodyMatch = String(html).match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
-  const visibleSource = (bodyMatch?.[1] ?? String(html))
+  return (bodyMatch?.[1] ?? String(html))
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|template|noscript|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(script|style|template|noscript|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
+}
+
+function formElements(html) {
+  return [...String(html).matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form\s*>/gi)].map((match) => ({
+    attributes: tagAttributes(`<form ${match[1]}>`),
+    body: match[2]
+  }));
+}
+
+function intrinsicRouteSemantics(html, finalUrl) {
+  const renderedHtml = renderedSemanticHtml(html);
+  const visibleSource = renderedHtml
     .replace(/<input\b[^>]*>/gi, ' ')
     .replace(/<[^>]+>/g, ' ');
   let visibleTextValue = decodeEntities(visibleSource);
@@ -779,11 +794,11 @@ function intrinsicRouteSemantics(html, finalUrl) {
     // caller uses this helper with a malformed synthetic value.
   }
   const visibleText = normalizeText(visibleTextValue);
-  const links = matchingTags(html, 'a', (attributes) => Boolean(attributes.href))
+  const links = matchingTags(renderedHtml, 'a', (attributes) => Boolean(attributes.href))
     .map((attributes) => intrinsicUrl(attributes.href, finalUrl));
   const media = [];
   for (const tagName of ['img', 'source', 'video', 'audio', 'iframe']) {
-    for (const attributes of matchingTags(html, tagName, () => true)) {
+    for (const attributes of matchingTags(renderedHtml, tagName, () => true)) {
       const asset = tagName !== 'iframe';
       for (const attribute of ['src', 'poster']) {
         if (attributes[attribute]) {
@@ -800,18 +815,30 @@ function intrinsicRouteSemantics(html, finalUrl) {
       }
     }
   }
-  const forms = matchingTags(html, 'form', () => true).map((attributes) => ({
+  const renderedForms = formElements(renderedHtml);
+  const forms = renderedForms.map(({ attributes }) => ({
     action: intrinsicUrl(attributes.action || finalUrl, finalUrl),
     method: String(attributes.method || 'get').toLowerCase()
   }));
+  const headingCount = (renderedHtml.match(/<h[1-6]\b[^>]*>/gi) ?? []).length;
+  const mediaElementCount = ['img', 'picture', 'video', 'audio', 'iframe', 'object', 'embed']
+    .reduce((total, tagName) => total + matchingTags(renderedHtml, tagName, () => true).length, 0);
+  const behaviorBearingMediaCount = ['video', 'audio', 'iframe', 'object', 'embed']
+    .reduce((total, tagName) => total + matchingTags(renderedHtml, tagName, () => true).length, 0);
   const controls = [];
-  for (const tagName of ['input', 'select', 'textarea', 'button']) {
-    for (const attributes of matchingTags(html, tagName, () => true)) {
-      controls.push({
-        tag: tagName,
-        name: String(attributes.name ?? ''),
-        type: String(attributes.type ?? '').toLowerCase()
-      });
+  for (const form of renderedForms) {
+    for (const tagName of ['input', 'select', 'textarea', 'button']) {
+      for (const attributes of matchingTags(form.body, tagName, () => true)) {
+        const type = String(attributes.type ?? '').toLowerCase();
+        if (tagName === 'input' && type === 'hidden') {
+          continue;
+        }
+        controls.push({
+          tag: tagName,
+          name: String(attributes.name ?? ''),
+          type
+        });
+      }
     }
   }
   const semantics = {
@@ -821,14 +848,17 @@ function intrinsicRouteSemantics(html, finalUrl) {
     linkCount: links.length,
     mediaTargetsSha256: stateSha256(media),
     mediaCount: media.length,
+    mediaElementCount,
+    behaviorBearingMediaCount,
+    headingCount,
     formShapeSha256: stateSha256({ forms, controls }),
     formCount: forms.length,
     formControlCount: controls.length
   };
   return {
-    schemaVersion: 'public-kit.route-semantics.1',
+    schemaVersion: 'public-kit.route-semantics.2',
     ...semantics,
-    fingerprint: stateSha256({ schemaVersion: 'public-kit.route-semantics.1', ...semantics })
+    fingerprint: stateSha256({ schemaVersion: 'public-kit.route-semantics.2', ...semantics })
   };
 }
 
@@ -1576,8 +1606,12 @@ async function requestFollowingRedirects(
 }
 
 const SOURCE_NON_DOCUMENT_EXTENSION_RE = /\.(?:avif|bmp|css|csv|docx?|eot|gif|gz|ico|jpe?g|js|json|m4a|m4v|mov|mp3|mp4|ogg|ogv|otf|pdf|png|pptx?|rar|rss|svg|tar|tiff?|ttf|txt|wav|webm|webp|woff2?|xlsx?|xml|zip)$/i;
+const SOURCE_TRACKING_QUERY_PARAMETER_RE = /^(?:utm_(?:source|medium|campaign|term|content|id|source_platform|creative_format|marketing_tactic)|gclid|dclid|fbclid|msclkid|mc_cid|mc_eid|_ga|_gl)$/i;
 
-function sourceDocumentPath(value, sourceBaseUrl) {
+function sourceRequestPath(value, sourceBaseUrl, {
+  allowNonDocument = false,
+  canonicalizeKnownTracking = false
+} = {}) {
   try {
     const url = new URL(String(value ?? ''), sourceBaseUrl);
     if (
@@ -1589,10 +1623,35 @@ function sourceDocumentPath(value, sourceBaseUrl) {
       return '';
     }
     const path = normalizePath(url.pathname);
-    return SOURCE_NON_DOCUMENT_EXTENSION_RE.test(path) ? '' : path;
+    if (!allowNonDocument && SOURCE_NON_DOCUMENT_EXTENSION_RE.test(path)) {
+      return '';
+    }
+    if (!canonicalizeKnownTracking || !url.search) {
+      return requestPathAndSearch(url);
+    }
+    const retainedParameters = url.search.slice(1).split('&').filter((parameter) => {
+      const rawKey = parameter.split('=', 1)[0].replace(/\+/g, ' ');
+      let key = rawKey;
+      try {
+        key = decodeURIComponent(rawKey);
+      } catch {
+        // Preserve malformed or nonstandard query keys. Only known, safely
+        // decoded tracking parameters may be removed from discovery identity.
+      }
+      return !SOURCE_TRACKING_QUERY_PARAMETER_RE.test(key);
+    });
+    return `${path}${retainedParameters.length > 0 ? `?${retainedParameters.join('&')}` : ''}`;
   } catch {
     return '';
   }
+}
+
+function sourceDocumentPath(value, sourceBaseUrl) {
+  return sourceRequestPath(value, sourceBaseUrl, { canonicalizeKnownTracking: true });
+}
+
+function responseContentType(headers) {
+  return String(headers?.['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase();
 }
 
 function sourceRenderedRouteLinks(html, finalUrl, sourceOrigin) {
@@ -1649,10 +1708,10 @@ function sourceBoundaryDisposition(routeMatrix, independentVerification, path, s
   if (!boundaryKind) return null;
   const record = (Array.isArray(routeMatrix?.sourceRouteDriftClassification)
     ? routeMatrix.sourceRouteDriftClassification
-    : []).find((candidate) => normalizePath(candidate?.sourcePath) === path);
+    : []).find((candidate) => requestPathAndSearch(candidate?.sourcePath) === path);
   const check = (Array.isArray(independentVerification?.routeDriftDispositionChecks)
     ? independentVerification.routeDriftDispositionChecks
-    : []).find((candidate) => normalizePath(candidate?.sourcePath) === path);
+    : []).find((candidate) => requestPathAndSearch(candidate?.sourcePath) === path);
   const allowedClassifications = boundaryKind === 'private'
     ? new Set(['private_boundary'])
     : new Set(['legacy', 'private_boundary', 'test_staging']);
@@ -1687,7 +1746,7 @@ function sourceBoundaryDisposition(routeMatrix, independentVerification, path, s
 
 function sourceSurfaceNotRun(reason, { status = 'not_run', authoritative = false } = {}) {
   return {
-    schemaVersion: 'public-kit.source-surface-census.1',
+    schemaVersion: 'public-kit.source-surface-census.2',
     checkedAt: new Date().toISOString(),
     status,
     authoritative,
@@ -2143,8 +2202,14 @@ export async function inspectSourceSurface({
     records.set(`${normalized.kind}\0${normalized.referrer}`, normalized);
     map.set(key, records);
   };
-  const enqueueRoute = (value, provenance) => {
-    const path = sourceDocumentPath(value, sourceBaseUrl);
+  const enqueueRoute = (value, provenance, {
+    allowNonDocument = false,
+    preserveExactQuery = false
+  } = {}) => {
+    const path = sourceRequestPath(value, sourceBaseUrl, {
+      allowNonDocument,
+      canonicalizeKnownTracking: !preserveExactQuery
+    });
     if (!path) return;
     addProvenance(routeProvenance, path, provenance);
     if (queuedRoutes.has(path)) return;
@@ -2173,11 +2238,18 @@ export async function inspectSourceSurface({
     sitemapQueue.push(url.href);
   };
 
-  enqueueRoute('/', { kind: 'homepage', referrer: routeMatrix.sourceBaseUrl });
+  enqueueRoute(
+    '/',
+    { kind: 'homepage', referrer: routeMatrix.sourceBaseUrl },
+    { allowNonDocument: true, preserveExactQuery: true }
+  );
   for (const route of Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []) {
-    enqueueRoute(route?.sourcePath, { kind: 'declared-primary', referrer: 'route-matrix.json#primaryRoutes' });
+    enqueueRoute(
+      route?.sourcePath,
+      { kind: 'declared-primary', referrer: 'route-matrix.json#primaryRoutes' },
+      { allowNonDocument: true, preserveExactQuery: true }
+    );
   }
-
   const drainRouteQueue = async (phase, { throughIndex = Number.POSITIVE_INFINITY } = {}) => {
     while (routeCursor < routeQueue.length && routeCursor < throughIndex) {
       const batchEnd = Math.min(
@@ -2194,6 +2266,7 @@ export async function inspectSourceSurface({
           const routeErrors = [];
           try {
             const response = await requestFollowingRedirects(url, {
+              captureBody: 'html',
               liveHttpContext: context,
               maxBodyBytes: effectiveLimits.maxBodyBytes
             });
@@ -2232,13 +2305,16 @@ export async function inspectSourceSurface({
               boundaryConfirmationStatus,
               boundaryConfirmed,
               canonical: metadata.canonicalUrl ?? '',
+              contentType: responseContentType(response.headers),
               discoveredLinks: extracted.paths,
               errors: routeErrors,
               finalUrl: response.finalUrl,
               h1: isHtml ? elementText(response.body, 'h1') : '',
               initialStatus: response.initialStatus,
+              intrinsicSemantics: isHtml ? intrinsicRouteSemantics(response.body, response.finalUrl) : null,
               isHtml,
               path,
+              requestKeySha256: stateSha256(path),
               status: response.status,
               title: isHtml ? elementText(response.body, 'title') : ''
             };
@@ -2246,8 +2322,10 @@ export async function inspectSourceSurface({
             return {
               bodySha256: '', canonical: '', discoveredLinks: [],
               boundaryConfirmationStatus: 0, boundaryConfirmed: false,
+              contentType: '',
               errors: [`Source route ${path} could not be inspected: ${error.message}`],
-              finalUrl: '', h1: '', initialStatus: 0, isHtml: false, path, status: 0, title: ''
+              finalUrl: '', h1: '', initialStatus: 0, intrinsicSemantics: null,
+              isHtml: false, path, requestKeySha256: stateSha256(path), status: 0, title: ''
             };
           }
         });
@@ -2262,9 +2340,16 @@ export async function inspectSourceSurface({
           enqueueRoute(linkedPath, { kind: 'rendered-link', referrer: record.path });
         }
         if (record.finalUrl) {
-          const finalPath = sourceDocumentPath(record.finalUrl, sourceBaseUrl);
+          const finalPath = sourceRequestPath(record.finalUrl, sourceBaseUrl, {
+            allowNonDocument: true,
+            canonicalizeKnownTracking: true
+          });
           if (finalPath && finalPath !== record.path) {
-            enqueueRoute(finalPath, { kind: 'redirect-final', referrer: record.path });
+            enqueueRoute(
+              record.finalUrl,
+              { kind: 'redirect-final', referrer: record.path },
+              { allowNonDocument: true }
+            );
           }
         }
       }
@@ -2277,6 +2362,15 @@ export async function inspectSourceSurface({
   emitProgress('primary', 'started', { force: true });
   const primaryPhaseCompleted = await drainRouteQueue('primary', { throughIndex: primaryRouteCount });
   emitProgress('primary', primaryPhaseCompleted ? 'completed' : 'blocked', { force: true });
+  for (const route of Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : []) {
+    if (route?.accepted === true) {
+      enqueueRoute(
+        route?.sourcePath,
+        { kind: 'accepted-route', referrer: 'route-matrix.json#routes' },
+        { allowNonDocument: true, preserveExactQuery: true }
+      );
+    }
+  }
   emitProgress('discovery', primaryPhaseCompleted ? 'started' : 'blocked', { force: true });
 
   let robots = null;
@@ -2374,10 +2468,10 @@ export async function inspectSourceSurface({
 
   const declaredSourcePaths = new Set([
     ...(Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : [])
-      .map((route) => normalizePath(route?.sourcePath)),
+      .map((route) => requestPathAndSearch(route?.sourcePath)),
     ...(Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
       .filter((route) => route?.accepted === true)
-      .map((route) => normalizePath(route?.sourcePath))
+      .map((route) => requestPathAndSearch(route?.sourcePath))
   ].filter(Boolean));
   const discoveredPublicPaths = new Set();
   for (const record of routes.values()) {
@@ -2407,28 +2501,29 @@ export async function inspectSourceSurface({
     }
   }
 
-  const declaredPrimaryByPath = new Map((Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : [])
-    .map((route) => [normalizePath(route?.sourcePath), route]));
-  const sourceRowsByPath = new Map((Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
-    .map((route) => [normalizePath(route?.sourcePath), route]));
-  for (const [path] of declaredPrimaryByPath) {
+  const acceptedSourceRowsByPath = new Map((Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+    .filter((route) => route?.accepted === true)
+    .map((route) => [requestPathAndSearch(route?.sourcePath), route]));
+  for (const [path, declared] of acceptedSourceRowsByPath) {
     const record = routes.get(path);
-    const declared = sourceRowsByPath.get(path);
-    if (!record || !declared) continue;
+    if (!record) {
+      errors.push(`Accepted source route ${path} has no verifier-owned source observation.`);
+      continue;
+    }
     const sourceStatusDeclared = declared.sourceStatus !== null && declared.sourceStatus !== undefined && declared.sourceStatus !== '';
     const expectedStatus = Number(declared.sourceStatus);
-    if (sourceStatusDeclared && Number.isFinite(expectedStatus) && expectedStatus !== record.initialStatus) {
-      errors.push(`Primary source route ${path} returned HTTP ${record.initialStatus}; route-matrix.json records ${expectedStatus}.`);
+    if (sourceStatusDeclared && (!Number.isFinite(expectedStatus) || expectedStatus !== record.initialStatus)) {
+      errors.push(`Accepted source route ${path} returned initial HTTP ${record.initialStatus}; route-matrix.json records ${String(declared.sourceStatus)}.`);
     }
-    const expectedFinalPath = normalizePath(declared.sourceFinalPath);
-    if (expectedFinalPath && expectedFinalPath !== normalizePath(record.finalUrl)) {
-      errors.push(`Primary source route ${path} ended at ${normalizePath(record.finalUrl)}; route-matrix.json records ${expectedFinalPath}.`);
+    const expectedFinalPath = requestPathAndSearch(declared.sourceFinalPath);
+    if (expectedFinalPath && expectedFinalPath !== requestPathAndSearch(record.finalUrl)) {
+      errors.push(`Accepted source route ${path} ended at ${requestPathAndSearch(record.finalUrl)}; route-matrix.json records ${expectedFinalPath}.`);
     }
     if (String(declared.sourceTitle ?? '').trim() && declared.sourceTitle !== record.title) {
-      errors.push(`Primary source route ${path} title does not match verifier-owned source readback.`);
+      errors.push(`Accepted source route ${path} title does not match verifier-owned source readback.`);
     }
     if (String(declared.sourceH1 ?? '').trim() && declared.sourceH1 !== record.h1) {
-      errors.push(`Primary source route ${path} H1 does not match verifier-owned source readback.`);
+      errors.push(`Accepted source route ${path} H1 does not match verifier-owned source readback.`);
     }
   }
 
@@ -2452,7 +2547,7 @@ export async function inspectSourceSurface({
   };
   emitProgress('discovery', errors.length === 0 ? 'completed' : 'blocked', { force: true });
   return {
-    schemaVersion: 'public-kit.source-surface-census.1',
+    schemaVersion: 'public-kit.source-surface-census.2',
     checkedAt,
     status: errors.length === 0 ? 'passed' : 'blocked',
     authoritative: true,
@@ -2872,28 +2967,42 @@ async function inspectServerRenderedResponseSurface(baseUrl, routeMatrix, liveHt
         const extracted = isHtml
           ? serverResponseLinks(response.body, response.finalUrl, baseUrl.origin, sourceOrigin)
           : { errors: [], internalLinks: [], sourceOriginLinks: [] };
+        const h1 = isHtml ? elementText(response.body, 'h1') : '';
+        const title = isHtml ? elementText(response.body, 'title') : '';
+        const intrinsicSemantics = isHtml
+          ? intrinsicRouteSemantics(response.body, response.finalUrl)
+          : null;
         errors.push(...extracted.errors);
         return {
           bodySha256: `sha256:${sha256(response.body)}`,
+          contentType: responseContentType(response.headers),
           errors,
           finalStatus: response.status,
           finalUrl: response.finalUrl,
+          h1,
+          h1Sha256: stateSha256(normalizeText(h1)),
           initialStatus: response.initialStatus,
           internalLinks: extracted.internalLinks,
+          intrinsicSemantics,
           isHtml,
           passed: errors.length === 0,
           reasons: [...seed.reasons],
+          requestKeySha256: stateSha256(requestPathAndSearch(seed.url)),
           requestedUrl: seed.url.href,
-          sourceOriginLinks: extracted.sourceOriginLinks
+          sourceOriginLinks: extracted.sourceOriginLinks,
+          title,
+          titleSha256: stateSha256(normalizeText(title))
         };
       } catch (error) {
         errors.push(`${redactedPath(seed.url.href, baseUrl)} could not be fetched for server-response link inspection: ${error.message}`);
         return {
+          contentType: '',
           errors,
           internalLinks: [],
           isHtml: false,
           passed: false,
           reasons: [...seed.reasons],
+          requestKeySha256: stateSha256(requestPathAndSearch(seed.url)),
           requestedUrl: seed.url.href,
           sourceOriginLinks: []
         };
@@ -12370,6 +12479,256 @@ function packetLocalEvidencePresent(packetDir, value) {
   }
 }
 
+function semanticRequestLabel(value) {
+  const request = requestPathAndSearch(value);
+  if (!request) return '(unknown route)';
+  const queryIndex = request.indexOf('?');
+  if (queryIndex === -1) return request;
+  return `${request.slice(0, queryIndex)}${redactedQuery(request.slice(queryIndex))}`;
+}
+
+function intrinsicSemanticCounts(value) {
+  return {
+    behaviorBearingMediaCount: Number(value?.behaviorBearingMediaCount ?? 0),
+    formControlCount: Number(value?.formControlCount ?? 0),
+    formCount: Number(value?.formCount ?? 0),
+    headingCount: Number(value?.headingCount ?? 0),
+    linkCount: Number(value?.linkCount ?? 0),
+    mediaElementCount: Number(value?.mediaElementCount ?? 0),
+    visibleTextLength: Number(value?.visibleTextLength ?? 0)
+  };
+}
+
+function grossSemanticOmissionErrors(source, target) {
+  const errors = [];
+  if (source.formCount > 0 && target.formCount === 0) {
+    errors.push('source forms are present but the target has none');
+  } else if (
+    source.formCount > 0 &&
+    target.formCount > 0 &&
+    source.formControlCount > 0 &&
+    target.formControlCount === 0
+  ) {
+    errors.push('source forms have interactive controls but target forms have none');
+  }
+  if (source.behaviorBearingMediaCount > 0 && target.behaviorBearingMediaCount === 0) {
+    errors.push('source behavior-bearing media or embeds are present but the target has none');
+  }
+  if (source.headingCount >= 2 && target.headingCount === 0) {
+    errors.push('the source has a material heading structure but the target has no headings');
+  }
+  if (source.mediaElementCount >= 3 && target.mediaElementCount === 0) {
+    errors.push('the source has material media but the target has no media elements');
+  }
+  const severeTextFloor = Math.max(120, Math.floor(source.visibleTextLength * 0.2));
+  if (source.visibleTextLength >= 400 && target.visibleTextLength < severeTextFloor) {
+    errors.push(
+      `visible text collapsed to ${target.visibleTextLength}/${source.visibleTextLength} characters (floor ${severeTextFloor})`
+    );
+  }
+  return errors;
+}
+
+export function allRouteSemanticReconciliation({
+  packetDir = '',
+  routeMatrix = {},
+  serverRenderedResponseSurface = {},
+  sourceSurfaceCensus = {}
+} = {}) {
+  const acceptedRoutes = (Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+    .filter((route) => route?.accepted === true);
+  const sourceRecordsByKey = new Map();
+  for (const record of Array.isArray(sourceSurfaceCensus?.routes) ? sourceSurfaceCensus.routes : []) {
+    const key = String(record?.requestKeySha256 || stateSha256(requestPathAndSearch(record?.path)));
+    const records = sourceRecordsByKey.get(key) ?? [];
+    records.push(record);
+    sourceRecordsByKey.set(key, records);
+  }
+  const targetRecordsByKey = new Map();
+  for (const record of Array.isArray(serverRenderedResponseSurface?.routeChecks)
+    ? serverRenderedResponseSurface.routeChecks
+    : []) {
+    const key = String(record?.requestKeySha256 || stateSha256(requestPathAndSearch(record?.requestedUrl)));
+    const records = targetRecordsByKey.get(key) ?? [];
+    records.push(record);
+    targetRecordsByKey.set(key, records);
+  }
+
+  const errors = [];
+  if (sourceSurfaceCensus?.authoritative !== true || sourceSurfaceCensus?.status !== 'passed') {
+    errors.push('Verifier-owned all-route semantic reconciliation requires a passing authoritative source census.');
+  }
+  if (serverRenderedResponseSurface?.passed !== true) {
+    errors.push('Verifier-owned all-route semantic reconciliation requires a passing target server-rendered response census.');
+  }
+  const routeChecks = [];
+  for (const route of acceptedRoutes) {
+    const sourceRequest = requestPathAndSearch(route?.sourcePath);
+    const targetRequest = requestPathAndSearch(route?.targetPath);
+    const sourceKey = stateSha256(sourceRequest);
+    const targetKey = stateSha256(targetRequest);
+    const sourceMatches = sourceRecordsByKey.get(sourceKey) ?? [];
+    const targetMatches = targetRecordsByKey.get(targetKey) ?? [];
+    const routeErrors = [];
+    if (!sourceRequest || sourceMatches.length !== 1) {
+      routeErrors.push(`expected exactly one verifier-owned source observation and found ${sourceMatches.length}`);
+    }
+    if (!targetRequest || targetMatches.length !== 1) {
+      routeErrors.push(`expected exactly one verifier-owned target observation and found ${targetMatches.length}`);
+    }
+    const source = sourceMatches[0];
+    const target = targetMatches[0];
+    const identityDisposition = route?.identityChangeDisposition;
+    const dispositionApplies = identityDisposition?.applies === true;
+    const dispositionAccepted = Boolean(
+      dispositionApplies &&
+      String(identityDisposition?.acceptedBy ?? '').trim() &&
+      String(identityDisposition?.rationale ?? '').trim() &&
+      packetLocalEvidencePresent(packetDir, identityDisposition?.evidence)
+    );
+    if (dispositionApplies && !dispositionAccepted) {
+      routeErrors.push('identityChangeDisposition applies but lacks a named accepter, rationale, or packet-local evidence');
+    }
+
+    let sourceCounts = intrinsicSemanticCounts(null);
+    let targetCounts = intrinsicSemanticCounts(null);
+    if (source && target) {
+      const sourceStatusDeclared = route?.sourceStatus !== null &&
+        route?.sourceStatus !== undefined && route?.sourceStatus !== '';
+      const expectedSourceStatus = Number(route?.sourceStatus);
+      if (sourceStatusDeclared && (
+        !Number.isFinite(expectedSourceStatus) ||
+        expectedSourceStatus !== Number(source.initialStatus)
+      )) {
+        routeErrors.push(
+          `sourceStatus ${expectedSourceStatus} is not live-bound to initial HTTP ${Number(source.initialStatus)}`
+        );
+      }
+      const expectedSourceFinalRequest = requestPathAndSearch(route?.sourceFinalPath);
+      const observedSourceFinalRequest = requestPathAndSearch(source?.finalUrl);
+      if (expectedSourceFinalRequest && expectedSourceFinalRequest !== observedSourceFinalRequest) {
+        routeErrors.push('sourceFinalPath is not live-bound to the verifier-owned final request');
+      }
+
+      const sourceIsHtml = source.isHtml === true;
+      const targetIsHtml = target.isHtml === true;
+      const sourceContentType = String(source.contentType ?? '').trim().toLowerCase();
+      const targetContentType = String(target.contentType ?? '').trim().toLowerCase();
+      if (sourceIsHtml !== targetIsHtml) {
+        routeErrors.push('source and target response content classes differ between HTML and non-HTML');
+      } else if (!sourceIsHtml && !targetIsHtml) {
+        if (!sourceContentType || !targetContentType) {
+          routeErrors.push('non-HTML source and target observations must expose response content types');
+        } else if (sourceContentType !== targetContentType) {
+          routeErrors.push(`non-HTML response content type changed from ${sourceContentType} to ${targetContentType}`);
+        }
+      } else {
+        const sourceTitle = normalizeText(source.title);
+        const sourceH1 = normalizeText(source.h1);
+        const targetTitle = normalizeText(target.title);
+        const targetH1 = normalizeText(target.h1);
+        for (const [field, declared, observed] of [
+          ['sourceTitle', route?.sourceTitle, sourceTitle],
+          ['sourceH1', route?.sourceH1, sourceH1],
+          ['targetTitle', route?.targetTitle, targetTitle],
+          ['targetH1', route?.targetH1, targetH1]
+        ]) {
+          if (normalizeText(declared) !== observed) {
+            routeErrors.push(`${field} is not live-bound to the verifier-owned observation`);
+          }
+        }
+        const identityDifferences = [];
+        if (sourceTitle !== targetTitle) identityDifferences.push('title');
+        if (sourceH1 !== targetH1) identityDifferences.push('H1');
+        if (identityDifferences.length > 0 && !dispositionAccepted) {
+          routeErrors.push(
+            `source and target ${identityDifferences.join(' and ')} differ without an accepted identityChangeDisposition`
+          );
+        }
+        if (!sourceTitle && !sourceH1) {
+          routeErrors.push('source route has neither a title nor H1 identity signal');
+        }
+        if (!targetTitle && !targetH1) {
+          routeErrors.push('target route has neither a title nor H1 identity signal');
+        }
+        sourceCounts = intrinsicSemanticCounts(source.intrinsicSemantics);
+        targetCounts = intrinsicSemanticCounts(target.intrinsicSemantics);
+        if (!source.intrinsicSemantics || !target.intrinsicSemantics) {
+          routeErrors.push('source and target intrinsic semantic observations are both required');
+        } else {
+          routeErrors.push(...grossSemanticOmissionErrors(sourceCounts, targetCounts));
+        }
+      }
+    }
+
+    const sourceLabel = semanticRequestLabel(route?.sourcePath);
+    const targetLabel = semanticRequestLabel(route?.targetPath);
+    errors.push(...routeErrors.map((error) => `${sourceLabel} -> ${targetLabel}: ${error}.`));
+    routeChecks.push({
+      acceptedIdentityChangeDisposition: dispositionAccepted,
+      contentTypeComparisonApplied: Boolean(source && target && source.isHtml !== true && target.isHtml !== true),
+      errors: routeErrors,
+      htmlSemanticComparisonApplied: Boolean(source && target && source.isHtml === true && target.isHtml === true),
+      passed: routeErrors.length === 0,
+      sourceContentType: String(source?.contentType ?? ''),
+      sourcePath: normalizePath(route?.sourcePath),
+      sourceRequestSha256: sourceKey,
+      sourceSemantics: sourceCounts,
+      targetPath: normalizePath(route?.targetPath),
+      targetRequestSha256: targetKey,
+      targetSemantics: targetCounts,
+      targetContentType: String(target?.contentType ?? '')
+    });
+  }
+  const uniqueErrors = [...new Set(errors)];
+  const failedRouteChecks = routeChecks.filter((check) => check.passed !== true);
+  const passedRouteChecks = routeChecks.filter((check) => check.passed === true);
+  const reportRouteChecks = [...failedRouteChecks, ...passedRouteChecks]
+    .slice(0, MAX_ALL_ROUTE_SEMANTIC_ROUTE_CHECKS);
+  const value = {
+    schemaVersion: 'public-kit.all-route-semantic-reconciliation.1',
+    authoritative: true,
+    status: uniqueErrors.length === 0 ? 'passed' : 'blocked',
+    routeCount: acceptedRoutes.length,
+    passedRouteCount: passedRouteChecks.length,
+    failedRouteCount: failedRouteChecks.length,
+    routeCheckCount: routeChecks.length,
+    omittedRouteCheckCount: Math.max(0, routeChecks.length - reportRouteChecks.length),
+    routeChecksFingerprint: stateSha256(routeChecks),
+    routeChecks: reportRouteChecks,
+    errorCount: uniqueErrors.length,
+    omittedErrorCount: Math.max(0, uniqueErrors.length - MAX_ALL_ROUTE_SEMANTIC_ERRORS),
+    errorsFingerprint: stateSha256(uniqueErrors),
+    errors: uniqueErrors.slice(0, MAX_ALL_ROUTE_SEMANTIC_ERRORS)
+  };
+  return { ...value, fingerprint: stateSha256(value) };
+}
+
+export function sharedAllRouteSemanticReconciliation(value, absolutePacketDir = '') {
+  return publicRedactedValue(sharedValue(value, absolutePacketDir));
+}
+
+export function allRouteSemanticCompletionBlocker(value) {
+  if (value?.status !== 'blocked') {
+    return null;
+  }
+  const examples = (Array.isArray(value?.errors) ? value.errors : [])
+    .slice(0, MAX_ALL_ROUTE_SEMANTIC_BLOCKER_EXAMPLES);
+  const exampleText = examples.length > 0 ? ` Examples: ${examples.join(' | ')}` : '';
+  return {
+    attemptedEvidence: [
+      `Verifier-owned source and target observations were reconciled for ${Number(value?.routeCount ?? 0)} accepted route(s).`,
+      `${Number(value?.failedRouteCount ?? 0)} route(s) failed with ${Number(value?.errorCount ?? 0)} unique semantic finding(s).`
+    ],
+    missingInput: '',
+    nextAction: 'Restore exact route identity and gross semantic completeness, or record a narrow evidenced identity-only change disposition, then rerun the live verifier.',
+    origin: 'all-route-semantics-verifier',
+    resolutionClass: 'agent_resolvable',
+    code: 'parity.all-route-semantics',
+    message: `All-route semantic reconciliation failed on ${Number(value?.failedRouteCount ?? 0)} of ${Number(value?.routeCount ?? 0)} accepted routes.${exampleText}`
+  };
+}
+
 function normalizedNoRedirectDisposition(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
@@ -14587,11 +14946,46 @@ export async function verifyLive({
     briefMode ||
     !runtimeAuthoritativeForCompletion ||
     sourceSurfaceCensus.status === 'passed';
+  const semanticReconciliationNotRun = (status, reason) => {
+    const value = {
+      schemaVersion: 'public-kit.all-route-semantic-reconciliation.1',
+      authoritative: true,
+      status,
+      routeCount: 0,
+      passedRouteCount: 0,
+      failedRouteCount: 0,
+      routeCheckCount: 0,
+      omittedRouteCheckCount: 0,
+      routeChecksFingerprint: stateSha256([]),
+      routeChecks: [],
+      errorCount: 0,
+      omittedErrorCount: 0,
+      errorsFingerprint: stateSha256([]),
+      errors: [],
+      reason
+    };
+    return { ...value, fingerprint: stateSha256(value) };
+  };
+  const allRouteSemantics = briefMode
+    ? semanticReconciliationNotRun('not_applicable', 'Source/target semantic parity does not apply to a brief-based build.')
+    : sourceSurfaceCensus.status === 'passed' && serverRenderedResponseSurface.passed === true
+      ? allRouteSemanticReconciliation({
+          packetDir: absolutePacketDir,
+          routeMatrix,
+          serverRenderedResponseSurface,
+          sourceSurfaceCensus
+        })
+      : semanticReconciliationNotRun(
+          'not_run',
+          'All-route semantics wait for passing verifier-owned source and target response censuses.'
+        );
+  const allRouteSemanticsSupportsCompletion = briefMode || allRouteSemantics.status === 'passed';
   const completionClaimAllowed =
     packetReport.valid &&
     liveTargetValid &&
     liveTargetBudgetSupportsCompletion &&
     sourceSurfaceSupportsCompletion &&
+    allRouteSemanticsSupportsCompletion &&
     packetSupportsCompletion &&
     verifierOwnedAxeSupportsCompletion &&
     drupalRuntimeSupportsCompletion &&
@@ -14660,6 +15054,10 @@ export async function verifyLive({
         }
       );
     }
+  }
+  const semanticCompletionBlocker = allRouteSemanticCompletionBlocker(allRouteSemantics);
+  if (semanticCompletionBlocker) {
+    completionBlockers.push(semanticCompletionBlocker);
   }
   if (!packetReport.completionEvidence?.independentVerificationSupportsCompletion) {
     addCompletionBlocker(
@@ -14790,6 +15188,7 @@ export async function verifyLive({
     origin: target?.url.origin ?? '',
     canvasRuntimeAvailabilityFingerprint: runtimeCanvasAvailability.fingerprint ?? '',
     sourceSurfaceFingerprint: sourceSurfaceCensus.fingerprint ?? '',
+    allRouteSemanticsFingerprint: allRouteSemantics.fingerprint ?? '',
     globalChromeCaptureFingerprint: globalChromeCapture?.captureFingerprint ?? '',
     visualParityFloorFingerprint: visualParityFloor?.fingerprint ?? '',
     beforeConsentNetworkCaptureFingerprint: beforeConsentNetworkCapture?.captureFingerprint ?? '',
@@ -14816,7 +15215,9 @@ export async function verifyLive({
         bodySha256: check.bodySha256 ?? '',
         finalStatus: check.finalStatus ?? 0,
         finalUrl: check.finalUrl ?? '',
+        intrinsicSemanticsSha256: check.intrinsicSemantics?.fingerprint ?? '',
         passed: check.passed,
+        requestKeySha256: check.requestKeySha256 ?? '',
         requestedUrl: check.requestedUrl
       })),
       sourceOriginLinkChecks: serverRenderedResponseSurface.sourceOriginLinkChecks.map((check) => ({
@@ -14867,6 +15268,12 @@ export async function verifyLive({
     ...(visualParityFloorSupportsCompletion
       ? []
       : (visualParityFloor?.errors ?? []).map((error) => `G-PARITY-01 ${sharedMessage(error, absolutePacketDir)}`)),
+    ...(allRouteSemantics.status === 'blocked'
+      ? [
+          `G-PARITY-01 ${sharedMessage(semanticCompletionBlocker?.message ?? 'All-route semantic reconciliation failed.', absolutePacketDir)}`,
+          ...allRouteSemantics.errors.map((error) => `G-PARITY-01 ${sharedMessage(error, absolutePacketDir)}`)
+        ]
+      : []),
     ...liveErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...sourceSurfaceErrors.map((error) => `G-VERIFY-02 ${sharedMessage(error, absolutePacketDir)}`),
     ...completionBlockedReasons.map((reason) => `G-VERIFY-02 ${sharedMessage(reason, absolutePacketDir)}`)
@@ -14899,10 +15306,11 @@ export async function verifyLive({
       liveEditorSurfaceCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveEditorSurfaceCensus ?? null))}`,
       liveNextCycleCensusSha256: `sha256:${sha256(JSON.stringify(inspectedDrupalRuntime.liveNextCycleCensus ?? null))}`,
       sourceSurfaceSha256: sourceSurfaceCensus.fingerprint ?? '',
+      allRouteSemanticsSha256: allRouteSemantics.fingerprint ?? '',
       visualParityFloorSha256: visualParityFloor?.fingerprint ?? '',
       routeMatrixSha256: `sha256:${sha256(routeMatrixText)}`,
       packetEvidenceSha256: buildState?.evidenceBindings?.packetFingerprint ?? '',
-      targetFingerprintInputVersion: 8
+      targetFingerprintInputVersion: 9
     },
     criticalAssetInspection: {
       distinctRequestCount: criticalAssetContext.cache.size,
@@ -14918,6 +15326,7 @@ export async function verifyLive({
     },
     routeChecks: routeChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     sourceSurfaceCensus: sharedValue(sourceSurfaceCensus, absolutePacketDir),
+    allRouteSemanticReconciliation: sharedAllRouteSemanticReconciliation(allRouteSemantics, absolutePacketDir),
     targetRequiredRouteChecks: targetRequiredRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
     globalChromeCapture: sharedGlobalChrome,
     globalChromeCaptureSummary,
@@ -14944,6 +15353,7 @@ export async function verifyLive({
     liveNextCycleReconciliation,
     liveTargetValid,
     sourceSurfaceSupportsCompletion,
+    allRouteSemanticsSupportsCompletion,
     buildState,
     reviewHandoffBinding: {
       attribution: 'builder-writable-self-attested-non-authoritative',
