@@ -147,6 +147,8 @@ const COMPUTED_STYLE_KEYS = Object.freeze([
   'color',
   'backgroundColor',
   'borderColor',
+  'borderStyle',
+  'borderWidth',
   'borderRadius'
 ]);
 const FIXED_THRESHOLDS = Object.freeze({
@@ -497,10 +499,9 @@ export function normalizeComputedStyleEvidence(value = {}) {
   const rawFamilies = Array.isArray(value?.loadedFontFamilies) ? value.loadedFontFamilies : [];
   const normalizedFamilies = [...new Set(rawFamilies
     .map(normalizedFontFamilyName)
-    .filter(Boolean))];
-  const loadedFontFamilies = normalizedFamilies
-    .slice(0, COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies)
+    .filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
+  const loadedFontFamilies = normalizedFamilies.slice(0, COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies);
   const samples = [];
   const observedRoles = new Set();
   for (const rawSample of Array.isArray(value?.samples) ? value.samples : []) {
@@ -531,7 +532,8 @@ export function normalizeComputedStyleEvidence(value = {}) {
     limits: { ...COMPUTED_STYLE_LIMITS },
     loadedFontFamilies,
     samples,
-    truncated: normalizedFamilies.length > COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies ||
+    truncated: value?.truncated === true ||
+      normalizedFamilies.length > COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies ||
       (Array.isArray(value?.samples) && value.samples.length > COMPUTED_STYLE_LIMITS.maxSamples)
   };
 }
@@ -1609,9 +1611,11 @@ function collectorExpression(contract, mobile) {
           value.height >= 28
         );
     });
+    const stableStyleAnchor = (element) => visible(element) &&
+      !element.closest('[data-agent-ready-dynamic-mask]');
     const firstVisibleWithin = (root, selector) => {
       if (!(root instanceof Element)) return null;
-      try { return [...root.querySelectorAll(selector)].find(visible) || null; }
+      try { return [...root.querySelectorAll(selector)].find(stableStyleAnchor) || null; }
       catch { return null; }
     };
     const representativeSurface = (() => {
@@ -1629,7 +1633,7 @@ function collectorExpression(contract, mobile) {
       return null;
     })();
     const styleSample = (semanticRole, selectionMethod, element) => {
-      if (!(element instanceof Element) || !visible(element)) return null;
+      if (!(element instanceof Element) || !stableStyleAnchor(element)) return null;
       const computed = getComputedStyle(element);
       const bounded = (value) => String(value || '')
         .replace(/[\u0000-\u001f\u007f]/g, ' ')
@@ -1647,7 +1651,9 @@ function collectorExpression(contract, mobile) {
           letterSpacing: bounded(computed.letterSpacing),
           color: bounded(computed.color),
           backgroundColor: bounded(computed.backgroundColor),
-          borderColor: bounded(computed.borderColor),
+          borderColor: bounded(computed.borderTopColor),
+          borderStyle: bounded(computed.borderTopStyle),
+          borderWidth: bounded(computed.borderTopWidth),
           borderRadius: bounded(computed.borderRadius)
         }
       };
@@ -1661,7 +1667,7 @@ function collectorExpression(contract, mobile) {
         'first-visible-primary-navigation-link',
         firstVisibleWithin(navigation, 'a[href]')
       ),
-      styleSample('primary_action', 'first-visible-prominent-main-action', prominentActions[0]),
+      styleSample('primary_action', 'first-visible-prominent-main-action', prominentActions.find(stableStyleAnchor)),
       styleSample(
         'form_control',
         'first-visible-main-form-control',
@@ -1672,13 +1678,13 @@ function collectorExpression(contract, mobile) {
         : null
     ].filter(Boolean).slice(0, computedStyleLimits.maxSamples);
     const fontSet = globalThis.document?.fonts;
-    const loadedFontFamilies = fontSet
+    const allLoadedFontFamilies = fontSet
       ? [...new Set([...fontSet]
         .filter((fontFace) => fontFace?.status === 'loaded')
         .map((fontFace) => String(fontFace?.family || '').replace(/^(['"])(.*)\1$/, '$2').trim())
-        .filter(Boolean))]
-        .slice(0, computedStyleLimits.maxLoadedFontFamilies)
+        .filter(Boolean))].sort((left, right) => left.localeCompare(right))
       : [];
+    const loadedFontFamilies = allLoadedFontFamilies.slice(0, computedStyleLimits.maxLoadedFontFamilies);
     let bandCandidates = contentRoot instanceof Element
       ? [...contentRoot.querySelectorAll('section,[role="region"]')].filter((element) => {
           if (!visible(element)) return false;
@@ -1744,6 +1750,7 @@ function collectorExpression(contract, mobile) {
       },
       computedStyleEvidence: {
         loadedFontFamilies,
+        truncated: allLoadedFontFamilies.length > loadedFontFamilies.length,
         samples: styleSamples
       },
       structure: {
@@ -2950,6 +2957,21 @@ function visibleControlToken(value) {
     : '';
 }
 
+function controlStyleTokens(styles = {}) {
+  const color = visibleControlToken(styles.color);
+  const backgroundColor = visibleControlToken(styles.backgroundColor);
+  const borderColor = visibleControlToken(styles.borderColor);
+  const borderStyle = privacySafeCssValue(styles.borderStyle).toLowerCase();
+  const borderWidth = finiteCssPixels(styles.borderWidth);
+  const visibleBorder = borderColor && !['none', 'hidden'].includes(borderStyle) && Number.isFinite(borderWidth);
+  return {
+    color,
+    backgroundColor,
+    borderColor: visibleBorder ? borderColor : '',
+    borderRadius: backgroundColor || visibleBorder ? visibleControlToken(styles.borderRadius) : ''
+  };
+}
+
 function computedStyleShadowResult(value) {
   const record = { schemaVersion: COMPUTED_STYLE_SHADOW_SCHEMA, ...value };
   return { ...record, fingerprint: sha256(record) };
@@ -2977,9 +2999,17 @@ export function compareComputedStyleShadow({
     for (const viewport of VIEWPORTS) {
       const sourceRoute = sourceIndex.get(`${sourcePath}\0${viewport.name}`);
       const targetRoute = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const sourceEvidencePresent = Boolean(
+        sourceRoute?.signals && Object.hasOwn(sourceRoute.signals, 'computedStyleEvidence')
+      );
+      const targetEvidencePresent = Boolean(
+        targetRoute?.signals && Object.hasOwn(targetRoute.signals, 'computedStyleEvidence')
+      );
+      const sourceProtected = sourceRoute?.signals?.protection?.detected === true;
       const source = styleSampleIndex(sourceRoute?.signals?.computedStyleEvidence);
       const target = styleSampleIndex(targetRoute?.signals?.computedStyleEvidence);
       const missingAnchors = [];
+      const notApplicableAnchors = [];
       const diagnostics = [];
       let diagnosticOverflow = false;
       const addDiagnostic = (diagnostic) => {
@@ -2992,8 +3022,21 @@ export function compareComputedStyleShadow({
       for (const semanticRole of COMPUTED_STYLE_ROLES) {
         const sourceSample = source.samples.get(semanticRole);
         const targetSample = target.samples.get(semanticRole);
-        if (!sourceRoute || !sourceSample) missingAnchors.push({ side: 'source', semanticRole });
-        if (!targetRoute || !targetSample) missingAnchors.push({ side: 'target', semanticRole });
+        const sourceUnavailable = !sourceRoute || !sourceEvidencePresent || sourceProtected;
+        const targetUnavailable = !targetRoute || !targetEvidencePresent;
+        if (sourceUnavailable) missingAnchors.push({ side: 'source', semanticRole });
+        if (targetUnavailable) missingAnchors.push({ side: 'target', semanticRole });
+        if (sourceUnavailable || targetUnavailable) continue;
+        if (!sourceSample && semanticRole === 'body') {
+          missingAnchors.push({ side: 'source', semanticRole });
+        } else if (!sourceSample) {
+          notApplicableAnchors.push({
+            semanticRole,
+            targetAnchorPresent: Boolean(targetSample)
+          });
+        } else if (!targetSample) {
+          missingAnchors.push({ side: 'target', semanticRole });
+        }
         if (!sourceSample || !targetSample) continue;
         const sourceFamilies = fontFamilyTokens(sourceSample.styles.fontFamily);
         const targetFamilies = fontFamilyTokens(targetSample.styles.fontFamily);
@@ -3009,7 +3052,7 @@ export function compareComputedStyleShadow({
         }
         const sourceLoaded = new Set(source.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
         const targetLoaded = new Set(target.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
-        const unloadedTargetFamily = targetFamilies.find((family) =>
+        const unloadedTargetFamily = !target.evidence.truncated && targetFamilies.find((family) =>
           !GENERIC_FONT_FAMILIES.has(family) && sourceLoaded.has(family) && !targetLoaded.has(family)
         );
         if (unloadedTargetFamily) {
@@ -3029,8 +3072,10 @@ export function compareComputedStyleShadow({
         }
         if (['primary_action', 'form_control'].includes(semanticRole)) {
           const controlKeys = ['color', 'backgroundColor', 'borderColor', 'borderRadius'];
+          const sourceControlTokens = controlStyleTokens(sourceSample.styles);
+          const targetControlTokens = controlStyleTokens(targetSample.styles);
           const differingTokens = controlKeys.filter((key) =>
-            visibleControlToken(sourceSample.styles[key]) !== visibleControlToken(targetSample.styles[key])
+            sourceControlTokens[key] !== targetControlTokens[key]
           );
           if (
             differingTokens.length >= 2 &&
@@ -3048,10 +3093,12 @@ export function compareComputedStyleShadow({
       comparisons.push({
         routeFingerprint,
         viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        sourceProtected,
         disposition: missingAnchors.length > 0
           ? 'insufficient_evidence'
           : diagnostics.length > 0 ? 'diagnostics' : 'observed',
         missingAnchors,
+        notApplicableAnchors,
         diagnostics,
         diagnosticLimitReached: diagnosticOverflow
       });

@@ -1211,6 +1211,71 @@ test('computed-style shadow reports a source web font that is computed but unloa
   ));
 });
 
+test('computed-style shadow does not infer an unloaded font from a truncated target family list', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: ['Raleway'] })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => ({
+      ...completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: [] }),
+      truncated: true
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(!shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'font-family-not-loaded'
+  ));
+});
+
+test('computed-style shadow ignores invisible border tokens on controls', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      roleStyles: {
+        form_control: {
+          color: 'rgb(20, 20, 20)',
+          backgroundColor: 'transparent',
+          borderColor: 'rgb(0, 85, 170)',
+          borderStyle: 'none',
+          borderWidth: '0px',
+          borderRadius: '4px'
+        }
+      }
+    })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      roleStyles: {
+        form_control: {
+          color: 'rgb(40, 40, 40)',
+          backgroundColor: 'transparent',
+          borderColor: 'rgb(170, 0, 0)',
+          borderStyle: 'none',
+          borderWidth: '0px',
+          borderRadius: '24px'
+        }
+      }
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(!shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'control-token-mismatch' && diagnostic.semanticRole === 'form_control'
+  ));
+});
+
 test('computed-style shadow calls missing semantic anchors insufficient evidence and never pass', () => {
   const sourceCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
@@ -1236,6 +1301,95 @@ test('computed-style shadow calls missing semantic anchors insufficient evidence
   )));
   assert.equal(Object.hasOwn(shadow, 'passed'), false);
   assert.ok(shadow.comparisons.every((comparison) => comparison.disposition !== 'passed'));
+});
+
+test('computed-style shadow treats source-absent semantic anchors as not applicable', () => {
+  const withoutOptionalAnchors = () => {
+    const evidence = completeComputedStyleEvidence();
+    return {
+      ...evidence,
+      samples: evidence.samples.filter((sample) =>
+        !['heading_2', 'form_control', 'card_or_listing_surface'].includes(sample.semanticRole)
+      )
+    };
+  };
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    withoutOptionalAnchors
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    withoutOptionalAnchors
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'observed');
+  assert.equal(shadow.insufficientEvidenceCount, 0);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.length === 0));
+  assert.ok(shadow.comparisons.every((comparison) =>
+    comparison.notApplicableAnchors.map((anchor) => anchor.semanticRole).join(',') ===
+      'heading_2,form_control,card_or_listing_surface'
+  ));
+});
+
+test('computed-style shadow keeps missing evidence and the mandatory body anchor insufficient', () => {
+  const missingEvidenceSource = visualFloorCapture({
+    origin: 'https://source.example',
+    hashSeed: 'a',
+    structure: composedStructure
+  });
+  const missingBodySource = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => {
+      const evidence = completeComputedStyleEvidence();
+      return { ...evidence, samples: evidence.samples.filter((sample) => sample.semanticRole !== 'body') };
+    }
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+
+  for (const sourceCapture of [missingEvidenceSource, missingBodySource]) {
+    const shadow = compareComputedStyleShadow({
+      sourceCapture,
+      targetCapture,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+    });
+    assert.equal(shadow.status, 'insufficient_evidence');
+    assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.some((anchor) =>
+      anchor.side === 'source' && anchor.semanticRole === 'body'
+    )));
+  }
+});
+
+test('computed-style shadow suppresses style diagnostics for a protected source surface', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: composedStructure,
+      protectedSource: true
+    }),
+    () => completeComputedStyleEvidence({ family: 'Challenge Sans' })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Inter' })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'insufficient_evidence');
+  assert.equal(shadow.diagnosticCount, 0);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.sourceProtected === true));
 });
 
 test('computed-style evidence strips page text and URLs while enforcing fixed output bounds', () => {
@@ -1264,6 +1418,7 @@ test('computed-style evidence strips page text and URLs while enforcing fixed ou
   assert.ok(evidence.samples.length <= COMPUTED_STYLE_LIMITS.maxSamples);
   assert.ok(evidence.loadedFontFamilies.length <= COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies);
   assert.equal(evidence.truncated, true);
+  assert.deepEqual(normalizeComputedStyleEvidence(evidence), evidence);
   assert.doesNotMatch(serialized, /private page copy|private\.example|token=secret/i);
   assert.equal(evidence.samples[0].styles.backgroundColor, '');
   assert.deepEqual(evidence.privacy, { includesElementText: false, includesUrls: false });
