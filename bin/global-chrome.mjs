@@ -34,6 +34,8 @@ export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1'
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
 export const VISUAL_PARITY_FLOOR_SCHEMA = 'public-kit.visual-parity-floor.1';
+export const COMPUTED_STYLE_EVIDENCE_SCHEMA = 'public-kit.computed-style-evidence.1';
+export const COMPUTED_STYLE_SHADOW_SCHEMA = 'public-kit.computed-style-shadow.1';
 export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
 export const VERIFIER_AXE_SCHEMA = 'public-kit.verifier-axe.1';
 export const VERIFIER_AXE_VERSION = '4.10.3';
@@ -104,6 +106,48 @@ const PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES = new Set([
   'visible_aria_labelledby',
   'button_text',
   'rendered_input_button_text'
+]);
+export const COMPUTED_STYLE_LIMITS = Object.freeze({
+  maxSamples: 7,
+  maxLoadedFontFamilies: 48,
+  maxCssValueLength: 160,
+  maxDiagnosticsPerRouteViewport: 24,
+  maxRouteViewportComparisons: 128
+});
+const COMPUTED_STYLE_ROLES = Object.freeze([
+  'body',
+  'heading_1',
+  'heading_2',
+  'primary_navigation_link',
+  'primary_action',
+  'form_control',
+  'card_or_listing_surface'
+]);
+const COMPUTED_STYLE_METHODS = Object.freeze({
+  body: new Set(['document-body']),
+  heading_1: new Set(['first-visible-h1']),
+  heading_2: new Set(['first-visible-h2']),
+  primary_navigation_link: new Set(['first-visible-primary-navigation-link']),
+  primary_action: new Set(['first-visible-prominent-main-action']),
+  form_control: new Set(['first-visible-main-form-control']),
+  card_or_listing_surface: new Set([
+    'first-visible-card-class',
+    'first-visible-teaser-class',
+    'first-visible-listing-class',
+    'first-visible-article',
+    'first-visible-list-item'
+  ])
+});
+const COMPUTED_STYLE_KEYS = Object.freeze([
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'lineHeight',
+  'letterSpacing',
+  'color',
+  'backgroundColor',
+  'borderColor',
+  'borderRadius'
 ]);
 const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
@@ -435,10 +479,67 @@ function normalizedSelectors(value) {
   return normalized;
 }
 
+function privacySafeCssValue(value) {
+  const normalized = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, COMPUTED_STYLE_LIMITS.maxCssValueLength);
+  if (/(?:https?:\/\/|\b(?:data|blob|file):|url\s*\()/i.test(normalized)) return '';
+  return normalized;
+}
+
+function normalizedFontFamilyName(value) {
+  return privacySafeCssValue(value).replace(/^(['"])(.*)\1$/, '$2').trim();
+}
+
+export function normalizeComputedStyleEvidence(value = {}) {
+  const rawFamilies = Array.isArray(value?.loadedFontFamilies) ? value.loadedFontFamilies : [];
+  const normalizedFamilies = [...new Set(rawFamilies
+    .map(normalizedFontFamilyName)
+    .filter(Boolean))];
+  const loadedFontFamilies = normalizedFamilies
+    .slice(0, COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies)
+    .sort((left, right) => left.localeCompare(right));
+  const samples = [];
+  const observedRoles = new Set();
+  for (const rawSample of Array.isArray(value?.samples) ? value.samples : []) {
+    if (samples.length >= COMPUTED_STYLE_LIMITS.maxSamples) break;
+    const semanticRole = String(rawSample?.semanticRole ?? '').trim();
+    const selectionMethod = String(rawSample?.selectionMethod ?? '').trim();
+    if (
+      !COMPUTED_STYLE_ROLES.includes(semanticRole) ||
+      !COMPUTED_STYLE_METHODS[semanticRole]?.has(selectionMethod) ||
+      observedRoles.has(semanticRole)
+    ) continue;
+    const rawStyles = rawSample?.styles && typeof rawSample.styles === 'object' && !Array.isArray(rawSample.styles)
+      ? rawSample.styles
+      : {};
+    const styles = Object.fromEntries(COMPUTED_STYLE_KEYS.map((key) => [key, privacySafeCssValue(rawStyles[key])]));
+    samples.push({ semanticRole, selectionMethod, styles });
+    observedRoles.add(semanticRole);
+  }
+  samples.sort((left, right) => COMPUTED_STYLE_ROLES.indexOf(left.semanticRole) - COMPUTED_STYLE_ROLES.indexOf(right.semanticRole));
+  return {
+    schemaVersion: COMPUTED_STYLE_EVIDENCE_SCHEMA,
+    authority: 'verifier-owned-managed-browser-computed-style-observation',
+    completionAuthority: false,
+    privacy: {
+      includesElementText: false,
+      includesUrls: false
+    },
+    limits: { ...COMPUTED_STYLE_LIMITS },
+    loadedFontFamilies,
+    samples,
+    truncated: normalizedFamilies.length > COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies ||
+      (Array.isArray(value?.samples) && value.samples.length > COMPUTED_STYLE_LIMITS.maxSamples)
+  };
+}
+
 export function normalizeGlobalChromeContract(value = {}) {
   const contract = {
     schemaVersion: GLOBAL_CHROME_CONTRACT_SCHEMA,
-    selectorHeuristicsVersion: 2,
+    selectorHeuristicsVersion: 3,
     dynamicRegionSelectors: normalizedSelectors(value?.dynamicRegionSelectors),
     thresholds: FIXED_THRESHOLDS,
     viewports: VIEWPORTS.map(({ name, width, height }) => ({ name, width, height }))
@@ -990,6 +1091,7 @@ async function openCaptureBrowserBackend({
 
 function collectorExpression(contract, mobile) {
   const source = async ({
+    computedStyleLimits,
     dynamicRegionSelectors,
     mobileViewport,
     primaryNavigationLimits,
@@ -1507,6 +1609,76 @@ function collectorExpression(contract, mobile) {
           value.height >= 28
         );
     });
+    const firstVisibleWithin = (root, selector) => {
+      if (!(root instanceof Element)) return null;
+      try { return [...root.querySelectorAll(selector)].find(visible) || null; }
+      catch { return null; }
+    };
+    const representativeSurface = (() => {
+      const candidates = [
+        ['first-visible-card-class', '[class*="card" i]'],
+        ['first-visible-teaser-class', '[class*="teaser" i]'],
+        ['first-visible-listing-class', '[class*="listing" i]'],
+        ['first-visible-article', 'article'],
+        ['first-visible-list-item', '[role="listitem"],li']
+      ];
+      for (const [selectionMethod, selector] of candidates) {
+        const element = firstVisibleWithin(contentRoot, selector);
+        if (element) return { element, selectionMethod };
+      }
+      return null;
+    })();
+    const styleSample = (semanticRole, selectionMethod, element) => {
+      if (!(element instanceof Element) || !visible(element)) return null;
+      const computed = getComputedStyle(element);
+      const bounded = (value) => String(value || '')
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, computedStyleLimits.maxCssValueLength);
+      return {
+        semanticRole,
+        selectionMethod,
+        styles: {
+          fontFamily: bounded(computed.fontFamily),
+          fontSize: bounded(computed.fontSize),
+          fontWeight: bounded(computed.fontWeight),
+          lineHeight: bounded(computed.lineHeight),
+          letterSpacing: bounded(computed.letterSpacing),
+          color: bounded(computed.color),
+          backgroundColor: bounded(computed.backgroundColor),
+          borderColor: bounded(computed.borderColor),
+          borderRadius: bounded(computed.borderRadius)
+        }
+      };
+    };
+    const styleSamples = [
+      styleSample('body', 'document-body', document.body),
+      styleSample('heading_1', 'first-visible-h1', firstVisibleWithin(contentRoot, 'h1')),
+      styleSample('heading_2', 'first-visible-h2', firstVisibleWithin(contentRoot, 'h2')),
+      styleSample(
+        'primary_navigation_link',
+        'first-visible-primary-navigation-link',
+        firstVisibleWithin(navigation, 'a[href]')
+      ),
+      styleSample('primary_action', 'first-visible-prominent-main-action', prominentActions[0]),
+      styleSample(
+        'form_control',
+        'first-visible-main-form-control',
+        firstVisibleWithin(contentRoot, 'input:not([type="hidden"]),select,textarea')
+      ),
+      representativeSurface
+        ? styleSample('card_or_listing_surface', representativeSurface.selectionMethod, representativeSurface.element)
+        : null
+    ].filter(Boolean).slice(0, computedStyleLimits.maxSamples);
+    const fontSet = globalThis.document?.fonts;
+    const loadedFontFamilies = fontSet
+      ? [...new Set([...fontSet]
+        .filter((fontFace) => fontFace?.status === 'loaded')
+        .map((fontFace) => String(fontFace?.family || '').replace(/^(['"])(.*)\1$/, '$2').trim())
+        .filter(Boolean))]
+        .slice(0, computedStyleLimits.maxLoadedFontFamilies)
+      : [];
     let bandCandidates = contentRoot instanceof Element
       ? [...contentRoot.querySelectorAll('section,[role="region"]')].filter((element) => {
           if (!visible(element)) return false;
@@ -1570,6 +1742,10 @@ function collectorExpression(contract, mobile) {
         responseStatus,
         reasonCodes: [...new Set(reasonCodes)].sort()
       },
+      computedStyleEvidence: {
+        loadedFontFamilies,
+        samples: styleSamples
+      },
       structure: {
         headingCount: headingOrder.length,
         headingOrder,
@@ -1591,6 +1767,7 @@ function collectorExpression(contract, mobile) {
     };
   };
   return `(${source})(${JSON.stringify({
+    computedStyleLimits: COMPUTED_STYLE_LIMITS,
     dynamicRegionSelectors: contract.dynamicRegionSelectors,
     mobileViewport: mobile,
     primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
@@ -1742,7 +1919,10 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
   if (evaluated.exceptionDetails || !evaluated.result?.value) {
     throw new Error(`${path} ${viewport.name} signal collection failed.`);
   }
-  const signals = evaluated.result.value;
+  const signals = {
+    ...evaluated.result.value,
+    computedStyleEvidence: normalizeComputedStyleEvidence(evaluated.result.value.computedStyleEvidence)
+  };
   const axe = rawVerifierAxeRecord(axeEvaluation.result.value, signals.finalUrl);
   if (axe.status !== 'executed') {
     throw new Error(`${path} ${viewport.name} verifier-owned axe-core result failed validation: ${axe.errors.join(' ')}`);
@@ -2726,6 +2906,179 @@ function captureRouteIndex(capture) {
   ]));
 }
 
+const GENERIC_FONT_FAMILIES = new Set([
+  'cursive',
+  'emoji',
+  'fangsong',
+  'fantasy',
+  'math',
+  'monospace',
+  'sans-serif',
+  'serif',
+  'system-ui',
+  'ui-monospace',
+  'ui-rounded',
+  'ui-sans-serif',
+  'ui-serif'
+]);
+
+function fontFamilyTokens(value) {
+  return privacySafeCssValue(value)
+    .split(',')
+    .map((family) => normalizedFontFamilyName(family).toLowerCase())
+    .filter(Boolean);
+}
+
+function styleSampleIndex(evidence) {
+  const normalized = normalizeComputedStyleEvidence(evidence);
+  return {
+    evidence: normalized,
+    samples: new Map(normalized.samples.map((sample) => [sample.semanticRole, sample]))
+  };
+}
+
+function finiteCssPixels(value) {
+  const match = privacySafeCssValue(value).match(/^(-?\d+(?:\.\d+)?)px$/i);
+  const number = match ? Number(match[1]) : Number.NaN;
+  return Number.isFinite(number) && number > 0 ? number : Number.NaN;
+}
+
+function visibleControlToken(value) {
+  const normalized = privacySafeCssValue(value).toLowerCase();
+  return normalized && !['none', 'normal', 'transparent', 'rgba(0, 0, 0, 0)'].includes(normalized)
+    ? normalized
+    : '';
+}
+
+function computedStyleShadowResult(value) {
+  const record = { schemaVersion: COMPUTED_STYLE_SHADOW_SCHEMA, ...value };
+  return { ...record, fingerprint: sha256(record) };
+}
+
+export function compareComputedStyleShadow({
+  sourceCapture,
+  targetCapture,
+  primaryRoutes = [],
+  stateFingerprint = ''
+} = {}) {
+  const sourceIndex = captureRouteIndex(sourceCapture);
+  const targetIndex = captureRouteIndex(targetCapture);
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  const maximumRoutes = Math.floor(COMPUTED_STYLE_LIMITS.maxRouteViewportComparisons / VIEWPORTS.length);
+  const routes = routeInputs.slice(0, maximumRoutes);
+  const inputTruncated = routeInputs.length > routes.length;
+  const comparisons = [];
+  let diagnosticCount = 0;
+  let insufficientEvidenceCount = inputTruncated || routes.length === 0 ? 1 : 0;
+  for (const route of routes) {
+    const sourcePath = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetPath = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    const routeFingerprint = sha256({ sourcePath, targetPath });
+    for (const viewport of VIEWPORTS) {
+      const sourceRoute = sourceIndex.get(`${sourcePath}\0${viewport.name}`);
+      const targetRoute = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const source = styleSampleIndex(sourceRoute?.signals?.computedStyleEvidence);
+      const target = styleSampleIndex(targetRoute?.signals?.computedStyleEvidence);
+      const missingAnchors = [];
+      const diagnostics = [];
+      let diagnosticOverflow = false;
+      const addDiagnostic = (diagnostic) => {
+        if (diagnostics.length >= COMPUTED_STYLE_LIMITS.maxDiagnosticsPerRouteViewport) {
+          diagnosticOverflow = true;
+          return;
+        }
+        diagnostics.push(diagnostic);
+      };
+      for (const semanticRole of COMPUTED_STYLE_ROLES) {
+        const sourceSample = source.samples.get(semanticRole);
+        const targetSample = target.samples.get(semanticRole);
+        if (!sourceRoute || !sourceSample) missingAnchors.push({ side: 'source', semanticRole });
+        if (!targetRoute || !targetSample) missingAnchors.push({ side: 'target', semanticRole });
+        if (!sourceSample || !targetSample) continue;
+        const sourceFamilies = fontFamilyTokens(sourceSample.styles.fontFamily);
+        const targetFamilies = fontFamilyTokens(targetSample.styles.fontFamily);
+        const sourcePrimaryFamily = sourceFamilies[0] ?? '';
+        const targetPrimaryFamily = targetFamilies[0] ?? '';
+        if (sourcePrimaryFamily && targetPrimaryFamily && sourcePrimaryFamily !== targetPrimaryFamily) {
+          addDiagnostic({
+            code: 'font-family-replaced',
+            semanticRole,
+            sourceFamily: sourcePrimaryFamily,
+            targetFamily: targetPrimaryFamily
+          });
+        }
+        const sourceLoaded = new Set(source.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
+        const targetLoaded = new Set(target.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
+        const unloadedTargetFamily = targetFamilies.find((family) =>
+          !GENERIC_FONT_FAMILIES.has(family) && sourceLoaded.has(family) && !targetLoaded.has(family)
+        );
+        if (unloadedTargetFamily) {
+          addDiagnostic({ code: 'font-family-not-loaded', semanticRole, fontFamily: unloadedTargetFamily });
+        }
+        const sourceSize = finiteCssPixels(sourceSample.styles.fontSize);
+        const targetSize = finiteCssPixels(targetSample.styles.fontSize);
+        const sizeRatio = targetSize / sourceSize;
+        if (Number.isFinite(sizeRatio) && (sizeRatio > 1.5 || sizeRatio < (2 / 3))) {
+          addDiagnostic({
+            code: 'extreme-font-size-ratio',
+            semanticRole,
+            sourcePx: sourceSize,
+            targetPx: targetSize,
+            ratio: Number(sizeRatio.toFixed(3))
+          });
+        }
+        if (['primary_action', 'form_control'].includes(semanticRole)) {
+          const controlKeys = ['color', 'backgroundColor', 'borderColor', 'borderRadius'];
+          const differingTokens = controlKeys.filter((key) =>
+            visibleControlToken(sourceSample.styles[key]) !== visibleControlToken(targetSample.styles[key])
+          );
+          if (
+            differingTokens.length >= 2 &&
+            differingTokens.some((key) => ['backgroundColor', 'borderColor', 'borderRadius'].includes(key))
+          ) {
+            addDiagnostic({ code: 'control-token-mismatch', semanticRole, differingTokens });
+          }
+        }
+      }
+      diagnostics.sort((left, right) =>
+        `${left.semanticRole}\0${left.code}`.localeCompare(`${right.semanticRole}\0${right.code}`)
+      );
+      diagnosticCount += diagnostics.length;
+      if (missingAnchors.length > 0) insufficientEvidenceCount += 1;
+      comparisons.push({
+        routeFingerprint,
+        viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        disposition: missingAnchors.length > 0
+          ? 'insufficient_evidence'
+          : diagnostics.length > 0 ? 'diagnostics' : 'observed',
+        missingAnchors,
+        diagnostics,
+        diagnosticLimitReached: diagnosticOverflow
+      });
+    }
+  }
+  const status = insufficientEvidenceCount > 0
+    ? 'insufficient_evidence'
+    : diagnosticCount > 0 ? 'diagnostics' : 'observed';
+  return computedStyleShadowResult({
+    checkedAt: String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString()),
+    authority: 'none',
+    verifierOwnedObservation: true,
+    completionEffect: 'none',
+    completionStatusAffected: false,
+    resultStateFingerprint: String(stateFingerprint || targetCapture?.resultStateFingerprint || ''),
+    sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
+    targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
+    status,
+    limits: { ...COMPUTED_STYLE_LIMITS },
+    inputTruncated,
+    comparisonCount: comparisons.length,
+    diagnosticCount,
+    insufficientEvidenceCount,
+    comparisons
+  });
+}
+
 function visualFloorResult(value) {
   const record = { schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA, ...value };
   return { ...record, fingerprint: sha256(record) };
@@ -2741,6 +3094,12 @@ export function compareVerifierOwnedVisualFloor({
   stateFingerprint = ''
 } = {}) {
   const checkedAt = String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString());
+  const computedStyleShadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes,
+    stateFingerprint
+  });
   const base = {
     checkedAt,
     authority: 'verifier-owned-managed-browser-structural-floor',
@@ -2752,6 +3111,7 @@ export function compareVerifierOwnedVisualFloor({
     sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
     targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
     thresholds: VISUAL_FLOOR_THRESHOLDS,
+    computedStyleShadow,
     primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
     findings: [],
     publicFormControlFindings: [],
@@ -3682,6 +4042,13 @@ export function validateGlobalChromeCapture(capture, { stateFingerprint = '', re
       if (!route.signals || !HASH_RE.test(route.screenshot?.sha256) || !String(route.screenshot?.path ?? '').trim() ||
           !Number.isSafeInteger(route.screenshot?.size) || route.screenshot.size <= 0) {
         throw new Error(`Global chrome ${path} ${route.viewport.name} lacks computed signals or screenshot evidence.`);
+      }
+      if (
+        route.signals.computedStyleEvidence !== undefined &&
+        canonicalJson(normalizeComputedStyleEvidence(route.signals.computedStyleEvidence)) !==
+          canonicalJson(route.signals.computedStyleEvidence)
+      ) {
+        throw new Error(`Global chrome ${path} ${route.viewport.name} computed-style evidence is not privacy-safe and bounded.`);
       }
       const axe = route?.axe;
       if (axe !== undefined && (

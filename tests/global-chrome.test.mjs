@@ -11,6 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   BEFORE_CONSENT_NETWORK_SCHEMA,
   BROWSER_CAPTURE_LIMITS,
+  COMPUTED_STYLE_EVIDENCE_SCHEMA,
+  COMPUTED_STYLE_LIMITS,
+  COMPUTED_STYLE_SHADOW_SCHEMA,
   DEFAULT_SELENIUM_GRID_URL,
   PUBLIC_FORM_CONTROL_LIMITS,
   SELENIUM_ADD_ON_RELEASE,
@@ -27,6 +30,7 @@ import {
   captureSummary,
   canonicalizeSeleniumCdpUrl,
   cleanupBrowserProfile,
+  compareComputedStyleShadow,
   compareGlobalChromeCaptures,
   compareVerifierOwnedVisualFloor,
   createBrowserCaptureBudget,
@@ -34,6 +38,7 @@ import {
   finalizeGlobalChromeCapture,
   findBrowserExecutable,
   globalChromeImpact,
+  normalizeComputedStyleEvidence,
   normalizeGlobalChromeContract,
   openSeleniumCdpBackend,
   validateBeforeConsentNetworkCapture,
@@ -459,6 +464,8 @@ test('DDEV container mode uses the remote Grid, owns its global context, and rep
   });
   assert.equal(raw.status, 'captured', raw.errors.join('\n'));
   assert.equal(raw.runtime.ready, true);
+  assert.equal(raw.routes[0].signals.computedStyleEvidence.schemaVersion, COMPUTED_STYLE_EVIDENCE_SCHEMA);
+  assert.deepEqual(raw.routes[0].signals.computedStyleEvidence.samples, []);
   assert.deepEqual(raw.runtime, {
     backend: 'selenium-grid-cdp',
     executionBoundary: 'ddev-add-on-sidecar',
@@ -1043,6 +1050,224 @@ const publicContactControls = [
   }),
   observedControl({ accessibleIdentity: 'send', kind: 'button_submit', visibleLabel: 'Send' })
 ];
+const styleSelectionMethods = {
+  body: 'document-body',
+  heading_1: 'first-visible-h1',
+  heading_2: 'first-visible-h2',
+  primary_navigation_link: 'first-visible-primary-navigation-link',
+  primary_action: 'first-visible-prominent-main-action',
+  form_control: 'first-visible-main-form-control',
+  card_or_listing_surface: 'first-visible-card-class'
+};
+
+function completeComputedStyleEvidence({
+  family = 'Raleway',
+  loadedFontFamilies = [family],
+  roleStyles = {}
+} = {}) {
+  const sizes = {
+    body: '16px',
+    heading_1: '48px',
+    heading_2: '32px',
+    primary_navigation_link: '16px',
+    primary_action: '16px',
+    form_control: '16px',
+    card_or_listing_surface: '16px'
+  };
+  return normalizeComputedStyleEvidence({
+    loadedFontFamilies,
+    samples: Object.entries(styleSelectionMethods).map(([semanticRole, selectionMethod]) => ({
+      semanticRole,
+      selectionMethod,
+      styles: {
+        fontFamily: `"${family}", sans-serif`,
+        fontSize: sizes[semanticRole],
+        fontWeight: semanticRole.startsWith('heading_') ? '700' : '400',
+        lineHeight: '24px',
+        letterSpacing: 'normal',
+        color: 'rgb(20, 20, 20)',
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        borderColor: 'rgb(20, 20, 20)',
+        borderRadius: '0px',
+        ...(roleStyles[semanticRole] ?? {})
+      }
+    }))
+  });
+}
+
+function attachComputedStyles(capture, evidenceForViewport) {
+  for (const route of capture.routes) {
+    route.signals.computedStyleEvidence = evidenceForViewport(route.viewport.name);
+  }
+  return capture;
+}
+
+test('computed-style shadow diagnoses font replacement and control-token drift without changing completion', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      family: 'Raleway',
+      roleStyles: {
+        primary_action: {
+          color: 'rgb(255, 255, 255)',
+          backgroundColor: 'rgb(0, 85, 170)',
+          borderColor: 'rgb(0, 85, 170)',
+          borderRadius: '4px'
+        },
+        form_control: {
+          backgroundColor: 'rgb(255, 255, 255)',
+          borderColor: 'rgb(80, 80, 80)',
+          borderRadius: '4px'
+        }
+      }
+    })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      family: 'Inter',
+      roleStyles: {
+        primary_action: {
+          color: 'rgb(0, 0, 0)',
+          backgroundColor: 'rgb(245, 210, 80)',
+          borderColor: 'rgb(0, 0, 0)',
+          borderRadius: '24px'
+        },
+        form_control: {
+          backgroundColor: 'rgb(240, 240, 240)',
+          borderColor: 'rgb(0, 0, 0)',
+          borderRadius: '12px'
+        }
+      }
+    })
+  );
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.equal(floor.completionSupported, true);
+  assert.equal(visualParityCompletionSupport(floor), true);
+  assert.equal(floor.computedStyleShadow.schemaVersion, COMPUTED_STYLE_SHADOW_SCHEMA);
+  assert.equal(floor.computedStyleShadow.authority, 'none');
+  assert.equal(floor.computedStyleShadow.completionEffect, 'none');
+  assert.equal(floor.computedStyleShadow.completionStatusAffected, false);
+  assert.equal(floor.computedStyleShadow.status, 'diagnostics');
+  const diagnostics = floor.computedStyleShadow.comparisons.flatMap((comparison) => comparison.diagnostics);
+  assert.ok(diagnostics.some((diagnostic) =>
+    diagnostic.code === 'font-family-replaced' &&
+    diagnostic.sourceFamily === 'raleway' &&
+    diagnostic.targetFamily === 'inter'
+  ));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.code === 'control-token-mismatch'));
+});
+
+test('computed-style shadow keeps a desktop-only oversized H1 scoped to that viewport', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    (viewport) => completeComputedStyleEvidence({
+      roleStyles: viewport === 'desktop' ? { heading_1: { fontSize: '80px' } } : {}
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  const desktop = shadow.comparisons.find((comparison) => comparison.viewport.name === 'desktop');
+  const mobile = shadow.comparisons.find((comparison) => comparison.viewport.name === 'mobile');
+
+  assert.ok(desktop.diagnostics.some((diagnostic) =>
+    diagnostic.code === 'extreme-font-size-ratio' && diagnostic.semanticRole === 'heading_1'
+  ));
+  assert.ok(!mobile.diagnostics.some((diagnostic) => diagnostic.code === 'extreme-font-size-ratio'));
+});
+
+test('computed-style shadow reports a source web font that is computed but unloaded on target', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: ['Raleway'] })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: [] })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'font-family-not-loaded' && diagnostic.fontFamily === 'raleway'
+  ));
+});
+
+test('computed-style shadow calls missing semantic anchors insufficient evidence and never pass', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => {
+      const evidence = completeComputedStyleEvidence();
+      return { ...evidence, samples: evidence.samples.filter((sample) => sample.semanticRole !== 'form_control') };
+    }
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'insufficient_evidence');
+  assert.ok(shadow.comparisons.every((comparison) => comparison.disposition === 'insufficient_evidence'));
+  assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.some((anchor) =>
+    anchor.side === 'target' && anchor.semanticRole === 'form_control'
+  )));
+  assert.equal(Object.hasOwn(shadow, 'passed'), false);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.disposition !== 'passed'));
+});
+
+test('computed-style evidence strips page text and URLs while enforcing fixed output bounds', () => {
+  const seed = completeComputedStyleEvidence();
+  const evidence = normalizeComputedStyleEvidence({
+    loadedFontFamilies: [
+      'url(https://private.example/font.woff2)',
+      ...Array.from({ length: 60 }, (_, index) => `Fixture Family ${index}`)
+    ],
+    samples: Array.from({ length: 20 }, (_, index) => {
+      const sample = seed.samples[index % seed.samples.length];
+      return {
+        ...sample,
+        textContent: 'private page copy',
+        href: 'https://private.example/account?token=secret',
+        styles: {
+          ...sample.styles,
+          backgroundColor: index === 0 ? 'url(https://private.example/image.png)' : sample.styles.backgroundColor
+        }
+      };
+    })
+  });
+  const serialized = JSON.stringify(evidence);
+
+  assert.equal(evidence.schemaVersion, COMPUTED_STYLE_EVIDENCE_SCHEMA);
+  assert.ok(evidence.samples.length <= COMPUTED_STYLE_LIMITS.maxSamples);
+  assert.ok(evidence.loadedFontFamilies.length <= COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies);
+  assert.equal(evidence.truncated, true);
+  assert.doesNotMatch(serialized, /private page copy|private\.example|token=secret/i);
+  assert.equal(evidence.samples[0].styles.backgroundColor, '');
+  assert.deepEqual(evidence.privacy, { includesElementText: false, includesUrls: false });
+});
 
 test('verifier-owned visual floor passes comparable composed routes at identical desktop/mobile viewports', () => {
   const floor = compareVerifierOwnedVisualFloor({
