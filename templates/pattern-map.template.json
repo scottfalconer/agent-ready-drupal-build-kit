@@ -189,6 +189,7 @@
   "utilityPageExceptions": [
     {
       "sourceRoute": "",
+      "targetRoute": "",
       "routeRole": "",
       "reasonUtilityPageFits": "",
       "whyNotStructuredContent": "",

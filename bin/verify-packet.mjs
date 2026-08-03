@@ -1009,6 +1009,11 @@ function compositionRoutePairsMatch(left, right) {
   );
 }
 
+function compositionRoutePairKey(record) {
+  const pair = compositionRoutePair(record);
+  return pair.source && pair.target ? `${pair.source}\u0000${pair.target}` : '';
+}
+
 function exactStringSet(actual, expected) {
   const normalize = (values) => arrayOrEmpty(values)
     .map((value) => String(value ?? '').trim())
@@ -1050,6 +1055,11 @@ async function compositionDecisionReasons({
       const pair = compositionRoutePair(route);
       return pair.source || pair.target;
     });
+  const acceptedRoutes = arrayOrEmpty(routeMatrix?.routes)
+    .filter((route) => {
+      const pair = compositionRoutePair(route);
+      return route?.accepted === true && route?.expectedRedirect !== true && pair.source && pair.target;
+    });
   const flexibleRoutes = arrayOrEmpty(patternMap?.compositionModel?.flexibleLandingRoutes)
     .filter((route) => {
       const pair = compositionRoutePair(route);
@@ -1072,21 +1082,30 @@ async function compositionDecisionReasons({
     });
   const blindDecisionReviews = arrayOrEmpty(blindAdversarialReview?.compositionOwnerDecisionReviews)
     .filter((review) => String(review?.decisionId ?? '').trim());
+  const utilityPageExceptions = substantiveObjects(patternMap?.utilityPageExceptions);
 
   if (buildTypeRequiresCanvasEvidence(buildType) !== compositionHasCanvasOwner(patternMap, independentVerification)) {
     reasons.push('G-COMPOSITION-01 pattern-map.json build type must summarize the declared and independently observed route owners; it cannot enable or suppress Canvas evidence by itself.');
   }
 
+  const requiredCompositionRoutes = new Map();
+  for (const route of acceptedRoutes.filter((candidate) =>
+    ['homepage', 'landing'].includes(String(candidate?.routeRole ?? '').trim())
+  )) {
+    requiredCompositionRoutes.set(compositionRoutePairKey(route), route);
+  }
   for (const primaryRoute of primaryRoutes.filter((route) =>
-    ['homepage', 'landing'].includes(String(route?.routeRole ?? '').trim()) ||
     pageOwners.some((owner) =>
       compositionRoutePairsMatch(owner, route) &&
       COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim())
     )
   )) {
-    if (flexibleRoutes.filter((route) => compositionRoutePairsMatch(route, primaryRoute)).length !== 1) {
-      const pair = compositionRoutePair(primaryRoute);
-      reasons.push(`G-COMPOSITION-01 primary flexible route ${pair.target || pair.source || '(unknown)'} needs exactly one matching compositionModel.flexibleLandingRoutes record.`);
+    requiredCompositionRoutes.set(compositionRoutePairKey(primaryRoute), primaryRoute);
+  }
+  for (const requiredRoute of requiredCompositionRoutes.values()) {
+    if (flexibleRoutes.filter((route) => compositionRoutePairsMatch(route, requiredRoute)).length !== 1) {
+      const pair = compositionRoutePair(requiredRoute);
+      reasons.push(`G-COMPOSITION-01 accepted homepage/landing route ${pair.target || pair.source || '(unknown)'} needs exactly one matching compositionModel.flexibleLandingRoutes record.`);
     }
   }
 
@@ -1118,11 +1137,11 @@ async function compositionDecisionReasons({
     if (!validFlexibleRoute) {
       reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must be accepted with a complete owner rationale, editor model, and every declared section fully owned.`);
     }
-    const primaryMatches = primaryRoutes.filter((route) => compositionRoutePairsMatch(route, flexibleRoute));
+    const routeMatches = acceptedRoutes.filter((route) => compositionRoutePairsMatch(route, flexibleRoute));
     const ownerMatches = pageOwners.filter((owner) => compositionRoutePairsMatch(owner, flexibleRoute));
     const fidelityMatches = fidelityChecks.filter((check) => compositionRoutePairsMatch(check, flexibleRoute));
-    if (primaryMatches.length !== 1 || ownerMatches.length !== 1 || fidelityMatches.length !== 1) {
-      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile one-to-one across primaryRoutes, flexibleLandingRoutes, pageCompositionOwnership, and independent composition fidelity.`);
+    if (routeMatches.length !== 1 || ownerMatches.length !== 1 || fidelityMatches.length !== 1) {
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile one-to-one across accepted route-matrix rows, flexibleLandingRoutes, pageCompositionOwnership, and independent composition fidelity.`);
       continue;
     }
 
@@ -1242,6 +1261,55 @@ async function compositionDecisionReasons({
       !blindEvidenceResults.some(Boolean)
     ) {
       reasons.push(`G-COMPOSITION-01 non-Canvas owner for composed route ${routeLabel} requires an outcome-based comparison prosecuted and accepted by the fresh blind reviewer.`);
+    }
+  }
+
+  const seenUtilityExceptions = new Set();
+  for (const [index, exception] of utilityPageExceptions.entries()) {
+    const pair = compositionRoutePair(exception);
+    const key = compositionRoutePairKey(exception);
+    const rawSource = String(exception?.sourceRoute ?? '').trim();
+    const rawTarget = String(exception?.targetRoute ?? '').trim();
+    const routeMatches = acceptedRoutes.filter((route) => compositionRoutePairsMatch(route, exception));
+    const ownerMatches = pageOwners.filter((owner) =>
+      compositionRoutePairsMatch(owner, exception) &&
+      owner?.accepted === true &&
+      String(owner?.selectedOwner ?? '').trim() === 'utility_page'
+    );
+    const flexibleMatches = flexibleRoutes.filter((route) =>
+      compositionRoutePairsMatch(route, exception) &&
+      String(route?.compositionOwner ?? '').trim() === 'utility_page'
+    );
+    if (
+      !rawSource.startsWith('/') ||
+      !rawTarget.startsWith('/') ||
+      !pair.source ||
+      !pair.target ||
+      !key ||
+      seenUtilityExceptions.has(key) ||
+      routeMatches.length !== 1 ||
+      ownerMatches.length !== 1 ||
+      flexibleMatches.length !== 1 ||
+      !String(exception?.routeRole ?? '').trim() ||
+      !String(exception?.reasonUtilityPageFits ?? '').trim() ||
+      !String(exception?.whyNotStructuredContent ?? '').trim() ||
+      !String(exception?.whyCanvasOrExperienceBuilderNotUsed ?? '').trim() ||
+      !String(exception?.editorMaintenancePath ?? '').trim() ||
+      !String(exception?.browserEvidence ?? '').trim() ||
+      exception?.accepted !== true
+    ) {
+      reasons.push(`G-COMPOSITION-01 utilityPageExceptions[${index}] must identify one exact accepted source/target route and reconcile to one declared Utility Page owner with complete editor evidence.`);
+    }
+    if (key) {
+      seenUtilityExceptions.add(key);
+    }
+  }
+  for (const owner of pageOwners.filter((candidate) =>
+    candidate?.accepted === true && String(candidate?.selectedOwner ?? '').trim() === 'utility_page'
+  )) {
+    if (utilityPageExceptions.filter((exception) => compositionRoutePairsMatch(exception, owner)).length !== 1) {
+      const pair = compositionRoutePair(owner);
+      reasons.push(`G-COMPOSITION-01 Utility Page owner ${pair.target || pair.source || '(unknown)'} requires exactly one route-specific utilityPageExceptions record.`);
     }
   }
 
