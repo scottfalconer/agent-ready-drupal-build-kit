@@ -12166,6 +12166,47 @@ test('packet-only verification rejects authored completion authority', async () 
   assert.match(report.errors.join('\n'), /completion authority belongs only to the live verifier/);
 });
 
+test('navigation parity dispositions require exact fingerprints, sorted difference kinds, and packet evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'navigation-parity-disposition-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const routeMatrix = liveRouteMatrix('https://target.example');
+  routeMatrix.primaryNavigationParityDispositions = [{
+    schemaVersion: 'public-kit.navigation-parity-disposition.1',
+    viewport: 'desktop',
+    expectedSourceTreeFingerprint: `sha256:${'a'.repeat(64)}`,
+    targetTreeFingerprint: `sha256:${'b'.repeat(64)}`,
+    differenceKinds: ['label'],
+    acceptedBy: 'Site owner',
+    rationale: 'The revised public navigation label is intentional.',
+    evidence: 'navigation-label-decision.txt',
+    accepted: true
+  }];
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+
+  const missingEvidence = await validatePacket({ packetDir });
+  assert.match(
+    missingEvidence.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /primaryNavigationParityDispositions\[0\].*non-empty packet-local evidence/i
+  );
+
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeFileSync(join(packetDir, 'evidence', 'navigation-label-decision.txt'), 'Approved by the source-site owner.\n');
+  const evidenced = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    evidenced.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /primaryNavigationParityDispositions\[0\]/i
+  );
+
+  routeMatrix.primaryNavigationParityDispositions[0].differenceKinds = ['label', 'href'];
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+  const unsorted = await validatePacket({ packetDir });
+  assert.match(
+    unsorted.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /primaryNavigationParityDispositions\[0\].*sorted differenceKinds/i
+  );
+});
+
 test('blind completion evidence rejects a text file named like a screenshot', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'fake-screenshot-'));
   const packetDir = join(temp, 'review-packet');

@@ -949,6 +949,35 @@ function combinedVisualFloorCapture(captures, fingerprintSeed) {
   return combined;
 }
 
+function primaryNavigation(entries, overrides = {}) {
+  return {
+    present: true,
+    visible: true,
+    entryCount: entries.length,
+    capturedEntryCount: entries.length,
+    entriesTruncated: false,
+    labelTruncatedCount: 0,
+    depthTruncatedCount: 0,
+    entries: entries.map((entry, position) => ({
+      position,
+      depth: 0,
+      depthTruncated: false,
+      parentPosition: null,
+      kind: 'link',
+      labelTruncated: false,
+      ...entry
+    })),
+    ...overrides
+  };
+}
+
+function setPrimaryNavigation(capture, entries, overrides = {}) {
+  for (const route of capture.routes) {
+    route.signals.primaryNavigation = primaryNavigation(entries, overrides);
+  }
+  return capture;
+}
+
 const composedStructure = {
   headingOrder: ['Build faster', 'Why it matters', 'Capabilities', 'Start today'],
   headingCount: 4,
@@ -1696,6 +1725,201 @@ test('noncanonical labels, unstable occurrences, and impossible native state fai
   assert.match(floor.errors.join('\n'), /invalid bounded option evidence/i);
 });
 
+test('verifier-owned primary-navigation parity preserves accepted route mappings, order, labels, and hierarchy', () => {
+  const sourceEntries = [
+    { href: '/', label: 'Home' },
+    { href: '/programs?audience=adult', label: 'Programs' },
+    { href: '/programs/advanced', label: 'Advanced', depth: 1, parentPosition: 1 }
+  ];
+  const targetEntries = [
+    { href: '/', label: 'Home' },
+    { href: '/courses?audience=adult', label: 'Programs' },
+    { href: '/courses/advanced', label: 'Advanced', depth: 1, parentPosition: 1 }
+  ];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }), sourceEntries),
+    targetCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+    }), targetEntries),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    routeMappings: [
+      { sourcePath: '/', targetPath: '/', accepted: true },
+      { sourcePath: '/programs?audience=adult', targetPath: '/courses?audience=adult', accepted: true },
+      { sourcePath: '/programs/advanced', targetPath: '/courses/advanced', accepted: true }
+    ],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.equal(floor.primaryNavigationSemanticParity.status, 'passed');
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.passed));
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.differenceKinds.length === 0));
+});
+
+test('verifier-owned primary-navigation parity catches swapped labels, wrong order, lost hierarchy, wrong hrefs, and additions', () => {
+  const sourceEntries = [
+    { href: '/', label: 'Home' },
+    { href: '/programs', label: 'Programs' },
+    { href: '/programs/advanced', label: 'Advanced', depth: 1, parentPosition: 1 }
+  ];
+  const cases = [
+    {
+      name: 'swapped labels',
+      expectedKinds: ['addition', 'label', 'omission'],
+      entries: [
+        { href: '/', label: 'Programs' },
+        { href: '/programs', label: 'Home' },
+        { href: '/programs/advanced', label: 'Advanced', depth: 1, parentPosition: 1 }
+      ]
+    },
+    {
+      name: 'wrong order',
+      expectedKinds: ['order'],
+      entries: [
+        { href: '/programs', label: 'Programs' },
+        { href: '/', label: 'Home' },
+        { href: '/programs/advanced', label: 'Advanced', depth: 1, parentPosition: 0 }
+      ]
+    },
+    {
+      name: 'lost hierarchy',
+      expectedKinds: ['hierarchy'],
+      entries: [
+        { href: '/', label: 'Home' },
+        { href: '/programs', label: 'Programs' },
+        { href: '/programs/advanced', label: 'Advanced' }
+      ]
+    },
+    {
+      name: 'wrong href',
+      expectedKinds: ['addition', 'href', 'omission'],
+      entries: [
+        { href: '/', label: 'Home' },
+        { href: '/classes', label: 'Programs' },
+        { href: '/programs/advanced', label: 'Advanced', depth: 1, parentPosition: 1 }
+      ]
+    },
+    {
+      name: 'invented entry',
+      expectedKinds: ['addition', 'href'],
+      entries: [
+        ...sourceEntries,
+        { href: '/invented', label: 'Invented' }
+      ]
+    }
+  ];
+
+  for (const fixture of cases) {
+    const floor = compareVerifierOwnedVisualFloor({
+      sourceCapture: setPrimaryNavigation(visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+      }), sourceEntries),
+      targetCapture: setPrimaryNavigation(visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+      }), fixture.entries),
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(floor.status, 'failed', fixture.name);
+    assert.equal(floor.primaryNavigationSemanticParity.status, 'failed', fixture.name);
+    for (const expectedKind of fixture.expectedKinds) {
+      assert.ok(
+        floor.findings.every((finding) => finding.primaryNavigation.differenceKinds.includes(expectedKind)),
+        `${fixture.name}: ${expectedKind}`
+      );
+    }
+    assert.match(floor.errors.join('\n'), /primary navigation semantic mismatch/i, fixture.name);
+  }
+});
+
+test('navigation mismatch dispositions bind exact tree fingerprints, viewport, and difference kinds', () => {
+  const sourceEntries = [
+    { href: '/', label: 'Home' },
+    { href: '/programs', label: 'Programs' }
+  ];
+  const targetEntries = [
+    { href: '/', label: 'Start' },
+    { href: '/programs', label: 'Programs' }
+  ];
+  const input = {
+    sourceCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }), sourceEntries),
+    targetCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+    }), targetEntries),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  };
+  const failed = compareVerifierOwnedVisualFloor(input);
+  const dispositions = failed.findings.map((finding) => ({
+    schemaVersion: 'public-kit.navigation-parity-disposition.1',
+    viewport: finding.viewport.name,
+    expectedSourceTreeFingerprint: finding.primaryNavigation.expectedSourceTreeFingerprint,
+    targetTreeFingerprint: finding.primaryNavigation.targetTreeFingerprint,
+    differenceKinds: finding.primaryNavigation.differenceKinds,
+    acceptedBy: 'Site owner',
+    rationale: 'The revised home label is an approved editorial change.',
+    evidence: 'evidence/navigation-label-decision.txt',
+    accepted: true
+  }));
+  const dispositioned = compareVerifierOwnedVisualFloor({
+    ...input,
+    navigationParityDispositions: dispositions
+  });
+  assert.equal(dispositioned.status, 'passed', dispositioned.errors.join('\n'));
+  assert.equal(dispositioned.primaryNavigationSemanticParity.status, 'dispositioned');
+  assert.ok(dispositioned.findings.every((finding) => finding.primaryNavigation.disposition.applied));
+
+  dispositions[0].differenceKinds = ['href'];
+  const mismatchedDisposition = compareVerifierOwnedVisualFloor({
+    ...input,
+    navigationParityDispositions: dispositions
+  });
+  assert.equal(mismatchedDisposition.status, 'failed');
+  assert.equal(mismatchedDisposition.primaryNavigationSemanticParity.staleDispositionCount, 1);
+  assert.equal(mismatchedDisposition.findings[0].primaryNavigation.disposition.applied, false);
+});
+
+test('truncated primary-navigation evidence fails closed and cannot be dispositioned', () => {
+  const entries = [{ href: '/', label: 'Home' }];
+  const sourceCapture = setPrimaryNavigation(visualFloorCapture({
+    origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+  }), entries, { entryCount: 129, entriesTruncated: true });
+  const targetCapture = setPrimaryNavigation(visualFloorCapture({
+    origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+  }), entries, { entryCount: 129, entriesTruncated: true });
+  const input = {
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  };
+  const failed = compareVerifierOwnedVisualFloor(input);
+  const desktop = failed.findings.find((finding) => finding.viewport.name === 'desktop').primaryNavigation;
+  const disposition = {
+    schemaVersion: 'public-kit.navigation-parity-disposition.1',
+    viewport: 'desktop',
+    expectedSourceTreeFingerprint: desktop.expectedSourceTreeFingerprint,
+    targetTreeFingerprint: desktop.targetTreeFingerprint,
+    differenceKinds: desktop.differenceKinds,
+    acceptedBy: 'Site owner',
+    rationale: 'The large navigation is intentional.',
+    evidence: 'evidence/navigation.txt',
+    accepted: true
+  };
+  const stillFailed = compareVerifierOwnedVisualFloor({
+    ...input,
+    navigationParityDispositions: [disposition]
+  });
+
+  assert.equal(stillFailed.status, 'failed');
+  assert.match(stillFailed.errors.join('\n'), /exceeded verifier bounds/i);
+  assert.ok(stillFailed.findings.every((finding) => !finding.primaryNavigation.disposition.applied));
+});
+
 test('long article structure does not become a design-led Canvas candidate from headings alone', () => {
   const articleStructure = {
     headingOrder: ['Article title', 'Context', 'Evidence', 'Analysis', 'Conclusion'],
@@ -2161,6 +2385,61 @@ test('finalized exact-query form captures compare by their privacy-preserving ro
   );
 });
 
+function finalizedNavigationCapture({ packetDir, origin, entries, screenshotSeed }) {
+  const raw = rawCaptureFixture();
+  raw.targetOrigin = origin;
+  const png = Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    Buffer.alloc(128, screenshotSeed)
+  ]).toString('base64');
+  raw.routes = raw.routes.map((route) => ({
+    ...route,
+    signals: {
+      ...route.signals,
+      finalUrl: `${origin}/`,
+      primaryNavigation: primaryNavigation(entries)
+    },
+    axe: {
+      ...route.axe,
+      report: { ...route.axe.report, url: `${origin}/` }
+    },
+    screenshot: { ...route.screenshot, base64: png }
+  }));
+  mkdirSync(packetDir, { recursive: true });
+  return finalizeGlobalChromeCapture({ capture: raw, packetDir, stateFingerprint: state('f') });
+}
+
+test('navigation route mapping remains exact after labels and query values are privacy-bound', () => {
+  const root = mkdtempSync(join(tmpdir(), 'navigation-finalized-mapping-'));
+  const sourceCapture = finalizedNavigationCapture({
+    packetDir: join(root, 'source-packet'),
+    origin: 'https://source.example',
+    entries: [{ href: '/programs?audience=adult', label: 'Programs' }],
+    screenshotSeed: 1
+  });
+  const targetCapture = finalizedNavigationCapture({
+    packetDir: join(root, 'target-packet'),
+    origin: 'https://target.example',
+    entries: [{ href: '/courses?audience=adult', label: 'Programs' }],
+    screenshotSeed: 2
+  });
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    routeMappings: [{
+      sourcePath: '/programs?audience=adult',
+      targetPath: '/courses?audience=adult',
+      accepted: true
+    }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.passed));
+  assert.doesNotMatch(JSON.stringify(sourceCapture), /audience=adult|"label":"Programs"/);
+});
+
 test('finalization fails before writing for incomplete captures and symlinked evidence ancestors', () => {
   const incompleteRoot = mkdtempSync(join(tmpdir(), 'global-chrome-incomplete-'));
   const incompletePacket = join(incompleteRoot, 'review-packet');
@@ -2223,7 +2502,7 @@ test('state-bound verifier-owned axe results preserve and block WCAG violations'
   assert.equal(validateScreenshotArtifacts(packetDir, finalized), true);
 });
 
-test('CDP pipe captures desktop/mobile screenshots and computed signals without a browser-driver dependency', {
+test('CDP pipe captures screenshots and interactive ARIA-menuitem ancestry without a browser-driver dependency', {
   skip: findBrowserExecutable() ? false : 'Chrome/Chromium is not installed in this runtime.'
 }, async () => {
   const server = createServer((request, response) => {
@@ -2236,7 +2515,7 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
       <button class="menu-toggle" aria-label="Menu" aria-controls="main-nav" aria-expanded="false"
         onclick="this.setAttribute('aria-expanded','true');document.getElementById('main-nav').classList.add('open')">Menu</button>
-      <nav id="main-nav"><a href="/">Home</a><a href="/about">About</a></nav></header>
+      <nav id="main-nav"><div role="menu"><a role="menuitem" href="/">Home</a><div role="menuitem"><a href="/about">About</a><div role="menu"><a role="menuitem" href="/team">Team</a></div></div></div></nav></header>
       <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p>
         <form id="fixture-form"><input type="hidden" name="form_token" value="csrf-secret">
           <label for="fixture-email">Email&nbsp;&#xFF21;ddress</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">
@@ -2309,6 +2588,10 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
       JSON.stringify(raw.routes.map((route) => route.signals.publicFormControls)),
       /form_token|csrf-secret|email_internal|visitor-secret|general-internal|blank-internal|Private fallback text|website_honeypot|honeypot-secret|inert_internal|inert-secret|transparent_internal|transparent-secret|hidden_internal|hidden-secret|operation_internal|send-internal|reference_internal|external-secret/
     );
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entryCount === 3));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries.map((entry) => entry.label).join('|') === 'Home|About|Team'));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].depth === 1));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].parentPosition === 1));
     assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
     assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
     assert.equal(raw.routes.find((route) => route.path === '/' && route.viewport.name === 'mobile').signals.mobileMenu.activationWorks, true);
@@ -2320,6 +2603,7 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     assert.equal(finalized.routes.length, 4);
     assert.ok(finalized.routes.every((route) => route.axe.report.path.endsWith('.json')));
     assert.ok(finalized.routes.every((route) => route.axe.report.sha256.startsWith('sha256:')));
+    assert.ok(finalized.routes.every((route) => route.signals.primaryNavigation.entries.every((entry) => !('label' in entry))));
     assert.deepEqual(verifierAxeCompletionErrors(finalized), []);
     assert.equal(validateScreenshotArtifacts(packetDir, finalized), true);
   } finally {
@@ -2486,7 +2770,10 @@ test('shared global chrome evidence redacts every query with provenance-bound id
       meaningfulHrefs: [
         { href: '/next?token=header-private', scope: 'navigation' },
         { href: digestLikeRoute, scope: 'footer' }
-      ]
+      ],
+      primaryNavigation: primaryNavigation([
+        { href: '/next?token=header-private', label: 'Visitor private-value' }
+      ])
     },
     axe: {
       ...route.axe,
@@ -2523,7 +2810,7 @@ test('shared global chrome evidence redacts every query with provenance-bound id
   const expectedHeaderIdentity = sha256('?token=header-private').slice('sha256:'.length);
   const serialized = JSON.stringify(shared);
 
-  assert.doesNotMatch(serialized, /private-value|header-private/);
+  assert.doesNotMatch(serialized, /Visitor private-value|header-private/);
   assert.equal(shared.primaryRoutes[0], `/search?query-sha256=${expectedPrivateIdentity}`);
   assert.equal(shared.routes[0].signals.meaningfulHrefs[1].href, `/search?query-sha256=${expectedLiteralIdentity}`);
   assert.notEqual(
@@ -2532,6 +2819,15 @@ test('shared global chrome evidence redacts every query with provenance-bound id
     'raw digest-like queries must not impersonate redaction output'
   );
   assert.equal(shared.routes[0].signals.meaningfulHrefs[0].href, `/next?query-sha256=${expectedHeaderIdentity}`);
+  assert.equal(
+    shared.routes[0].signals.primaryNavigation.entries[0].labelSha256,
+    sha256('visitor private-value')
+  );
+  assert.equal(
+    shared.routes[0].signals.primaryNavigation.entries[0].href,
+    `/next?query-sha256=${expectedHeaderIdentity}`
+  );
+  assert.equal('label' in shared.routes[0].signals.primaryNavigation.entries[0], false);
   assert.doesNotMatch(shared.warnings.join('\n'), new RegExp(packetDir));
   const storedAxeReport = JSON.parse(readFileSync(join(packetDir, shared.routes[0].axe.report.path), 'utf8'));
   assert.equal(storedAxeReport.url, `https://fixture.ddev.site/search?query-sha256=${expectedPrivateIdentity}`);

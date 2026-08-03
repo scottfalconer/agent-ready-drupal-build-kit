@@ -147,6 +147,14 @@ const SAME_ORIGIN_LINK_DISPOSITIONS = new Set([
   'other'
 ]);
 const EXTERNAL_REDIRECT_FINAL_MATCHES = new Set(['exact_url', 'origin']);
+const NAVIGATION_PARITY_DIFFERENCE_KINDS = new Set([
+  'addition',
+  'hierarchy',
+  'href',
+  'label',
+  'omission',
+  'order'
+]);
 const CUSTOM_CODE_REVIEW_SCHEMA = 'public-kit.custom-code-review.2';
 const CUSTOM_CODE_COVERAGE_ROW_LIMIT = 128;
 export const PACKET_JSON_LIMITS = Object.freeze({
@@ -1567,6 +1575,54 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   } catch {
     return false;
   }
+}
+
+async function navigationParityDispositionReasons(packetDir, routeMatrix) {
+  const reasons = [];
+  const dispositions = arrayOrEmpty(routeMatrix?.primaryNavigationParityDispositions);
+  if (dispositions.length > 128) {
+    reasons.push('route-matrix.json primaryNavigationParityDispositions is limited to 128 exact mismatch dispositions.');
+    return reasons;
+  }
+  const identities = new Set();
+  for (const [index, disposition] of dispositions.entries()) {
+    const prefix = `route-matrix.json primaryNavigationParityDispositions[${index}]`;
+    const differenceKinds = Array.isArray(disposition?.differenceKinds)
+      ? disposition.differenceKinds.map((kind) => String(kind).trim())
+      : [];
+    const normalizedKinds = [...new Set(differenceKinds)].sort();
+    const identity = JSON.stringify([
+      disposition?.viewport,
+      disposition?.expectedSourceTreeFingerprint,
+      disposition?.targetTreeFingerprint,
+      normalizedKinds
+    ]);
+    const evidenceReady = await nonEmptyPacketEvidence(packetDir, disposition?.evidence);
+    if (
+      disposition?.schemaVersion !== 'public-kit.navigation-parity-disposition.1' ||
+      !['desktop', 'mobile'].includes(disposition?.viewport) ||
+      !HASH_RE.test(String(disposition?.expectedSourceTreeFingerprint ?? '')) ||
+      !HASH_RE.test(String(disposition?.targetTreeFingerprint ?? '')) ||
+      disposition?.expectedSourceTreeFingerprint === disposition?.targetTreeFingerprint ||
+      differenceKinds.length === 0 ||
+      differenceKinds.some((kind) => !NAVIGATION_PARITY_DIFFERENCE_KINDS.has(kind)) ||
+      JSON.stringify(differenceKinds) !== JSON.stringify(normalizedKinds) ||
+      disposition?.accepted !== true ||
+      !String(disposition?.acceptedBy ?? '').trim() ||
+      !String(disposition?.rationale ?? '').trim() ||
+      !evidenceReady
+    ) {
+      reasons.push(
+        `${prefix} must bind one desktop/mobile verifier mismatch by exact source/target tree fingerprints and sorted differenceKinds, ` +
+        'with accepted=true, a named accepter, rationale, and non-empty packet-local evidence.'
+      );
+    }
+    if (identities.has(identity)) {
+      reasons.push(`${prefix} duplicates an existing exact navigation mismatch disposition.`);
+    }
+    identities.add(identity);
+  }
+  return reasons;
 }
 
 async function customCodeEvidenceReasons(packetDir, drupalReadback) {
@@ -5935,6 +5991,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     sourceAudit
   }));
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
+  reasons.push(...await navigationParityDispositionReasons(packetDir, routeMatrix));
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
   reasons.push(...await browserCaptureStateReasons(
