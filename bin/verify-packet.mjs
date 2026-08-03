@@ -5756,6 +5756,13 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     routeRows.some((route) => {
       const targetPath = normalizeRouteRequestKey(route?.targetPath);
       const targetFinalPath = normalizeRouteRequestKey(route?.targetFinalPath);
+      const sourceFinalPath = normalizeRouteRequestKey(route?.sourceFinalPath);
+      const sourceStatus = numericValue(route?.sourceStatus);
+      const sourceContractValid = sourceStatus !== null &&
+        Number.isInteger(sourceStatus) &&
+        sourceStatus >= 100 &&
+        sourceStatus < 500 &&
+        Boolean(sourceFinalPath);
       const declaredServerError = numericValue(route?.sourceStatus) >= 500 || numericValue(route?.targetStatus) >= 500;
       const redirectContractValid = route?.expectedRedirect === true &&
         redirectStatus(route?.targetStatus) &&
@@ -5768,11 +5775,12 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
         !normalizeRouteRequestKey(route?.sourcePath) ||
         !targetPath ||
         !ROUTE_ROLES.has(String(route?.routeRole ?? '').trim()) ||
+        !sourceContractValid ||
         declaredServerError ||
         (!redirectContractValid && !directContractValid);
     })
   ) {
-    reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
+    reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, bind sourceStatus plus sourceFinalPath, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
   }
   for (const [index, route] of routeRows.entries()) {
     const disposition = route?.identityChangeDisposition;

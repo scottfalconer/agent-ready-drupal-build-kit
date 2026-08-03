@@ -767,11 +767,103 @@ function intrinsicUrl(value, finalUrl, { asset = false } = {}) {
   }
 }
 
+const VOID_HTML_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
+  'param', 'source', 'track', 'wbr'
+]);
+
+function explicitlyHiddenTag(tag) {
+  const attributes = tagAttributes(tag);
+  if (Object.prototype.hasOwnProperty.call(attributes, 'hidden')) {
+    return true;
+  }
+  if (String(attributes['aria-hidden'] ?? '').trim().toLowerCase() === 'true') {
+    return true;
+  }
+  return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)(?:\s*!important)?(?:\s*;|$)/i
+    .test(String(attributes.style ?? ''));
+}
+
+function stripExplicitlyHiddenHtml(html) {
+  const value = String(html);
+  const matcher = /<\/?([a-z][\w:-]*)\b[^>]*>/gi;
+  let output = '';
+  let cursor = 0;
+  let hiddenTag = '';
+  let hiddenTagDepth = 0;
+  for (const match of value.matchAll(matcher)) {
+    const token = match[0];
+    const tagName = match[1].toLowerCase();
+    const closing = /^<\//.test(token);
+    const standalone = /\/\s*>$/.test(token) || VOID_HTML_ELEMENTS.has(tagName);
+    if (!hiddenTag) {
+      output += value.slice(cursor, match.index);
+      if (!closing && explicitlyHiddenTag(token)) {
+        output += ' ';
+        if (!standalone) {
+          hiddenTag = tagName;
+          hiddenTagDepth = 1;
+        }
+      } else {
+        output += token;
+      }
+    } else if (tagName === hiddenTag) {
+      if (closing) {
+        hiddenTagDepth -= 1;
+        if (hiddenTagDepth === 0) {
+          hiddenTag = '';
+        }
+      } else if (!standalone) {
+        hiddenTagDepth += 1;
+      }
+    }
+    cursor = match.index + token.length;
+  }
+  if (!hiddenTag) {
+    output += value.slice(cursor);
+  }
+  return output;
+}
+
+function firstElementSubtree(html, openingMatch) {
+  const value = String(html);
+  const tagName = openingMatch[1].toLowerCase();
+  const matcher = new RegExp(`<\\/?${tagName}\\b[^>]*>`, 'gi');
+  matcher.lastIndex = openingMatch.index + openingMatch[0].length;
+  let depth = 1;
+  for (const match of value.matchAll(matcher)) {
+    if (/^<\//.test(match[0])) {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(openingMatch.index, match.index + match[0].length);
+      }
+    } else if (!/\/\s*>$/.test(match[0])) {
+      depth += 1;
+    }
+  }
+  return value.slice(openingMatch.index);
+}
+
+function routeMainHtml(html) {
+  const value = String(html);
+  const matcher = /<([a-z][\w:-]*)\b[^>]*>/gi;
+  for (const match of value.matchAll(matcher)) {
+    const tagName = match[1].toLowerCase();
+    const attributes = tagAttributes(match[0]);
+    const roles = String(attributes.role ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (tagName === 'main' || roles.includes('main')) {
+      return firstElementSubtree(value, match);
+    }
+  }
+  return value;
+}
+
 function renderedSemanticHtml(html) {
   const bodyMatch = String(html).match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
-  return (bodyMatch?.[1] ?? String(html))
+  const withoutInertMarkup = (bodyMatch?.[1] ?? String(html))
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<(script|style|template|noscript|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
+  return stripExplicitlyHiddenHtml(routeMainHtml(withoutInertMarkup));
 }
 
 function formElements(html) {
@@ -2512,11 +2604,15 @@ export async function inspectSourceSurface({
     }
     const sourceStatusDeclared = declared.sourceStatus !== null && declared.sourceStatus !== undefined && declared.sourceStatus !== '';
     const expectedStatus = Number(declared.sourceStatus);
-    if (sourceStatusDeclared && (!Number.isFinite(expectedStatus) || expectedStatus !== record.initialStatus)) {
+    if (!sourceStatusDeclared) {
+      errors.push(`Accepted source route ${path} must declare sourceStatus for verifier-owned live binding.`);
+    } else if (!Number.isFinite(expectedStatus) || expectedStatus !== record.initialStatus) {
       errors.push(`Accepted source route ${path} returned initial HTTP ${record.initialStatus}; route-matrix.json records ${String(declared.sourceStatus)}.`);
     }
     const expectedFinalPath = requestPathAndSearch(declared.sourceFinalPath);
-    if (expectedFinalPath && expectedFinalPath !== requestPathAndSearch(record.finalUrl)) {
+    if (!expectedFinalPath) {
+      errors.push(`Accepted source route ${path} must declare sourceFinalPath for verifier-owned live binding.`);
+    } else if (expectedFinalPath !== requestPathAndSearch(record.finalUrl)) {
       errors.push(`Accepted source route ${path} ended at ${requestPathAndSearch(record.finalUrl)}; route-matrix.json records ${expectedFinalPath}.`);
     }
     if (String(declared.sourceTitle ?? '').trim() && declared.sourceTitle !== record.title) {
@@ -12596,17 +12692,21 @@ export function allRouteSemanticReconciliation({
       const sourceStatusDeclared = route?.sourceStatus !== null &&
         route?.sourceStatus !== undefined && route?.sourceStatus !== '';
       const expectedSourceStatus = Number(route?.sourceStatus);
-      if (sourceStatusDeclared && (
+      if (!sourceStatusDeclared) {
+        routeErrors.push('sourceStatus is required for verifier-owned live binding');
+      } else if (
         !Number.isFinite(expectedSourceStatus) ||
         expectedSourceStatus !== Number(source.initialStatus)
-      )) {
+      ) {
         routeErrors.push(
           `sourceStatus ${expectedSourceStatus} is not live-bound to initial HTTP ${Number(source.initialStatus)}`
         );
       }
       const expectedSourceFinalRequest = requestPathAndSearch(route?.sourceFinalPath);
       const observedSourceFinalRequest = requestPathAndSearch(source?.finalUrl);
-      if (expectedSourceFinalRequest && expectedSourceFinalRequest !== observedSourceFinalRequest) {
+      if (!expectedSourceFinalRequest) {
+        routeErrors.push('sourceFinalPath is required for verifier-owned live binding');
+      } else if (expectedSourceFinalRequest !== observedSourceFinalRequest) {
         routeErrors.push('sourceFinalPath is not live-bound to the verifier-owned final request');
       }
 

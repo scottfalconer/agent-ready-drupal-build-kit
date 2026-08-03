@@ -1666,9 +1666,14 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
 
     const completeMatrix = structuredClone(matrix);
     for (const path of ['/projects', '/developers', '/podcasts']) {
-      completeMatrix.routes.push({ sourcePath: path, accepted: true });
+      completeMatrix.routes.push({ sourcePath: path, sourceStatus: 200, sourceFinalPath: path, accepted: true });
     }
-    completeMatrix.routes.push({ sourcePath: '/projects?view=featured', accepted: true });
+    completeMatrix.routes.push({
+      sourcePath: '/projects?view=featured',
+      sourceStatus: 200,
+      sourceFinalPath: '/projects?view=featured',
+      accepted: true
+    });
     const complete = await inspectSourceSurface({ routeMatrix: completeMatrix });
     assert.equal(complete.status, 'passed', complete.errors.join('\n'));
     assert.equal(complete.errors.length, 0);
@@ -1686,6 +1691,15 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     assert.equal(stale.status, 'blocked');
     assert.match(stale.errors.join('\n'), /accepted source route \/projects returned initial HTTP 200.*records 201/i);
     assert.match(stale.errors.join('\n'), /accepted source route \/projects ended at \/projects.*records \/wrong-final/i);
+
+    const missingBindingsMatrix = structuredClone(completeMatrix);
+    const missingBindingsRoute = missingBindingsMatrix.routes.find((route) => route.sourcePath === '/projects');
+    delete missingBindingsRoute.sourceStatus;
+    delete missingBindingsRoute.sourceFinalPath;
+    const missingBindings = await inspectSourceSurface({ routeMatrix: missingBindingsMatrix });
+    assert.equal(missingBindings.status, 'blocked');
+    assert.match(missingBindings.errors.join('\n'), /accepted source route \/projects must declare sourceStatus/i);
+    assert.match(missingBindings.errors.join('\n'), /accepted source route \/projects must declare sourceFinalPath/i);
 
     const bounded = await inspectSourceSurface({ routeMatrix: matrix, limits: { maxRoutes: 2 } });
     assert.equal(bounded.status, 'blocked');
@@ -1716,6 +1730,19 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       </body></html>`);
       return;
     }
+    if (request.url === '/prose' || request.url === '/hero' || request.url === '/hidden-main') {
+      const sharedChrome = 'Shared navigation and footer copy. '.repeat(24);
+      const mainContent = request.url === '/prose'
+        ? `<main><h1>Program</h1><p>${'Substantive route prose. '.repeat(32)}</p></main>`
+        : request.url === '/hero'
+          ? '<div role="main"><h1>Program</h1></div>'
+          : `<main hidden><h1>Program</h1><p>${'Hidden route prose. '.repeat(32)}</p></main>`;
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html><html><head><title>Program</title></head><body>
+        <header>${sharedChrome}</header>${mainContent}<footer>${sharedChrome}</footer>
+      </body></html>`);
+      return;
+    }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><html><head><title>Home</title></head><body>
       <h1>Home</h1><button type="button">Menu</button>
@@ -1724,6 +1751,11 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       <template><h2>Template heading</h2><form><input name="template"></form><object data="old.pdf"></object></template>
       <noscript><iframe src="/fallback"></iframe></noscript>
       <svg><foreignObject><form><button>SVG</button></form></foreignObject></svg>
+      <section hidden><h2>Hidden heading</h2><form><button>Hidden form</button></form><video src="hidden.mp4"></video></section>
+      <aside aria-hidden="TRUE"><h2>ARIA-hidden heading</h2><form><button>Hidden form</button></form><iframe src="/hidden"></iframe></aside>
+      <div style="color: red; DISPLAY: none !important;"><h2>Display-hidden heading</h2><form><button>Hidden form</button></form><audio src="hidden.mp3"></audio></div>
+      <div style="visibility : hidden"><h2>Visibility-hidden heading</h2><form><button>Hidden form</button></form><object data="hidden.pdf"></object></div>
+      <img hidden src="hidden.png"><input aria-hidden="true" name="hidden-control">
       <a href="/form">Form</a><a href="/manual.pdf">Manual</a>
     </body></html>`);
   }, async (sourceBaseUrl) => {
@@ -1733,7 +1765,10 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       routes: [
         { sourcePath: '/', sourceStatus: 200, sourceFinalPath: '/', sourceTitle: 'Home', sourceH1: 'Home', accepted: true },
         { sourcePath: '/form', sourceStatus: 200, sourceFinalPath: '/form', sourceTitle: 'Form', sourceH1: 'Form', accepted: true },
-        { sourcePath: '/manual.pdf', sourceStatus: 200, sourceFinalPath: '/manual.pdf', sourceTitle: '', sourceH1: '', accepted: true }
+        { sourcePath: '/manual.pdf', sourceStatus: 200, sourceFinalPath: '/manual.pdf', sourceTitle: '', sourceH1: '', accepted: true },
+        { sourcePath: '/prose', sourceStatus: 200, sourceFinalPath: '/prose', sourceTitle: 'Program', sourceH1: 'Program', accepted: true },
+        { sourcePath: '/hero', sourceStatus: 200, sourceFinalPath: '/hero', sourceTitle: 'Program', sourceH1: 'Program', accepted: true },
+        { sourcePath: '/hidden-main', sourceStatus: 200, sourceFinalPath: '/hidden-main', sourceTitle: 'Program', sourceH1: 'Program', accepted: true }
       ],
       sourceRouteDriftClassification: []
     };
@@ -1785,6 +1820,38 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
     });
     assert.equal(mismatchingMedia.status, 'blocked');
     assert.match(mismatchingMedia.errors.join('\n'), /content type changed from application\/pdf to application\/octet-stream/i);
+
+    const sourceProse = census.routes.find((route) => route.path === '/prose');
+    const targetHero = census.routes.find((route) => route.path === '/hero');
+    const hiddenMain = census.routes.find((route) => route.path === '/hidden-main');
+    assert.ok(sourceProse.intrinsicSemantics.visibleTextLength >= 400);
+    assert.ok(targetHero.intrinsicSemantics.visibleTextLength < 120);
+    assert.equal(hiddenMain.intrinsicSemantics.visibleTextLength, 0);
+    assert.equal(hiddenMain.intrinsicSemantics.headingCount, 0);
+    assert.equal(hiddenMain.intrinsicSemantics.formCount, 0);
+    const omittedMainContent = allRouteSemanticReconciliation({
+      routeMatrix: { routes: [{
+        sourcePath: '/prose',
+        sourceStatus: 200,
+        sourceFinalPath: '/prose',
+        sourceTitle: 'Program',
+        sourceH1: 'Program',
+        targetPath: '/hero',
+        targetTitle: 'Program',
+        targetH1: 'Program',
+        accepted: true
+      }] },
+      sourceSurfaceCensus: census,
+      serverRenderedResponseSurface: {
+        passed: true,
+        routeChecks: [{
+          ...targetHero,
+          requestedUrl: 'https://target.example/hero'
+        }]
+      }
+    });
+    assert.equal(omittedMainContent.status, 'blocked');
+    assert.match(omittedMainContent.errors.join('\n'), /visible text collapsed/i);
   }, { defaultVerificationRoutes: false });
 });
 
@@ -1859,6 +1926,19 @@ test('all-route semantic reconciliation live-binds exact query identities and bl
     sourceSurfaceCensus: wrongQuery
   });
   assert.match(missingExactSource.errors.join('\n'), /exactly one verifier-owned source observation/i);
+
+  const missingSourceBindingsRoute = structuredClone(route);
+  delete missingSourceBindingsRoute.sourceStatus;
+  delete missingSourceBindingsRoute.sourceFinalPath;
+  const missingSourceBindings = allRouteSemanticReconciliation({
+    packetDir,
+    routeMatrix: { routes: [missingSourceBindingsRoute] },
+    serverRenderedResponseSurface,
+    sourceSurfaceCensus
+  });
+  assert.equal(missingSourceBindings.status, 'blocked');
+  assert.match(missingSourceBindings.errors.join('\n'), /sourceStatus is required for verifier-owned live binding/i);
+  assert.match(missingSourceBindings.errors.join('\n'), /sourceFinalPath is required for verifier-owned live binding/i);
 
   const wrongDeclaredIdentity = structuredClone(route);
   wrongDeclaredIdentity.targetH1 = 'Menu label';
@@ -2235,7 +2315,12 @@ test('large source census checks primary delivery routes before a visible late c
         { sourcePath: '/', targetPath: '/', accepted: true },
         { sourcePath: '/landing', targetPath: '/landing', accepted: true }
       ],
-      routes: ['/', '/landing', ...commentPaths].map((sourcePath) => ({ sourcePath, accepted: true })),
+      routes: ['/', '/landing', ...commentPaths].map((sourcePath) => ({
+        sourcePath,
+        sourceStatus: 200,
+        sourceFinalPath: sourcePath,
+        accepted: true
+      })),
       sourceRouteDriftClassification: []
     };
 
@@ -2275,7 +2360,7 @@ test('verifier-owned source census records an evidenced private source boundary 
     const routeMatrix = {
       sourceBaseUrl,
       primaryRoutes: [{ sourcePath: '/', targetPath: '/', accepted: true }],
-      routes: [{ sourcePath: '/', accepted: true }],
+      routes: [{ sourcePath: '/', sourceStatus: 200, sourceFinalPath: '/', accepted: true }],
       sourceRouteDriftClassification: [{
         sourcePath: '/private',
         sourceStatus: 403,
@@ -2517,6 +2602,10 @@ function liveRouteMatrix(baseUrl) {
     },
     homepageParity: {
       sourcePath: '/',
+      sourceStatus: 200,
+      sourceFinalPath: '/',
+      sourceH1: 'Source home',
+      sourceTitle: 'Source home',
       targetPath: '/',
       targetStatus: 200,
       targetFinalPath: '/',
@@ -2564,6 +2653,10 @@ function liveRouteMatrix(baseUrl) {
     primaryRoutes: [
       {
         sourcePath: '/',
+        sourceStatus: 200,
+        sourceFinalPath: '/',
+        sourceTitle: 'Source home',
+        sourceH1: 'Source home',
         targetPath: '/',
         routeRole: 'homepage',
         sourceIntent: 'Source homepage',
@@ -2576,6 +2669,10 @@ function liveRouteMatrix(baseUrl) {
     routes: [
       {
         sourcePath: '/',
+        sourceStatus: 200,
+        sourceFinalPath: '/',
+        sourceTitle: 'Source home',
+        sourceH1: 'Source home',
         targetPath: '/',
         routeRole: 'homepage',
         targetStatus: 200,
@@ -7432,6 +7529,15 @@ test('completion fails closed when structured gate evidence or applicability dis
       }
     },
     {
+      name: 'route-source-live-bindings',
+      file: 'route-matrix.json',
+      expected: /bind sourceStatus plus sourceFinalPath/i,
+      mutate: (value) => {
+        delete value.routes[0].sourceStatus;
+        delete value.routes[0].sourceFinalPath;
+      }
+    },
+    {
       name: 'source-origin-exception-accepter',
       file: 'route-matrix.json',
       expected: /sourceOriginLinkExceptions.*named accepter/i,
@@ -10854,6 +10960,8 @@ test('noRedirectDisposition fails closed unless acceptance, owner, rationale, an
   const routeMatrix = liveRouteMatrix('https://target.example');
   routeMatrix.routes.push({
     sourcePath: '/legacy?item=one',
+    sourceStatus: 200,
+    sourceFinalPath: '/legacy?item=one',
     targetPath: '/',
     routeRole: 'homepage',
     targetStatus: 200,
