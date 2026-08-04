@@ -96,9 +96,19 @@ export const BUILD_TYPES = Object.freeze({
 const BUILD_TYPE_VALUES = new Set(Object.values(BUILD_TYPES));
 const CANVAS_BUILD_TYPES = new Set([BUILD_TYPES.hybrid, BUILD_TYPES.canvasHeavy]);
 const CANVAS_COMPOSITION_OWNERS = new Set(['canvas_page', 'experience_builder_page']);
-const COMPOSED_OWNER_DECISION_ROLES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
+const COMPOSED_OWNER_DECISION_ROLES = new Set(['homepage', 'landing']);
 const COMPOSED_OWNER_DECISION_PAGE_TYPES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
 const PAGE_LIKE_COMPOSITION_ROUTE_ROLES = new Set(['homepage', 'landing', 'form', 'legal', 'other']);
+const COLLECTION_ROUTE_ROLES = new Set(['listing', 'taxonomy', 'search']);
+const QUERY_BACKED_COLLECTION_OWNERS = new Set([
+  'view',
+  'search_api_view',
+  'taxonomy_view',
+  'canvas_component_bound_to_view',
+  'block_view'
+]);
+const DIRECT_ROUTE_VIEW_OWNERS = new Set(['view', 'search_api_view', 'taxonomy_view']);
+const COLLECTION_CONTINUATION_BINDINGS = new Set(['same_path_query', 'live_discovered_link', 'none']);
 const COMPOSITION_OWNER_CANONICAL_IDS = new Map([
   ['canvas_page', 'canvas_page'],
   ['experience_builder_page', 'experience_builder_page'],
@@ -1002,6 +1012,13 @@ export function compositionOwnersMatch(declared, actual) {
   return Boolean(declaredOwner && actualOwner && declaredOwner === actualOwner);
 }
 
+export function compositionOwnerMachinePasses({ declaredOwner, actualOwner, selectedOwner = '' } = {}) {
+  return Boolean(
+    compositionOwnersMatch(declaredOwner, actualOwner) &&
+    (!selectedOwner || compositionOwnersMatch(declaredOwner, selectedOwner))
+  );
+}
+
 export function buildTypeRequiresCanvasEvidence(value) {
   return CANVAS_BUILD_TYPES.has(String(value ?? '').trim());
 }
@@ -1105,8 +1122,6 @@ function compositionSectionDefinitionsMatch(declared, ownership) {
 async function compositionFidelityPasses({
   check,
   expectedSections = null,
-  expectedTarget,
-  independentTargetBaseUrl,
   packetDir,
   selectedOwner = ''
 }) {
@@ -1116,15 +1131,7 @@ async function compositionFidelityPasses({
 
   const declaredOwner = String(check.declaredCompositionOwner ?? '').trim();
   const actualOwner = String(check.actualCompositionOwner ?? '').trim();
-  const ownerMatches = compositionOwnersMatch(declaredOwner, actualOwner);
-  const independentTargetUrl = httpUrl(independentTargetBaseUrl);
-  const deviationTargetUrl = httpUrl(check.deviationTargetUrl);
-  const [deviationEvidencePresent, fidelityEvidencePresent, publicOutputProofPresent] = await Promise.all([
-    nonEmptyPacketEvidence(
-      packetDir,
-      check.deviationEvidence,
-      join(packetDir, 'evidence', 'independent-verification')
-    ),
+  const [fidelityEvidencePresent, publicOutputProofPresent] = await Promise.all([
     nonEmptyPacketEvidence(
       packetDir,
       check.evidence,
@@ -1136,23 +1143,12 @@ async function compositionFidelityPasses({
       join(packetDir, 'evidence', 'independent-verification')
     )
   ]);
-  const evidencedDeviation = Boolean(
-    !ownerMatches &&
-    check.deviationRecordRequired === true &&
-    check.deviationRecordPresent === true &&
-    independentTargetUrl &&
-    deviationTargetUrl?.origin === independentTargetUrl.origin &&
-    normalizeRouteRequestKey(deviationTargetUrl.href) === normalizeRouteRequestKey(expectedTarget) &&
-    String(check.deviationRationale ?? '').trim() &&
-    deviationEvidencePresent
-  );
 
   return Boolean(
     check.status === 'pass' &&
     canonicalCompositionOwner(declaredOwner) &&
     canonicalCompositionOwner(actualOwner) &&
-    (!selectedOwner || compositionOwnersMatch(declaredOwner, selectedOwner)) &&
-    (ownerMatches || evidencedDeviation) &&
+    compositionOwnerMachinePasses({ declaredOwner, actualOwner, selectedOwner }) &&
     check.routeRationalePresent === true &&
     check.sectionOwnershipDeclared === true &&
     check.expectedEditorActionsVerified === true &&
@@ -1162,8 +1158,33 @@ async function compositionFidelityPasses({
   );
 }
 
+export function utilityExceptionHasRouteBoundBrowserEvidence(exception, browserEvidence) {
+  const sourceRoute = normalizeRouteRequestKey(exception?.sourceRoute);
+  const targetRoute = normalizeRouteRequestKey(exception?.targetRoute);
+  const routeRole = String(exception?.routeRole ?? '').trim();
+  const evidenceReference = String(exception?.browserEvidence ?? '').trim();
+  if (!sourceRoute || !targetRoute || !routeRole || !evidenceReference) {
+    return false;
+  }
+  return defaultCaptureStateChecks(browserEvidence?.publicRouteChecks).some((check) =>
+    check?.accepted === true &&
+    check?.visualComparison?.status === 'pass' &&
+    String(check?.routeRole ?? '').trim() === routeRole &&
+    normalizeRouteRequestKey(check?.sourceUrl || check?.sourceFinalUrl) === sourceRoute &&
+    routeRecordRequestKey(check) === targetRoute &&
+    Boolean(String(check?.sourceScreenshot ?? '').trim()) &&
+    Boolean(String(check?.targetScreenshot ?? '').trim()) &&
+    [
+      check?.sourceScreenshot,
+      check?.targetScreenshot,
+      check?.visualComparison?.diffImage
+    ].some((reference) => String(reference ?? '').trim() === evidenceReference)
+  );
+}
+
 async function compositionDecisionReasons({
   blindAdversarialReview,
+  browserEvidence,
   independentVerification,
   packetDir,
   patternMap,
@@ -1303,13 +1324,11 @@ async function compositionDecisionReasons({
     const fidelityPasses = await compositionFidelityPasses({
       check: fidelity,
       expectedSections: sections.map((section) => section.editorFacingName),
-      expectedTarget: pair.target,
-      independentTargetBaseUrl: independentVerification?.target?.baseUrl,
       packetDir,
       selectedOwner
     });
     if (!fidelityPasses) {
-      reasons.push(`G-COMPOSITION-01 independent composition fidelity for ${routeLabel} must pass with packet-local public-output evidence, observe the selected owner, and check exactly the declared editor-facing sections.`);
+      reasons.push(`G-COMPOSITION-01 independent composition fidelity for ${routeLabel} must pass with packet-local public-output evidence, observe the exact declared selected owner, and check exactly the declared editor-facing sections; an owner deviation remains human review and blocks machine completion.`);
     }
 
     const routeSections = sectionRecords.filter((section) => compositionRoutePairsMatch(section, flexibleRoute));
@@ -1425,6 +1444,7 @@ async function compositionDecisionReasons({
       String(route?.compositionOwner ?? '').trim() === 'utility_page'
     );
     const browserEvidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.browserEvidence);
+    const routeBoundBrowserEvidencePresent = utilityExceptionHasRouteBoundBrowserEvidence(exception, browserEvidence);
     const exceptionRouteRole = String(exception?.routeRole ?? '').trim();
     const matchedRouteRole = String(routeMatches[0]?.routeRole ?? '').trim();
     if (
@@ -1444,9 +1464,10 @@ async function compositionDecisionReasons({
       !String(exception?.whyCanvasOrExperienceBuilderNotUsed ?? '').trim() ||
       !String(exception?.editorMaintenancePath ?? '').trim() ||
       !browserEvidencePresent ||
+      !routeBoundBrowserEvidencePresent ||
       exception?.accepted !== true
     ) {
-      reasons.push(`G-COMPOSITION-01 utilityPageExceptions[${index}] must identify one exact accepted source/target route and reconcile to one declared Utility Page owner with complete packet-local browser evidence.`);
+      reasons.push(`G-COMPOSITION-01 utilityPageExceptions[${index}] must identify one exact accepted source/target route and reconcile to one declared Utility Page owner with complete packet-local browser evidence that is bound to that exact route.`);
     }
     if (key) {
       seenUtilityExceptions.add(key);
@@ -1577,9 +1598,10 @@ async function nonEmptyPacketEvidence(packetDir, reference, evidenceDir = join(p
   }
 }
 
-async function navigationParityDispositionReasons(packetDir, routeMatrix) {
+export async function navigationParityDispositionReasons(packetDir, routeMatrix, independentVerification = {}) {
   const reasons = [];
   const dispositions = arrayOrEmpty(routeMatrix?.primaryNavigationParityDispositions);
+  const independentChecks = arrayOrEmpty(independentVerification?.primaryNavigationParityDispositionChecks);
   if (dispositions.length > 128) {
     reasons.push('route-matrix.json primaryNavigationParityDispositions is limited to 128 exact mismatch dispositions.');
     return reasons;
@@ -1598,6 +1620,14 @@ async function navigationParityDispositionReasons(packetDir, routeMatrix) {
       normalizedKinds
     ]);
     const evidenceReady = await nonEmptyPacketEvidence(packetDir, disposition?.evidence);
+    const matchingIndependentChecks = independentChecks.filter((check) =>
+      check?.viewport === disposition?.viewport &&
+      check?.expectedSourceTreeFingerprint === disposition?.expectedSourceTreeFingerprint &&
+      check?.targetTreeFingerprint === disposition?.targetTreeFingerprint &&
+      JSON.stringify(arrayOrEmpty(check?.differenceKinds)) === JSON.stringify(differenceKinds) &&
+      String(check?.dispositionEvidence ?? '').trim() === String(disposition?.evidence ?? '').trim() &&
+      check?.status === 'pass'
+    );
     if (
       disposition?.schemaVersion !== 'public-kit.navigation-parity-disposition.1' ||
       !['desktop', 'mobile'].includes(disposition?.viewport) ||
@@ -1617,10 +1647,78 @@ async function navigationParityDispositionReasons(packetDir, routeMatrix) {
         'with accepted=true, a named accepter, rationale, and non-empty packet-local evidence.'
       );
     }
+    if (matchingIndependentChecks.length !== 1) {
+      reasons.push(`${prefix} needs exactly one passing independent-verification.json primaryNavigationParityDispositionChecks counterpart bound to the same viewport, fingerprints, differenceKinds, and disposition evidence.`);
+    }
     if (identities.has(identity)) {
       reasons.push(`${prefix} duplicates an existing exact navigation mismatch disposition.`);
     }
     identities.add(identity);
+  }
+  return reasons;
+}
+
+function normalizedIdentitySignal(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+export async function identityChangeDispositionReasons(packetDir, routeMatrix, independentVerification = {}) {
+  const reasons = [];
+  const independentChecks = arrayOrEmpty(independentVerification?.identityChangeDispositionChecks);
+  for (const [index, route] of arrayOrEmpty(routeMatrix?.routes).entries()) {
+    const routeSignals = {
+      sourceTitle: normalizedIdentitySignal(route?.sourceTitle),
+      sourceH1: normalizedIdentitySignal(route?.sourceH1),
+      targetTitle: normalizedIdentitySignal(route?.targetTitle),
+      targetH1: normalizedIdentitySignal(route?.targetH1)
+    };
+    const declaredDifference = routeSignals.sourceTitle !== routeSignals.targetTitle ||
+      routeSignals.sourceH1 !== routeSignals.targetH1;
+    const disposition = route?.identityChangeDisposition;
+    const prefix = `route-matrix.json routes[${index}].identityChangeDisposition`;
+    if (disposition === undefined || disposition === null) {
+      continue;
+    }
+    const validShape = isJsonObject(disposition) && typeof disposition.applies === 'boolean';
+    if (!validShape) {
+      reasons.push(`${prefix} must be a narrow boolean decision and, when it applies, include a named accepter, rationale, and packet-local evidence.`);
+      continue;
+    }
+    if (disposition.applies !== true) {
+      continue;
+    }
+
+    const evidencePresent = await nonEmptyPacketEvidence(packetDir, disposition.evidence);
+    const dispositionSignalsMatch = Object.entries(routeSignals).every(([field, value]) =>
+      normalizedIdentitySignal(disposition?.[field]) === value
+    );
+    const sourcePath = normalizeRouteRequestKey(route?.sourcePath);
+    const targetPath = normalizeRouteRequestKey(route?.targetPath);
+    const matchingIndependentChecks = independentChecks.filter((check) =>
+      normalizeRouteRequestKey(check?.sourcePath) === sourcePath &&
+      normalizeRouteRequestKey(check?.targetPath) === targetPath &&
+      check?.status === 'pass' &&
+      Object.entries(routeSignals).every(([field, value]) =>
+        normalizedIdentitySignal(check?.[field]) === value
+      ) &&
+      String(check?.dispositionEvidence ?? '').trim() === String(disposition?.evidence ?? '').trim()
+    );
+    if (
+      !String(disposition.acceptedBy ?? '').trim() ||
+      !String(disposition.rationale ?? '').trim() ||
+      !evidencePresent
+    ) {
+      reasons.push(`${prefix} must be a narrow boolean decision and, when it applies, include a named accepter, rationale, and packet-local evidence.`);
+    }
+    if (!declaredDifference) {
+      reasons.push(`${prefix} applies=true is stale because the current route row title and H1 declare no source/target difference.`);
+    }
+    if (!dispositionSignalsMatch) {
+      reasons.push(`${prefix} must bind the exact current route-row sourceTitle, sourceH1, targetTitle, and targetH1 values.`);
+    }
+    if (matchingIndependentChecks.length !== 1) {
+      reasons.push(`${prefix} needs exactly one passing independent-verification.json identityChangeDispositionChecks counterpart bound to the same route, identity values, and disposition evidence.`);
+    }
   }
   return reasons;
 }
@@ -2116,6 +2214,162 @@ export function collectionRecordMatchesLedger(record, ledger, routeMatrix, ledge
   return ledgerRows.filter((candidate) => normalizeRouteRequestKey(candidate?.sourceRoute) === source).length === 1;
 }
 
+function viewDisplayIdentity(value) {
+  const match = String(value ?? '').trim().match(/^views\.view\.([a-z0-9_]+):([a-z0-9_]+)$/);
+  return match ? { configName: `views.view.${match[1]}`, displayId: match[2], viewId: match[1] } : null;
+}
+
+export function collectionOwnershipRouteReasons({ patternMap = {}, routeMatrix = {}, drupalReadback = {} } = {}) {
+  const reasons = [];
+  const ledgers = substantiveObjects(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+    .filter((ledger) => ledger?.accepted === true);
+  const acceptedRoutes = arrayOrEmpty(routeMatrix?.routes).filter((route) =>
+    route?.accepted === true &&
+    normalizeRouteRequestKey(route?.sourcePath) &&
+    normalizeRouteRequestKey(route?.targetPath)
+  );
+  const liveViews = substantiveObjects(drupalReadback?.views);
+
+  for (const ledger of ledgers) {
+    const sourceRoute = normalizeRouteRequestKey(ledger?.sourceRoute);
+    const targetRoute = targetRouteForSource(routeMatrix, sourceRoute);
+    const label = String(ledger?.sourceObject ?? '').trim() || privacySafeRouteRequestLabel(sourceRoute);
+    const owner = String(ledger?.collectionOwner ?? '').trim();
+    const selection = String(ledger?.collectionSelection ?? '').trim();
+    const queryBacked = QUERY_BACKED_COLLECTION_OWNERS.has(owner);
+    const curatedReference = owner === 'entity_reference';
+
+    if (queryBacked) {
+      if (selection !== 'query_backed') {
+        reasons.push(`pattern-map.json accepted query-backed collection ${label} must declare collectionSelection query_backed.`);
+      }
+      const liveDisplay = String(ledger?.pagination?.liveViewDisplay ?? '').trim();
+      const displayIdentity = viewDisplayIdentity(liveDisplay);
+      const declaredOwner = String(ledger?.viewDisplayOrConfig ?? '').trim();
+      if (
+        !displayIdentity ||
+        ![displayIdentity?.configName, liveDisplay].includes(declaredOwner)
+      ) {
+        reasons.push(`pattern-map.json accepted query-backed collection ${label} must bind viewDisplayOrConfig to the same exact View or View display as pagination.liveViewDisplay.`);
+        continue;
+      }
+      const matchingViews = liveViews.filter((view) =>
+        String(view?.viewId ?? '').trim() === displayIdentity.viewId &&
+        String(view?.displayId ?? '').trim() === displayIdentity.displayId &&
+        String(view?.configName ?? '').trim() === displayIdentity.configName &&
+        recordConfigIdentities(view, 'view_row').includes(liveDisplay)
+      );
+      if (matchingViews.length !== 1) {
+        reasons.push(`drupal-readback.json must contain exactly one live View row for ${label} with coherent viewId, displayId, and configName fields matching ${liveDisplay}.`);
+        continue;
+      }
+      const livePath = normalizeRouteKey(matchingViews[0]?.path);
+      const targetPath = normalizeRouteKey(targetRoute);
+      if (
+        !targetRoute ||
+        (DIRECT_ROUTE_VIEW_OWNERS.has(owner) && livePath !== targetPath) ||
+        (!DIRECT_ROUTE_VIEW_OWNERS.has(owner) && livePath && livePath !== targetPath)
+      ) {
+        reasons.push(`drupal-readback.json live View row for ${label} must expose a path coherent with its exact declared target route; embedded block/component displays may leave path blank.`);
+      }
+    } else if (curatedReference) {
+      if (
+        selection !== 'curated_reference' ||
+        !String(ledger?.curationRationale ?? '').trim() ||
+        !String(ledger?.curationEvidence ?? '').trim() ||
+        String(ledger?.pagination?.sourceMode ?? '').trim() !== 'none' ||
+        String(ledger?.pagination?.targetMode ?? '').trim() !== 'none' ||
+        String(ledger?.pagination?.sourceContinuationKind ?? '').trim() !== 'none' ||
+        String(ledger?.pagination?.targetContinuationKind ?? '').trim() !== 'none' ||
+        String(ledger?.pagination?.liveViewDisplay ?? '').trim()
+      ) {
+        reasons.push(`pattern-map.json entity-reference collection ${label} is valid only with collectionSelection curated_reference, a non-empty source/editor-evidenced curationRationale plus curationEvidence, exact none pagination/continuation, and no fabricated live View display.`);
+      }
+    } else if (owner !== 'documented_exception') {
+      reasons.push(`pattern-map.json accepted collection ${label} must use a query-backed View owner, an explicit entity_reference curated_reference selection, or a genuine documented_exception.`);
+    }
+  }
+
+  for (const route of acceptedRoutes.filter((candidate) =>
+    COLLECTION_ROUTE_ROLES.has(String(candidate?.routeRole ?? '').trim())
+  )) {
+    const sourceRoute = normalizeRouteRequestKey(route?.sourcePath);
+    const targetRoute = normalizeRouteRequestKey(route?.targetPath);
+    const matchingQueryLedgers = ledgers.filter((ledger) =>
+      QUERY_BACKED_COLLECTION_OWNERS.has(String(ledger?.collectionOwner ?? '').trim()) &&
+      String(ledger?.collectionSelection ?? '').trim() === 'query_backed' &&
+      normalizeRouteRequestKey(ledger?.sourceRoute) === sourceRoute &&
+      targetRouteForSource(routeMatrix, ledger?.sourceRoute) === targetRoute
+    );
+    if (matchingQueryLedgers.length === 0) {
+      reasons.push(`route-matrix.json accepted ${route.routeRole} route ${targetRoute} needs an exact source/target collection ledger backed by a Drupal View; a curated reference cannot satisfy a dynamic listing route.`);
+    }
+  }
+
+  for (const route of acceptedRoutes.filter((candidate) => String(candidate?.routeRole ?? '').trim() === 'detail')) {
+    const sourceRoute = normalizeRouteRequestKey(route?.sourcePath);
+    const targetRoute = normalizeRouteRequestKey(route?.targetPath);
+    if (!ledgers.some((ledger) =>
+      ledger?.detailRouteMode === 'separate_public_route' &&
+      normalizeRouteRequestKey(ledger?.representativeDetailSourcePath) === sourceRoute &&
+      normalizeRouteRequestKey(ledger?.representativeDetailTargetPath) === targetRoute
+    )) {
+      reasons.push(`route-matrix.json accepted detail route ${targetRoute} must be the exact representative source/target detail pair of an accepted collection ledger.`);
+    }
+  }
+  for (const ledger of ledgers.filter((record) => record?.detailRouteMode === 'separate_public_route')) {
+    const sourceDetail = normalizeRouteRequestKey(ledger?.representativeDetailSourcePath);
+    const targetDetail = normalizeRouteRequestKey(ledger?.representativeDetailTargetPath);
+    if (!acceptedRoutes.some((route) =>
+      String(route?.routeRole ?? '').trim() === 'detail' &&
+      normalizeRouteRequestKey(route?.sourcePath) === sourceDetail &&
+      normalizeRouteRequestKey(route?.targetPath) === targetDetail
+    )) {
+      reasons.push(`pattern-map.json collection ${ledger.sourceObject || ledger.sourceRoute || '(unnamed)'} declares a separate public detail route that is not bound to one accepted routeRole detail row.`);
+    }
+  }
+
+  return reasons;
+}
+
+export function continuationRequestBinding(initialRequest, continuationRequest) {
+  const initial = normalizeRouteRequestKey(initialRequest);
+  const continuation = normalizeRouteRequestKey(continuationRequest);
+  if (!initial || !continuation || initial === continuation) {
+    return '';
+  }
+  const initialUrl = new URL(initial, 'https://collection-route.invalid/');
+  const continuationUrl = new URL(continuation, 'https://collection-route.invalid/');
+  if (normalizeRouteKey(initialUrl.pathname) === normalizeRouteKey(continuationUrl.pathname)) {
+    return initialUrl.search !== continuationUrl.search ? 'same_path_query' : '';
+  }
+  return 'live_discovered_link';
+}
+
+export function independentCollectionOwnershipCheckShapePasses(record) {
+  const selection = String(record?.collectionSelection ?? '').trim();
+  const commonReady = Boolean(
+    record?.status === 'pass' &&
+    normalizeRouteRequestKey(record?.sourceRoute) &&
+    String(record?.drupalOwner ?? '').trim() &&
+    record?.drupalOwner !== 'body_markup_or_blob' &&
+    String(record?.editorAddRowEvidence ?? '').trim() &&
+    String(record?.evidence ?? '').trim()
+  );
+  if (!commonReady) {
+    return false;
+  }
+  if (selection === 'curated_reference') {
+    return Boolean(
+      record?.drupalOwner === 'entity_reference_curated' &&
+      !String(record?.viewOrCollectionConfig ?? '').trim() &&
+      String(record?.curationRationale ?? '').trim() &&
+      String(record?.curationEvidence ?? '').trim()
+    );
+  }
+  return selection === 'query_backed' && Boolean(String(record?.viewOrCollectionConfig ?? '').trim());
+}
+
 export function collectionPaginationRecordReasons(ledger, browserCheck, targetRoute, publicRouteChecks = []) {
   const reasons = [];
   const sourceRequest = normalizeRouteRequestKey(ledger?.sourceRoute);
@@ -2134,9 +2388,12 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
   const targetContinuationKind = String(pagination.targetContinuationKind ?? '').trim();
   const sourceContinuationRequest = normalizeRouteRequestKey(pagination.sourceContinuationRequest);
   const targetContinuationRequest = normalizeRouteRequestKey(pagination.targetContinuationRequest);
+  const sourceContinuationBinding = String(pagination.sourceContinuationBinding ?? '').trim();
+  const targetContinuationBinding = String(pagination.targetContinuationBinding ?? '').trim();
   const sourceContinuationStateId = String(pagination.sourceContinuationStateId ?? '').trim();
   const targetContinuationStateId = String(pagination.targetContinuationStateId ?? '').trim();
   const liveViewDisplay = String(pagination.liveViewDisplay ?? '').trim();
+  const viewBackedCollection = QUERY_BACKED_COLLECTION_OWNERS.has(String(ledger?.collectionOwner ?? '').trim());
   const documentedSinglePageException = ledger?.collectionOwner === 'documented_exception';
   const modeChange = isJsonObject(pagination.modeChangeDisposition)
     ? pagination.modeChangeDisposition
@@ -2174,9 +2431,9 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
     (sourceMode === 'none' && sourcePageSize !== null) ||
     (targetMode !== 'none' && positiveIntegerOrNull(targetPageSize) === null) ||
     (targetMode === 'none' && targetPageSize !== null) ||
-    (!documentedSinglePageException && !/^views\.view\.[a-z0-9_]+:[a-z0-9_]+$/.test(liveViewDisplay))
+    (viewBackedCollection && !/^views\.view\.[a-z0-9_]+:[a-z0-9_]+$/.test(liveViewDisplay))
   ) {
-    reasons.push(`pattern-map.json accepted collection ${label} needs an accepted pagination declaration with implementation-neutral source/target modes, valid observable page sizes, and an exact live View display unless it is a documented genuine single-page exception.`);
+    reasons.push(`pattern-map.json accepted collection ${label} needs an accepted pagination declaration with implementation-neutral source/target modes and valid observable page sizes; query-backed collections also need one exact live View display.`);
   }
 
   if (documentedSinglePageException && (
@@ -2215,6 +2472,17 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
     ) {
       reasons.push(`pattern-map.json accepted collection ${label} request-addressable source continuation needs one exact request distinct from its initial route and no browser state ID.`);
     }
+    if (sourceContinuationKind === 'request') {
+      const observedBinding = continuationRequestBinding(sourceInitialRequest, sourceContinuationRequest);
+      if (
+        !observedBinding ||
+        !COLLECTION_CONTINUATION_BINDINGS.has(sourceContinuationBinding || observedBinding) ||
+        (observedBinding === 'same_path_query' && sourceContinuationBinding && sourceContinuationBinding !== observedBinding) ||
+        (observedBinding === 'live_discovered_link' && sourceContinuationBinding !== observedBinding)
+      ) {
+        reasons.push(`pattern-map.json accepted collection ${label} source continuation must be a same-path query state or declare sourceContinuationBinding live_discovered_link for verifier confirmation against the initial live response.`);
+      }
+    }
     if (
       sourceContinuationKind === 'browser_interaction' &&
       (sourceContinuationRequest || !CAPTURE_STATE_ID_RE.test(sourceContinuationStateId) || sourceContinuationStateId === 'default')
@@ -2227,11 +2495,25 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
     ) {
       reasons.push(`pattern-map.json accepted collection ${label} request-addressable target continuation needs one exact request distinct from its initial route and no browser state ID.`);
     }
+    if (targetContinuationKind === 'request') {
+      const observedBinding = continuationRequestBinding(targetInitialRequest, targetContinuationRequest);
+      if (
+        !observedBinding ||
+        !COLLECTION_CONTINUATION_BINDINGS.has(targetContinuationBinding || observedBinding) ||
+        (observedBinding === 'same_path_query' && targetContinuationBinding && targetContinuationBinding !== observedBinding) ||
+        (observedBinding === 'live_discovered_link' && targetContinuationBinding !== observedBinding)
+      ) {
+        reasons.push(`pattern-map.json accepted collection ${label} target continuation must be a same-path query state or declare targetContinuationBinding live_discovered_link for verifier confirmation against the initial live response.`);
+      }
+    }
     if (
       targetContinuationKind === 'browser_interaction' &&
       (targetContinuationRequest || !CAPTURE_STATE_ID_RE.test(targetContinuationStateId) || targetContinuationStateId === 'default')
     ) {
       reasons.push(`pattern-map.json accepted collection ${label} JS-only target continuation needs one exact non-default browser capture state ID and no fabricated request URL.`);
+    }
+    if (sourceContinuationKind === 'browser_interaction' || targetContinuationKind === 'browser_interaction') {
+      reasons.push(`pattern-map.json accepted collection ${label} uses a browser_interaction continuation that remains machine-incomplete until the verifier can replay it; self-attested capture steps cannot authorize completion.`);
     }
     const initialIdentity = String(browserCheck?.initialItemIdentitySha256 ?? '').trim();
     const continuationIdentity = String(browserCheck?.continuationItemIdentitySha256 ?? '').trim();
@@ -2298,6 +2580,8 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
     targetContinuationRequest ||
     sourceContinuationStateId ||
     targetContinuationStateId ||
+    !['', 'none'].includes(sourceContinuationBinding) ||
+    !['', 'none'].includes(targetContinuationBinding) ||
     pagination.sourceContinuationEquivalent !== false ||
     (browserCheck && browserCheck.status === 'pass')
   ) {
@@ -2684,11 +2968,13 @@ async function independentStructuredGateReasons({
   const reasons = [];
   reasons.push(...await compositionDecisionReasons({
     blindAdversarialReview,
+    browserEvidence,
     independentVerification,
     packetDir,
     patternMap,
     routeMatrix
   }));
+  reasons.push(...collectionOwnershipRouteReasons({ patternMap, routeMatrix, drupalReadback }));
   reasons.push(...await nextCycleStructuredGateReasons({
     browserEvidence,
     fieldOutputMatrix,
@@ -2756,16 +3042,10 @@ async function independentStructuredGateReasons({
   if (
     collectionEvidenceRequired &&
     (collectionChecks.length === 0 || collectionChecks.some((record) =>
-      record.status !== 'pass' ||
-      !normalizeRouteRequestKey(record.sourceRoute) ||
-      !String(record.drupalOwner ?? '').trim() ||
-      record.drupalOwner === 'body_markup_or_blob' ||
-      !String(record.viewOrCollectionConfig ?? '').trim() ||
-      !String(record.editorAddRowEvidence ?? '').trim() ||
-      !String(record.evidence ?? '').trim()
+      !independentCollectionOwnershipCheckShapePasses(record)
     ))
   ) {
-    reasons.push('independent-verification.json must contain passing collection ownership and editor-add-row checks for in-scope collections.');
+    reasons.push('independent-verification.json must contain passing collection ownership and editor-add-row checks for in-scope collections, with query-backed View config or exact independently evidenced curated-reference fields.');
   }
 
   const addRowChecks = substantiveObjects(independentVerification?.editorAddRowChecks);
@@ -2842,6 +3122,8 @@ async function independentStructuredGateReasons({
     const paginationCheck = paginationChecks.find((record) =>
       collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
+    const curatedReference = String(ledger?.collectionSelection ?? '').trim() === 'curated_reference' &&
+      String(ledger?.collectionOwner ?? '').trim() === 'entity_reference';
     const ledgerSourceCount = numericValue(ledger.sourceItemCount);
     const sourceCount = numericValue(reconciliation?.sourceCount);
     const renderedCount = numericValue(reconciliation?.targetRenderedCount);
@@ -2858,6 +3140,15 @@ async function independentStructuredGateReasons({
     const ownershipAddEvidencePresent = ownershipCheck && await nonEmptyPacketEvidence(
       packetDir,
       ownershipCheck.editorAddRowEvidence,
+      independentEvidenceDir
+    );
+    const ledgerCurationEvidencePresent = curatedReference && await nonEmptyPacketEvidence(
+      packetDir,
+      ledger.curationEvidence
+    );
+    const ownershipCurationEvidencePresent = curatedReference && ownershipCheck && await nonEmptyPacketEvidence(
+      packetDir,
+      ownershipCheck.curationEvidence,
       independentEvidenceDir
     );
     const addRowEvidencePresent = addRowCheck && await nonEmptyPacketEvidence(packetDir, addRowCheck.evidence, independentEvidenceDir);
@@ -2928,14 +3219,27 @@ async function independentStructuredGateReasons({
     }
     if (
       !ownershipCheck ||
-      ownershipCheck.status !== 'pass' ||
-      !String(ownershipCheck.drupalOwner ?? '').trim() ||
-      ownershipCheck.drupalOwner === 'body_markup_or_blob' ||
-      !exactIdentityMatch(ownershipCheck.viewOrCollectionConfig, ledger.viewDisplayOrConfig) ||
+      !independentCollectionOwnershipCheckShapePasses(ownershipCheck) ||
+      (
+        curatedReference
+          ? (
+              ownershipCheck.collectionSelection !== 'curated_reference' ||
+              ownershipCheck.drupalOwner !== 'entity_reference_curated' ||
+              String(ownershipCheck.viewOrCollectionConfig ?? '').trim() ||
+              String(ownershipCheck.curationRationale ?? '').trim() !== String(ledger.curationRationale ?? '').trim() ||
+              String(ownershipCheck.curationEvidence ?? '').trim() !== String(ledger.curationEvidence ?? '').trim() ||
+              !ledgerCurationEvidencePresent ||
+              !ownershipCurationEvidencePresent
+            )
+          : (
+              ownershipCheck.collectionSelection !== 'query_backed' ||
+              !exactIdentityMatch(ownershipCheck.viewOrCollectionConfig, ledger.viewDisplayOrConfig)
+            )
+      ) ||
       !ownershipEvidencePresent ||
       !ownershipAddEvidencePresent
     ) {
-      reasons.push(`independent-verification.json needs an evidence-backed collectionOwnershipChecks row mapped to collection ${collectionLabel}.`);
+      reasons.push(`independent-verification.json needs an evidence-backed collectionOwnershipChecks row mapped to collection ${collectionLabel}; curated references must exactly corroborate the ledger rationale and packet-local curation/editor evidence without a fabricated View config.`);
     }
     if (
       !addRowCheck ||
@@ -3169,12 +3473,10 @@ async function independentStructuredGateReasons({
     const check = compositionChecks.find((candidate) => recordMatchesRoute(candidate, route.source, route.target));
     const fidelityPasses = await compositionFidelityPasses({
       check,
-      expectedTarget: route.target,
-      independentTargetBaseUrl: independentVerification?.target?.baseUrl,
       packetDir
     });
     if (!fidelityPasses) {
-      reasons.push(`independent-verification.json needs a passing composition-fidelity check for ${route.target}.`);
+      reasons.push(`independent-verification.json needs a passing composition-fidelity check for ${route.target} with an exact declared/observed owner match; owner deviations remain human review and block machine completion.`);
     }
   }
 
@@ -5152,15 +5454,17 @@ function detailFieldVisible(record) {
   );
 }
 
-function recordConfigIdentities(record, owner) {
+export function recordConfigIdentities(record, owner) {
   if (typeof record === 'string') {
     const value = record.trim();
     if (!value) {
       return [];
     }
-    return owner === 'view_row' && !value.startsWith('views.view.')
-      ? [value, `views.view.${value}`]
-      : [value];
+    if (owner !== 'view_row') {
+      return [value];
+    }
+    const normalized = value.startsWith('views.view.') ? value : `views.view.${value}`;
+    return [...new Set([value, normalized, normalized.split(':', 1)[0]])];
   }
   if (!isJsonObject(record)) {
     return [];
@@ -5170,17 +5474,35 @@ function recordConfigIdentities(record, owner) {
     record?.id,
     record?.config,
     record?.name,
-    record?.displayConfig
+    record?.displayConfig,
+    record?.configName,
+    record?.viewId,
+    record?.displayId
   ].map((value) => String(value ?? '').trim()).filter(Boolean));
   if (owner === 'entity_view_display' && record?.bundle && record?.mode) {
     identities.add(`core.entity_view_display.${record.entityType || 'node'}.${record.bundle}.${record.mode}`);
   }
-  if (owner === 'view_row' && record?.id) {
-    identities.add(`views.view.${record.id}`);
-    for (const display of arrayOrEmpty(record?.displays)) {
-      const displayId = String(isJsonObject(display) ? display.id || display.displayId : display).trim();
-      if (displayId) {
-        identities.add(`views.view.${record.id}:${displayId}`);
+  if (owner === 'view_row') {
+    const viewBases = new Set();
+    for (const rawCandidate of [record?.configName, record?.viewId, record?.id, record?.configId]) {
+      const candidate = String(rawCandidate ?? '').trim();
+      if (!candidate) continue;
+      const normalized = candidate.startsWith('views.view.') ? candidate : `views.view.${candidate}`;
+      const base = normalized.split(':', 1)[0];
+      if (/^views\.view\.[a-z0-9_]+$/.test(base)) {
+        viewBases.add(base);
+        identities.add(base);
+      }
+    }
+    const displayIds = new Set([
+      String(record?.displayId ?? '').trim(),
+      ...arrayOrEmpty(record?.displays).map((display) =>
+        String(isJsonObject(display) ? display.id || display.displayId : display).trim()
+      )
+    ].filter(Boolean));
+    for (const base of viewBases) {
+      for (const displayId of displayIds) {
+        identities.add(`${base}:${displayId}`);
       }
     }
   }
@@ -5453,12 +5775,12 @@ function humanDecisionPresentationAssessment({ briefMode = false, decisions, off
       continue;
     }
     requiredReferences.push(`composition-deviation:${targetRoute}`);
-    sourceDescriptions.add('independent-verification.json accepted composition-owner deviations');
+    sourceDescriptions.add('independent-verification.json diagnostic composition-owner mismatch records');
   }
 
   if (missingStableIdentities.length > 0) {
     contradictionReasons.push(
-      `Accepted deviations need stable IDs or route/item identities before handoff presentation can be checked: ${missingStableIdentities.join(', ')}.`
+      `Recorded deviations or diagnostic mismatches need stable IDs or route/item identities before handoff presentation can be checked: ${missingStableIdentities.join(', ')}.`
     );
   }
   const presentedReferences = currentEvidenceReferenceSet(decisionRows);
@@ -5991,7 +6313,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     sourceAudit
   }));
   const primaryRoutes = arrayOrEmpty(routeMatrix?.primaryRoutes);
-  reasons.push(...await navigationParityDispositionReasons(packetDir, routeMatrix));
+  reasons.push(...await navigationParityDispositionReasons(packetDir, routeMatrix, independentVerification));
   const primaryRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.targetPath)).filter(Boolean);
   const primarySourceRoutePaths = primaryRoutes.map((route) => normalizeRouteRequestKey(route?.sourcePath)).filter(Boolean);
   reasons.push(...await browserCaptureStateReasons(
@@ -6078,30 +6400,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
   ) {
     reasons.push('route-matrix.json route rows must declare a valid routeRole, be accepted, bind sourceStatus plus sourceFinalPath, reject declared 5xx responses, and declare either a direct final 2xx path or an intentional initial 3xx redirect with its expected final path.');
   }
-  for (const [index, route] of routeRows.entries()) {
-    const disposition = route?.identityChangeDisposition;
-    if (disposition === undefined || disposition === null) {
-      continue;
-    }
-    const validShape = typeof disposition === 'object' && !Array.isArray(disposition) &&
-      typeof disposition.applies === 'boolean';
-    const evidencePresent = validShape && disposition.applies === true
-      ? await nonEmptyPacketEvidence(packetDir, disposition.evidence)
-      : true;
-    if (
-      !validShape ||
-      (
-        disposition.applies === true &&
-        (
-          !String(disposition.acceptedBy ?? '').trim() ||
-          !String(disposition.rationale ?? '').trim() ||
-          !evidencePresent
-        )
-      )
-    ) {
-      reasons.push(`route-matrix.json routes[${index}].identityChangeDisposition must be a narrow boolean decision and, when it applies, include a named accepter, rationale, and packet-local evidence.`);
-    }
-  }
+  reasons.push(...await identityChangeDispositionReasons(packetDir, routeMatrix, independentVerification));
   const mappingContracts = [];
   for (const [index, route] of routeRows.entries()) {
     const sourceRequest = normalizeRouteRequestKey(route?.sourcePath);
@@ -6522,17 +6821,33 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
       String(owner?.editorVerificationEvidence ?? '').trim()
   );
   const acceptedCollectionOwners = collectionLedger.filter((record) =>
-    record?.accepted === true &&
-    normalizeRouteKey(record?.sourceRoute) &&
-    String(record?.sourceObject ?? '').trim() &&
-    finiteNumberValue(record?.sourceItemCount) &&
-    String(record?.drupalEntityType ?? '').trim() &&
-    String(record?.contentTypeOrBundle ?? '').trim() &&
-    hasMeaningfulEntry(record?.requiredFields) &&
-    String(record?.collectionOwner ?? '').trim() &&
-    String(record?.viewDisplayOrConfig ?? '').trim() &&
-    String(record?.detailRouteOwner ?? '').trim() &&
-    String(record?.editorAddRowEvidence ?? '').trim()
+    {
+      const owner = String(record?.collectionOwner ?? '').trim();
+      const selection = String(record?.collectionSelection ?? '').trim();
+      const ownerReady = (
+        QUERY_BACKED_COLLECTION_OWNERS.has(owner) &&
+        selection === 'query_backed' &&
+        String(record?.viewDisplayOrConfig ?? '').trim()
+      ) || (
+        owner === 'entity_reference' &&
+        selection === 'curated_reference' &&
+        String(record?.curationRationale ?? '').trim() &&
+        String(record?.curationEvidence ?? '').trim()
+      ) || (
+        owner === 'documented_exception' &&
+        String(record?.exceptionRationale ?? '').trim()
+      );
+      return record?.accepted === true &&
+        normalizeRouteKey(record?.sourceRoute) &&
+        String(record?.sourceObject ?? '').trim() &&
+        finiteNumberValue(record?.sourceItemCount) &&
+        String(record?.drupalEntityType ?? '').trim() &&
+        String(record?.contentTypeOrBundle ?? '').trim() &&
+        hasMeaningfulEntry(record?.requiredFields) &&
+        ownerReady &&
+        String(record?.detailRouteOwner ?? '').trim() &&
+        String(record?.editorAddRowEvidence ?? '').trim();
+    }
   );
   const acceptedRecurringObjects = recurringSourceObjects.filter((record) =>
     record?.accepted === true &&
@@ -7150,7 +7465,15 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     !hasMeaningfulEntry(drupalContent.viewDisplays) ||
     (!hasMeaningfulEntry(drupalContent.nodes) && !hasMeaningfulEntry(drupalContent.canvasPages)) ||
     arrayOrEmpty(drupalContent.defaultOrDemoContent).length > 0 ||
-    (collectionEvidenceRequired && !hasMeaningfulEntry(drupalReadback?.views)) ||
+    (
+      collectionEvidenceRequired &&
+      collectionLedger.some((ledger) =>
+        ledger?.accepted === true &&
+        String(ledger?.collectionSelection ?? '').trim() === 'query_backed' &&
+        QUERY_BACKED_COLLECTION_OWNERS.has(String(ledger?.collectionOwner ?? '').trim())
+      ) &&
+      !hasMeaningfulEntry(drupalReadback?.views)
+    ) ||
     ((hasMeaningfulEntry(sourceAudit?.mediaSignals) || hasMeaningfulEntry(patternMap?.media)) &&
       (!hasMeaningfulEntry(drupalReadback?.media?.items) ||
         !isJsonObject(drupalReadback?.media?.countsByType) ||
@@ -7244,6 +7567,7 @@ async function briefPacketCompletionReadiness(
   ));
   reasons.push(...await compositionDecisionReasons({
     blindAdversarialReview,
+    browserEvidence,
     independentVerification,
     packetDir,
     patternMap,

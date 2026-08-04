@@ -36,7 +36,7 @@
 - Verify production target evidence only from production-equivalent targets.
 - Verify local Drupal CMS builds with DDEV/Drush status, exported config, public anonymous routes, content inventory, visual/design checks, functional checks, and browser-rendered evidence.
 - Require every declared collection row to have count, ownership, and editor add-a-row proof; every custom/repeating public bundle to have a non-admin workflow; and every load-bearing/anonymous-output field to have a falsification check.
-- Require the actual composition owner to match its declaration or a target-bound accepted deviation. Require reviewed rationale and evidence for SEO `not_applicable`.
+- Require the actual composition owner to match its declaration for machine completion. Preserve any target-bound deviation as a human-review record, not a waiver. Require reviewed rationale and evidence for SEO `not_applicable`.
 - Reject static previews and non-Drupal prototypes as Drupal CMS build evidence.
 
 ## Phase 5: Hand Off

@@ -158,6 +158,10 @@
       "targetH1": "",
       "identityChangeDisposition": {
         "applies": false,
+        "sourceTitle": "",
+        "sourceH1": "",
+        "targetTitle": "",
+        "targetH1": "",
         "acceptedBy": "",
         "rationale": "",
         "evidence": ""

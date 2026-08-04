@@ -380,6 +380,9 @@ function targetRouteUrl(value, targetOrigin, label) {
     throw new Error(`${label} must stay on the review-handoff target origin.`);
   }
   targetUrl.hash = '';
+  if (targetUrl.pathname !== '/') {
+    targetUrl.pathname = targetUrl.pathname.replace(/\/+$/, '') || '/';
+  }
   return targetUrl.href;
 }
 
@@ -1469,9 +1472,12 @@ export function reviewHandoffReviewerErrors({
       );
     } else {
       for (const [index, check] of fidelityChecks.entries()) {
+        const sourceRoute = String(check?.sourceRoute ?? check?.sourcePath ?? '').trim();
+        const targetRoute = String(check?.targetRoute ?? check?.targetPath ?? '').trim();
+        if (!sourceRoute && !targetRoute) continue;
         try {
           const targetUrl = targetRouteUrl(
-            check?.targetRoute ?? check?.targetPath,
+            targetRoute,
             manifest.binding.targetOrigin,
             `independent-verification.json compositionModelFidelityChecks[${index}] target route`
           );

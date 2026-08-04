@@ -12,13 +12,13 @@
       "file": "10-phase-1-introspection.md",
       "heading": "## Operating Phases",
       "summary": "Phase 1 introspection plus the structured-content, composition, and Canvas ownership gates.",
-      "bytes": 21764
+      "bytes": 22514
     },
     {
       "file": "20-phase-2-assembly.md",
       "heading": "### Phase 2: Recipe-Backed Assembly",
       "summary": "Phase 2 recipe-backed assembly.",
-      "bytes": 4941
+      "bytes": 5203
     },
     {
       "file": "30-phase-3-5-intent-gap-self-eval.md",
@@ -30,7 +30,7 @@
       "file": "40-phase-6-verification.md",
       "heading": "### Phase 6: Independent Verification",
       "summary": "Phase 6 independent verification.",
-      "bytes": 11769
+      "bytes": 11831
     },
     {
       "file": "50-phase-7-blind-review.md",
@@ -48,13 +48,13 @@
       "file": "70-browser-evidence-and-completion.md",
       "heading": "## Browser Evidence Gate",
       "summary": "Browser evidence gate and the completion contract.",
-      "bytes": 14131
+      "bytes": 14673
     },
     {
       "file": "80-drupal-architecture.md",
       "heading": "## Build Order",
       "summary": "Build order, Drupal CMS baseline, architecture defaults, parity, recipe fit, and content modeling.",
-      "bytes": 19288
+      "bytes": 19635
     },
     {
       "file": "85-quality-requirements.md",
@@ -66,7 +66,7 @@
       "file": "90-verification-and-decisions.md",
       "heading": "## Required Verification",
       "summary": "Required verification, scoped gap list, open decisions, and route smoke checks.",
-      "bytes": 14311
+      "bytes": 14337
     },
     {
       "file": "95-stop-conditions-and-outputs.md",

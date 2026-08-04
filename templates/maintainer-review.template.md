@@ -116,11 +116,13 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] One-off composed experiences use Canvas pages / Experience Builder when available rather than tortured content types with single-use layout fields.
 - [ ] Hybrid pages keep nodes as canonical data and use Canvas as composed presentation where that fits the source pattern.
 - [ ] Views own collection/listing/search routes and entity displays own repeatable detail pages; Canvas composition does not replace those Drupal primitives.
+- [ ] Recurring/query-backed collections use Views, including when embedded in a composed landing page; unlimited entity references are used only for curation or ordering proven by the source or preserved brief plus editor evidence, with a recorded rationale and packet-local evidence.
+- [ ] Continuing collections use verifier-owned route-bound continuation requests; browser-interaction-only states that cannot be replayed remain `review_required` rather than machine-passed.
 - [ ] Composition modeling happened before implementation for every flexible landing-like route, and `pattern-map.json` records the selected owner, route rationale, sections, data sources, expected editor actions, and acceptance proof.
 - [ ] Canvas is not treated as a route mandate for `/`; every homepage, landing, campaign, splash, section landing, and presentation-heavy page has an explicit Drupal authoring owner that fits the editor mental model.
 - [ ] A verifier-observed design-led route uses Canvas when the runtime is authorable, or names an externally authenticated owner exception; packet-local reviewer declarations are not treated as exception authority.
 - [ ] Repeatable collections inside composed pages remain Drupal-owned through entities, media, entity references, Views, slots, or child components backed by Drupal data.
-- [ ] Any deviation from the declared composition owner or component model has a deviation record; silent fallback to theme-only composition or a blob component is not accepted.
+- [ ] Any deviation from the declared composition owner or component model has a diagnostic deviation record and remains machine-incomplete; silent fallback to theme-only composition or a blob component is not accepted.
 - [ ] Canvas authoring ownership: The public homepage or landing-page composition is editable in Canvas when Canvas is the selected owner.
 - [ ] Public or rebuild-owned Canvas pages have a usable rational component model, not one monolithic component wrapping the whole flexible page.
 - [ ] Canvas props use typed values for singleton data and references/Views/slots/child components for repeatable data; JSON strings, newline URL lists, multi-URL string props, and body/source HTML blobs are rejected.
@@ -155,6 +157,7 @@ Use this checklist to support the verdict. It is not a second rubric.
 - [ ] Media strategy is explicit: Drupal media references, source assets, unavailable assets, placeholders, or external references are not conflated.
 - [ ] Public source assets use managed Media and image styles, or the packet documents why raw URI fields, CDN hotlinks, or placeholders remain.
 - [ ] Alt text, responsive image styles, image reuse, and hero/thumbnail/social-image field decisions are explicit.
+- [ ] Visible material content `<img>` image styles deliver enough intrinsic pixels for their object-fit-aware painted card, listing, event, news, hero, and detail dimensions without material upscaling or blur; CSS background images were visually reviewed separately.
 - [ ] Primary navigation and footer navigation are owned by Drupal menus/blocks or have a documented exception.
 - [ ] Custom content types have Pathauto patterns or an explicit alias-management decision.
 - [ ] The content model has one reviewable source of truth; install hooks are not the only place custom structure exists.

@@ -34,18 +34,23 @@ function acceptedLedger(overrides = {}) {
   return {
     sourceRoute: '/events',
     sourceObject: 'Event',
+    collectionOwner: 'view',
+    collectionSelection: 'query_backed',
+    viewDisplayOrConfig: 'views.view.events:page_1',
     accepted: true,
     pagination: {
       sourceMode: 'paged',
       sourcePageSize: 12,
       sourceContinuationKind: 'request',
       sourceContinuationRequest: '/events?page=1',
+      sourceContinuationBinding: 'same_path_query',
       sourceContinuationStateId: '',
       targetMode: 'paged',
       targetPageSize: 8,
       liveViewDisplay: 'views.view.events:page_1',
       targetContinuationKind: 'request',
       targetContinuationRequest: '/events?page=1',
+      targetContinuationBinding: 'same_path_query',
       targetContinuationStateId: '',
       sourceContinuationEquivalent: true,
       evidence: 'evidence/browser/events-pagination.json',
@@ -199,6 +204,48 @@ test('collection pagination accepts unequal source and target page sizes with a 
   assert.match(laundering.join('\n'), /cannot launder source pagination mode paged into target mode none/i);
 });
 
+test('request continuations stay collection-bound unless the live verifier discovered an exact link', () => {
+  const unrelated = acceptedLedger({
+    sourceContinuationRequest: '/about',
+    targetContinuationRequest: '/about'
+  });
+  const browserCheck = passingBrowserCheck({
+    sourceContinuationRequest: '/about',
+    targetContinuationRequest: '/about'
+  });
+  const unrelatedRoute = capturedContinuationRoute({
+    sourceUrl: 'https://source.example/about',
+    sourceFinalUrl: 'https://source.example/about',
+    targetUrl: 'https://target.example/about',
+    targetFinalUrl: 'https://target.example/about'
+  });
+  assert.match(
+    collectionPaginationRecordReasons(unrelated, browserCheck, '/events', [unrelatedRoute]).join('\n'),
+    /same-path query state.*live_discovered_link/i
+  );
+
+  const discovered = acceptedLedger({
+    sourceContinuationRequest: '/events/page/2',
+    sourceContinuationBinding: 'live_discovered_link',
+    targetContinuationRequest: '/events/page/2',
+    targetContinuationBinding: 'live_discovered_link'
+  });
+  const discoveredCheck = passingBrowserCheck({
+    sourceContinuationRequest: '/events/page/2',
+    targetContinuationRequest: '/events/page/2'
+  });
+  const discoveredRoute = capturedContinuationRoute({
+    sourceUrl: 'https://source.example/events/page/2',
+    sourceFinalUrl: 'https://source.example/events/page/2',
+    targetUrl: 'https://target.example/events/page/2',
+    targetFinalUrl: 'https://target.example/events/page/2'
+  });
+  assert.deepEqual(
+    collectionPaginationRecordReasons(discovered, discoveredCheck, '/events', [discoveredRoute]),
+    []
+  );
+});
+
 test('continuation mode changes require one narrow exact accessible replacement disposition', () => {
   const replacement = acceptedLedger({
     sourceMode: 'infinite_scroll',
@@ -277,6 +324,7 @@ test('JS-only source continuation must bind an interaction-bearing capture state
   const ledger = acceptedLedger({
     sourceContinuationKind: 'browser_interaction',
     sourceContinuationRequest: '',
+    sourceContinuationBinding: 'none',
     sourceContinuationStateId: 'source-load-more'
   });
   const browserCheck = passingBrowserCheck({
@@ -311,14 +359,14 @@ test('JS-only source continuation must bind an interaction-bearing capture state
     value: '',
     expectedState: 'Additional items are visible.'
   }];
-  assert.deepEqual(
+  assert.match(
     collectionPaginationRecordReasons(
       ledger,
       browserCheck,
       '/events',
       [inertSourceState, capturedContinuationRoute()]
-    ),
-    []
+    ).join('\n'),
+    /browser_interaction continuation.*machine-incomplete.*verifier can replay/i
   );
 });
 
@@ -382,6 +430,7 @@ test('target request continuation must be verifier-owned and semantically distin
   const jsOnlyLedger = acceptedLedger({
     targetContinuationKind: 'browser_interaction',
     targetContinuationRequest: '',
+    targetContinuationBinding: 'none',
     targetContinuationStateId: 'load-more'
   });
   const jsOnly = collectionPaginationLiveResponseChecks(
@@ -390,8 +439,10 @@ test('target request continuation must be verifier-owned and semantically distin
     []
   );
   assert.deepEqual(jsOnly.errors, []);
+  assert.match(jsOnly.reviewRequired.join('\n'), /paged live mode.*request-addressable and verifier-owned/i);
   assert.equal(jsOnly.checks[0].authority, 'self_attested_capture_evidence');
-  assert.equal(jsOnly.checks[0].status, 'packet_authored_js_only');
+  assert.equal(jsOnly.checks[0].status, 'review_required');
+  assert.equal(jsOnly.checks[0].passed, false);
 });
 
 test('a valid non-primary collection schedules both exact target states in the shared bounded route plan', () => {
@@ -689,11 +740,13 @@ test('genuine single-page collections require explicit none backed by a live no-
     sourcePageSize: null,
     sourceContinuationKind: 'none',
     sourceContinuationRequest: '',
+    sourceContinuationBinding: 'none',
     sourceContinuationStateId: '',
     targetMode: 'none',
     targetPageSize: null,
     targetContinuationKind: 'none',
     targetContinuationRequest: '',
+    targetContinuationBinding: 'none',
     targetContinuationStateId: '',
     sourceContinuationEquivalent: false
   });
