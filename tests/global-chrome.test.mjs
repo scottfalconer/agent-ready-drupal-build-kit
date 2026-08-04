@@ -1061,7 +1061,7 @@ const styleSelectionMethods = {
 };
 
 function completeComputedStyleEvidence({
-  family = 'Raleway',
+  family = 'Source Brand Sans',
   loadedFontFamilies = [family],
   roleStyles = {}
 } = {}) {
@@ -1106,7 +1106,7 @@ test('computed-style shadow diagnoses font replacement and control-token drift w
   const sourceCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
     () => completeComputedStyleEvidence({
-      family: 'Raleway',
+      family: 'Source Brand Sans',
       roleStyles: {
         primary_action: {
           color: 'rgb(255, 255, 255)',
@@ -1125,7 +1125,7 @@ test('computed-style shadow diagnoses font replacement and control-token drift w
   const targetCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
     () => completeComputedStyleEvidence({
-      family: 'Inter',
+      family: 'Target Brand Sans',
       roleStyles: {
         primary_action: {
           color: 'rgb(0, 0, 0)',
@@ -1159,8 +1159,8 @@ test('computed-style shadow diagnoses font replacement and control-token drift w
   const diagnostics = floor.computedStyleShadow.comparisons.flatMap((comparison) => comparison.diagnostics);
   assert.ok(diagnostics.some((diagnostic) =>
     diagnostic.code === 'font-family-replaced' &&
-    diagnostic.sourceFamily === 'raleway' &&
-    diagnostic.targetFamily === 'inter'
+    diagnostic.sourceFamily === 'source brand sans' &&
+    diagnostic.targetFamily === 'target brand sans'
   ));
   assert.ok(diagnostics.some((diagnostic) => diagnostic.code === 'control-token-mismatch'));
 });
@@ -1194,11 +1194,11 @@ test('computed-style shadow keeps a desktop-only oversized H1 scoped to that vie
 test('computed-style shadow reports a source web font that is computed but unloaded on target', () => {
   const sourceCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
-    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: ['Raleway'] })
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: ['Source Brand Sans'] })
   );
   const targetCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
-    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: [] })
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: [] })
   );
   const shadow = compareComputedStyleShadow({
     sourceCapture,
@@ -1207,19 +1207,19 @@ test('computed-style shadow reports a source web font that is computed but unloa
   });
 
   assert.ok(shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
-    diagnostic.code === 'font-family-not-loaded' && diagnostic.fontFamily === 'raleway'
+    diagnostic.code === 'font-family-not-loaded' && diagnostic.fontFamily === 'source brand sans'
   ));
 });
 
 test('computed-style shadow does not infer an unloaded font from a truncated target family list', () => {
   const sourceCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
-    () => completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: ['Raleway'] })
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: ['Source Brand Sans'] })
   );
   const targetCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
     () => ({
-      ...completeComputedStyleEvidence({ family: 'Raleway', loadedFontFamilies: [] }),
+      ...completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: [] }),
       truncated: true
     })
   );
