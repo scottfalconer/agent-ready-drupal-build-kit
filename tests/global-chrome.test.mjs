@@ -46,6 +46,8 @@ import {
   consentNetworkCaptureRequired,
   sharedBeforeConsentNetworkCapture,
   sharedGlobalChromeCapture,
+  verifierOwnedManagedBrowserRoutes,
+  verifierOwnedPublicFormRoutes,
   visualParityCompletionSupport,
   verifyConsentReconciliation
 } from '../bin/verify.mjs';
@@ -551,6 +553,48 @@ test('global chrome capture fails closed before browser launch when route or wal
   assert.match(expired.errors.join('\n'), /10 ms total wall-clock deadline/i);
 });
 
+test('managed public-form route closure deduplicates capture identities but never slices overflow', () => {
+  const primaryRoutes = [{ sourcePath: '/', targetPath: '/' }];
+  const publicFormRoutes = [
+    ...Array.from({ length: BROWSER_CAPTURE_LIMITS.maxRoutes }, (_value, index) => ({
+      sourcePath: `/form-${index}`,
+      targetPath: `/form-${index}`,
+      routeRole: 'form'
+    })),
+    { sourcePath: '/legacy-form', targetPath: '/form-0', routeRole: 'form' }
+  ];
+  const targetRoutes = verifierOwnedManagedBrowserRoutes({ primaryRoutes, publicFormRoutes });
+  const sourceRoutes = verifierOwnedManagedBrowserRoutes({
+    captureSide: 'source',
+    primaryRoutes,
+    publicFormRoutes
+  });
+  assert.equal(targetRoutes.length, BROWSER_CAPTURE_LIMITS.maxRoutes + 1);
+  assert.equal(sourceRoutes.length, BROWSER_CAPTURE_LIMITS.maxRoutes + 2);
+  assert.equal(targetRoutes.filter((route) => route.targetPath === '/form-0').length, 1);
+  assert.equal(sourceRoutes.at(-1).targetPath, '/legacy-form');
+  const budget = createBrowserCaptureBudget({
+    label: 'Verifier-owned public-form capture',
+    routeCount: targetRoutes.length,
+    viewportCount: 2
+  });
+  assert.throws(
+    () => budget.assertRouteLimit(),
+    /requires 65 routes, exceeding the 64 route limit; no browser checks were run/i
+  );
+  assert.equal(budget.metrics().attempted, false);
+  const blockedComparison = compareVerifierOwnedVisualFloor({
+    sourceCapture: {},
+    targetCapture: {},
+    primaryRoutes: [],
+    publicFormControlRoutes: publicFormRoutes,
+    stateFingerprint: state('f')
+  });
+  assert.equal(blockedComparison.status, 'blocked');
+  assert.match(blockedComparison.errors.join('\n'), /65 exact source\/target route pairs.*64 route-pair limit/i);
+  assert.equal(blockedComparison.publicFormControlFindings.length, 0);
+});
+
 test('before-consent capture reuses the browser route ceiling and aggregate deadline', async () => {
   const tooManyRoutes = await captureBeforeConsentNetwork({
     baseUrl: 'http://127.0.0.1',
@@ -897,6 +941,14 @@ function visualFloorCapture({
   };
 }
 
+function combinedVisualFloorCapture(captures, fingerprintSeed) {
+  const combined = structuredClone(captures[0]);
+  combined.primaryRoutes = captures.flatMap((capture) => capture.primaryRoutes);
+  combined.routes = captures.flatMap((capture) => capture.routes);
+  combined.captureFingerprint = state(fingerprintSeed);
+  return combined;
+}
+
 const composedStructure = {
   headingOrder: ['Build faster', 'Why it matters', 'Capabilities', 'Start today'],
   headingCount: 4,
@@ -1014,6 +1066,135 @@ test('verifier-owned source and target form controls pass with exact accessible 
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.controlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.fingerprint.startsWith('sha256:')));
+});
+
+test('accepted non-primary form and search routes cannot escape verifier-owned control parity', () => {
+  const searchPath = '/course-search?kind=summer';
+  const primaryRoutes = [{ sourcePath: '/contact', targetPath: '/contact', routeRole: 'form' }];
+  const publicFormRoutes = verifierOwnedPublicFormRoutes({
+    routeMatrix: {
+      primaryRoutes,
+      routes: [
+        { sourcePath: '/contact', targetPath: '/contact', routeRole: 'form', accepted: true },
+        { sourcePath: searchPath, targetPath: searchPath, routeRole: 'search', accepted: true },
+        { sourcePath: '/draft-form', targetPath: '/draft-form', routeRole: 'form', accepted: false }
+      ]
+    },
+    patternMap: {
+      forms: [{
+        formKey: 'contact-main',
+        sourceRoute: '/contact',
+        targetRoute: '/contact',
+        accepted: true
+      }]
+    },
+    sourceAudit: {
+      formsAndIntegrations: [
+        {
+          formKey: 'contact-main',
+          kind: 'public_submission_form',
+          sourceRoute: '/contact',
+          anonymousPublicUse: true
+        },
+        { formKey: 'course-search', kind: 'search', sourceRoute: searchPath }
+      ]
+    }
+  });
+  assert.deepEqual(
+    publicFormRoutes.map(({ sourcePath, targetPath }) => ({ sourcePath, targetPath })),
+    [
+      { sourcePath: '/contact', targetPath: '/contact' },
+      { sourcePath: searchPath, targetPath: searchPath }
+    ]
+  );
+  assert.deepEqual(
+    verifierOwnedManagedBrowserRoutes({ primaryRoutes, publicFormRoutes })
+      .map((route) => route.targetPath),
+    ['/contact', searchPath]
+  );
+  assert.deepEqual(
+    verifierOwnedManagedBrowserRoutes({ captureSide: 'source', primaryRoutes, publicFormRoutes })
+      .map((route) => route.targetPath),
+    ['/contact', searchPath]
+  );
+
+  const searchControls = [observedControl({
+    accessibleIdentity: 'course type',
+    kind: 'select_single',
+    visibleLabel: 'Course type',
+    optionEvidence: 'observed',
+    options: [
+      { label: 'All courses', selected: true, defaultSelected: true, disabled: false },
+      { label: 'Summer courses', selected: false, defaultSelected: false, disabled: false }
+    ]
+  })];
+  const targetSearchControls = structuredClone(searchControls);
+  targetSearchControls[0].options.pop();
+  targetSearchControls[0].optionCount = 1;
+
+  const sourceCapture = combinedVisualFloorCapture([
+    visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      path: '/contact', publicFormControls: publicFormControlEvidence(publicContactControls)
+    }),
+    visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      path: searchPath, publicFormControls: publicFormControlEvidence(searchControls)
+    })
+  ], 'e');
+  const targetCapture = combinedVisualFloorCapture([
+    visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      path: '/contact', publicFormControls: publicFormControlEvidence(publicContactControls)
+    }),
+    visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      path: searchPath, publicFormControls: publicFormControlEvidence(targetSearchControls)
+    })
+  ], 'f');
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes,
+    publicFormControlRoutes: publicFormRoutes,
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.ok(floor.findings.filter((finding) => finding.targetPath === '/contact')
+    .every((finding) => finding.passed));
+  const nonPrimaryFindings = floor.publicFormControlFindings
+    .filter((finding) => finding.targetPath === searchPath);
+  assert.equal(nonPrimaryFindings.length, 2);
+  assert.ok(nonPrimaryFindings.every((finding) => !finding.passed));
+  assert.match(
+    nonPrimaryFindings.flatMap((finding) => finding.errors).join('\n'),
+    /ordered option labels or selected, default, and disabled option state/i
+  );
+});
+
+test('an audited form route cannot claim parity from empty source and target control evidence', () => {
+  const path = '/empty-contact';
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      path
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      path
+    }),
+    primaryRoutes: [],
+    publicFormControlRoutes: [{ sourcePath: path, targetPath: path, routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.equal(floor.publicFormControlFindings.length, 2);
+  assert.match(
+    floor.publicFormControlFindings.flatMap((finding) => finding.errors).join('\n'),
+    /empty source and target evidence cannot establish form parity/i
+  );
 });
 
 test('an inaccessible source control may gain only the identity of its existing visible label', () => {
@@ -1903,6 +2084,83 @@ function rawCaptureFixture() {
   return raw;
 }
 
+test('finalized exact-query form captures compare by their privacy-preserving route identity', () => {
+  const route = '/course-search?kind=summer&campus=budapest';
+  const sourceControls = [observedControl({
+    accessibleIdentity: 'campus',
+    kind: 'select_single',
+    visibleLabel: 'Campus',
+    optionEvidence: 'observed',
+    options: [
+      { label: 'All campuses', selected: true, defaultSelected: true, disabled: false },
+      { label: 'Budapest', selected: false, defaultSelected: false, disabled: false }
+    ]
+  })];
+  const targetControls = structuredClone(sourceControls);
+  targetControls[0].options.pop();
+  targetControls[0].optionCount = 1;
+  const rawCapture = (origin, controls, byteSeed) => {
+    const raw = rawCaptureFixture();
+    raw.targetOrigin = origin;
+    raw.primaryRoutes = [route];
+    raw.routes = raw.routes.map((entry) => ({
+      ...entry,
+      path: route,
+      signals: {
+        ...entry.signals,
+        finalUrl: `${origin}${route}`,
+        publicFormControls: publicFormControlEvidence(controls),
+        protection: { detected: false, responseStatus: 200, reasonCodes: [] }
+      },
+      axe: {
+        ...entry.axe,
+        report: { ...entry.axe.report, url: `${origin}${route}` }
+      },
+      screenshot: {
+        ...entry.screenshot,
+        base64: Buffer.concat([
+          Buffer.from('89504e470d0a1a0a', 'hex'),
+          Buffer.alloc(128, byteSeed)
+        ]).toString('base64')
+      }
+    }));
+    return raw;
+  };
+  const sourceRoot = mkdtempSync(join(tmpdir(), 'global-chrome-query-source-'));
+  const targetRoot = mkdtempSync(join(tmpdir(), 'global-chrome-query-target-'));
+  const sourcePacket = join(sourceRoot, 'review-packet');
+  const targetPacket = join(targetRoot, 'review-packet');
+  mkdirSync(sourcePacket, { recursive: true });
+  mkdirSync(targetPacket, { recursive: true });
+  const sourceCapture = finalizeGlobalChromeCapture({
+    capture: rawCapture('https://source.example', sourceControls, 1),
+    packetDir: sourcePacket,
+    stateFingerprint: state('f')
+  });
+  const targetCapture = finalizeGlobalChromeCapture({
+    capture: rawCapture('https://target.example', targetControls, 2),
+    packetDir: targetPacket,
+    stateFingerprint: state('f')
+  });
+
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [],
+    publicFormControlRoutes: [{ sourcePath: route, targetPath: route, routeRole: 'search' }],
+    stateFingerprint: state('f')
+  });
+  const expectedRoute = `/course-search?query-sha256=${sha256('?kind=summer&campus=budapest').slice('sha256:'.length)}`;
+  assert.equal(floor.status, 'failed');
+  assert.equal(floor.publicFormControlFindings.length, 2);
+  assert.ok(floor.publicFormControlFindings.every((finding) => finding.targetPath === expectedRoute));
+  assert.doesNotMatch(floor.errors.join('\n'), /missing (?:source|target) managed-browser capture/i);
+  assert.match(
+    floor.publicFormControlFindings.flatMap((finding) => finding.errors).join('\n'),
+    /ordered option labels or selected, default, and disabled option state/i
+  );
+});
+
 test('finalization fails before writing for incomplete captures and symlinked evidence ancestors', () => {
   const incompleteRoot = mkdtempSync(join(tmpdir(), 'global-chrome-incomplete-'));
   const incompletePacket = join(incompleteRoot, 'review-packet');
@@ -2239,6 +2497,19 @@ test('shared global chrome evidence redacts every query with provenance-bound id
     }
   }));
   const capture = finalizeGlobalChromeCapture({ capture: raw, packetDir, stateFingerprint: state('f') });
+  const rawRouteComparison = compareGlobalChromeCaptures({
+    anchor: capture,
+    current: capture,
+    primaryRoutes: [privateRoute]
+  });
+  const finalizedRouteComparison = compareGlobalChromeCaptures({
+    anchor: capture,
+    current: capture,
+    primaryRoutes: capture.primaryRoutes
+  });
+  assert.equal(rawRouteComparison.passed, true, rawRouteComparison.errors.join('\n'));
+  assert.equal(finalizedRouteComparison.passed, true, finalizedRouteComparison.errors.join('\n'));
+  assert.deepEqual(finalizedRouteComparison.routes, rawRouteComparison.routes);
   const captureWithLocalPath = {
     ...capture,
     warnings: [`Capture artifacts were finalized under ${packetDir}.`]

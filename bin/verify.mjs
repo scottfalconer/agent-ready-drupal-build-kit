@@ -29,6 +29,7 @@ import {
 import { reviewHandoffStateErrors, VERIFIER_OUTPUT_PACKET_PATHS } from './review-handoff.mjs';
 import { applyVerificationLifecycle, globalChromeCaptureContext } from './lifecycle.mjs';
 import {
+  BROWSER_CAPTURE_LIMITS,
   captureBeforeConsentNetwork,
   captureGlobalChrome,
   captureSummary,
@@ -1306,6 +1307,112 @@ export function visualParityCompletionSupport(record, { briefMode = false } = {}
 
 function normalizeRouteKey(value) {
   return requestPathAndSearch(value) || normalizePath(value);
+}
+
+const PUBLIC_FORM_ROUTE_ROLES = new Set(['form', 'search']);
+
+/**
+ * Close verifier-owned public-form coverage over the accepted route model.
+ *
+ * Primary routes remain the authored human-review and consent scope. The
+ * managed-browser form floor additionally needs every accepted form/search
+ * route that the packet audits or models, even when that route was not chosen
+ * as a primary representative. Exact path+query identities stay private inside
+ * the verifier and are redacted only when the live report is shared.
+ */
+export function verifierOwnedPublicFormRoutes({
+  patternMap = {},
+  routeMatrix = {},
+  sourceAudit = {}
+} = {}) {
+  const acceptedRows = (Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+    .filter((route) => route?.accepted === true);
+  const routes = [];
+  const seen = new Set();
+  const addRoute = (route, routeRole = '') => {
+    const sourcePath = requestPathAndSearch(route?.sourcePath ?? route?.sourceRoute);
+    const targetPath = requestPathAndSearch(route?.targetPath ?? route?.targetRoute);
+    if (!sourcePath || !targetPath) return;
+    const identity = `${sourcePath}\0${targetPath}`;
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    routes.push({
+      ...route,
+      sourcePath,
+      targetPath,
+      routeRole: String(route?.routeRole || routeRole)
+    });
+  };
+
+  for (const route of acceptedRows) {
+    if (PUBLIC_FORM_ROUTE_ROLES.has(String(route?.routeRole ?? ''))) {
+      addRoute(route);
+    }
+  }
+
+  // A form model is an exact source/target mapping and remains applicable even
+  // if a route row was mislabeled as "other". Packet validation independently
+  // rejects missing route rows; this closure prevents a valid mapping from
+  // escaping the live DOM comparison because of its representative status.
+  for (const form of Array.isArray(patternMap?.forms) ? patternMap.forms : []) {
+    if (form?.accepted !== true) continue;
+    const sourcePath = requestPathAndSearch(form?.sourceRoute);
+    const targetPath = requestPathAndSearch(form?.targetRoute);
+    const row = acceptedRows.find((candidate) =>
+      requestPathAndSearch(candidate?.sourcePath) === sourcePath &&
+      requestPathAndSearch(candidate?.targetPath) === targetPath
+    );
+    addRoute(row ?? {
+      sourcePath,
+      targetPath,
+      routeRole: 'form'
+    }, 'form');
+  }
+
+  // Source audit records do not carry target paths. Bind each applicable audit
+  // record back to every accepted exact route-matrix mapping for that source
+  // identity; the packet validator separately requires modeled anonymous forms.
+  for (const audit of Array.isArray(sourceAudit?.formsAndIntegrations)
+    ? sourceAudit.formsAndIntegrations
+    : []) {
+    const auditRole = audit?.kind === 'search'
+      ? 'search'
+      : audit?.kind === 'public_submission_form' && audit?.anonymousPublicUse === true
+        ? 'form'
+        : '';
+    if (!auditRole) continue;
+    const sourcePath = requestPathAndSearch(audit?.sourceRoute);
+    for (const row of acceptedRows.filter((candidate) =>
+      requestPathAndSearch(candidate?.sourcePath) === sourcePath
+    )) {
+      addRoute(row, auditRole);
+    }
+  }
+
+  return routes;
+}
+
+export function verifierOwnedManagedBrowserRoutes({
+  captureSide = 'target',
+  primaryRoutes = [],
+  publicFormRoutes = []
+} = {}) {
+  if (!['source', 'target'].includes(captureSide)) {
+    throw new Error('Managed-browser route closure captureSide must be source or target.');
+  }
+  const routes = [];
+  const capturedRoutes = new Set();
+  for (const route of [...primaryRoutes, ...publicFormRoutes]) {
+    const path = requestPathAndSearch(
+      captureSide === 'source'
+        ? route?.sourcePath ?? route?.targetPath ?? route
+        : route?.targetPath ?? route?.sourcePath ?? route
+    );
+    if (!path || capturedRoutes.has(path)) continue;
+    capturedRoutes.add(path);
+    routes.push({ ...route, targetPath: path });
+  }
+  return routes;
 }
 
 function parseHttpUrl(value, label) {
@@ -14720,6 +14827,22 @@ export async function verifyLive({
   if (primaryRoutes.length === 0) {
     liveErrors.push('route-matrix.json must declare at least one primary route.');
   }
+  const publicFormControlRoutes = verifierOwnedPublicFormRoutes({
+    patternMap,
+    routeMatrix,
+    sourceAudit
+  });
+  const managedBrowserTargetRoutes = verifierOwnedManagedBrowserRoutes({
+    primaryRoutes,
+    publicFormRoutes: publicFormControlRoutes
+  });
+  const publicFormRouteLimitExceeded =
+    publicFormControlRoutes.length > BROWSER_CAPTURE_LIMITS.maxRoutes;
+  if (publicFormRouteLimitExceeded) {
+    liveErrors.push(
+      `Verifier-owned public-form comparison requires ${publicFormControlRoutes.length} exact source/target route pairs, exceeding the ${BROWSER_CAPTURE_LIMITS.maxRoutes} route-pair limit; no managed-browser checks were run.`
+    );
+  }
 
   let chromeContext = { lifecyclePresent: false, latestVerifiedAnchor: null, contract: null };
   try {
@@ -14731,7 +14854,8 @@ export async function verifyLive({
   const browserCaptureAttempted = Boolean(
     target &&
     explicitTargetFetchAllowed &&
-    runtimeAuthoritativeForCompletion
+    runtimeAuthoritativeForCompletion &&
+    !publicFormRouteLimitExceeded
   );
   const runtimeProjectRoot = findDrupalDdevRoot(cwd);
   const effectiveChromeContract = chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {};
@@ -14758,7 +14882,7 @@ export async function verifyLive({
         chromeContract: effectiveChromeContract,
         codeManifest: shadowCodeManifest,
         inspectedDrupalRuntime,
-        primaryRoutes,
+        primaryRoutes: managedBrowserTargetRoutes,
         routeMatrixText,
         targetOrigin: target.url.origin
       });
@@ -14795,7 +14919,7 @@ export async function verifyLive({
         ? captureGlobalChrome({
             browserBackend,
             baseUrl: target.url,
-            primaryRoutes,
+            primaryRoutes: managedBrowserTargetRoutes,
             contract: effectiveChromeContract,
             environment
           })
@@ -15561,11 +15685,15 @@ export async function verifyLive({
     };
     visualParityFloor = { ...value, fingerprint: stateSha256(value) };
   } else if (visualFloorCaptureEligible) {
-    const sourcePrimaryRoutes = primaryRoutes.map((route) => ({ targetPath: route?.sourcePath }));
+    const managedBrowserSourceRoutes = verifierOwnedManagedBrowserRoutes({
+      captureSide: 'source',
+      primaryRoutes,
+      publicFormRoutes: publicFormControlRoutes
+    });
     const rawSourceVisualCapture = await captureGlobalChrome({
       browserBackend,
       baseUrl: new URL(declaredSource),
-      primaryRoutes: sourcePrimaryRoutes,
+      primaryRoutes: managedBrowserSourceRoutes,
       contract: chromeContext.contract ?? browserEvidence?.globalChromeRegression ?? {},
       environment
     });
@@ -15599,6 +15727,7 @@ export async function verifyLive({
       sourceCapture: sourceVisualCapture,
       targetCapture: globalChromeCapture,
       primaryRoutes,
+      publicFormControlRoutes,
       stateFingerprint: buildState.fingerprint
     });
     if (verifierFloor.status === 'review_required' && verifierFloor.diagnosticReviewEligible === true) {

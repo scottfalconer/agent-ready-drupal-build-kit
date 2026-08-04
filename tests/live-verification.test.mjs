@@ -10242,6 +10242,37 @@ test('anonymous public forms require submissions, outcome handling, and a vendor
     passing.completionEvidence.packetCompletionBlockedReasons.join('\n')
   );
 
+  const queryFormWithoutExactRoutePacket = join(temp, 'query-form-without-exact-route');
+  cpSync(passingPacket, queryFormWithoutExactRoutePacket, { recursive: true });
+  const querySourceRoute = '/contact?campus=budapest';
+  const queryTargetUrl = 'https://target.example/contact?campus=budapest';
+  mutateJson(join(queryFormWithoutExactRoutePacket, 'source-audit.json'), (sourceAudit) => {
+    sourceAudit.formsAndIntegrations[0].sourceRoute = querySourceRoute;
+  });
+  mutateJson(join(queryFormWithoutExactRoutePacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.forms[0].sourceRoute = querySourceRoute;
+    patternMap.forms[0].targetRoute = querySourceRoute;
+  });
+  mutateJson(join(queryFormWithoutExactRoutePacket, 'browser-evidence.json'), (browser) => {
+    browser.anonymousFormChecks[0].sourceRoute = querySourceRoute;
+    browser.anonymousFormChecks[0].targetUrl = queryTargetUrl;
+  });
+  mutateJson(join(queryFormWithoutExactRoutePacket, 'independent-verification.json'), (independent) => {
+    independent.anonymousFormChecks[0].sourceRoute = querySourceRoute;
+    independent.anonymousFormChecks[0].targetRoute = querySourceRoute;
+  });
+  for (const evidenceFile of ['form-outcome.json', 'form-abuse-protection.json']) {
+    mutateJson(join(queryFormWithoutExactRoutePacket, 'evidence/browser', evidenceFile), (evidence) => {
+      evidence.targetUrl = queryTargetUrl;
+    });
+  }
+  const queryFormWithoutExactRoute = await validatePacket({ packetDir: queryFormWithoutExactRoutePacket });
+  assert.equal(queryFormWithoutExactRoute.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    queryFormWithoutExactRoute.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must prove anonymous invalid and valid submissions plus an outcome-appropriate handler for form \/contact\?campus=budapest/i
+  );
+
   const twoFormsPacket = join(temp, 'two-forms-one-route');
   cpSync(passingPacket, twoFormsPacket, { recursive: true });
   mutateJson(join(twoFormsPacket, 'source-audit.json'), (sourceAudit) => {

@@ -2229,6 +2229,7 @@ export function compareVerifierOwnedVisualFloor({
   sourceCapture,
   targetCapture,
   primaryRoutes = [],
+  publicFormControlRoutes = [],
   stateFingerprint = ''
 } = {}) {
   const checkedAt = String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString());
@@ -2244,8 +2245,21 @@ export function compareVerifierOwnedVisualFloor({
     targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
     thresholds: VISUAL_FLOOR_THRESHOLDS,
     findings: [],
+    publicFormControlFindings: [],
     errors: []
   };
+  if (
+    Array.isArray(publicFormControlRoutes) &&
+    publicFormControlRoutes.length > BROWSER_CAPTURE_LIMITS.maxRoutes
+  ) {
+    return visualFloorResult({
+      ...base,
+      status: 'blocked',
+      errors: [
+        `Verifier-owned public-form comparison requires ${publicFormControlRoutes.length} exact source/target route pairs, exceeding the ${BROWSER_CAPTURE_LIMITS.maxRoutes} route-pair limit; no partial comparison was run.`
+      ]
+    });
+  }
   const captureErrors = [];
   if (sourceCapture?.status !== 'captured' || sourceCapture?.authoritative !== true) {
     captureErrors.push(`Source managed-browser capture is unavailable: ${(sourceCapture?.errors ?? []).join(' ') || sourceCapture?.status || 'missing'}.`);
@@ -2275,14 +2289,36 @@ export function compareVerifierOwnedVisualFloor({
   const sourceIndex = captureRouteIndex(sourceCapture);
   const targetIndex = captureRouteIndex(targetCapture);
   const findings = [];
+  const publicFormControlFindings = [];
   const errors = [];
   let protectedFindingCount = 0;
+  const captureLookupPath = (route, capture, index, viewportName) => {
+    const normalized = normalizeRoute(route);
+    const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
+      capture?.queryPrivacy?.method === 'sha256' &&
+      capture?.queryPrivacy?.authoritative === true;
+    if (!privacyBound || index.has(`${normalized}\0${viewportName}`)) return normalized;
+    return privacyPreservingRoute(normalized);
+  };
+  const publicFormRoutePairs = new Set((Array.isArray(publicFormControlRoutes)
+    ? publicFormControlRoutes
+    : []).map((route) => (
+      `${normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route)}\0` +
+      `${normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route)}`
+    )));
+  const primaryRoutePairs = new Set((Array.isArray(primaryRoutes) ? primaryRoutes : []).map((route) => (
+    `${normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route)}\0` +
+    `${normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route)}`
+  )));
   for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
-    const sourcePath = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
-    const targetPath = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    const publicFormEvidenceRequired = publicFormRoutePairs.has(`${sourceRequest}\0${targetRequest}`);
     for (const viewport of VIEWPORTS) {
-      const source = sourceIndex.get(`${sourcePath}\0${viewport.name}`);
-      const target = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const routeErrors = [];
       const deficits = [];
       const decisiveDeficits = [];
@@ -2326,6 +2362,9 @@ export function compareVerifierOwnedVisualFloor({
         if (!protectedSource) {
           publicFormControlParity = comparePublicFormControls(source.signals, target.signals);
           routeErrors.push(...publicFormControlParity.errors);
+          if (publicFormEvidenceRequired && publicFormControlParity.source?.controlCount === 0) {
+            routeErrors.push('audited public form/search route exposed no visible native source controls; empty source and target evidence cannot establish form parity');
+          }
           for (const role of ['header', 'navigation', 'main', 'footer']) {
             if (source.signals?.roles?.[role]?.visible === true && target.signals?.roles?.[role]?.visible !== true) {
               routeErrors.push(`${role} landmark visible on the source is missing from the target`);
@@ -2419,8 +2458,77 @@ export function compareVerifierOwnedVisualFloor({
       errors.push(...routeErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
     }
   }
+  const additionalPublicFormRoutes = (Array.isArray(publicFormControlRoutes)
+    ? publicFormControlRoutes
+    : []).filter((route) => {
+    const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    return !primaryRoutePairs.has(`${sourceRequest}\0${targetRequest}`);
+  });
+  for (const route of additionalPublicFormRoutes) {
+    const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    for (const viewport of VIEWPORTS) {
+      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const routeErrors = [];
+      const sourceProtection = source?.signals?.protection ?? {};
+      const protectedSource = sourceProtection.detected === true;
+      let publicFormControlParity = {
+        source: null,
+        target: null,
+        matchedControlCount: 0,
+        errors: []
+      };
+      if (!source || !target) {
+        routeErrors.push(`missing ${!source ? 'source' : 'target'} managed-browser capture`);
+      } else {
+        const sameViewport = source.viewport?.width === target.viewport?.width &&
+          source.viewport?.height === target.viewport?.height &&
+          source.viewport?.width === viewport.width &&
+          source.viewport?.height === viewport.height;
+        if (!sameViewport) routeErrors.push('source and target were not captured at the identical required viewport');
+        try {
+          if (new URL(target.signals?.finalUrl ?? 'about:blank').origin !== base.targetOrigin) {
+            routeErrors.push('target capture left the inspected target origin');
+          }
+          if (!protectedSource && new URL(source.signals?.finalUrl ?? 'about:blank').origin !== base.sourceOrigin) {
+            routeErrors.push('source capture left the declared source origin');
+          }
+        } catch {
+          routeErrors.push('source or target capture lacks a valid final URL identity');
+        }
+        if (!protectedSource) {
+          publicFormControlParity = comparePublicFormControls(source.signals, target.signals);
+          routeErrors.push(...publicFormControlParity.errors);
+          if (publicFormControlParity.source?.controlCount === 0) {
+            routeErrors.push('audited public form/search route exposed no visible native source controls; empty source and target evidence cannot establish form parity');
+          }
+        }
+      }
+      if (protectedSource) protectedFindingCount += 1;
+      const finding = {
+        sourcePath,
+        targetPath,
+        routeRole: String(route?.routeRole ?? ''),
+        viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        protectedSource,
+        protectionReasonCodes: Array.isArray(sourceProtection.reasonCodes) ? sourceProtection.reasonCodes : [],
+        publicFormControlParity,
+        passed: routeErrors.length === 0 && !protectedSource,
+        errors: routeErrors
+      };
+      publicFormControlFindings.push(finding);
+      errors.push(...routeErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+    }
+  }
   if (findings.length !== primaryRoutes.length * VIEWPORTS.length) {
     errors.push('Visual floor did not cover every primary route at desktop and mobile viewports.');
+  }
+  if (publicFormControlFindings.length !== additionalPublicFormRoutes.length * VIEWPORTS.length) {
+    errors.push('Public-form control floor did not cover every additional audited form/search route at desktop and mobile viewports.');
   }
   const status = errors.length > 0 ? 'failed' : protectedFindingCount > 0 ? 'review_required' : 'passed';
   return visualFloorResult({
@@ -2431,8 +2539,9 @@ export function compareVerifierOwnedVisualFloor({
     diagnosticReviewEligible: status === 'review_required' && protectedFindingCount > 0,
     reviewFallbackEligible: false,
     findings,
+    publicFormControlFindings,
     errors: status === 'review_required'
-      ? ['Source protection prevented verifier-owned structural comparison; machine completion remains blocked until verifier-owned source access is restored.']
+      ? ['Source protection prevented verifier-owned structural or public-form comparison; machine completion remains blocked until verifier-owned source access is restored.']
       : errors
   });
 }
@@ -3101,7 +3210,17 @@ export function compareGlobalChromeCaptures({ anchor, current, primaryRoutes = [
   }
   const anchorRoutes = routeIndex(anchor);
   const currentRoutes = routeIndex(current);
-  const routes = [...new Set((primaryRoutes.length ? primaryRoutes : anchor.routes.map((route) => route.path)).map(normalizeRoute))].sort();
+  const comparisonRouteIdentity = (route) => {
+    const normalized = normalizeRoute(route);
+    if (
+      anchorRoutes.has(`${normalized}\0desktop`) ||
+      anchorRoutes.has(`${normalized}\0mobile`)
+    ) return normalized;
+    return privacyPreservingRoute(normalized);
+  };
+  const routes = [...new Set(primaryRoutes.length
+    ? primaryRoutes.map(comparisonRouteIdentity)
+    : anchor.routes.map((route) => normalizeRoute(route.path)))].sort();
   const findings = [];
   for (const path of routes) {
     for (const viewport of ['desktop', 'mobile']) {
