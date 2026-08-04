@@ -2988,8 +2988,8 @@ async function independentStructuredGateReasons({
       !check ||
       !browserCheck ||
       check?.status !== 'pass' ||
-      normalizeRouteKey(check?.sourceRoute) !== normalizeRouteKey(form?.sourceRoute) ||
-      normalizeRouteKey(check?.targetRoute) !== normalizeRouteKey(form?.targetRoute) ||
+      normalizeRouteRequestKey(check?.sourceRoute) !== normalizeRouteRequestKey(form?.sourceRoute) ||
+      normalizeRouteRequestKey(check?.targetRoute) !== normalizeRouteRequestKey(form?.targetRoute) ||
       !exactIdentityMatch(check?.purpose, form?.purpose) ||
       !exactIdentityMatch(check?.modeledOwner, form?.drupalOwner) ||
       !exactIdentityMatch(check?.browserOwner, browserCheck?.drupalOwner) ||
@@ -6862,7 +6862,7 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
     );
     return !form ||
       form?.accepted !== true ||
-      normalizeRouteKey(form?.sourceRoute) !== normalizeRouteKey(sourceForm?.sourceRoute) ||
+      normalizeRouteRequestKey(form?.sourceRoute) !== normalizeRouteRequestKey(sourceForm?.sourceRoute) ||
       !exactIdentityMatch(form?.purpose, sourceForm?.purpose) ||
       String(form?.expectedOutcome ?? '') !== String(sourceForm?.expectedOutcome ?? '') ||
       !String(form?.drupalOwner ?? '').trim();
@@ -6871,8 +6871,8 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
   }
   for (const form of modeledForms) {
     const formKey = String(form?.formKey ?? '').trim();
-    const sourceRoute = normalizeRouteKey(form?.sourceRoute);
-    const targetRoute = normalizeRouteKey(form?.targetRoute);
+    const sourceRoute = normalizeRouteRequestKey(form?.sourceRoute);
+    const targetRoute = normalizeRouteRequestKey(form?.targetRoute);
     const expectedOutcome = String(form?.expectedOutcome ?? '');
     const sourceForm = sourcePublicForms.find((candidate) =>
       String(candidate?.formKey ?? '').trim() === formKey
@@ -6881,12 +6881,15 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
       String(candidate?.formKey ?? '').trim() === formKey
     );
     const routeRecord = routeRows.find((candidate) =>
-      normalizeRouteKey(candidate?.targetPath) === targetRoute && candidate?.accepted === true
+      normalizeRouteRequestKey(candidate?.sourcePath) === sourceRoute &&
+      normalizeRouteRequestKey(candidate?.targetPath) === targetRoute &&
+      candidate?.accepted === true
     );
     const browserFormCheck = publicRouteChecks.find((candidate) =>
       candidate?.routeRole === 'form' &&
       captureStateId(candidate) === 'default' &&
-      routeRecordPath(candidate) === targetRoute &&
+      normalizeRouteRequestKey(candidate?.sourceUrl) === sourceRoute &&
+      routeRecordRequestKey(candidate) === targetRoute &&
       candidate?.accepted === true
     );
     const outcomeEvidenceMatches = check && await formOutcomeEvidenceMatches(
@@ -6920,8 +6923,8 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
       !routeRecord ||
       !browserFormCheck ||
       !check ||
-      normalizeRouteKey(check?.sourceRoute) !== sourceRoute ||
-      routeRecordPath(check) !== targetRoute ||
+      normalizeRouteRequestKey(check?.sourceRoute) !== sourceRoute ||
+      routeRecordRequestKey(check) !== targetRoute ||
       check?.accepted !== true ||
       check?.status !== 'pass' ||
       check?.anonymousSession !== true ||
@@ -6944,8 +6947,8 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
   }
   if (anonymousFormChecks.some((check) => !modeledForms.some((form) =>
     String(form?.formKey ?? '').trim() === String(check?.formKey ?? '').trim() &&
-    normalizeRouteKey(form?.sourceRoute) === normalizeRouteKey(check?.sourceRoute) &&
-    normalizeRouteKey(form?.targetRoute) === routeRecordPath(check)
+    normalizeRouteRequestKey(form?.sourceRoute) === normalizeRouteRequestKey(check?.sourceRoute) &&
+    normalizeRouteRequestKey(form?.targetRoute) === routeRecordRequestKey(check)
   ))) {
     reasons.push('browser-evidence.json anonymousFormChecks must map to pattern-map.json forms.');
   }
