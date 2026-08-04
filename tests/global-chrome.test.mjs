@@ -1758,6 +1758,68 @@ test('verifier-owned primary-navigation parity preserves accepted route mappings
   assert.ok(floor.findings.every((finding) => finding.primaryNavigation.differenceKinds.length === 0));
 });
 
+test('primary navigation prefers a unique canonical final route over an earlier incomplete primary mapping', () => {
+  const sourceEntries = [{ href: '/legacy-programs', label: 'Programs' }];
+  const targetEntries = [{ href: '/programs', label: 'Programs' }];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }), sourceEntries),
+    targetCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+    }), targetEntries),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    routeMappings: [
+      { sourcePath: '/legacy-programs', targetPath: '/legacy-programs', accepted: true },
+      {
+        sourcePath: '/legacy-programs',
+        targetPath: '/legacy-programs',
+        targetFinalPath: '/programs',
+        accepted: true
+      }
+    ],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.routeMappingConflictCount === 0));
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.passed));
+});
+
+test('conflicting canonical navigation mappings fail closed even when the observed trees otherwise match', () => {
+  const entries = [{ href: '/legacy-programs', label: 'Programs' }];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }), entries),
+    targetCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+    }), entries),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    routeMappings: [
+      {
+        sourcePath: '/legacy-programs',
+        targetPath: '/legacy-programs',
+        targetFinalPath: '/programs-a',
+        accepted: true
+      },
+      {
+        sourcePath: '/legacy-programs',
+        targetPath: '/legacy-programs',
+        targetFinalPath: '/programs-b',
+        accepted: true
+      }
+    ],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.equal(floor.primaryNavigationSemanticParity.status, 'failed');
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.routeMappingConflictCount === 1));
+  assert.ok(floor.findings.every((finding) => finding.primaryNavigation.disposition.applied === false));
+  assert.match(floor.errors.join('\n'), /ambiguous canonical route mapping/i);
+});
+
 test('verifier-owned primary-navigation parity fails when an otherwise exact target tree is hidden', () => {
   const entries = [
     { href: '/', label: 'Home' },

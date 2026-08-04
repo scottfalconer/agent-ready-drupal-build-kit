@@ -2422,19 +2422,41 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
 }
 
 function navigationRouteMapping(routeMappings = []) {
-  const mapped = new Map();
+  const candidates = new Map();
   for (const route of Array.isArray(routeMappings) ? routeMappings : []) {
     if (route?.accepted === false) continue;
     try {
       const source = privacyPreservingRoute(route?.sourcePath);
-      const target = privacyPreservingRoute(route?.targetFinalPath || route?.targetPath);
-      if (source && target && !mapped.has(source)) mapped.set(source, target);
+      const explicitFinalTarget = route?.targetFinalPath
+        ? privacyPreservingRoute(route.targetFinalPath)
+        : '';
+      const fallbackTarget = privacyPreservingRoute(route?.targetPath);
+      if (!source || (!explicitFinalTarget && !fallbackTarget)) continue;
+      const state = candidates.get(source) ?? {
+        explicitFinalTargets: new Set(),
+        fallbackTargets: new Set()
+      };
+      if (explicitFinalTarget) state.explicitFinalTargets.add(explicitFinalTarget);
+      else if (fallbackTarget) state.fallbackTargets.add(fallbackTarget);
+      candidates.set(source, state);
     } catch {
       // Packet validation owns malformed route rows. An invalid row must not
       // alter verifier-observed navigation semantics.
     }
   }
-  return mapped;
+  const mapped = new Map();
+  let conflictCount = 0;
+  for (const [source, state] of candidates) {
+    const targets = state.explicitFinalTargets.size > 0
+      ? state.explicitFinalTargets
+      : state.fallbackTargets;
+    if (targets.size !== 1) {
+      conflictCount += 1;
+      continue;
+    }
+    mapped.set(source, [...targets][0]);
+  }
+  return { conflictCount, mapped };
 }
 
 function normalizedNavigationTree(value = {}, hrefMappings = new Map()) {
@@ -2603,10 +2625,11 @@ function comparePrimaryNavigation({
   dispositions = [],
   viewport = ''
 } = {}) {
+  const routeMapping = navigationRouteMapping(routeMappings);
   const sourceObserved = normalizedNavigationTree(source?.signals?.primaryNavigation);
   const expectedSource = normalizedNavigationTree(
     source?.signals?.primaryNavigation,
-    navigationRouteMapping(routeMappings)
+    routeMapping.mapped
   );
   const targetObserved = normalizedNavigationTree(target?.signals?.primaryNavigation);
   const bounded = [expectedSource, targetObserved].every((tree) =>
@@ -2631,19 +2654,23 @@ function comparePrimaryNavigation({
     targetTreeFingerprint: targetObserved.treeFingerprint,
     sourceEntryCount: expectedSource.entryCount,
     targetEntryCount: targetObserved.entryCount,
+    routeMappingConflictCount: routeMapping.conflictCount,
     differenceKinds: sortedDifferenceKinds
   };
-  const exact = bounded &&
+  const exact = routeMapping.conflictCount === 0 && bounded &&
     expectedSource.present === targetObserved.present &&
     expectedSource.visible === targetObserved.visible &&
     canonicalJson(expectedSource.entries) === canonicalJson(targetObserved.entries);
-  const disposition = exact || !bounded
+  const disposition = exact || !bounded || routeMapping.conflictCount > 0
     ? null
     : matchingNavigationDisposition(dispositions, comparison, viewport);
   const noNavigation = !expectedSource.present && !targetObserved.present &&
     expectedSource.entryCount === 0 && targetObserved.entryCount === 0;
-  const passed = bounded && (exact || Boolean(disposition) || noNavigation);
+  const passed = routeMapping.conflictCount === 0 && bounded && (exact || Boolean(disposition) || noNavigation);
   const errors = [];
+  if (routeMapping.conflictCount > 0) {
+    errors.push(`primary navigation has ${routeMapping.conflictCount} ambiguous canonical route mapping(s)`);
+  }
   if (!bounded) {
     errors.push(
       `primary navigation exceeded verifier bounds (${PRIMARY_NAVIGATION_LIMITS.maxEntries} entries, ` +
@@ -2657,7 +2684,9 @@ function comparePrimaryNavigation({
   }
   return {
     ...comparison,
-    status: noNavigation ? 'not_applicable' : exact ? 'passed' : disposition ? 'dispositioned' : 'failed',
+    status: routeMapping.conflictCount > 0
+      ? 'failed'
+      : noNavigation ? 'not_applicable' : exact ? 'passed' : disposition ? 'dispositioned' : 'failed',
     bounded,
     disposition: disposition
       ? { applied: true, fingerprint: sha256(disposition) }
