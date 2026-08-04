@@ -2502,7 +2502,7 @@ test('state-bound verifier-owned axe results preserve and block WCAG violations'
   assert.equal(validateScreenshotArtifacts(packetDir, finalized), true);
 });
 
-test('CDP pipe captures screenshots and interactive ARIA-menuitem ancestry without a browser-driver dependency', {
+test('CDP pipe captures screenshots and list-wrapped or role-container ARIA-menuitem ancestry without a browser-driver dependency', {
   skip: findBrowserExecutable() ? false : 'Chrome/Chromium is not installed in this runtime.'
 }, async () => {
   const server = createServer((request, response) => {
@@ -2515,7 +2515,7 @@ test('CDP pipe captures screenshots and interactive ARIA-menuitem ancestry witho
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
       <button class="menu-toggle" aria-label="Menu" aria-controls="main-nav" aria-expanded="false"
         onclick="this.setAttribute('aria-expanded','true');document.getElementById('main-nav').classList.add('open')">Menu</button>
-      <nav id="main-nav"><div role="menu"><a role="menuitem" href="/">Home</a><div role="menuitem"><a href="/about">About</a><div role="menu"><a role="menuitem" href="/team">Team</a></div></div></div></nav></header>
+      <nav id="main-nav"><ul role="menu"><li role="none"><a role="menuitem" href="/">Home</a></li><li role="none"><a role="menuitem" href="/about">About</a><ul role="menu"><li role="none"><a role="menuitem" href="/team">Team</a></li></ul></li></ul><div role="menu"><div role="menuitem"><a href="/services">Services</a><div role="menu"><a role="menuitem" href="/consulting">Consulting</a></div></div></div></nav></header>
       <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p>
         <form id="fixture-form"><input type="hidden" name="form_token" value="csrf-secret">
           <label for="fixture-email">Email&nbsp;&#xFF21;ddress</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">
@@ -2588,10 +2588,12 @@ test('CDP pipe captures screenshots and interactive ARIA-menuitem ancestry witho
       JSON.stringify(raw.routes.map((route) => route.signals.publicFormControls)),
       /form_token|csrf-secret|email_internal|visitor-secret|general-internal|blank-internal|Private fallback text|website_honeypot|honeypot-secret|inert_internal|inert-secret|transparent_internal|transparent-secret|hidden_internal|hidden-secret|operation_internal|send-internal|reference_internal|external-secret/
     );
-    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entryCount === 3));
-    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries.map((entry) => entry.label).join('|') === 'Home|About|Team'));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entryCount === 5));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries.map((entry) => entry.label).join('|') === 'Home|About|Team|Services|Consulting'));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].depth === 1));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].parentPosition === 1));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[4].depth === 1));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[4].parentPosition === 3));
     assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
     assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
     assert.equal(raw.routes.find((route) => route.path === '/' && route.viewport.name === 'mobile').signals.mobileMenu.activationWorks, true);

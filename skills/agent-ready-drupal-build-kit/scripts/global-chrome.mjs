@@ -1103,7 +1103,18 @@ function collectorExpression(contract, mobile) {
       : [];
     const boundedNavigationElements = navigationElements.slice(0, primaryNavigationLimits.maxEntries);
     const navigationPosition = new Map(boundedNavigationElements.map((element, index) => [element, index]));
-    const primaryNavigationEntries = boundedNavigationElements.map((element, position) => {
+    const navigationItemContainer = (element) => {
+      if (!(element instanceof Element)) return null;
+      // Prefer the wrapping list item when the interactive element itself also
+      // carries role=menuitem. Counting both the anchor/button and its <li>
+      // would invent an extra hierarchy level in a common ARIA menu pattern.
+      const listItem = element.closest('li');
+      if (listItem && primaryNavigationRoot.contains(listItem)) return listItem;
+      const roleItem = element.matches('[role="menuitem"]') ? element : element.closest('[role="menuitem"]');
+      return roleItem && primaryNavigationRoot.contains(roleItem) ? roleItem : element;
+    };
+    const primaryNavigationEntries = [];
+    for (const [position, element] of boundedNavigationElements.entries()) {
       const rawLabel = String(
         element.getAttribute('aria-label') ||
         element.textContent ||
@@ -1111,37 +1122,37 @@ function collectorExpression(contract, mobile) {
         element.getAttribute('title') ||
         ''
       ).normalize('NFKC').replace(/\s+/g, ' ').trim();
-      const item = element.closest('li,[role="menuitem"]');
-      const itemAncestors = [];
-      let cursor = item;
+      const item = navigationItemContainer(element);
+      let cursor = item === element ? element.parentElement : item?.parentElement;
+      let parentElement = null;
       while (cursor && cursor !== primaryNavigationRoot) {
-        if (cursor.matches?.('li,[role="menuitem"]')) itemAncestors.push(cursor);
+        if (cursor.matches?.('li,[role="menuitem"]')) {
+          parentElement = boundedNavigationElements.find((candidate, candidatePosition) =>
+            candidatePosition < position && navigationItemContainer(candidate) === cursor
+          ) || null;
+          if (parentElement) break;
+        }
         cursor = cursor.parentElement;
       }
-      const parentItem = itemAncestors[1] || null;
-      const parentElement = parentItem
-        ? [
-            ...(parentItem.matches('a,button') ? [parentItem] : []),
-            ...parentItem.querySelectorAll('a,button')
-          ].find((candidate) => {
-            const candidateItem = candidate.closest('li,[role="menuitem"]');
-            return candidateItem === parentItem;
-          }) || null
-        : null;
+      const parentPosition = navigationPosition.has(parentElement) ? navigationPosition.get(parentElement) : null;
+      const parentDepth = Number.isSafeInteger(parentPosition)
+        ? Number(primaryNavigationEntries[parentPosition]?.depth ?? 0)
+        : -1;
+      const rawDepth = parentDepth + 1;
       const normalizedHref = element.matches('a')
         ? normalizeHref(element.getAttribute('href') || '')
         : '';
-      return {
+      primaryNavigationEntries.push({
         position,
-        depth: Math.min(primaryNavigationLimits.maxDepth, Math.max(0, itemAncestors.length - 1)),
-        depthTruncated: itemAncestors.length - 1 > primaryNavigationLimits.maxDepth,
-        parentPosition: navigationPosition.has(parentElement) ? navigationPosition.get(parentElement) : null,
+        depth: Math.min(primaryNavigationLimits.maxDepth, Math.max(0, rawDepth)),
+        depthTruncated: rawDepth > primaryNavigationLimits.maxDepth,
+        parentPosition,
         kind: normalizedHref ? 'link' : 'control',
         href: normalizedHref,
         label: rawLabel.slice(0, primaryNavigationLimits.maxLabelLength),
         labelTruncated: rawLabel.length > primaryNavigationLimits.maxLabelLength
-      };
-    });
+      });
+    }
     const primaryNavigation = {
       present: primaryNavigationRoot instanceof Element,
       visible: visible(primaryNavigationRoot),
