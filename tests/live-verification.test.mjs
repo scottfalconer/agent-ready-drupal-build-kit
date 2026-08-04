@@ -49,6 +49,7 @@ import {
   BUILD_TYPES,
   buildTypeRequiresCanvasEvidence,
   canvasAuthoringScreenshotSetCredible,
+  compositionOwnersMatch,
   compositionOwnerUsesCanvas,
   customCodeReviewReasons,
   MACHINE_GATE_EVALUATORS,
@@ -75,6 +76,7 @@ const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
 const canvasDigest = (seed) => `sha256:${seed.repeat(64)}`;
+const pageLikeCompositionRouteRoles = new Set(['homepage', 'landing', 'form', 'legal', 'other']);
 
 function canvasCapabilityInventory({
   status = 'available',
@@ -362,6 +364,40 @@ test('composition evidence classification uses exact build types and owner ident
   assert.equal(compositionOwnerUsesCanvas('experience_builder_page'), true);
   assert.equal(compositionOwnerUsesCanvas('node'), false);
   assert.equal(compositionOwnerUsesCanvas('canvas_page_fallback'), false);
+});
+
+test('composition owner vocabularies reconcile every documented owner through explicit identities', () => {
+  const template = JSON.parse(readFileSync(join(templatesDir, 'pattern-map.template.json'), 'utf8'));
+  const documentedOwners = template.compositionModel.flexibleLandingRoutes[0].compositionOwner.split(' | ');
+  const selectedOwners = template.pageCompositionOwnership[0].selectedOwner.split(' | ');
+  const selectedOwnerFor = new Map([
+    ['canvas_page', 'canvas_page'],
+    ['experience_builder_page', 'experience_builder_page'],
+    ['landing_page_content_type', 'landing_page_content_type'],
+    ['layout_builder', 'layout_builder'],
+    ['block_layout', 'block_layout'],
+    ['view_page', 'view'],
+    ['entity_display', 'entity_display'],
+    ['utility_page', 'utility_page'],
+    ['node', 'node'],
+    ['documented_exception', 'documented_exception']
+  ]);
+
+  assert.deepEqual(documentedOwners, [...selectedOwnerFor.keys()]);
+  for (const [declaredOwner, selectedOwner] of selectedOwnerFor) {
+    assert.ok(selectedOwners.includes(selectedOwner), `${selectedOwner} is a documented selected owner`);
+    assert.equal(compositionOwnersMatch(declaredOwner, selectedOwner), true, `${declaredOwner} -> ${selectedOwner}`);
+  }
+  for (const selectedOwner of selectedOwners) {
+    assert.ok(
+      documentedOwners.some((declaredOwner) => compositionOwnersMatch(declaredOwner, selectedOwner)),
+      `${selectedOwner} has a documented composition-owner mapping`
+    );
+  }
+  assert.equal(compositionOwnersMatch('view_page', 'view_page'), true);
+  assert.equal(compositionOwnersMatch('layout_builder', 'block_layout'), false);
+  assert.equal(compositionOwnersMatch('Canvas Page', 'canvas_page'), false);
+  assert.equal(compositionOwnersMatch('unknown_owner', 'unknown_owner'), false);
 });
 
 test('agent continuation pauses only for verifier-confirmed external-only blockers', () => {
@@ -2428,6 +2464,15 @@ function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
     targetPath: route.targetPath,
     targetUrl: new URL(route.targetPath, targetOrigin).href
   }));
+  const compositionTargetUrls = (routeMatrix.routes ?? [])
+    .filter((route) =>
+      route?.accepted === true &&
+      route?.expectedRedirect !== true &&
+      String(route?.sourcePath ?? '').trim() &&
+      String(route?.targetPath ?? '').trim() &&
+      pageLikeCompositionRouteRoles.has(String(route?.routeRole ?? '').trim())
+    )
+    .map((route) => new URL(route.targetPath, targetOrigin).href);
   const excludedBlindInputs = [
     'implementation files',
     'review packet before public or artifact review',
@@ -2514,6 +2559,7 @@ function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
         urls: [...new Set([
           `${targetOrigin}/`,
           ...primaryRoutes.map((route) => route.targetUrl),
+          ...compositionTargetUrls,
           `${targetOrigin}/admin`,
           ...(buildInput.mode === 'source_site'
             ? [`${new URL(routeMatrix.sourceBaseUrl).origin}/`]
@@ -3507,6 +3553,7 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
     sourceAudit.routeInventorySummary.successfulRoutes += 1;
   });
   mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    const contactRationale = 'A stable Page node owns the contact-route composition while Drupal Webform owns submission handling.';
     patternMap.forms = [{
       formKey: 'contact-main',
       sourceRoute: '/contact',
@@ -3517,15 +3564,35 @@ function addAnonymousContactFormEvidence(packetDir, targetBaseUrl, outcomeMode =
       accepted: true,
       notes: 'The contact form is Drupal-owned.'
     }];
+    patternMap.compositionModel.flexibleLandingRoutes.push({
+      ...structuredClone(patternMap.compositionModel.flexibleLandingRoutes[0]),
+      sourceRoute: '/contact',
+      targetRoute: '/contact',
+      pageType: 'form',
+      ownerRationale: contactRationale,
+      sections: [{
+        ...structuredClone(patternMap.compositionModel.flexibleLandingRoutes[0].sections[0]),
+        editorFacingName: 'Contact form',
+        dataSource: 'webform.contact',
+        expectedEditorAction: 'Edit the Contact Webform.'
+      }]
+    });
     patternMap.pageCompositionOwnership.push({
       ...structuredClone(patternMap.pageCompositionOwnership[0]),
       sourceRoute: '/contact',
+      targetRoute: '/contact',
       routeRole: 'form',
-      ownerRationale: 'A Drupal Webform owns the contact route.'
+      ownerRationale: contactRationale,
+      ownerDecision: {
+        ...structuredClone(patternMap.pageCompositionOwnership[0].ownerDecision),
+        decisionId: 'composition-contact',
+        blindReviewDecisionId: ''
+      }
     });
     patternMap.sectionOwnershipMatrix.push({
       ...structuredClone(patternMap.sectionOwnershipMatrix[0]),
       sourceRoute: '/contact',
+      targetRoute: '/contact',
       section: 'other',
       editorFacingName: 'Contact form',
       dataSource: 'webform.contact',
@@ -7020,8 +7087,329 @@ test('composition ownership is route-reconciled and Canvas opt-out requires an o
   assert.equal(currentReport.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     currentReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /primary flexible route .* exactly one matching compositionModel\.flexibleLandingRoutes record/i
+    /accepted page-like route .* exactly one matching compositionModel\.flexibleLandingRoutes record/i
   );
+
+  const missingNonPrimaryLandingOwner = join(temp, 'missing-non-primary-landing-owner');
+  cpSync(canonicalPacket, missingNonPrimaryLandingOwner, { recursive: true });
+  mutateJson(join(missingNonPrimaryLandingOwner, 'route-matrix.json'), (matrix) => {
+    matrix.routes.push({
+      ...structuredClone(matrix.routes[0]),
+      sourcePath: '/about',
+      targetPath: '/about',
+      sourceTitle: 'About source',
+      sourceH1: 'About source',
+      targetTitle: 'About target',
+      targetH1: 'About target',
+      targetFinalPath: '/about',
+      routeRole: 'homepage'
+    });
+  });
+  attachFixtureReviewHandoff(missingNonPrimaryLandingOwner, 'https://target.example');
+  const missingNonPrimaryLandingReport = await validatePacket({ packetDir: missingNonPrimaryLandingOwner });
+  assert.equal(missingNonPrimaryLandingReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    missingNonPrimaryLandingReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted page-like route \/about needs exactly one matching compositionModel\.flexibleLandingRoutes record/i
+  );
+
+  for (const [routeRole, routePath] of [
+    ['landing', '/landing'],
+    ['form', '/form'],
+    ['legal', '/legal'],
+    ['other', '/ordinary-page']
+  ]) {
+    const missingRoleOwner = join(temp, `missing-${routeRole}-owner`);
+    cpSync(canonicalPacket, missingRoleOwner, { recursive: true });
+    mutateJson(join(missingRoleOwner, 'route-matrix.json'), (matrix) => {
+      matrix.routes.push({
+        ...structuredClone(matrix.routes[0]),
+        sourcePath: routePath,
+        targetPath: routePath,
+        sourceTitle: `${routeRole} source`,
+        sourceH1: `${routeRole} source`,
+        targetTitle: `${routeRole} target`,
+        targetH1: `${routeRole} target`,
+        targetFinalPath: routePath,
+        routeRole
+      });
+    });
+    attachFixtureReviewHandoff(missingRoleOwner, 'https://target.example');
+    const report = await validatePacket({ packetDir: missingRoleOwner });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, routeRole);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      new RegExp(`accepted page-like route ${routePath} needs exactly one matching compositionModel\\.flexibleLandingRoutes record`, 'i'),
+      routeRole
+    );
+  }
+
+  const acceptedNonPageMediaRoute = join(temp, 'accepted-non-page-media-route');
+  cpSync(canonicalPacket, acceptedNonPageMediaRoute, { recursive: true });
+  mutateJson(join(acceptedNonPageMediaRoute, 'route-matrix.json'), (matrix) => {
+    matrix.routes.push({
+      ...structuredClone(matrix.routes[0]),
+      sourcePath: '/feed.xml',
+      targetPath: '/feed.xml',
+      sourceTitle: '',
+      sourceH1: '',
+      targetTitle: '',
+      targetH1: '',
+      targetFinalPath: '/feed.xml',
+      routeRole: 'media',
+      notes: 'A public machine-readable feed uses the non-page media role.'
+    });
+  });
+  attachFixtureReviewHandoff(acceptedNonPageMediaRoute, 'https://target.example');
+  const acceptedNonPageMediaReport = await validatePacket({ packetDir: acceptedNonPageMediaRoute });
+  assert.doesNotMatch(
+    acceptedNonPageMediaReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /accepted page-like route \/feed\.xml/i
+  );
+
+  const ownedNonPrimaryLanding = join(temp, 'owned-non-primary-landing');
+  cpSync(missingNonPrimaryLandingOwner, ownedNonPrimaryLanding, { recursive: true });
+  mutateJson(join(ownedNonPrimaryLanding, 'pattern-map.json'), (patternMap) => {
+    const flexible = structuredClone(patternMap.compositionModel.flexibleLandingRoutes[0]);
+    flexible.sourceRoute = '/about';
+    flexible.targetRoute = '/about';
+    flexible.pageType = 'about';
+    flexible.ownerRationale = 'A stable About page is maintained through structured fields.';
+    flexible.sections[0].editorFacingName = 'About introduction';
+    flexible.sections[0].dataSource = 'node.page.body';
+    flexible.sections[0].expectedEditorAction = 'Edit the About introduction field.';
+    patternMap.compositionModel.flexibleLandingRoutes.push(flexible);
+
+    const owner = structuredClone(patternMap.pageCompositionOwnership[0]);
+    owner.sourceRoute = '/about';
+    owner.targetRoute = '/about';
+    owner.routeRole = 'homepage';
+    owner.ownerRationale = flexible.ownerRationale;
+    owner.ownerDecision.decisionId = 'composition-about';
+    owner.ownerDecision.blindReviewDecisionId = 'composition-about';
+    patternMap.pageCompositionOwnership.push(owner);
+
+    const section = structuredClone(patternMap.sectionOwnershipMatrix[0]);
+    section.sourceRoute = '/about';
+    section.targetRoute = '/about';
+    section.editorFacingName = 'About introduction';
+    section.expectedEditorAction = 'Edit the About introduction field.';
+    section.publicOutputLocation = '/about';
+    patternMap.sectionOwnershipMatrix.push(section);
+  });
+  mutateJson(join(ownedNonPrimaryLanding, 'independent-verification.json'), (independent) => {
+    const fidelity = structuredClone(independent.compositionModelFidelityChecks[0]);
+    fidelity.sourceRoute = '/about';
+    fidelity.targetRoute = '/about';
+    fidelity.sectionsChecked = ['About introduction'];
+    independent.compositionModelFidelityChecks.push(fidelity);
+  });
+  mutateJson(join(ownedNonPrimaryLanding, 'blind-adversarial-review.json'), (blind) => {
+    const review = structuredClone(blind.compositionOwnerDecisionReviews[0]);
+    review.decisionId = 'composition-about';
+    review.sourceRoute = '/about';
+    review.targetRoute = '/about';
+    review.prosecution = 'Challenged whether the stable About page needed rearrangeable composition; the source and editor task support structured fields.';
+    blind.compositionOwnerDecisionReviews.push(review);
+  });
+  attachFixtureReviewHandoff(ownedNonPrimaryLanding, 'https://target.example');
+  const ownedNonPrimaryLandingReport = await validatePacket({ packetDir: ownedNonPrimaryLanding });
+  assert.equal(
+    ownedNonPrimaryLandingReport.completionEvidence.packetSupportsCompletion,
+    true,
+    ownedNonPrimaryLandingReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  const ownedNonPrimaryLegal = join(temp, 'owned-non-primary-legal');
+  cpSync(ownedNonPrimaryLanding, ownedNonPrimaryLegal, { recursive: true });
+  mutateJson(join(ownedNonPrimaryLegal, 'route-matrix.json'), (matrix) => {
+    matrix.routes.find((route) => route.targetPath === '/about').routeRole = 'legal';
+  });
+  mutateJson(join(ownedNonPrimaryLegal, 'pattern-map.json'), (patternMap) => {
+    patternMap.pageCompositionOwnership.find((owner) => owner.targetRoute === '/about').routeRole = 'legal';
+  });
+  attachFixtureReviewHandoff(ownedNonPrimaryLegal, 'https://target.example');
+  const ownedNonPrimaryLegalReport = await validatePacket({ packetDir: ownedNonPrimaryLegal });
+  assert.doesNotMatch(
+    ownedNonPrimaryLegalReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /(?:accepted page-like route \/about needs|pageCompositionOwnership for \/about|independent composition fidelity for \/about)/i
+  );
+
+  for (const [name, routeRole] of [['relabelled', 'other'], ['omitted', '']]) {
+    const invalidOwnerRole = join(temp, `${name}-page-owner-role`);
+    cpSync(ownedNonPrimaryLanding, invalidOwnerRole, { recursive: true });
+    mutateJson(join(invalidOwnerRole, 'pattern-map.json'), (patternMap) => {
+      patternMap.pageCompositionOwnership.find((owner) => owner.targetRoute === '/about').routeRole = routeRole;
+    });
+    attachFixtureReviewHandoff(invalidOwnerRole, 'https://target.example');
+    const report = await validatePacket({ packetDir: invalidOwnerRole });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /pageCompositionOwnership for \/about must match the accepted page-like route role/i,
+      name
+    );
+  }
+
+  const relabelledRouteWithoutProsecution = join(temp, 'relabelled-route-without-prosecution');
+  cpSync(ownedNonPrimaryLanding, relabelledRouteWithoutProsecution, { recursive: true });
+  mutateJson(join(relabelledRouteWithoutProsecution, 'blind-adversarial-review.json'), (blind) => {
+    blind.compositionOwnerDecisionReviews = blind.compositionOwnerDecisionReviews.filter(
+      (review) => review.decisionId !== 'composition-about'
+    );
+  });
+  attachFixtureReviewHandoff(relabelledRouteWithoutProsecution, 'https://target.example');
+  const relabelledRouteReport = await validatePacket({ packetDir: relabelledRouteWithoutProsecution });
+  assert.equal(relabelledRouteReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    relabelledRouteReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /non-Canvas owner for composed route \/about requires an outcome-based comparison prosecuted and accepted by the fresh blind reviewer/i
+  );
+
+  const fidelityFailures = [
+    ['failed-status', (check) => { check.status = 'fail'; }],
+    ['blank-evidence', (check) => { check.evidence = ''; }],
+    ['blank-public-output-proof', (check) => { check.nonAdminEditorPublicOutputProof = ''; }]
+  ];
+  for (const [name, mutateCheck] of fidelityFailures) {
+    const invalidFidelity = join(temp, `non-primary-fidelity-${name}`);
+    cpSync(ownedNonPrimaryLegal, invalidFidelity, { recursive: true });
+    mutateJson(join(invalidFidelity, 'independent-verification.json'), (independent) => {
+      mutateCheck(independent.compositionModelFidelityChecks.find((check) => check.targetRoute === '/about'));
+    });
+    attachFixtureReviewHandoff(invalidFidelity, 'https://target.example');
+    const report = await validatePacket({ packetDir: invalidFidelity });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /independent composition fidelity for \/about must pass with packet-local public-output evidence/i,
+      name
+    );
+  }
+
+  const contradictorySectionOwnership = join(temp, 'contradictory-section-ownership');
+  cpSync(ownedNonPrimaryLegal, contradictorySectionOwnership, { recursive: true });
+  mutateJson(join(contradictorySectionOwnership, 'pattern-map.json'), (patternMap) => {
+    patternMap.sectionOwnershipMatrix.find((section) => section.targetRoute === '/about').editorOwnedBy = 'theme_exception';
+  });
+  attachFixtureReviewHandoff(contradictorySectionOwnership, 'https://target.example');
+  const contradictorySectionReport = await validatePacket({ packetDir: contradictorySectionOwnership });
+  assert.equal(contradictorySectionReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    contradictorySectionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /reconcile every declared section and its owner, repeatability, data source, editor action, and acceptance proof one-to-one with sectionOwnershipMatrix/i
+  );
+
+  const utilityPagePacket = join(temp, 'route-specific-utility-page');
+  cpSync(canonicalPacket, utilityPagePacket, { recursive: true });
+  mutateJson(join(utilityPagePacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.compositionModel.flexibleLandingRoutes[0].compositionOwner = 'utility_page';
+    patternMap.pageCompositionOwnership[0].selectedOwner = 'utility_page';
+    patternMap.utilityPageExceptions = [{
+      sourceRoute: '/',
+      targetRoute: '/',
+      routeRole: 'homepage',
+      reasonUtilityPageFits: 'The source is a stable, low-design informational page.',
+      whyNotStructuredContent: 'The route has no recurring schema or reusable object.',
+      whyCanvasOrExperienceBuilderNotUsed: 'Editors only maintain one stable introduction field.',
+      editorMaintenancePath: '/node/1/edit',
+      browserEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      accepted: true,
+      notes: ''
+    }];
+  });
+  mutateJson(join(utilityPagePacket, 'independent-verification.json'), (independent) => {
+    independent.compositionModelFidelityChecks[0].declaredCompositionOwner = 'utility_page';
+    independent.compositionModelFidelityChecks[0].actualCompositionOwner = 'utility_page';
+  });
+  mutateJson(join(utilityPagePacket, 'blind-adversarial-review.json'), (blind) => {
+    blind.compositionOwnerDecisionReviews[0].selectedOwner = 'utility_page';
+  });
+  attachFixtureReviewHandoff(utilityPagePacket, 'https://target.example');
+  const utilityPageReport = await validatePacket({ packetDir: utilityPagePacket });
+  assert.equal(
+    utilityPageReport.completionEvidence.packetSupportsCompletion,
+    true,
+    utilityPageReport.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  for (const [name, browserEvidence] of [['blank', ''], ['missing', 'missing-browser-proof.json']]) {
+    const invalidUtilityEvidence = join(temp, `utility-${name}-browser-evidence`);
+    cpSync(utilityPagePacket, invalidUtilityEvidence, { recursive: true });
+    mutateJson(join(invalidUtilityEvidence, 'pattern-map.json'), (patternMap) => {
+      patternMap.utilityPageExceptions[0].browserEvidence = browserEvidence;
+    });
+    attachFixtureReviewHandoff(invalidUtilityEvidence, 'https://target.example');
+    const report = await validatePacket({ packetDir: invalidUtilityEvidence });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /utilityPageExceptions\[0\].*complete packet-local browser evidence/i,
+      name
+    );
+  }
+
+  const mismatchedUtilityRole = join(temp, 'utility-mismatched-route-role');
+  cpSync(utilityPagePacket, mismatchedUtilityRole, { recursive: true });
+  mutateJson(join(mismatchedUtilityRole, 'pattern-map.json'), (patternMap) => {
+    patternMap.utilityPageExceptions[0].routeRole = 'other';
+  });
+  attachFixtureReviewHandoff(mismatchedUtilityRole, 'https://target.example');
+  const mismatchedUtilityRoleReport = await validatePacket({ packetDir: mismatchedUtilityRole });
+  assert.equal(mismatchedUtilityRoleReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    mismatchedUtilityRoleReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /utilityPageExceptions\[0\].*complete packet-local browser evidence/i
+  );
+
+  const aggregateUtilityPagePacket = join(temp, 'aggregate-utility-page');
+  cpSync(utilityPagePacket, aggregateUtilityPagePacket, { recursive: true });
+  mutateJson(join(aggregateUtilityPagePacket, 'pattern-map.json'), (patternMap) => {
+    patternMap.utilityPageExceptions[0].sourceRoute = '22 stable page routes';
+  });
+  attachFixtureReviewHandoff(aggregateUtilityPagePacket, 'https://target.example');
+  const aggregateUtilityPageReport = await validatePacket({ packetDir: aggregateUtilityPagePacket });
+  assert.equal(aggregateUtilityPageReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    aggregateUtilityPageReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /utilityPageExceptions\[0\] must identify one exact accepted source\/target route/i
+  );
+
+  const exactTargetDeviation = join(temp, 'exact-target-composition-deviation');
+  cpSync(canonicalPacket, exactTargetDeviation, { recursive: true });
+  mutateJson(join(exactTargetDeviation, 'independent-verification.json'), (independent) => {
+    const check = independent.compositionModelFidelityChecks[0];
+    check.actualCompositionOwner = 'layout_builder';
+    check.deviationRecordRequired = true;
+    check.deviationRecordPresent = true;
+    check.deviationTargetUrl = 'https://target.example/';
+    check.deviationRationale = 'The independently observed owner differs from the accepted declaration on this exact route.';
+    check.deviationEvidence = 'claim-evidence.json';
+  });
+  attachFixtureReviewHandoff(exactTargetDeviation, 'https://target.example');
+  const exactTargetDeviationReport = await validatePacket({ packetDir: exactTargetDeviation });
+  const exactTargetDeviationReasons = exactTargetDeviationReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
+  assert.doesNotMatch(exactTargetDeviationReasons, /independent composition fidelity for \/ must pass/i);
+  assert.doesNotMatch(exactTargetDeviationReasons, /needs a passing composition-fidelity check for \/\./i);
+
+  for (const [name, mutateDeviation] of [
+    ['wrong-target', (check) => { check.deviationTargetUrl = 'https://target.example/wrong'; }],
+    ['missing-evidence', (check) => { check.deviationEvidence = 'missing-deviation-evidence.json'; }]
+  ]) {
+    const invalidDeviation = join(temp, `composition-deviation-${name}`);
+    cpSync(exactTargetDeviation, invalidDeviation, { recursive: true });
+    mutateJson(join(invalidDeviation, 'independent-verification.json'), (independent) => {
+      mutateDeviation(independent.compositionModelFidelityChecks[0]);
+    });
+    attachFixtureReviewHandoff(invalidDeviation, 'https://target.example');
+    const report = await validatePacket({ packetDir: invalidDeviation });
+    assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /independent composition fidelity for \/ must pass with packet-local public-output evidence/i,
+      name
+    );
+  }
 
   const unprosecutedOptOut = join(temp, 'unprosecuted-opt-out');
   cpSync(canonicalPacket, unprosecutedOptOut, { recursive: true });
@@ -7060,7 +7448,7 @@ test('composition ownership is route-reconciled and Canvas opt-out requires an o
   assert.equal(sectionReport.completionEvidence.packetSupportsCompletion, false);
   assert.match(
     sectionReport.completionEvidence.packetCompletionBlockedReasons.join('\n'),
-    /reconcile every declared section one-to-one with sectionOwnershipMatrix/i
+    /reconcile every declared section and its owner, repeatability, data source, editor action, and acceptance proof one-to-one with sectionOwnershipMatrix/i
   );
 
   const fallbackPacket = join(temp, 'fallback');
@@ -9997,6 +10385,39 @@ test('noRedirectDisposition fails closed unless acceptance, owner, rationale, an
   });
   writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
   addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    const flexible = structuredClone(patternMap.compositionModel.flexibleLandingRoutes[0]);
+    flexible.sourceRoute = '/legacy?item=one';
+    flexible.targetRoute = '/';
+    flexible.ownerRationale = 'The accepted legacy mapping resolves to the maintained homepage composition.';
+    patternMap.compositionModel.flexibleLandingRoutes.push(flexible);
+
+    const owner = structuredClone(patternMap.pageCompositionOwnership[0]);
+    owner.sourceRoute = '/legacy?item=one';
+    owner.targetRoute = '/';
+    owner.ownerRationale = flexible.ownerRationale;
+    owner.ownerDecision.decisionId = 'composition-legacy-home';
+    owner.ownerDecision.blindReviewDecisionId = 'composition-legacy-home';
+    patternMap.pageCompositionOwnership.push(owner);
+
+    const section = structuredClone(patternMap.sectionOwnershipMatrix[0]);
+    section.sourceRoute = '/legacy?item=one';
+    section.targetRoute = '/';
+    patternMap.sectionOwnershipMatrix.push(section);
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    const fidelity = structuredClone(independent.compositionModelFidelityChecks[0]);
+    fidelity.sourceRoute = '/legacy?item=one';
+    fidelity.targetRoute = '/';
+    independent.compositionModelFidelityChecks.push(fidelity);
+  });
+  mutateJson(join(packetDir, 'blind-adversarial-review.json'), (blind) => {
+    const review = structuredClone(blind.compositionOwnerDecisionReviews[0]);
+    review.decisionId = 'composition-legacy-home';
+    review.sourceRoute = '/legacy?item=one';
+    review.targetRoute = '/';
+    blind.compositionOwnerDecisionReviews.push(review);
+  });
 
   const missingEvidence = await validatePacket({ packetDir });
   assert.match(

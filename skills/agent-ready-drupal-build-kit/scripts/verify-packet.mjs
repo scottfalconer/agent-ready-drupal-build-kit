@@ -98,6 +98,35 @@ const CANVAS_BUILD_TYPES = new Set([BUILD_TYPES.hybrid, BUILD_TYPES.canvasHeavy]
 const CANVAS_COMPOSITION_OWNERS = new Set(['canvas_page', 'experience_builder_page']);
 const COMPOSED_OWNER_DECISION_ROLES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
 const COMPOSED_OWNER_DECISION_PAGE_TYPES = new Set(['homepage', 'landing', 'campaign', 'marketing']);
+const PAGE_LIKE_COMPOSITION_ROUTE_ROLES = new Set(['homepage', 'landing', 'form', 'legal', 'other']);
+const COMPOSITION_OWNER_CANONICAL_IDS = new Map([
+  ['canvas_page', 'canvas_page'],
+  ['experience_builder_page', 'experience_builder_page'],
+  ['landing_page_content_type', 'landing_page_content_type'],
+  ['layout_builder', 'layout_builder'],
+  ['block_layout', 'block_layout'],
+  ['view', 'view_page'],
+  ['view_page', 'view_page'],
+  ['entity_display', 'entity_display'],
+  ['utility_page', 'utility_page'],
+  ['node', 'node'],
+  ['documented_exception', 'documented_exception']
+]);
+const COMPOSITION_SECTION_OWNER_CANONICAL_IDS = new Map([
+  ['canvas_component', 'canvas_component'],
+  ['canvas_slot', 'canvas_slot'],
+  ['field', 'field'],
+  ['media_field', 'media_reference'],
+  ['media_reference', 'media_reference'],
+  ['entity_reference', 'entity_reference'],
+  ['view', 'view'],
+  ['block', 'block'],
+  ['menu', 'menu'],
+  ['config', 'config'],
+  ['entity_display', 'entity_display'],
+  ['theme_exception', 'theme_exception'],
+  ['documented_exception', 'documented_exception']
+]);
 const OWNER_DECISION_OUTCOME_BASES = new Set([
   'arrange_sections',
   'stable_reusable_schema',
@@ -946,8 +975,14 @@ function exactIdentityMatch(left, right) {
   return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
-function compositionOwnersMatch(declared, actual) {
-  return exactIdentityMatch(declared, actual);
+function canonicalCompositionOwner(value) {
+  return COMPOSITION_OWNER_CANONICAL_IDS.get(String(value ?? '').trim()) ?? '';
+}
+
+export function compositionOwnersMatch(declared, actual) {
+  const declaredOwner = canonicalCompositionOwner(declared);
+  const actualOwner = canonicalCompositionOwner(actual);
+  return Boolean(declaredOwner && actualOwner && declaredOwner === actualOwner);
 }
 
 export function buildTypeRequiresCanvasEvidence(value) {
@@ -1009,6 +1044,11 @@ function compositionRoutePairsMatch(left, right) {
   );
 }
 
+function compositionRoutePairKey(record) {
+  const pair = compositionRoutePair(record);
+  return pair.source && pair.target ? `${pair.source}\u0000${pair.target}` : '';
+}
+
 function exactStringSet(actual, expected) {
   const normalize = (values) => arrayOrEmpty(values)
     .map((value) => String(value ?? '').trim())
@@ -1023,6 +1063,86 @@ function compositionSectionKey(section) {
   const type = String(section?.section ?? '').trim();
   const label = String(section?.editorFacingName ?? '').trim();
   return type && label ? `${type}\u0000${label}` : '';
+}
+
+function canonicalCompositionSectionOwner(value) {
+  return COMPOSITION_SECTION_OWNER_CANONICAL_IDS.get(String(value ?? '').trim()) ?? '';
+}
+
+function compositionSectionDefinitionsMatch(declared, ownership) {
+  const declaredOwner = canonicalCompositionSectionOwner(declared?.owner);
+  const actualOwner = canonicalCompositionSectionOwner(ownership?.editorOwnedBy);
+  return Boolean(
+    compositionSectionKey(declared) &&
+    compositionSectionKey(declared) === compositionSectionKey(ownership) &&
+    declaredOwner &&
+    actualOwner &&
+    declaredOwner === actualOwner &&
+    String(declared?.repeatability ?? '').trim() === String(ownership?.repeatability ?? '').trim() &&
+    String(declared?.dataSource ?? '').trim() === String(ownership?.dataSource ?? '').trim() &&
+    String(declared?.expectedEditorAction ?? '').trim() === String(ownership?.expectedEditorAction ?? '').trim() &&
+    String(declared?.acceptanceProof ?? '').trim() === String(ownership?.acceptanceProof ?? '').trim()
+  );
+}
+
+async function compositionFidelityPasses({
+  check,
+  expectedSections = null,
+  expectedTarget,
+  independentTargetBaseUrl,
+  packetDir,
+  selectedOwner = ''
+}) {
+  if (!check) {
+    return false;
+  }
+
+  const declaredOwner = String(check.declaredCompositionOwner ?? '').trim();
+  const actualOwner = String(check.actualCompositionOwner ?? '').trim();
+  const ownerMatches = compositionOwnersMatch(declaredOwner, actualOwner);
+  const independentTargetUrl = httpUrl(independentTargetBaseUrl);
+  const deviationTargetUrl = httpUrl(check.deviationTargetUrl);
+  const [deviationEvidencePresent, fidelityEvidencePresent, publicOutputProofPresent] = await Promise.all([
+    nonEmptyPacketEvidence(
+      packetDir,
+      check.deviationEvidence,
+      join(packetDir, 'evidence', 'independent-verification')
+    ),
+    nonEmptyPacketEvidence(
+      packetDir,
+      check.evidence,
+      join(packetDir, 'evidence', 'independent-verification')
+    ),
+    nonEmptyPacketEvidence(
+      packetDir,
+      check.nonAdminEditorPublicOutputProof,
+      join(packetDir, 'evidence', 'independent-verification')
+    )
+  ]);
+  const evidencedDeviation = Boolean(
+    !ownerMatches &&
+    check.deviationRecordRequired === true &&
+    check.deviationRecordPresent === true &&
+    independentTargetUrl &&
+    deviationTargetUrl?.origin === independentTargetUrl.origin &&
+    normalizeRouteRequestKey(deviationTargetUrl.href) === normalizeRouteRequestKey(expectedTarget) &&
+    String(check.deviationRationale ?? '').trim() &&
+    deviationEvidencePresent
+  );
+
+  return Boolean(
+    check.status === 'pass' &&
+    canonicalCompositionOwner(declaredOwner) &&
+    canonicalCompositionOwner(actualOwner) &&
+    (!selectedOwner || compositionOwnersMatch(declaredOwner, selectedOwner)) &&
+    (ownerMatches || evidencedDeviation) &&
+    check.routeRationalePresent === true &&
+    check.sectionOwnershipDeclared === true &&
+    check.expectedEditorActionsVerified === true &&
+    (expectedSections === null || exactStringSet(check.sectionsChecked, expectedSections)) &&
+    publicOutputProofPresent &&
+    fidelityEvidencePresent
+  );
 }
 
 async function compositionDecisionReasons({
@@ -1050,6 +1170,11 @@ async function compositionDecisionReasons({
       const pair = compositionRoutePair(route);
       return pair.source || pair.target;
     });
+  const acceptedRoutes = arrayOrEmpty(routeMatrix?.routes)
+    .filter((route) => {
+      const pair = compositionRoutePair(route);
+      return route?.accepted === true && route?.expectedRedirect !== true && pair.source && pair.target;
+    });
   const flexibleRoutes = arrayOrEmpty(patternMap?.compositionModel?.flexibleLandingRoutes)
     .filter((route) => {
       const pair = compositionRoutePair(route);
@@ -1072,21 +1197,30 @@ async function compositionDecisionReasons({
     });
   const blindDecisionReviews = arrayOrEmpty(blindAdversarialReview?.compositionOwnerDecisionReviews)
     .filter((review) => String(review?.decisionId ?? '').trim());
+  const utilityPageExceptions = substantiveObjects(patternMap?.utilityPageExceptions);
 
   if (buildTypeRequiresCanvasEvidence(buildType) !== compositionHasCanvasOwner(patternMap, independentVerification)) {
     reasons.push('G-COMPOSITION-01 pattern-map.json build type must summarize the declared and independently observed route owners; it cannot enable or suppress Canvas evidence by itself.');
   }
 
+  const requiredCompositionRoutes = new Map();
+  for (const route of acceptedRoutes.filter((candidate) =>
+    PAGE_LIKE_COMPOSITION_ROUTE_ROLES.has(String(candidate?.routeRole ?? '').trim())
+  )) {
+    requiredCompositionRoutes.set(compositionRoutePairKey(route), route);
+  }
   for (const primaryRoute of primaryRoutes.filter((route) =>
-    ['homepage', 'landing'].includes(String(route?.routeRole ?? '').trim()) ||
     pageOwners.some((owner) =>
       compositionRoutePairsMatch(owner, route) &&
       COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim())
     )
   )) {
-    if (flexibleRoutes.filter((route) => compositionRoutePairsMatch(route, primaryRoute)).length !== 1) {
-      const pair = compositionRoutePair(primaryRoute);
-      reasons.push(`G-COMPOSITION-01 primary flexible route ${pair.target || pair.source || '(unknown)'} needs exactly one matching compositionModel.flexibleLandingRoutes record.`);
+    requiredCompositionRoutes.set(compositionRoutePairKey(primaryRoute), primaryRoute);
+  }
+  for (const requiredRoute of requiredCompositionRoutes.values()) {
+    if (flexibleRoutes.filter((route) => compositionRoutePairsMatch(route, requiredRoute)).length !== 1) {
+      const pair = compositionRoutePair(requiredRoute);
+      reasons.push(`G-COMPOSITION-01 accepted page-like route ${pair.target || pair.source || '(unknown)'} needs exactly one matching compositionModel.flexibleLandingRoutes record.`);
     }
   }
 
@@ -1118,21 +1252,25 @@ async function compositionDecisionReasons({
     if (!validFlexibleRoute) {
       reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must be accepted with a complete owner rationale, editor model, and every declared section fully owned.`);
     }
-    const primaryMatches = primaryRoutes.filter((route) => compositionRoutePairsMatch(route, flexibleRoute));
+    const routeMatches = acceptedRoutes.filter((route) => compositionRoutePairsMatch(route, flexibleRoute));
     const ownerMatches = pageOwners.filter((owner) => compositionRoutePairsMatch(owner, flexibleRoute));
     const fidelityMatches = fidelityChecks.filter((check) => compositionRoutePairsMatch(check, flexibleRoute));
-    if (primaryMatches.length !== 1 || ownerMatches.length !== 1 || fidelityMatches.length !== 1) {
-      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile one-to-one across primaryRoutes, flexibleLandingRoutes, pageCompositionOwnership, and independent composition fidelity.`);
+    if (routeMatches.length !== 1 || ownerMatches.length !== 1 || fidelityMatches.length !== 1) {
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile one-to-one across accepted route-matrix rows, flexibleLandingRoutes, pageCompositionOwnership, and independent composition fidelity.`);
       continue;
     }
 
     const owner = ownerMatches[0];
     const fidelity = fidelityMatches[0];
+    const route = routeMatches[0];
     const selectedOwner = String(owner?.selectedOwner ?? '').trim();
     const selectedOwnerUsesCanvas = compositionOwnerUsesCanvas(selectedOwner);
+    const ownerRouteRole = String(owner?.routeRole ?? '').trim();
+    const acceptedRouteRole = String(route?.routeRole ?? '').trim();
     if (
       owner?.accepted !== true ||
-      !String(owner?.routeRole ?? '').trim() ||
+      !PAGE_LIKE_COMPOSITION_ROUTE_ROLES.has(ownerRouteRole) ||
+      ownerRouteRole !== acceptedRouteRole ||
       !selectedOwner ||
       !String(owner?.ownerRationale ?? '').trim() ||
       typeof owner?.canvasOrExperienceBuilderAvailable !== 'boolean' ||
@@ -1143,14 +1281,18 @@ async function compositionDecisionReasons({
       !String(owner?.editorVerificationEvidence ?? '').trim() ||
       !compositionOwnersMatch(flexibleRoute?.compositionOwner, selectedOwner)
     ) {
-      reasons.push(`G-COMPOSITION-01 pageCompositionOwnership for ${routeLabel} must match the flexible-route owner and prove its editor/public ownership boundary.`);
+      reasons.push(`G-COMPOSITION-01 pageCompositionOwnership for ${routeLabel} must match the accepted page-like route role and flexible-route owner, then prove its editor/public ownership boundary.`);
     }
-    if (
-      !compositionOwnersMatch(fidelity?.declaredCompositionOwner, selectedOwner) ||
-      !compositionOwnersMatch(fidelity?.actualCompositionOwner, selectedOwner) ||
-      !exactStringSet(fidelity?.sectionsChecked, sections.map((section) => section.editorFacingName))
-    ) {
-      reasons.push(`G-COMPOSITION-01 independent composition fidelity for ${routeLabel} must observe the selected owner and check exactly the declared editor-facing sections.`);
+    const fidelityPasses = await compositionFidelityPasses({
+      check: fidelity,
+      expectedSections: sections.map((section) => section.editorFacingName),
+      expectedTarget: pair.target,
+      independentTargetBaseUrl: independentVerification?.target?.baseUrl,
+      packetDir,
+      selectedOwner
+    });
+    if (!fidelityPasses) {
+      reasons.push(`G-COMPOSITION-01 independent composition fidelity for ${routeLabel} must pass with packet-local public-output evidence, observe the selected owner, and check exactly the declared editor-facing sections.`);
     }
 
     const routeSections = sectionRecords.filter((section) => compositionRoutePairsMatch(section, flexibleRoute));
@@ -1160,9 +1302,12 @@ async function compositionDecisionReasons({
       routeSections.length !== sections.length ||
       sectionKeys.some((key) => !key || sectionKeys.filter((candidate) => candidate === key).length !== 1) ||
       routeSectionKeys.some((key) => !key || routeSectionKeys.filter((candidate) => candidate === key).length !== 1) ||
-      !exactStringSet(routeSectionKeys, sectionKeys)
+      !exactStringSet(routeSectionKeys, sectionKeys) ||
+      sections.some((section) =>
+        routeSections.filter((ownership) => compositionSectionDefinitionsMatch(section, ownership)).length !== 1
+      )
     ) {
-      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile every declared section one-to-one with sectionOwnershipMatrix.`);
+      reasons.push(`G-COMPOSITION-01 flexible route ${routeLabel} must reconcile every declared section and its owner, repeatability, data source, editor action, and acceptance proof one-to-one with sectionOwnershipMatrix.`);
     }
 
     const decision = owner?.ownerDecision ?? {};
@@ -1209,7 +1354,8 @@ async function compositionDecisionReasons({
       continue;
     }
 
-    const composedRoute = COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim()) ||
+    const composedRoute = COMPOSED_OWNER_DECISION_ROLES.has(String(route?.routeRole ?? '').trim()) ||
+      COMPOSED_OWNER_DECISION_ROLES.has(String(owner?.routeRole ?? '').trim()) ||
       COMPOSED_OWNER_DECISION_PAGE_TYPES.has(String(flexibleRoute?.pageType ?? '').trim());
     if (!composedRoute) {
       continue;
@@ -1245,6 +1391,59 @@ async function compositionDecisionReasons({
     }
   }
 
+  const seenUtilityExceptions = new Set();
+  for (const [index, exception] of utilityPageExceptions.entries()) {
+    const pair = compositionRoutePair(exception);
+    const key = compositionRoutePairKey(exception);
+    const rawSource = String(exception?.sourceRoute ?? '').trim();
+    const rawTarget = String(exception?.targetRoute ?? '').trim();
+    const routeMatches = acceptedRoutes.filter((route) => compositionRoutePairsMatch(route, exception));
+    const ownerMatches = pageOwners.filter((owner) =>
+      compositionRoutePairsMatch(owner, exception) &&
+      owner?.accepted === true &&
+      String(owner?.selectedOwner ?? '').trim() === 'utility_page'
+    );
+    const flexibleMatches = flexibleRoutes.filter((route) =>
+      compositionRoutePairsMatch(route, exception) &&
+      String(route?.compositionOwner ?? '').trim() === 'utility_page'
+    );
+    const browserEvidencePresent = await nonEmptyPacketEvidence(packetDir, exception?.browserEvidence);
+    const exceptionRouteRole = String(exception?.routeRole ?? '').trim();
+    const matchedRouteRole = String(routeMatches[0]?.routeRole ?? '').trim();
+    if (
+      !rawSource.startsWith('/') ||
+      !rawTarget.startsWith('/') ||
+      !pair.source ||
+      !pair.target ||
+      !key ||
+      seenUtilityExceptions.has(key) ||
+      routeMatches.length !== 1 ||
+      ownerMatches.length !== 1 ||
+      flexibleMatches.length !== 1 ||
+      !PAGE_LIKE_COMPOSITION_ROUTE_ROLES.has(exceptionRouteRole) ||
+      exceptionRouteRole !== matchedRouteRole ||
+      !String(exception?.reasonUtilityPageFits ?? '').trim() ||
+      !String(exception?.whyNotStructuredContent ?? '').trim() ||
+      !String(exception?.whyCanvasOrExperienceBuilderNotUsed ?? '').trim() ||
+      !String(exception?.editorMaintenancePath ?? '').trim() ||
+      !browserEvidencePresent ||
+      exception?.accepted !== true
+    ) {
+      reasons.push(`G-COMPOSITION-01 utilityPageExceptions[${index}] must identify one exact accepted source/target route and reconcile to one declared Utility Page owner with complete packet-local browser evidence.`);
+    }
+    if (key) {
+      seenUtilityExceptions.add(key);
+    }
+  }
+  for (const owner of pageOwners.filter((candidate) =>
+    candidate?.accepted === true && String(candidate?.selectedOwner ?? '').trim() === 'utility_page'
+  )) {
+    if (utilityPageExceptions.filter((exception) => compositionRoutePairsMatch(exception, owner)).length !== 1) {
+      const pair = compositionRoutePair(owner);
+      reasons.push(`G-COMPOSITION-01 Utility Page owner ${pair.target || pair.source || '(unknown)'} requires exactly one route-specific utilityPageExceptions record.`);
+    }
+  }
+
   if (
     sectionRecords.length === 0 ||
     sectionRecords.some((section) =>
@@ -1252,6 +1451,8 @@ async function compositionDecisionReasons({
       !compositionRoutePair(section).source ||
       !compositionRoutePair(section).target ||
       section?.accepted !== true ||
+      !canonicalCompositionSectionOwner(section?.editorOwnedBy) ||
+      !String(section?.repeatability ?? '').trim() ||
       !String(section?.drupalOwner ?? '').trim() ||
       !String(section?.dataSource ?? '').trim() ||
       !String(section?.expectedEditorAction ?? '').trim() ||
@@ -2671,35 +2872,13 @@ async function independentStructuredGateReasons({
   const compositionChecks = substantiveObjects(independentVerification?.compositionModelFidelityChecks);
   for (const route of primaryRoutes) {
     const check = compositionChecks.find((candidate) => recordMatchesRoute(candidate, route.source, route.target));
-    const ownerMatches = compositionOwnersMatch(check?.declaredCompositionOwner, check?.actualCompositionOwner);
-    const independentTargetUrl = httpUrl(independentVerification?.target?.baseUrl);
-    const deviationTargetUrl = httpUrl(check?.deviationTargetUrl);
-    const deviationEvidencePresent = check && await nonEmptyPacketEvidence(
-      packetDir,
-      check.deviationEvidence,
-      join(packetDir, 'evidence', 'independent-verification')
-    );
-    const evidencedDeviation =
-      !ownerMatches &&
-      check?.deviationRecordRequired === true &&
-      check?.deviationRecordPresent === true &&
-      independentTargetUrl &&
-      deviationTargetUrl?.origin === independentTargetUrl.origin &&
-      normalizeRouteRequestKey(deviationTargetUrl.href) === route.target &&
-      String(check?.deviationRationale ?? '').trim() &&
-      deviationEvidencePresent;
-    if (
-      !check ||
-      check.status !== 'pass' ||
-      !String(check.declaredCompositionOwner ?? '').trim() ||
-      !String(check.actualCompositionOwner ?? '').trim() ||
-      (!ownerMatches && !evidencedDeviation) ||
-      check.routeRationalePresent !== true ||
-      check.sectionOwnershipDeclared !== true ||
-      check.expectedEditorActionsVerified !== true ||
-      !String(check.nonAdminEditorPublicOutputProof ?? '').trim() ||
-      !String(check.evidence ?? '').trim()
-    ) {
+    const fidelityPasses = await compositionFidelityPasses({
+      check,
+      expectedTarget: route.target,
+      independentTargetBaseUrl: independentVerification?.target?.baseUrl,
+      packetDir
+    });
+    if (!fidelityPasses) {
       reasons.push(`independent-verification.json needs a passing composition-fidelity check for ${route.target}.`);
     }
   }

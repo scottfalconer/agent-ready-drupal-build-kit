@@ -12,7 +12,7 @@
       "file": "10-phase-1-introspection.md",
       "heading": "## Operating Phases",
       "summary": "Phase 1 introspection plus the structured-content, composition, and Canvas ownership gates.",
-      "bytes": 18935
+      "bytes": 19947
     },
     {
       "file": "20-phase-2-assembly.md",
@@ -30,7 +30,7 @@
       "file": "40-phase-6-verification.md",
       "heading": "### Phase 6: Independent Verification",
       "summary": "Phase 6 independent verification.",
-      "bytes": 8517
+      "bytes": 8865
     },
     {
       "file": "50-phase-7-blind-review.md",
