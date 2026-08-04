@@ -2235,6 +2235,17 @@ function liveResponseSemanticDistinctness(initial, continuation) {
   };
 }
 
+function successfulCollectionLiveResponse(check) {
+  const finalStatus = Number(check?.finalStatus);
+  const semantics = check?.intrinsicSemantics ?? {};
+  const exactSha256 = (value) => /^sha256:[a-f0-9]{64}$/.test(String(value ?? ''));
+  return check?.passed === true &&
+    Number.isInteger(finalStatus) && finalStatus >= 200 && finalStatus < 300 &&
+    exactSha256(check?.bodySha256) &&
+    exactSha256(semantics.visibleTextSha256) &&
+    exactSha256(semantics.mediaTargetsSha256);
+}
+
 async function inspectSourcePaginationContinuations({
   context,
   maxBodyBytes,
@@ -5371,7 +5382,7 @@ export function collectionPaginationLiveResponseChecks(
     const initial = liveRouteResponseByRequest(liveRouteChecks, contract.targetInitialRequest);
     const continuation = liveRouteResponseByRequest(liveRouteChecks, contract.targetContinuationRequest);
     const checkErrors = [];
-    if (!initial?.passed || !continuation?.passed) {
+    if (!successfulCollectionLiveResponse(initial) || !successfulCollectionLiveResponse(continuation)) {
       checkErrors.push(`Target collection ${contract.label} needs successful verifier-owned live responses for its exact initial and continuation requests.`);
     }
     const initialFinalRequest = liveRouteFinalRequest(initial);
@@ -13047,7 +13058,7 @@ function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
   const requestTarget = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
   const expectedFinalRequest = requestPathAndSearch(check?.targetFinalUrl || check?.targetUrl);
   const targetPath = normalizePath(requestTarget);
-  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
     ? Number(declaredStatus)
@@ -13073,7 +13084,7 @@ function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
 function expectedCollectionPaginationRoute(routeMatrix, request) {
   const requestTarget = requestPathAndSearch(request);
   const targetPath = normalizePath(requestTarget);
-  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
     ? Number(declaredStatus)
@@ -13097,17 +13108,20 @@ function expectedCollectionPaginationRoute(routeMatrix, request) {
 }
 
 function expectedTargetRequiredRoute(record) {
-  const targetPath = normalizeRouteKey(record?.targetPath);
+  const requestTarget = requestPathAndSearch(record?.targetPath);
+  const targetPath = normalizePath(requestTarget);
   return {
     accepted: record?.accepted === true,
     expectedBehavior: String(record?.expectedPublicBehavior ?? ''),
-    expectedFinalPath: normalizeRouteKey(record?.targetFinalPath || targetPath),
+    expectedFinalPath: normalizePath(record?.targetFinalPath || targetPath),
+    expectedFinalRequest: requestPathAndSearch(record?.targetFinalPath || requestTarget),
     expectedH1: '',
     expectedStatus: Number(record?.targetStatus),
     expectedTitle: '',
     identityRequired: false,
     matchesBrowserRenderedSource: true,
     renderedSeo: null,
+    requestTarget,
     routeKind: 'target-required',
     statusUsesInitialResponse: record?.expectedPublicBehavior === 'redirect',
     targetPath
@@ -14928,7 +14942,12 @@ export async function verifyLive({
   const collectionPaginationLiveResponses = collectionPaginationLiveResponseChecks(
     patternMap,
     routeMatrix,
-    [...routeChecks, ...browserRepresentativeRouteChecks, ...collectionPaginationRouteChecks]
+    [
+      ...routeChecks,
+      ...targetRequiredRouteChecks,
+      ...browserRepresentativeRouteChecks,
+      ...collectionPaginationRouteChecks
+    ]
   );
   liveErrors.push(...collectionPaginationLiveResponses.errors);
   const emptyServerRenderedResponseSurface = () => ({

@@ -2006,21 +2006,25 @@ function recordMatchesRoute(record, sourcePath, targetPath) {
 }
 
 function targetRouteForSource(routeMatrix, sourcePath) {
-  const source = normalizeRouteKey(sourcePath);
-  const route = [
+  const source = normalizeRouteRequestKey(sourcePath);
+  const targets = new Set([
     ...arrayOrEmpty(routeMatrix?.primaryRoutes),
     ...arrayOrEmpty(routeMatrix?.routes)
-  ].find(
-    (route) => normalizeRouteKey(route?.sourcePath) === source
-  );
-  return normalizeRouteKey(route?.targetPath);
+  ]
+    .filter((route) => normalizeRouteRequestKey(route?.sourcePath) === source)
+    .map((route) => normalizeRouteRequestKey(route?.targetPath))
+    .filter(Boolean));
+  return targets.size === 1 ? [...targets][0] : '';
 }
 
-function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
-  const source = normalizeRouteKey(ledger?.sourceRoute);
+export function collectionRecordMatchesLedger(record, ledger, routeMatrix, ledgerRows) {
+  const source = normalizeRouteRequestKey(ledger?.sourceRoute);
   const target = targetRouteForSource(routeMatrix, source);
-  const recordSource = normalizeRouteKey(record?.sourceRoute || record?.sourcePath);
-  const recordTarget = normalizeRouteKey(
+  if (!source || !target) {
+    return false;
+  }
+  const recordSource = normalizeRouteRequestKey(record?.sourceRoute || record?.sourcePath);
+  const recordTarget = normalizeRouteRequestKey(
     record?.targetRoute || record?.targetPath || record?.publicRoute || record?.publicRouteExpectedToChange
   );
   if (recordSource && recordSource !== source) {
@@ -2053,12 +2057,15 @@ function recordMatchesCollection(record, ledger, routeMatrix, ledgerRows) {
       return true;
     }
   }
-  return ledgerRows.filter((candidate) => normalizeRouteKey(candidate?.sourceRoute) === source).length === 1;
+  return ledgerRows.filter((candidate) => normalizeRouteRequestKey(candidate?.sourceRoute) === source).length === 1;
 }
 
 export function collectionPaginationRecordReasons(ledger, browserCheck, targetRoute, publicRouteChecks = []) {
   const reasons = [];
-  const label = String(ledger?.sourceObject || ledger?.sourceRoute || 'accepted collection').trim();
+  const sourceRequest = normalizeRouteRequestKey(ledger?.sourceRoute);
+  const label = String(ledger?.sourceObject ?? '').trim() || (
+    sourceRequest ? privacySafeRouteRequestLabel(sourceRequest) : 'accepted collection'
+  );
   const pagination = isJsonObject(ledger?.pagination) ? ledger.pagination : {};
   const sourceMode = String(pagination.sourceMode ?? '').trim();
   const targetMode = String(pagination.targetMode ?? '').trim();
@@ -2645,8 +2652,8 @@ async function independentStructuredGateReasons({
   const browserItemCounts = defaultCaptureStateChecks(browserEvidence?.publicRouteChecks)
     .flatMap((check) => substantiveObjects(check?.renderedItemCounts).map((count) => ({
       ...count,
-      sourceRoute: normalizeRouteKey(httpUrl(check?.sourceUrl)?.pathname),
-      targetRoute: routeRecordPath(check)
+      sourceRoute: normalizeRouteRequestKey(check?.sourceUrl),
+      targetRoute: routeRecordRequestKey(check)
     })));
   const collectionScope = patternMap?.structuredContentModel?.collectionScope ?? {};
   const discoveredCollectionEvidence = collectionLedger.length > 0 || recurringObjects.some(
@@ -2677,8 +2684,8 @@ async function independentStructuredGateReasons({
     collectionEvidenceRequired &&
     (perRouteItemCounts.length === 0 || perRouteItemCounts.some((record) =>
       record.status !== 'pass' ||
-      !normalizeRouteKey(record.sourceRoute) ||
-      !normalizeRouteKey(record.targetRoute) ||
+      !normalizeRouteRequestKey(record.sourceRoute) ||
+      !normalizeRouteRequestKey(record.targetRoute) ||
       !finiteNumberValue(record.expectedSourceItemCount) ||
       !finiteNumberValue(record.targetRenderedItemCount) ||
       !finiteNumberValue(record.targetDrupalEntityCount) ||
@@ -2694,7 +2701,7 @@ async function independentStructuredGateReasons({
     collectionEvidenceRequired &&
     (collectionChecks.length === 0 || collectionChecks.some((record) =>
       record.status !== 'pass' ||
-      !normalizeRouteKey(record.sourceRoute) ||
+      !normalizeRouteRequestKey(record.sourceRoute) ||
       !String(record.drupalOwner ?? '').trim() ||
       record.drupalOwner === 'body_markup_or_blob' ||
       !String(record.viewOrCollectionConfig ?? '').trim() ||
@@ -2736,8 +2743,8 @@ async function independentStructuredGateReasons({
       continue;
     }
     const reconciliation = reconciliationRecords.find((record) =>
-      normalizeRouteKey(record.sourcePath) === normalizeRouteKey(count.sourceRoute) &&
-      normalizeRouteKey(record.targetPath) === normalizeRouteKey(count.targetRoute) &&
+      normalizeRouteRequestKey(record.sourcePath) === normalizeRouteRequestKey(count.sourceRoute) &&
+      normalizeRouteRequestKey(record.targetPath) === normalizeRouteRequestKey(count.targetRoute) &&
       numericValue(record.sourceCount) === sourceCount &&
       numericValue(record.targetRenderedCount) === renderedCount &&
       numericValue(record.targetDrupalEntityCount) === entityCount &&
@@ -2753,30 +2760,31 @@ async function independentStructuredGateReasons({
   }
   const acceptedCollectionKeys = new Set();
   for (const ledger of collectionLedger.filter((record) => record?.accepted === true)) {
-    const sourcePath = normalizeRouteKey(ledger.sourceRoute);
+    const sourcePath = normalizeRouteRequestKey(ledger.sourceRoute);
     const targetPath = targetRouteForSource(routeMatrix, sourcePath);
     const collectionKey = `${sourcePath}:${identityKey(ledger.sourceObject)}`;
+    const collectionLabel = String(ledger.sourceObject ?? '').trim() || privacySafeRouteRequestLabel(sourcePath);
     if (acceptedCollectionKeys.has(collectionKey)) {
-      reasons.push(`pattern-map.json collectionOwnershipLedger has a duplicate accepted route/object key for ${ledger.sourceObject || sourcePath}.`);
+      reasons.push(`pattern-map.json collectionOwnershipLedger has a duplicate accepted route/object key for ${collectionLabel}.`);
     }
     acceptedCollectionKeys.add(collectionKey);
     const reconciliation = reconciliationRecords.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const countCheck = perRouteItemCounts.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const ownershipCheck = collectionChecks.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const addRowCheck = addRowChecks.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const browserCount = browserItemCounts.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const paginationCheck = paginationChecks.find((record) =>
-      recordMatchesCollection(record, ledger, routeMatrix, collectionLedger)
+      collectionRecordMatchesLedger(record, ledger, routeMatrix, collectionLedger)
     );
     const ledgerSourceCount = numericValue(ledger.sourceItemCount);
     const sourceCount = numericValue(reconciliation?.sourceCount);
@@ -2821,7 +2829,7 @@ async function independentStructuredGateReasons({
       !modeChangeEvidencePresent ||
       (String(ledger?.pagination?.sourceMode ?? '') !== 'none' && !paginationBrowserEvidencePresent)
     ) {
-      reasons.push(`accepted collection ${ledger.sourceObject || sourcePath} needs packet-local pagination and continuation evidence.`);
+      reasons.push(`accepted collection ${collectionLabel} needs packet-local pagination and continuation evidence.`);
     }
 
     if (
@@ -2846,7 +2854,7 @@ async function independentStructuredGateReasons({
         !dispositionEvidencePresent
       ))
     ) {
-      reasons.push(`route-matrix.json must account for every count delta in accepted collection ${ledger.sourceObject || sourcePath} with matching counts and packet-local disposition evidence.`);
+      reasons.push(`route-matrix.json must account for every count delta in accepted collection ${collectionLabel} with matching counts and packet-local disposition evidence.`);
     }
     if (
       !countCheck ||
@@ -2860,7 +2868,7 @@ async function independentStructuredGateReasons({
       )) ||
       !countEvidencePresent
     ) {
-      reasons.push(`independent-verification.json needs an independently evidenced perRouteItemCounts row for collection ${ledger.sourceObject || sourcePath}.`);
+      reasons.push(`independent-verification.json needs an independently evidenced perRouteItemCounts row for collection ${collectionLabel}.`);
     }
     if (
       !ownershipCheck ||
@@ -2871,7 +2879,7 @@ async function independentStructuredGateReasons({
       !ownershipEvidencePresent ||
       !ownershipAddEvidencePresent
     ) {
-      reasons.push(`independent-verification.json needs an evidence-backed collectionOwnershipChecks row mapped to collection ${ledger.sourceObject || sourcePath}.`);
+      reasons.push(`independent-verification.json needs an evidence-backed collectionOwnershipChecks row mapped to collection ${collectionLabel}.`);
     }
     if (
       !addRowCheck ||
@@ -2884,14 +2892,14 @@ async function independentStructuredGateReasons({
       !addRowEvidencePresent ||
       !ledgerEditorEvidencePresent
     ) {
-      reasons.push(`independent-verification.json needs a non-admin, packet-evidenced editorAddRowChecks row mapped to collection ${ledger.sourceObject || sourcePath}.`);
+      reasons.push(`independent-verification.json needs a non-admin, packet-evidenced editorAddRowChecks row mapped to collection ${collectionLabel}.`);
     }
     if (browserCount && (
       numericValue(browserCount.sourceCount) !== sourceCount ||
       numericValue(browserCount.targetCount) !== renderedCount ||
       browserCount.accepted !== true
     )) {
-      reasons.push(`browser-evidence.json rendered item counts disagree with the accepted reconciliation for collection ${ledger.sourceObject || sourcePath}.`);
+      reasons.push(`browser-evidence.json rendered item counts disagree with the accepted reconciliation for collection ${collectionLabel}.`);
     }
   }
 

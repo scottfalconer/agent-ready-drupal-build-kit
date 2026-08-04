@@ -11,7 +11,10 @@ import {
   inspectSourceSurface,
   scheduleLiveRouteChecks
 } from '../bin/verify.mjs';
-import { collectionPaginationRecordReasons } from '../bin/verify-packet.mjs';
+import {
+  collectionPaginationRecordReasons,
+  collectionRecordMatchesLedger
+} from '../bin/verify-packet.mjs';
 
 const digest = (character) => `sha256:${character.repeat(64)}`;
 
@@ -327,6 +330,7 @@ test('target request continuation must be verifier-owned and semantically distin
     requestTarget,
     finalRequest: finalUrl,
     finalUrl: `https://target.example${finalUrl}`,
+    finalStatus: 200,
     passed: true,
     bodySha256: digest(character),
     intrinsicSemantics: {
@@ -357,6 +361,23 @@ test('target request continuation must be verifier-owned and semantically distin
   );
   assert.match(redirectedBack.errors.join('\n'), /resolve to distinct final requests/i);
   assert.match(redirectedBack.errors.join('\n'), /exact declared continuation binding/i);
+
+  const omitted = collectionPaginationLiveResponseChecks(
+    { structuredContentModel: { collectionOwnershipLedger: [acceptedLedger()] } },
+    routeMatrix,
+    []
+  );
+  assert.match(omitted.errors.join('\n'), /successful verifier-owned live responses/i);
+
+  const privateContinuation = collectionPaginationLiveResponseChecks(
+    { structuredContentModel: { collectionOwnershipLedger: [acceptedLedger()] } },
+    routeMatrix,
+    [
+      liveResponse('/events', 'a'),
+      liveResponse('/events?page=1', 'b', 'b', '/events?page=1')
+    ].map((check, index) => index === 1 ? { ...check, finalStatus: 403, passed: true } : check)
+  );
+  assert.match(privateContinuation.errors.join('\n'), /successful verifier-owned live responses/i);
 
   const jsOnlyLedger = acceptedLedger({
     targetContinuationKind: 'browser_interaction',
@@ -394,6 +415,75 @@ test('a valid non-primary collection schedules both exact target states in the s
     collectionPaginationTargetRoutePlan(patternMap, routeMatrix, ['/', '/events?page=1']).requests,
     ['/events']
   );
+});
+
+test('collection packet records bind to exact same-path query variants', () => {
+  const firstLedger = {
+    sourceRoute: '/catalog?segment=first',
+    sourceObject: 'Listing',
+    accepted: true
+  };
+  const secondLedger = {
+    sourceRoute: '/catalog?segment=second',
+    sourceObject: 'Listing',
+    accepted: true
+  };
+  const ledgers = [firstLedger, secondLedger];
+  const routeMatrix = {
+    routes: [
+      {
+        sourcePath: '/catalog?segment=first',
+        targetPath: '/offers?segment=first'
+      },
+      {
+        sourcePath: '/catalog?segment=second',
+        targetPath: '/offers?segment=second'
+      }
+    ]
+  };
+  const firstRecord = {
+    sourceRoute: 'https://source.example/catalog?segment=first',
+    targetRoute: 'https://target.example/offers?segment=first',
+    sourceObject: 'Listing'
+  };
+  const secondRecord = {
+    sourceRoute: 'https://source.example/catalog?segment=second',
+    targetRoute: 'https://target.example/offers?segment=second',
+    sourceObject: 'Listing'
+  };
+
+  assert.equal(collectionRecordMatchesLedger(firstRecord, firstLedger, routeMatrix, ledgers), true);
+  assert.equal(collectionRecordMatchesLedger(firstRecord, secondLedger, routeMatrix, ledgers), false);
+  assert.equal(collectionRecordMatchesLedger(secondRecord, firstLedger, routeMatrix, ledgers), false);
+  assert.equal(collectionRecordMatchesLedger(secondRecord, secondLedger, routeMatrix, ledgers), true);
+
+  const ambiguousRouteMatrix = structuredClone(routeMatrix);
+  ambiguousRouteMatrix.routes.push({
+    sourcePath: '/catalog?segment=first',
+    targetPath: '/alternate-offers?segment=first'
+  });
+  assert.equal(
+    collectionRecordMatchesLedger(firstRecord, firstLedger, ambiguousRouteMatrix, ledgers),
+    false,
+    'An ambiguous exact source request must not bind to the first route-matrix target by order.'
+  );
+});
+
+test('query-bound collection failures redact private request values', () => {
+  const ledger = acceptedLedger();
+  ledger.sourceObject = '';
+  ledger.sourceRoute = '/events?private-state=owner-only';
+  ledger.pagination.sourceContinuationRequest = '/events?private-state=owner-only&page=2';
+
+  const reasons = collectionPaginationRecordReasons(
+    ledger,
+    null,
+    '/events?private-state=owner-only',
+    []
+  ).join('\n');
+
+  assert.match(reasons, /\/events\?query-sha256=[a-f0-9]{64}/);
+  assert.doesNotMatch(reasons, /owner-only|private-state/);
 });
 
 test('target continuation keeps an exact private final-request binding after public query redaction', async () => {
