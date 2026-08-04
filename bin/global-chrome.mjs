@@ -118,10 +118,23 @@ const VISUAL_FLOOR_THRESHOLDS = Object.freeze({
   minimumMediaRatio: 0.4,
   minimumPageHeightRatio: 0.45
 });
+const PRIMARY_NAVIGATION_LIMITS = Object.freeze({
+  maxDepth: 8,
+  maxEntries: 128,
+  maxLabelLength: 160
+});
+const NAVIGATION_DIFFERENCE_KINDS = Object.freeze([
+  'addition',
+  'hierarchy',
+  'href',
+  'label',
+  'omission',
+  'order'
+]);
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
-const QUERY_IN_TEXT_RE = /((?:https?:\/\/[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/g;
+const QUERY_IN_TEXT_RE = /((?:https?:\/\/[^\s"'<>?]+|(?:mailto|tel|sms):[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/gi;
 
 function connectWebSocket(value, { signal } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('WebSocket connection aborted.'));
@@ -309,6 +322,63 @@ function privacyPreservingValue(value) {
     );
   }
   return value;
+}
+
+function normalizedNavigationLabel(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function privacyPreservingNavigationTree(value = {}) {
+  const rawEntries = Array.isArray(value?.entries) ? value.entries : [];
+  const privacyBound = HASH_RE.test(String(value?.treeFingerprint ?? '')) && rawEntries.every((entry) =>
+    HASH_RE.test(String(entry?.labelSha256 ?? '')) && !Object.hasOwn(entry, 'label')
+  );
+  const entries = rawEntries.slice(0, PRIMARY_NAVIGATION_LIMITS.maxEntries).map((entry, index) => {
+    const normalizedLabel = normalizedNavigationLabel(entry?.label);
+    const declaredLabelHash = String(entry?.labelSha256 ?? '').trim();
+    return {
+      position: Number.isSafeInteger(entry?.position) ? entry.position : index,
+      depth: Number.isSafeInteger(entry?.depth)
+        ? Math.max(0, Math.min(PRIMARY_NAVIGATION_LIMITS.maxDepth, entry.depth))
+        : 0,
+      depthTruncated: entry?.depthTruncated === true,
+      parentPosition: Number.isSafeInteger(entry?.parentPosition) ? entry.parentPosition : null,
+      kind: entry?.kind === 'link' ? 'link' : 'control',
+      href: privacyBound
+        ? String(entry?.href ?? '').slice(0, 2048)
+        : privacyPreservingText(String(entry?.href ?? '').slice(0, 2048)),
+      labelSha256: HASH_RE.test(declaredLabelHash) ? declaredLabelHash : sha256(normalizedLabel),
+      labelLength: Number.isSafeInteger(entry?.labelLength) ? Math.max(0, entry.labelLength) : normalizedLabel.length,
+      labelTruncated: entry?.labelTruncated === true
+    };
+  });
+  const shared = {
+    present: value?.present === true,
+    visible: value?.visible === true,
+    entryCount: Number.isSafeInteger(value?.entryCount) ? Math.max(0, value.entryCount) : rawEntries.length,
+    capturedEntryCount: entries.length,
+    entriesTruncated: value?.entriesTruncated === true || rawEntries.length > PRIMARY_NAVIGATION_LIMITS.maxEntries,
+    labelTruncatedCount: Number.isSafeInteger(value?.labelTruncatedCount)
+      ? Math.max(0, value.labelTruncatedCount)
+      : entries.filter((entry) => entry.labelTruncated).length,
+    depthTruncatedCount: Number.isSafeInteger(value?.depthTruncatedCount)
+      ? Math.max(0, value.depthTruncatedCount)
+      : entries.filter((entry) => entry.depthTruncated).length,
+    entries
+  };
+  return { ...shared, treeFingerprint: sha256(shared) };
+}
+
+function privacyPreservingGlobalChromeRoute(route) {
+  const shared = privacyPreservingValue(route);
+  if (route?.signals?.primaryNavigation) {
+    shared.signals.primaryNavigation = privacyPreservingNavigationTree(route.signals.primaryNavigation);
+  }
+  return shared;
 }
 
 function privacyPreservingRoute(value) {
@@ -919,7 +989,12 @@ async function openCaptureBrowserBackend({
 }
 
 function collectorExpression(contract, mobile) {
-  const source = async ({ dynamicRegionSelectors, mobileViewport, publicFormControlLimits }) => {
+  const source = async ({
+    dynamicRegionSelectors,
+    mobileViewport,
+    primaryNavigationLimits,
+    publicFormControlLimits
+  }) => {
     const visible = (element) => {
       if (!(element instanceof Element)) return false;
       const box = element.getBoundingClientRect();
@@ -944,8 +1019,56 @@ function collectorExpression(contract, mobile) {
     const header = first(['header', '[role="banner"]', '#header', '.site-header']);
     const navigation = first([
       'header nav', '[role="banner"] nav', 'nav[aria-label*="primary" i]', '#navigation',
+      '.main-navigation', '.primary-navigation',
+      'header [role="menubar"]', '[role="banner"] [role="menubar"]',
+      '[role="menubar"][aria-label*="primary" i]', '[role="menu"][aria-label*="primary" i]'
+    ], false) || first(['nav', '[role="navigation"]', '[role="menubar"]']);
+    const trigger = first([
+      'button[aria-controls*="menu" i]', 'button[aria-label*="menu" i]', 'button[class*="menu" i]',
+      'button[id*="menu" i]', '.menu-toggle', '.navbar-toggler', '[data-drupal-selector*="menu"] button'
+    ]);
+    const primaryNavigationSelectors = [
+      'nav[aria-label*="primary" i]', '[role="navigation"][aria-label*="primary" i]',
+      '[role="menubar"][aria-label*="primary" i]', '[role="menu"][aria-label*="primary" i]',
+      'nav[aria-label*="main" i]', '[role="navigation"][aria-label*="main" i]',
+      '[role="menubar"][aria-label*="main" i]', '[role="menu"][aria-label*="main" i]',
+      'nav[id*="primary" i]', 'nav[class*="primary" i]',
+      '[role="navigation"][id*="primary" i]', '[role="navigation"][class*="primary" i]',
+      '[role="menubar"][id*="primary" i]', '[role="menubar"][class*="primary" i]',
+      'nav[id*="main" i]', 'nav[class*="main" i]',
+      '[role="navigation"][id*="main" i]', '[role="navigation"][class*="main" i]',
+      '[role="menubar"][id*="main" i]', '[role="menubar"][class*="main" i]',
       '.main-navigation', '.primary-navigation'
-    ], false) || first(['nav', '[role="navigation"]']);
+    ];
+    const firstWithin = (root, selectors, preferVisible = true) => {
+      if (!(root instanceof Element)) return null;
+      const elements = [];
+      for (const selector of selectors) {
+        try {
+          if (root.matches(selector)) elements.push(root);
+          elements.push(...root.querySelectorAll(selector));
+        } catch {}
+      }
+      return (preferVisible ? elements.find(visible) : null) || elements[0] || null;
+    };
+    const controlledId = String(trigger?.getAttribute('aria-controls') || '').trim();
+    const controlledRegion = () => controlledId ? document.getElementById(controlledId) : null;
+    const controlledNavigation = () => {
+      const region = controlledRegion();
+      if (!(region instanceof Element)) return null;
+      return firstWithin(region, primaryNavigationSelectors) ||
+        firstWithin(region, ['[role="menubar"]', 'nav', '[role="navigation"]', '[role="menu"]']) ||
+        region;
+    };
+    const primaryNavigationRoot = () => {
+      const mobileRoot = mobileViewport && visible(trigger) ? controlledNavigation() : null;
+      return (mobileRoot instanceof Element ? mobileRoot : null) || first([
+        ...primaryNavigationSelectors,
+        'header nav', '[role="banner"] nav',
+        'header [role="menubar"]', '[role="banner"] [role="menubar"]',
+        'header [role="menu"]', '[role="banner"] [role="menu"]'
+      ]) || navigation;
+    };
     const footer = first(['footer', '[role="contentinfo"]', '#footer', '.site-footer']);
     const brand = first([
       'header a[rel="home"] img', 'header a[class*="brand" i] img', 'header a[class*="logo" i] img',
@@ -985,7 +1108,7 @@ function collectorExpression(contract, mobile) {
     const normalizeHref = (href) => {
       try {
         const raw = String(href || '').trim();
-        if (!raw) return '';
+        if (!raw || raw === '#' || /^javascript:/i.test(raw)) return '';
         const url = new URL(raw, location.href);
         if (['mailto:', 'tel:', 'sms:'].includes(url.protocol)) return url.href;
         if (!['http:', 'https:'].includes(url.protocol)) return '';
@@ -993,9 +1116,38 @@ function collectorExpression(contract, mobile) {
         return url.origin === location.origin ? `${url.pathname}${url.search}` : url.href;
       } catch { return ''; }
     };
+    let mobileMenu = {
+      triggerPresent: Boolean(trigger), triggerVisible: visible(trigger), activationWorks: false,
+      expandedBefore: String(trigger?.getAttribute('aria-expanded') || ''), expandedAfter: '', controlledMenuVisible: false
+    };
+    let restoreMobileMenu = false;
+    if (mobileViewport && visible(trigger)) {
+      const beforeControlledNavigation = controlledNavigation();
+      const beforeControlledVisible = visible(beforeControlledNavigation);
+      const beforeNavVisible = visible(navigation);
+      trigger.click();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const afterControlledNavigation = controlledNavigation();
+      const afterControlledVisible = visible(afterControlledNavigation);
+      const controlledRootChanged = beforeControlledNavigation !== afterControlledNavigation;
+      mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
+      mobileMenu.controlledMenuVisible = afterControlledVisible;
+      mobileMenu.activationWorks = (
+        afterControlledVisible && (
+          !beforeControlledVisible ||
+          controlledRootChanged ||
+          mobileMenu.expandedBefore !== mobileMenu.expandedAfter
+        )
+      ) || (!beforeNavVisible && visible(navigation));
+      restoreMobileMenu = mobileMenu.expandedBefore !== mobileMenu.expandedAfter ||
+        beforeControlledVisible !== afterControlledVisible || controlledRootChanged;
+    }
+    // Resolve the controlled root only after activation. Some responsive
+    // menus inject their semantic tree lazily on the first user interaction.
+    const primaryNavigationElement = primaryNavigationRoot();
     const links = [];
     const placeholders = [];
-    for (const [scope, root] of [['header', header], ['navigation', navigation], ['footer', footer]]) {
+    for (const [scope, root] of [['header', header], ['navigation', primaryNavigationElement || navigation], ['footer', footer]]) {
       if (!(root instanceof Element)) continue;
       for (const link of root.querySelectorAll('a')) {
         if (!visible(link)) continue;
@@ -1007,6 +1159,102 @@ function collectorExpression(contract, mobile) {
       }
     }
     links.sort((left, right) => `${left.scope}\0${left.href}\0${left.label}`.localeCompare(`${right.scope}\0${right.href}\0${right.label}`));
+    const navigationElements = primaryNavigationElement instanceof Element
+      ? [...primaryNavigationElement.querySelectorAll('a,button,[role="menuitem"]')].filter((element) => {
+          if (element.matches('a,button')) return true;
+          // A role=menuitem wrapper with its own direct anchor/button is the
+          // semantic container for that control, not a second navigation item.
+          // Nested submenu controls do not suppress a standalone parent item.
+          return ![...element.querySelectorAll('a,button')].some((candidate) => {
+            let cursor = candidate.parentElement;
+            while (cursor && cursor !== element) {
+              if (cursor.matches('ul,ol,[role="menu"],[role="menubar"]')) return false;
+              cursor = cursor.parentElement;
+            }
+            return cursor === element;
+          });
+        })
+      : [];
+    const boundedNavigationElements = navigationElements.slice(0, primaryNavigationLimits.maxEntries);
+    const navigationPosition = new Map(boundedNavigationElements.map((element, index) => [element, index]));
+    const navigationItemContainer = (element) => {
+      if (!(element instanceof Element)) return null;
+      // Prefer the wrapping list item when the interactive element itself also
+      // carries role=menuitem. Counting both the anchor/button and its <li>
+      // would invent an extra hierarchy level in a common ARIA menu pattern.
+      const listItem = element.closest('li');
+      if (listItem && primaryNavigationElement.contains(listItem)) return listItem;
+      const roleItem = element.matches('[role="menuitem"]') ? element : element.closest('[role="menuitem"]');
+      return roleItem && primaryNavigationElement.contains(roleItem) ? roleItem : element;
+    };
+    const navigationLabel = (element) => {
+      const ariaLabel = String(element.getAttribute('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const labelledBy = String(element.getAttribute('aria-labelledby') || '').trim();
+      if (labelledBy) {
+        const referenced = labelledBy.split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent || '')
+          .join(' ')
+          .trim();
+        if (referenced) return referenced;
+      }
+      const clone = element.cloneNode(true);
+      for (const nestedMenu of clone.querySelectorAll('ul,ol,[role="menu"],[role="menubar"]')) nestedMenu.remove();
+      return String(
+        clone.textContent ||
+        element.querySelector('img')?.alt ||
+        element.getAttribute('title') ||
+        ''
+      );
+    };
+    const primaryNavigationEntries = [];
+    for (const [position, element] of boundedNavigationElements.entries()) {
+      const rawLabel = navigationLabel(element).normalize('NFKC').replace(/\s+/g, ' ').trim();
+      const item = navigationItemContainer(element);
+      let cursor = item === element ? element.parentElement : item?.parentElement;
+      let parentElement = null;
+      while (cursor && cursor !== primaryNavigationElement) {
+        if (cursor.matches?.('li,[role="menuitem"]')) {
+          parentElement = boundedNavigationElements.find((candidate, candidatePosition) =>
+            candidatePosition < position && navigationItemContainer(candidate) === cursor
+          ) || null;
+          if (parentElement) break;
+        }
+        cursor = cursor.parentElement;
+      }
+      const parentPosition = navigationPosition.has(parentElement) ? navigationPosition.get(parentElement) : null;
+      const parentDepth = Number.isSafeInteger(parentPosition)
+        ? Number(primaryNavigationEntries[parentPosition]?.depth ?? 0)
+        : -1;
+      const rawDepth = parentDepth + 1;
+      const normalizedHref = element.matches('a')
+        ? normalizeHref(element.getAttribute('href') || '')
+        : '';
+      primaryNavigationEntries.push({
+        position,
+        depth: Math.min(primaryNavigationLimits.maxDepth, Math.max(0, rawDepth)),
+        depthTruncated: rawDepth > primaryNavigationLimits.maxDepth,
+        parentPosition,
+        kind: normalizedHref ? 'link' : 'control',
+        href: normalizedHref,
+        label: rawLabel.slice(0, primaryNavigationLimits.maxLabelLength),
+        labelTruncated: rawLabel.length > primaryNavigationLimits.maxLabelLength
+      });
+    }
+    const primaryNavigation = {
+      present: primaryNavigationElement instanceof Element,
+      visible: visible(primaryNavigationElement),
+      entryCount: navigationElements.length,
+      capturedEntryCount: primaryNavigationEntries.length,
+      entriesTruncated: navigationElements.length > primaryNavigationLimits.maxEntries,
+      labelTruncatedCount: primaryNavigationEntries.filter((entry) => entry.labelTruncated).length,
+      depthTruncatedCount: primaryNavigationEntries.filter((entry) => entry.depthTruncated).length,
+      entries: primaryNavigationEntries
+    };
+    if (mobileViewport && restoreMobileMenu) {
+      trigger.click();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
     const brandImage = brand?.matches('img') ? brand : brand?.querySelector('img');
     const brandSvg = brand?.matches('svg') ? brand : brand?.querySelector('svg');
     const brandLink = brand?.closest('a') || brand?.querySelector('a');
@@ -1027,25 +1275,6 @@ function collectorExpression(contract, mobile) {
       beforeStyle: visualStyle(brandBeforeStyle),
       afterStyle: visualStyle(brandAfterStyle)
     } : null;
-    const trigger = first([
-      'button[aria-controls*="menu" i]', 'button[aria-label*="menu" i]', 'button[class*="menu" i]',
-      'button[id*="menu" i]', '.menu-toggle', '.navbar-toggler', '[data-drupal-selector*="menu"] button'
-    ]);
-    let mobileMenu = {
-      triggerPresent: Boolean(trigger), triggerVisible: visible(trigger), activationWorks: false,
-      expandedBefore: String(trigger?.getAttribute('aria-expanded') || ''), expandedAfter: '', controlledMenuVisible: false
-    };
-    if (mobileViewport && visible(trigger)) {
-      const beforeNavVisible = visible(navigation);
-      trigger.click();
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      const controlledId = String(trigger.getAttribute('aria-controls') || '').trim();
-      const controlled = controlledId ? document.getElementById(controlledId) : null;
-      mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
-      mobileMenu.controlledMenuVisible = visible(controlled);
-      mobileMenu.activationWorks = mobileMenu.expandedAfter === 'true' || mobileMenu.controlledMenuVisible || (!beforeNavVisible && visible(navigation));
-      if (mobileMenu.expandedBefore !== mobileMenu.expandedAfter) trigger.click();
-    }
     const topLevelMasked = masked.filter((element) => !masked.some((candidate) => candidate !== element && candidate.contains(element)));
     const maskedHeight = topLevelMasked.reduce((sum, element) => sum + Math.max(0, element.getBoundingClientRect().height), 0);
     const main = first(['main', '[role="main"]', '#main-content', '.main-content'], false);
@@ -1329,10 +1558,11 @@ function collectorExpression(contract, mobile) {
         footer: roleSignal(footer),
         header: roleSignal(header),
         main: roleSignal(main),
-        navigation: roleSignal(navigation)
+        navigation: roleSignal(primaryNavigationElement || navigation)
       },
       meaningfulHrefs: links,
       placeholderHrefs: placeholders,
+      primaryNavigation,
       publicFormControls: publicFormEvidence,
       mobileMenu,
       protection: {
@@ -1363,6 +1593,7 @@ function collectorExpression(contract, mobile) {
   return `(${source})(${JSON.stringify({
     dynamicRegionSelectors: contract.dynamicRegionSelectors,
     mobileViewport: mobile,
+    primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
     publicFormControlLimits: PUBLIC_FORM_CONTROL_LIMITS
   })})`;
 }
@@ -2190,6 +2421,281 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
   };
 }
 
+function navigationRouteMapping(routeMappings = []) {
+  const candidates = new Map();
+  for (const route of Array.isArray(routeMappings) ? routeMappings : []) {
+    if (route?.accepted === false) continue;
+    try {
+      const source = privacyPreservingRoute(route?.sourcePath);
+      const explicitFinalTarget = route?.targetFinalPath
+        ? privacyPreservingRoute(route.targetFinalPath)
+        : '';
+      const fallbackTarget = privacyPreservingRoute(route?.targetPath);
+      if (!source || (!explicitFinalTarget && !fallbackTarget)) continue;
+      const state = candidates.get(source) ?? {
+        explicitFinalTargets: new Set(),
+        fallbackTargets: new Set()
+      };
+      if (explicitFinalTarget) state.explicitFinalTargets.add(explicitFinalTarget);
+      else if (fallbackTarget) state.fallbackTargets.add(fallbackTarget);
+      candidates.set(source, state);
+    } catch {
+      // Packet validation owns malformed route rows. An invalid row must not
+      // alter verifier-observed navigation semantics.
+    }
+  }
+  const mapped = new Map();
+  let conflictCount = 0;
+  for (const [source, state] of candidates) {
+    const targets = state.explicitFinalTargets.size > 0
+      ? state.explicitFinalTargets
+      : state.fallbackTargets;
+    if (targets.size !== 1) {
+      conflictCount += 1;
+      continue;
+    }
+    mapped.set(source, [...targets][0]);
+  }
+  return { conflictCount, mapped };
+}
+
+function normalizedNavigationTree(value = {}, hrefMappings = new Map()) {
+  const shared = privacyPreservingNavigationTree(value);
+  const entries = shared.entries.map((entry, position) => ({
+    position,
+    depth: entry.depth,
+    depthTruncated: entry.depthTruncated,
+    parentPosition: entry.parentPosition,
+    kind: entry.kind,
+    href: hrefMappings.get(entry.href) ?? entry.href,
+    labelSha256: entry.labelSha256,
+    labelLength: entry.labelLength,
+    labelTruncated: entry.labelTruncated
+  }));
+  const normalized = {
+    present: shared.present,
+    visible: shared.visible,
+    entryCount: shared.entryCount,
+    capturedEntryCount: entries.length,
+    entriesTruncated: shared.entriesTruncated,
+    labelTruncatedCount: shared.labelTruncatedCount,
+    depthTruncatedCount: shared.depthTruncatedCount,
+    entries
+  };
+  return { ...normalized, treeFingerprint: sha256(normalized) };
+}
+
+function countedValues(values) {
+  const counts = new Map();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return counts;
+}
+
+function mapsEqual(left, right) {
+  return left.size === right.size && [...left].every(([key, value]) => right.get(key) === value);
+}
+
+function commonOccurrenceOrder(entries, commonCounts) {
+  const seen = new Map();
+  return entries.flatMap((entry) => {
+    const identity = `${entry.kind}\0${entry.href}\0${entry.labelSha256}`;
+    const occurrence = (seen.get(identity) ?? 0) + 1;
+    seen.set(identity, occurrence);
+    return occurrence <= (commonCounts.get(identity) ?? 0) ? [`${identity}\0${occurrence}`] : [];
+  });
+}
+
+function groupedEntryValues(entries, keyFor, valueFor) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = keyFor(entry);
+    const values = groups.get(key) ?? [];
+    values.push(valueFor(entry));
+    groups.set(key, values.sort());
+  }
+  return groups;
+}
+
+function sharedGroupDiffers(left, right) {
+  for (const [key, leftValues] of left) {
+    if (!right.has(key)) continue;
+    if (canonicalJson(leftValues) !== canonicalJson(right.get(key))) return true;
+  }
+  return false;
+}
+
+function navigationDifferenceKinds(sourceEntries, targetEntries) {
+  const differences = new Set();
+
+  const identity = (entry) => `${entry.kind}\0${entry.href}\0${entry.labelSha256}`;
+  const sourceIdentityCounts = countedValues(sourceEntries.map(identity));
+  const targetIdentityCounts = countedValues(targetEntries.map(identity));
+  if ([...targetIdentityCounts].some(([key, count]) => count > (sourceIdentityCounts.get(key) ?? 0))) {
+    differences.add('addition');
+  }
+  if ([...sourceIdentityCounts].some(([key, count]) => count > (targetIdentityCounts.get(key) ?? 0))) {
+    differences.add('omission');
+  }
+  const commonCounts = new Map([...sourceIdentityCounts].flatMap(([key, count]) => {
+    const targetCount = targetIdentityCounts.get(key) ?? 0;
+    return targetCount > 0 ? [[key, Math.min(count, targetCount)]] : [];
+  }));
+  const sourceCommonOrder = commonOccurrenceOrder(sourceEntries, commonCounts);
+  const targetCommonOrder = commonOccurrenceOrder(targetEntries, commonCounts);
+  if (
+    sourceCommonOrder.length > 1 &&
+    canonicalJson(sourceCommonOrder) !== canonicalJson(targetCommonOrder)
+  ) {
+    differences.add('order');
+  }
+
+  const sourceHrefs = countedValues(sourceEntries.map((entry) => `${entry.kind}\0${entry.href}`));
+  const targetHrefs = countedValues(targetEntries.map((entry) => `${entry.kind}\0${entry.href}`));
+  if (!mapsEqual(sourceHrefs, targetHrefs)) differences.add('href');
+
+  const sourceLabelsByHref = groupedEntryValues(
+    sourceEntries,
+    (entry) => `${entry.kind}\0${entry.href}`,
+    (entry) => entry.labelSha256
+  );
+  const targetLabelsByHref = groupedEntryValues(
+    targetEntries,
+    (entry) => `${entry.kind}\0${entry.href}`,
+    (entry) => entry.labelSha256
+  );
+  if (sharedGroupDiffers(sourceLabelsByHref, targetLabelsByHref)) differences.add('label');
+
+  const sourceOccurrence = new Map();
+  const targetOccurrence = new Map();
+  const topology = (entries, occurrenceMap) => {
+    const tokens = entries.map((entry) => {
+      const key = identity(entry);
+      const occurrence = (occurrenceMap.get(key) ?? 0) + 1;
+      occurrenceMap.set(key, occurrence);
+      return `${key}\0${occurrence}`;
+    });
+    return new Map(entries.map((entry, index) => [
+      tokens[index],
+      {
+        depth: entry.depth,
+        parent: Number.isSafeInteger(entry.parentPosition) && tokens[entry.parentPosition]
+          ? tokens[entry.parentPosition]
+          : ''
+      }
+    ]));
+  };
+  const sourceTopology = topology(sourceEntries, sourceOccurrence);
+  const targetTopology = topology(targetEntries, targetOccurrence);
+  for (const [token, sourceValue] of sourceTopology) {
+    if (!targetTopology.has(token)) continue;
+    if (canonicalJson(sourceValue) !== canonicalJson(targetTopology.get(token))) {
+      differences.add('hierarchy');
+      break;
+    }
+  }
+
+  if (
+    differences.size === 0 &&
+    canonicalJson(sourceEntries) !== canonicalJson(targetEntries)
+  ) {
+    differences.add('order');
+  }
+  return NAVIGATION_DIFFERENCE_KINDS.filter((kind) => differences.has(kind));
+}
+
+function matchingNavigationDisposition(dispositions, comparison, viewport) {
+  const differenceKinds = canonicalJson(comparison.differenceKinds);
+  const matches = (Array.isArray(dispositions) ? dispositions : []).filter((disposition) =>
+    disposition?.schemaVersion === 'public-kit.navigation-parity-disposition.1' &&
+    disposition?.accepted === true &&
+    disposition?.viewport === viewport &&
+    disposition?.expectedSourceTreeFingerprint === comparison.expectedSourceTreeFingerprint &&
+    disposition?.targetTreeFingerprint === comparison.targetTreeFingerprint &&
+    canonicalJson([...new Set(Array.isArray(disposition?.differenceKinds)
+      ? disposition.differenceKinds.map((kind) => String(kind)).filter((kind) => NAVIGATION_DIFFERENCE_KINDS.includes(kind))
+      : [])].sort()) === differenceKinds
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function comparePrimaryNavigation({
+  source,
+  target,
+  routeMappings = [],
+  dispositions = [],
+  viewport = ''
+} = {}) {
+  const routeMapping = navigationRouteMapping(routeMappings);
+  const sourceObserved = normalizedNavigationTree(source?.signals?.primaryNavigation);
+  const expectedSource = normalizedNavigationTree(
+    source?.signals?.primaryNavigation,
+    routeMapping.mapped
+  );
+  const targetObserved = normalizedNavigationTree(target?.signals?.primaryNavigation);
+  const bounded = [expectedSource, targetObserved].every((tree) =>
+    tree.entriesTruncated !== true &&
+    tree.labelTruncatedCount === 0 &&
+    tree.depthTruncatedCount === 0 &&
+    tree.entryCount === tree.capturedEntryCount
+  );
+  const differenceKinds = navigationDifferenceKinds(expectedSource.entries, targetObserved.entries);
+  if (expectedSource.present !== targetObserved.present) {
+    differenceKinds.push(expectedSource.present ? 'omission' : 'addition');
+  }
+  if (expectedSource.visible !== targetObserved.visible) {
+    differenceKinds.push(expectedSource.visible ? 'omission' : 'addition');
+  }
+  const sortedDifferenceKinds = NAVIGATION_DIFFERENCE_KINDS.filter((kind) => differenceKinds.includes(kind));
+  const comparison = {
+    authority: 'verifier-owned-managed-browser-navigation-semantics',
+    viewport,
+    sourceTreeFingerprint: sourceObserved.treeFingerprint,
+    expectedSourceTreeFingerprint: expectedSource.treeFingerprint,
+    targetTreeFingerprint: targetObserved.treeFingerprint,
+    sourceEntryCount: expectedSource.entryCount,
+    targetEntryCount: targetObserved.entryCount,
+    routeMappingConflictCount: routeMapping.conflictCount,
+    differenceKinds: sortedDifferenceKinds
+  };
+  const exact = routeMapping.conflictCount === 0 && bounded &&
+    expectedSource.present === targetObserved.present &&
+    expectedSource.visible === targetObserved.visible &&
+    canonicalJson(expectedSource.entries) === canonicalJson(targetObserved.entries);
+  const disposition = exact || !bounded || routeMapping.conflictCount > 0
+    ? null
+    : matchingNavigationDisposition(dispositions, comparison, viewport);
+  const noNavigation = !expectedSource.present && !targetObserved.present &&
+    expectedSource.entryCount === 0 && targetObserved.entryCount === 0;
+  const passed = routeMapping.conflictCount === 0 && bounded && (exact || Boolean(disposition) || noNavigation);
+  const errors = [];
+  if (routeMapping.conflictCount > 0) {
+    errors.push(`primary navigation has ${routeMapping.conflictCount} ambiguous canonical route mapping(s)`);
+  }
+  if (!bounded) {
+    errors.push(
+      `primary navigation exceeded verifier bounds (${PRIMARY_NAVIGATION_LIMITS.maxEntries} entries, ` +
+      `${PRIMARY_NAVIGATION_LIMITS.maxLabelLength} label characters, depth ${PRIMARY_NAVIGATION_LIMITS.maxDepth})`
+    );
+  } else if (!passed) {
+    errors.push(
+      `primary navigation semantic mismatch (${sortedDifferenceKinds.join(', ') || 'unclassified'}; ` +
+      `source ${expectedSource.entryCount}, target ${targetObserved.entryCount}) lacks an exact evidence-backed disposition`
+    );
+  }
+  return {
+    ...comparison,
+    status: routeMapping.conflictCount > 0
+      ? 'failed'
+      : noNavigation ? 'not_applicable' : exact ? 'passed' : disposition ? 'dispositioned' : 'failed',
+    bounded,
+    disposition: disposition
+      ? { applied: true, fingerprint: sha256(disposition) }
+      : { applied: false, fingerprint: '' },
+    passed,
+    errors
+  };
+}
+
 function composedSourceRoute(_routeRole, structure) {
   // Route roles are packet-authored labels. Composition detection must use
   // verifier-observed source structure so relabeling a landing page as
@@ -2230,6 +2736,8 @@ export function compareVerifierOwnedVisualFloor({
   targetCapture,
   primaryRoutes = [],
   publicFormControlRoutes = [],
+  routeMappings = primaryRoutes,
+  navigationParityDispositions = [],
   stateFingerprint = ''
 } = {}) {
   const checkedAt = String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString());
@@ -2244,6 +2752,7 @@ export function compareVerifierOwnedVisualFloor({
     sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
     targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
     thresholds: VISUAL_FLOOR_THRESHOLDS,
+    primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
     findings: [],
     publicFormControlFindings: [],
     errors: []
@@ -2334,6 +2843,15 @@ export function compareVerifierOwnedVisualFloor({
         matchedControlCount: 0,
         errors: []
       };
+      let primaryNavigation = {
+        authority: 'verifier-owned-managed-browser-navigation-semantics',
+        viewport: viewport.name,
+        status: 'not_run',
+        bounded: false,
+        disposition: { applied: false, fingerprint: '' },
+        passed: false,
+        errors: ['Primary navigation comparison did not run because source or target capture was unavailable.']
+      };
       if (!source || !target) {
         routeErrors.push(`missing ${!source ? 'source' : 'target'} managed-browser capture`);
       } else {
@@ -2365,6 +2883,14 @@ export function compareVerifierOwnedVisualFloor({
           if (publicFormEvidenceRequired && publicFormControlParity.source?.controlCount === 0) {
             routeErrors.push('audited public form/search route exposed no visible native source controls; empty source and target evidence cannot establish form parity');
           }
+          primaryNavigation = comparePrimaryNavigation({
+            source,
+            target,
+            routeMappings,
+            dispositions: navigationParityDispositions,
+            viewport: viewport.name
+          });
+          routeErrors.push(...primaryNavigation.errors);
           for (const role of ['header', 'navigation', 'main', 'footer']) {
             if (source.signals?.roles?.[role]?.visible === true && target.signals?.roles?.[role]?.visible !== true) {
               routeErrors.push(`${role} landmark visible on the source is missing from the target`);
@@ -2448,6 +2974,7 @@ export function compareVerifierOwnedVisualFloor({
         ),
         sourceStructure,
         targetStructure,
+        primaryNavigation,
         publicFormControlParity,
         deficits,
         decisiveDeficits,
@@ -2530,7 +3057,25 @@ export function compareVerifierOwnedVisualFloor({
   if (publicFormControlFindings.length !== additionalPublicFormRoutes.length * VIEWPORTS.length) {
     errors.push('Public-form control floor did not cover every additional audited form/search route at desktop and mobile viewports.');
   }
+  let staleNavigationDispositionCount = 0;
+  if (protectedFindingCount === 0) {
+    const appliedDispositionFingerprints = new Set(findings
+      .map((finding) => finding?.primaryNavigation?.disposition?.fingerprint)
+      .filter(Boolean));
+    const acceptedDispositions = (Array.isArray(navigationParityDispositions) ? navigationParityDispositions : [])
+      .filter((disposition) => disposition?.accepted === true);
+    staleNavigationDispositionCount = acceptedDispositions.filter(
+      (disposition) => !appliedDispositionFingerprints.has(sha256(disposition))
+    ).length;
+    if (staleNavigationDispositionCount > 0) {
+      errors.push(
+        `Primary navigation has ${staleNavigationDispositionCount} stale or unmatched accepted disposition(s); ` +
+        'remove them or bind them to the exact current verifier mismatch.'
+      );
+    }
+  }
   const status = errors.length > 0 ? 'failed' : protectedFindingCount > 0 ? 'review_required' : 'passed';
+  const navigationFindings = findings.map((finding) => finding.primaryNavigation).filter(Boolean);
   return visualFloorResult({
     ...base,
     status,
@@ -2538,6 +3083,23 @@ export function compareVerifierOwnedVisualFloor({
     protectedFindingCount,
     diagnosticReviewEligible: status === 'review_required' && protectedFindingCount > 0,
     reviewFallbackEligible: false,
+    primaryNavigationSemanticParity: {
+      authority: 'verifier-owned-managed-browser-navigation-semantics',
+      status: staleNavigationDispositionCount > 0 || navigationFindings.some((finding) => finding.status === 'failed')
+        ? 'failed'
+        : navigationFindings.some((finding) => finding.status === 'dispositioned')
+          ? 'dispositioned'
+          : navigationFindings.every((finding) => finding.status === 'not_applicable')
+            ? 'not_applicable'
+            : navigationFindings.every((finding) => finding.passed === true)
+              ? 'passed'
+              : 'not_run',
+      findingCount: navigationFindings.length,
+      mismatchCount: navigationFindings.filter((finding) => finding.status === 'failed').length,
+      dispositionedCount: navigationFindings.filter((finding) => finding.status === 'dispositioned').length,
+      staleDispositionCount: staleNavigationDispositionCount,
+      limits: PRIMARY_NAVIGATION_LIMITS
+    },
     findings,
     publicFormControlFindings,
     errors: status === 'review_required'
@@ -3033,7 +3595,7 @@ export function finalizeGlobalChromeCapture({ capture, packetDir, stateFingerpri
     ) {
       throw new Error(`Global chrome ${route.path} ${route.viewport?.name} axe-core scope or summary was modified.`);
     }
-    const sharedRoute = privacyPreservingValue(route);
+    const sharedRoute = privacyPreservingGlobalChromeRoute(route);
     const axeBytes = Buffer.from(`${JSON.stringify(sharedRoute.axe.report, null, 2)}\n`, 'utf8');
     const axeDigest = sha256(axeBytes);
     const axePath = join(directory, `axe-${route.viewport.name}-${routeKey}-${axeDigest.slice(7, 23)}.json`);

@@ -15728,6 +15728,13 @@ export async function verifyLive({
       targetCapture: globalChromeCapture,
       primaryRoutes,
       publicFormControlRoutes,
+      routeMappings: [
+        ...primaryRoutes,
+        ...(Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+      ].filter((route) => route?.accepted === true),
+      navigationParityDispositions: Array.isArray(routeMatrix?.primaryNavigationParityDispositions)
+        ? routeMatrix.primaryNavigationParityDispositions
+        : [],
       stateFingerprint: buildState.fingerprint
     });
     if (verifierFloor.status === 'review_required' && verifierFloor.diagnosticReviewEligible === true) {
