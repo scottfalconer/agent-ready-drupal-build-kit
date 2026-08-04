@@ -134,7 +134,7 @@ const NAVIGATION_DIFFERENCE_KINDS = Object.freeze([
 const CONFIG_GLOBAL_RE = /(?:^|\/)(?:canvas\.(?:page_region|brand_kit|asset_library\.global)|block\.block\.|system\.(?:menu\.|theme(?:\.|$))|navigation\.|core\.menu\.static_menu_link_overrides|core\.entity_view_display\.|canvas\.content_template\.)/i;
 const CODE_GLOBAL_RE = /(?:^|\/)(?:(?:web|docroot)\/)?themes\/(?:custom|contrib)\//i;
 const DEPENDENCY_GLOBAL_RE = /(?:^|\/)composer\.lock$/i;
-const QUERY_IN_TEXT_RE = /((?:https?:\/\/[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/g;
+const QUERY_IN_TEXT_RE = /((?:https?:\/\/[^\s"'<>?]+|(?:mailto|tel|sms):[^\s"'<>?]+|\/[^\s"'<>?]*))\?([^\s"'<>]+)/gi;
 
 function connectWebSocket(value, { signal } = {}) {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('WebSocket connection aborted.'));
@@ -1019,29 +1019,56 @@ function collectorExpression(contract, mobile) {
     const header = first(['header', '[role="banner"]', '#header', '.site-header']);
     const navigation = first([
       'header nav', '[role="banner"] nav', 'nav[aria-label*="primary" i]', '#navigation',
-      '.main-navigation', '.primary-navigation'
-    ], false) || first(['nav', '[role="navigation"]']);
+      '.main-navigation', '.primary-navigation',
+      'header [role="menubar"]', '[role="banner"] [role="menubar"]',
+      '[role="menubar"][aria-label*="primary" i]', '[role="menu"][aria-label*="primary" i]'
+    ], false) || first(['nav', '[role="navigation"]', '[role="menubar"]']);
     const trigger = first([
       'button[aria-controls*="menu" i]', 'button[aria-label*="menu" i]', 'button[class*="menu" i]',
       'button[id*="menu" i]', '.menu-toggle', '.navbar-toggler', '[data-drupal-selector*="menu"] button'
     ]);
-    const controlledId = String(trigger?.getAttribute('aria-controls') || '').trim();
-    const controlledRegion = controlledId ? document.getElementById(controlledId) : null;
-    const controlledNavigation = controlledRegion instanceof Element
-      ? (controlledRegion.matches('nav,[role="navigation"]')
-          ? controlledRegion
-          : controlledRegion.querySelector('nav,[role="navigation"]') || controlledRegion)
-      : null;
-    const primaryNavigationRoot = (
-      mobileViewport && visible(trigger) && controlledNavigation instanceof Element
-        ? controlledNavigation
-        : null
-    ) || first([
+    const primaryNavigationSelectors = [
       'nav[aria-label*="primary" i]', '[role="navigation"][aria-label*="primary" i]',
+      '[role="menubar"][aria-label*="primary" i]', '[role="menu"][aria-label*="primary" i]',
+      'nav[aria-label*="main" i]', '[role="navigation"][aria-label*="main" i]',
+      '[role="menubar"][aria-label*="main" i]', '[role="menu"][aria-label*="main" i]',
       'nav[id*="primary" i]', 'nav[class*="primary" i]',
+      '[role="navigation"][id*="primary" i]', '[role="navigation"][class*="primary" i]',
+      '[role="menubar"][id*="primary" i]', '[role="menubar"][class*="primary" i]',
       'nav[id*="main" i]', 'nav[class*="main" i]',
-      'header nav', '[role="banner"] nav'
-    ]) || navigation;
+      '[role="navigation"][id*="main" i]', '[role="navigation"][class*="main" i]',
+      '[role="menubar"][id*="main" i]', '[role="menubar"][class*="main" i]',
+      '.main-navigation', '.primary-navigation'
+    ];
+    const firstWithin = (root, selectors, preferVisible = true) => {
+      if (!(root instanceof Element)) return null;
+      const elements = [];
+      for (const selector of selectors) {
+        try {
+          if (root.matches(selector)) elements.push(root);
+          elements.push(...root.querySelectorAll(selector));
+        } catch {}
+      }
+      return (preferVisible ? elements.find(visible) : null) || elements[0] || null;
+    };
+    const controlledId = String(trigger?.getAttribute('aria-controls') || '').trim();
+    const controlledRegion = () => controlledId ? document.getElementById(controlledId) : null;
+    const controlledNavigation = () => {
+      const region = controlledRegion();
+      if (!(region instanceof Element)) return null;
+      return firstWithin(region, primaryNavigationSelectors) ||
+        firstWithin(region, ['[role="menubar"]', 'nav', '[role="navigation"]', '[role="menu"]']) ||
+        region;
+    };
+    const primaryNavigationRoot = () => {
+      const mobileRoot = mobileViewport && visible(trigger) ? controlledNavigation() : null;
+      return (mobileRoot instanceof Element ? mobileRoot : null) || first([
+        ...primaryNavigationSelectors,
+        'header nav', '[role="banner"] nav',
+        'header [role="menubar"]', '[role="banner"] [role="menubar"]',
+        'header [role="menu"]', '[role="banner"] [role="menu"]'
+      ]) || navigation;
+    };
     const footer = first(['footer', '[role="contentinfo"]', '#footer', '.site-footer']);
     const brand = first([
       'header a[rel="home"] img', 'header a[class*="brand" i] img', 'header a[class*="logo" i] img',
@@ -1081,7 +1108,7 @@ function collectorExpression(contract, mobile) {
     const normalizeHref = (href) => {
       try {
         const raw = String(href || '').trim();
-        if (!raw) return '';
+        if (!raw || raw === '#' || /^javascript:/i.test(raw)) return '';
         const url = new URL(raw, location.href);
         if (['mailto:', 'tel:', 'sms:'].includes(url.protocol)) return url.href;
         if (!['http:', 'https:'].includes(url.protocol)) return '';
@@ -1089,9 +1116,38 @@ function collectorExpression(contract, mobile) {
         return url.origin === location.origin ? `${url.pathname}${url.search}` : url.href;
       } catch { return ''; }
     };
+    let mobileMenu = {
+      triggerPresent: Boolean(trigger), triggerVisible: visible(trigger), activationWorks: false,
+      expandedBefore: String(trigger?.getAttribute('aria-expanded') || ''), expandedAfter: '', controlledMenuVisible: false
+    };
+    let restoreMobileMenu = false;
+    if (mobileViewport && visible(trigger)) {
+      const beforeControlledNavigation = controlledNavigation();
+      const beforeControlledVisible = visible(beforeControlledNavigation);
+      const beforeNavVisible = visible(navigation);
+      trigger.click();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const afterControlledNavigation = controlledNavigation();
+      const afterControlledVisible = visible(afterControlledNavigation);
+      const controlledRootChanged = beforeControlledNavigation !== afterControlledNavigation;
+      mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
+      mobileMenu.controlledMenuVisible = afterControlledVisible;
+      mobileMenu.activationWorks = (
+        afterControlledVisible && (
+          !beforeControlledVisible ||
+          controlledRootChanged ||
+          mobileMenu.expandedBefore !== mobileMenu.expandedAfter
+        )
+      ) || (!beforeNavVisible && visible(navigation));
+      restoreMobileMenu = mobileMenu.expandedBefore !== mobileMenu.expandedAfter ||
+        beforeControlledVisible !== afterControlledVisible || controlledRootChanged;
+    }
+    // Resolve the controlled root only after activation. Some responsive
+    // menus inject their semantic tree lazily on the first user interaction.
+    const primaryNavigationElement = primaryNavigationRoot();
     const links = [];
     const placeholders = [];
-    for (const [scope, root] of [['header', header], ['navigation', navigation], ['footer', footer]]) {
+    for (const [scope, root] of [['header', header], ['navigation', primaryNavigationElement || navigation], ['footer', footer]]) {
       if (!(root instanceof Element)) continue;
       for (const link of root.querySelectorAll('a')) {
         if (!visible(link)) continue;
@@ -1103,8 +1159,21 @@ function collectorExpression(contract, mobile) {
       }
     }
     links.sort((left, right) => `${left.scope}\0${left.href}\0${left.label}`.localeCompare(`${right.scope}\0${right.href}\0${right.label}`));
-    const navigationElements = primaryNavigationRoot instanceof Element
-      ? [...primaryNavigationRoot.querySelectorAll('a,button')]
+    const navigationElements = primaryNavigationElement instanceof Element
+      ? [...primaryNavigationElement.querySelectorAll('a,button,[role="menuitem"]')].filter((element) => {
+          if (element.matches('a,button')) return true;
+          // A role=menuitem wrapper with its own direct anchor/button is the
+          // semantic container for that control, not a second navigation item.
+          // Nested submenu controls do not suppress a standalone parent item.
+          return ![...element.querySelectorAll('a,button')].some((candidate) => {
+            let cursor = candidate.parentElement;
+            while (cursor && cursor !== element) {
+              if (cursor.matches('ul,ol,[role="menu"],[role="menubar"]')) return false;
+              cursor = cursor.parentElement;
+            }
+            return cursor === element;
+          });
+        })
       : [];
     const boundedNavigationElements = navigationElements.slice(0, primaryNavigationLimits.maxEntries);
     const navigationPosition = new Map(boundedNavigationElements.map((element, index) => [element, index]));
@@ -1114,23 +1183,37 @@ function collectorExpression(contract, mobile) {
       // carries role=menuitem. Counting both the anchor/button and its <li>
       // would invent an extra hierarchy level in a common ARIA menu pattern.
       const listItem = element.closest('li');
-      if (listItem && primaryNavigationRoot.contains(listItem)) return listItem;
+      if (listItem && primaryNavigationElement.contains(listItem)) return listItem;
       const roleItem = element.matches('[role="menuitem"]') ? element : element.closest('[role="menuitem"]');
-      return roleItem && primaryNavigationRoot.contains(roleItem) ? roleItem : element;
+      return roleItem && primaryNavigationElement.contains(roleItem) ? roleItem : element;
     };
-    const primaryNavigationEntries = [];
-    for (const [position, element] of boundedNavigationElements.entries()) {
-      const rawLabel = String(
-        element.getAttribute('aria-label') ||
-        element.textContent ||
+    const navigationLabel = (element) => {
+      const ariaLabel = String(element.getAttribute('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const labelledBy = String(element.getAttribute('aria-labelledby') || '').trim();
+      if (labelledBy) {
+        const referenced = labelledBy.split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent || '')
+          .join(' ')
+          .trim();
+        if (referenced) return referenced;
+      }
+      const clone = element.cloneNode(true);
+      for (const nestedMenu of clone.querySelectorAll('ul,ol,[role="menu"],[role="menubar"]')) nestedMenu.remove();
+      return String(
+        clone.textContent ||
         element.querySelector('img')?.alt ||
         element.getAttribute('title') ||
         ''
-      ).normalize('NFKC').replace(/\s+/g, ' ').trim();
+      );
+    };
+    const primaryNavigationEntries = [];
+    for (const [position, element] of boundedNavigationElements.entries()) {
+      const rawLabel = navigationLabel(element).normalize('NFKC').replace(/\s+/g, ' ').trim();
       const item = navigationItemContainer(element);
       let cursor = item === element ? element.parentElement : item?.parentElement;
       let parentElement = null;
-      while (cursor && cursor !== primaryNavigationRoot) {
+      while (cursor && cursor !== primaryNavigationElement) {
         if (cursor.matches?.('li,[role="menuitem"]')) {
           parentElement = boundedNavigationElements.find((candidate, candidatePosition) =>
             candidatePosition < position && navigationItemContainer(candidate) === cursor
@@ -1159,8 +1242,8 @@ function collectorExpression(contract, mobile) {
       });
     }
     const primaryNavigation = {
-      present: primaryNavigationRoot instanceof Element,
-      visible: visible(primaryNavigationRoot),
+      present: primaryNavigationElement instanceof Element,
+      visible: visible(primaryNavigationElement),
       entryCount: navigationElements.length,
       capturedEntryCount: primaryNavigationEntries.length,
       entriesTruncated: navigationElements.length > primaryNavigationLimits.maxEntries,
@@ -1168,6 +1251,10 @@ function collectorExpression(contract, mobile) {
       depthTruncatedCount: primaryNavigationEntries.filter((entry) => entry.depthTruncated).length,
       entries: primaryNavigationEntries
     };
+    if (mobileViewport && restoreMobileMenu) {
+      trigger.click();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
     const brandImage = brand?.matches('img') ? brand : brand?.querySelector('img');
     const brandSvg = brand?.matches('svg') ? brand : brand?.querySelector('svg');
     const brandLink = brand?.closest('a') || brand?.querySelector('a');
@@ -1188,19 +1275,6 @@ function collectorExpression(contract, mobile) {
       beforeStyle: visualStyle(brandBeforeStyle),
       afterStyle: visualStyle(brandAfterStyle)
     } : null;
-    let mobileMenu = {
-      triggerPresent: Boolean(trigger), triggerVisible: visible(trigger), activationWorks: false,
-      expandedBefore: String(trigger?.getAttribute('aria-expanded') || ''), expandedAfter: '', controlledMenuVisible: false
-    };
-    if (mobileViewport && visible(trigger)) {
-      const beforeNavVisible = visible(navigation);
-      trigger.click();
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
-      mobileMenu.controlledMenuVisible = visible(controlledRegion);
-      mobileMenu.activationWorks = mobileMenu.expandedAfter === 'true' || mobileMenu.controlledMenuVisible || (!beforeNavVisible && visible(navigation));
-      if (mobileMenu.expandedBefore !== mobileMenu.expandedAfter) trigger.click();
-    }
     const topLevelMasked = masked.filter((element) => !masked.some((candidate) => candidate !== element && candidate.contains(element)));
     const maskedHeight = topLevelMasked.reduce((sum, element) => sum + Math.max(0, element.getBoundingClientRect().height), 0);
     const main = first(['main', '[role="main"]', '#main-content', '.main-content'], false);
@@ -1484,7 +1558,7 @@ function collectorExpression(contract, mobile) {
         footer: roleSignal(footer),
         header: roleSignal(header),
         main: roleSignal(main),
-        navigation: roleSignal(navigation)
+        navigation: roleSignal(primaryNavigationElement || navigation)
       },
       meaningfulHrefs: links,
       placeholderHrefs: placeholders,
@@ -2545,6 +2619,9 @@ function comparePrimaryNavigation({
   if (expectedSource.present !== targetObserved.present) {
     differenceKinds.push(expectedSource.present ? 'omission' : 'addition');
   }
+  if (expectedSource.visible !== targetObserved.visible) {
+    differenceKinds.push(expectedSource.visible ? 'omission' : 'addition');
+  }
   const sortedDifferenceKinds = NAVIGATION_DIFFERENCE_KINDS.filter((kind) => differenceKinds.includes(kind));
   const comparison = {
     authority: 'verifier-owned-managed-browser-navigation-semantics',
@@ -2558,6 +2635,7 @@ function comparePrimaryNavigation({
   };
   const exact = bounded &&
     expectedSource.present === targetObserved.present &&
+    expectedSource.visible === targetObserved.visible &&
     canonicalJson(expectedSource.entries) === canonicalJson(targetObserved.entries);
   const disposition = exact || !bounded
     ? null
