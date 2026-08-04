@@ -176,6 +176,9 @@ const CAPTURE_MENU_PRESS_KEYS = new Set(['Enter', 'Space']);
 const CAPTURE_MENU_STATES = new Set(['not_applicable', 'closed', 'open']);
 const CAPTURE_CONSENT_STATES = new Set(['not_applicable', 'before_consent', 'accepted', 'rejected']);
 const COLLECTION_PAGINATION_MODES = new Set(['paged', 'load_more', 'infinite_scroll', 'none']);
+const COLLECTION_CONTINUATION_KINDS = new Set(['request', 'browser_interaction', 'none']);
+const ACCESSIBLE_REPLACEMENT_SOURCE_MODES = new Set(['load_more', 'infinite_scroll']);
+const ACCESSIBLE_REPLACEMENT_TARGET_MODES = new Set(['paged', 'load_more']);
 const MAX_CAPTURE_INTERACTION_STEPS = 12;
 const MAX_CAPTURE_CONTENT_COUNT_ASSERTIONS = 16;
 const MAX_CAPTURE_DYNAMIC_MASKS = 8;
@@ -2062,16 +2065,50 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
   const sourcePageSize = pagination.sourcePageSize;
   const targetPageSize = pagination.targetPageSize;
   const continuationRequired = sourceMode !== 'none';
-  const continuationRequest = normalizeRouteRequestKey(pagination.targetContinuationRequest);
-  const initialRequest = normalizeRouteRequestKey(targetRoute);
+  const sourceInitialRequest = normalizeRouteRequestKey(ledger?.sourceRoute);
+  const targetInitialRequest = normalizeRouteRequestKey(targetRoute);
+  const sourceContinuationKind = String(pagination.sourceContinuationKind ?? '').trim();
+  const targetContinuationKind = String(pagination.targetContinuationKind ?? '').trim();
+  const sourceContinuationRequest = normalizeRouteRequestKey(pagination.sourceContinuationRequest);
+  const targetContinuationRequest = normalizeRouteRequestKey(pagination.targetContinuationRequest);
+  const sourceContinuationStateId = String(pagination.sourceContinuationStateId ?? '').trim();
+  const targetContinuationStateId = String(pagination.targetContinuationStateId ?? '').trim();
   const liveViewDisplay = String(pagination.liveViewDisplay ?? '').trim();
   const documentedSinglePageException = ledger?.collectionOwner === 'documented_exception';
+  const modeChange = isJsonObject(pagination.modeChangeDisposition)
+    ? pagination.modeChangeDisposition
+    : {};
+  const modeChanged = sourceMode !== targetMode;
+  const exactAccessibleModeChange =
+    modeChanged &&
+    modeChange.kind === 'accessible_continuation_replacement' &&
+    modeChange.accepted === true &&
+    String(modeChange.sourceMode ?? '').trim() === sourceMode &&
+    String(modeChange.targetMode ?? '').trim() === targetMode &&
+    ACCESSIBLE_REPLACEMENT_SOURCE_MODES.has(sourceMode) &&
+    ACCESSIBLE_REPLACEMENT_TARGET_MODES.has(targetMode) &&
+    sourceMode !== targetMode &&
+    Boolean(String(modeChange.acceptedBy ?? '').trim()) &&
+    Boolean(String(modeChange.rationale ?? '').trim()) &&
+    Boolean(String(modeChange.evidence ?? '').trim());
+  const inactiveModeChange =
+    !isJsonObject(pagination.modeChangeDisposition) ||
+    (
+      (!modeChange.kind || modeChange.kind === 'none') &&
+      modeChange.accepted !== true &&
+      !String(modeChange.sourceMode ?? '').trim() &&
+      !String(modeChange.targetMode ?? '').trim() &&
+      !String(modeChange.acceptedBy ?? '').trim() &&
+      !String(modeChange.rationale ?? '').trim() &&
+      !String(modeChange.evidence ?? '').trim()
+    );
 
   if (
     pagination.accepted !== true ||
     !COLLECTION_PAGINATION_MODES.has(sourceMode) ||
     !COLLECTION_PAGINATION_MODES.has(targetMode) ||
-    (sourcePageSize !== null && positiveIntegerOrNull(sourcePageSize) === null) ||
+    (sourceMode !== 'none' && positiveIntegerOrNull(sourcePageSize) === null) ||
+    (sourceMode === 'none' && sourcePageSize !== null) ||
     (targetMode !== 'none' && positiveIntegerOrNull(targetPageSize) === null) ||
     (targetMode === 'none' && targetPageSize !== null) ||
     (!documentedSinglePageException && !/^views\.view\.[a-z0-9_]+:[a-z0-9_]+$/.test(liveViewDisplay))
@@ -2089,30 +2126,84 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
   }
 
   if (sourceMode === 'none' && targetMode !== 'none') {
-    reasons.push(`pattern-map.json accepted single-page collection ${label} must declare target pagination mode none.`);
+    reasons.push(`pattern-map.json accepted single-page collection ${label} must keep target mode none; a target continuation cannot be fabricated for a non-continuing source.`);
   }
-  if (sourceMode !== 'none' && targetMode !== sourceMode) {
-    reasons.push(`pattern-map.json accepted collection ${label} cannot launder source pagination mode ${sourceMode || '(missing)'} into target mode ${targetMode || '(missing)'}.`);
+  if (sourceMode !== 'none' && targetMode === 'none') {
+    reasons.push(`pattern-map.json accepted collection ${label} cannot launder source pagination mode ${sourceMode || '(missing)'} into target mode none.`);
+  } else if (modeChanged && !exactAccessibleModeChange) {
+    reasons.push(`pattern-map.json accepted collection ${label} may change continuation mode only through an exact named-acceptance, rationale- and evidence-backed accessible_continuation_replacement disposition; ${sourceMode || '(missing)'} to ${targetMode || '(missing)'} is otherwise rejected.`);
+  } else if (!modeChanged && !inactiveModeChange) {
+    reasons.push(`pattern-map.json accepted collection ${label} must not carry a mode-change disposition when source and target modes are identical.`);
   }
 
   if (continuationRequired) {
     if (
-      !continuationRequest ||
-      continuationRequest === initialRequest ||
+      !COLLECTION_CONTINUATION_KINDS.has(sourceContinuationKind) ||
+      sourceContinuationKind === 'none' ||
+      !COLLECTION_CONTINUATION_KINDS.has(targetContinuationKind) ||
+      targetContinuationKind === 'none' ||
       pagination.sourceContinuationEquivalent !== true
     ) {
-      reasons.push(`pattern-map.json accepted paginated collection ${label} needs an exact, distinct target continuation request declared equivalent to the source continuation.`);
+      reasons.push(`pattern-map.json accepted continuing collection ${label} needs explicit request or browser_interaction continuation mechanisms for both source and target, plus preserved continuation behavior.`);
+    }
+    if (
+      sourceContinuationKind === 'request' &&
+      (!sourceContinuationRequest || sourceContinuationRequest === sourceInitialRequest || sourceContinuationStateId)
+    ) {
+      reasons.push(`pattern-map.json accepted collection ${label} request-addressable source continuation needs one exact request distinct from its initial route and no browser state ID.`);
+    }
+    if (
+      sourceContinuationKind === 'browser_interaction' &&
+      (sourceContinuationRequest || !CAPTURE_STATE_ID_RE.test(sourceContinuationStateId) || sourceContinuationStateId === 'default')
+    ) {
+      reasons.push(`pattern-map.json accepted collection ${label} JS-only source continuation needs one exact non-default browser capture state ID and no fabricated request URL.`);
+    }
+    if (
+      targetContinuationKind === 'request' &&
+      (!targetContinuationRequest || targetContinuationRequest === targetInitialRequest || targetContinuationStateId)
+    ) {
+      reasons.push(`pattern-map.json accepted collection ${label} request-addressable target continuation needs one exact request distinct from its initial route and no browser state ID.`);
+    }
+    if (
+      targetContinuationKind === 'browser_interaction' &&
+      (targetContinuationRequest || !CAPTURE_STATE_ID_RE.test(targetContinuationStateId) || targetContinuationStateId === 'default')
+    ) {
+      reasons.push(`pattern-map.json accepted collection ${label} JS-only target continuation needs one exact non-default browser capture state ID and no fabricated request URL.`);
     }
     const initialIdentity = String(browserCheck?.initialItemIdentitySha256 ?? '').trim();
     const continuationIdentity = String(browserCheck?.continuationItemIdentitySha256 ?? '').trim();
-    const continuationRouteCheck = defaultCaptureStateChecks(publicRouteChecks).find((check) =>
-      routeRecordRequestKey(check) === continuationRequest && check?.accepted === true
+    const acceptedRouteChecks = arrayOrEmpty(publicRouteChecks).filter((check) =>
+      check?.accepted === true && check?.visualComparison?.status === 'pass'
     );
+    const sourceEvidenceCheck = sourceContinuationKind === 'request'
+      ? acceptedRouteChecks.find((check) =>
+          captureStateId(check) === 'default' &&
+          normalizeRouteRequestKey(check?.sourceUrl || check?.sourceFinalUrl) === sourceContinuationRequest
+        )
+      : acceptedRouteChecks.find((check) =>
+          captureStateId(check) === sourceContinuationStateId &&
+          normalizeRouteRequestKey(check?.sourceUrl || check?.sourceFinalUrl) === sourceInitialRequest &&
+          arrayOrEmpty(check?.captureState?.interactionSteps).length > 0
+        );
+    const targetEvidenceCheck = targetContinuationKind === 'request'
+      ? acceptedRouteChecks.find((check) =>
+          captureStateId(check) === 'default' &&
+          routeRecordRequestKey(check) === targetContinuationRequest
+        )
+      : acceptedRouteChecks.find((check) =>
+          captureStateId(check) === targetContinuationStateId &&
+          routeRecordRequestKey(check) === targetInitialRequest &&
+          arrayOrEmpty(check?.captureState?.interactionSteps).length > 0
+        );
     if (
       !browserCheck ||
       browserCheck.status !== 'pass' ||
-      normalizeRouteRequestKey(browserCheck.initialTargetRequest) !== initialRequest ||
-      normalizeRouteRequestKey(browserCheck.targetContinuationRequest) !== continuationRequest ||
+      normalizeRouteRequestKey(browserCheck.sourceInitialRequest) !== sourceInitialRequest ||
+      normalizeRouteRequestKey(browserCheck.initialTargetRequest) !== targetInitialRequest ||
+      normalizeRouteRequestKey(browserCheck.sourceContinuationRequest) !== sourceContinuationRequest ||
+      normalizeRouteRequestKey(browserCheck.targetContinuationRequest) !== targetContinuationRequest ||
+      String(browserCheck.sourceContinuationStateId ?? '').trim() !== sourceContinuationStateId ||
+      String(browserCheck.targetContinuationStateId ?? '').trim() !== targetContinuationStateId ||
       numericValue(browserCheck.initialStatus) !== 200 ||
       numericValue(browserCheck.continuationStatus) !== 200 ||
       !HASH_RE.test(initialIdentity) ||
@@ -2121,21 +2212,33 @@ export function collectionPaginationRecordReasons(ledger, browserCheck, targetRo
       browserCheck.continuationStateDistinct !== true ||
       browserCheck.sourceContinuationEquivalent !== true
     ) {
-      reasons.push(`browser-evidence.json needs an exact successful, source-equivalent, item-distinct page-two state for accepted collection ${label}.`);
+      reasons.push(`browser-evidence.json needs an exact successful, source-bound, item-distinct continuation state for accepted collection ${label}.`);
     }
     if (
-      !continuationRouteCheck ||
-      !String(continuationRouteCheck?.targetScreenshot ?? '').trim() ||
-      !HASH_RE.test(String(continuationRouteCheck?.captureState?.evidenceBindings?.targetScreenshotSha256 ?? ''))
+      !sourceEvidenceCheck ||
+      !String(sourceEvidenceCheck?.sourceScreenshot ?? '').trim() ||
+      !HASH_RE.test(String(sourceEvidenceCheck?.captureState?.evidenceBindings?.sourceScreenshotSha256 ?? ''))
     ) {
-      reasons.push(`browser-evidence.json needs a captured publicRouteChecks row for the exact page-two request of accepted collection ${label}; the live verifier fetches that request independently.`);
+      reasons.push(`browser-evidence.json needs source screenshot evidence bound to the exact declared source continuation request or JS-only state for accepted collection ${label}.`);
+    }
+    if (
+      !targetEvidenceCheck ||
+      !String(targetEvidenceCheck?.targetScreenshot ?? '').trim() ||
+      !HASH_RE.test(String(targetEvidenceCheck?.captureState?.evidenceBindings?.targetScreenshotSha256 ?? ''))
+    ) {
+      reasons.push(`browser-evidence.json needs target screenshot evidence bound to the exact declared target continuation request or JS-only state for accepted collection ${label}.`);
     }
   } else if (
-    continuationRequest ||
+    sourceContinuationKind !== 'none' ||
+    targetContinuationKind !== 'none' ||
+    sourceContinuationRequest ||
+    targetContinuationRequest ||
+    sourceContinuationStateId ||
+    targetContinuationStateId ||
     pagination.sourceContinuationEquivalent !== false ||
     (browserCheck && browserCheck.status === 'pass')
   ) {
-    reasons.push(`pattern-map.json accepted single-page collection ${label} must use explicit none pagination without a continuation claim.`);
+    reasons.push(`pattern-map.json accepted single-page collection ${label} must use exact none pagination: null page sizes, none continuation mechanisms, no requests or state IDs, and no continuation claim.`);
   }
 
   return reasons;
@@ -2695,6 +2798,12 @@ async function independentStructuredGateReasons({
     );
     const addRowEvidencePresent = addRowCheck && await nonEmptyPacketEvidence(packetDir, addRowCheck.evidence, independentEvidenceDir);
     const paginationEvidencePresent = await nonEmptyPacketEvidence(packetDir, ledger?.pagination?.evidence);
+    const modeChangeDisposition = isJsonObject(ledger?.pagination?.modeChangeDisposition)
+      ? ledger.pagination.modeChangeDisposition
+      : null;
+    const modeChangeEvidencePresent =
+      String(ledger?.pagination?.sourceMode ?? '').trim() === String(ledger?.pagination?.targetMode ?? '').trim() ||
+      Boolean(modeChangeDisposition && await nonEmptyPacketEvidence(packetDir, modeChangeDisposition.evidence));
     const paginationBrowserEvidencePresent = paginationCheck && await nonEmptyPacketEvidence(
       packetDir,
       paginationCheck.evidence,
@@ -2707,7 +2816,11 @@ async function independentStructuredGateReasons({
       targetPath,
       browserEvidence?.publicRouteChecks
     ));
-    if (!paginationEvidencePresent || (String(ledger?.pagination?.sourceMode ?? '') !== 'none' && !paginationBrowserEvidencePresent)) {
+    if (
+      !paginationEvidencePresent ||
+      !modeChangeEvidencePresent ||
+      (String(ledger?.pagination?.sourceMode ?? '') !== 'none' && !paginationBrowserEvidencePresent)
+    ) {
       reasons.push(`accepted collection ${ledger.sourceObject || sourcePath} needs packet-local pagination and continuation evidence.`);
     }
 

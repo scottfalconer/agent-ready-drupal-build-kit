@@ -12,7 +12,7 @@
       "file": "10-phase-1-introspection.md",
       "heading": "## Operating Phases",
       "summary": "Phase 1 introspection plus the structured-content, composition, and Canvas ownership gates.",
-      "bytes": 21105
+      "bytes": 21764
     },
     {
       "file": "20-phase-2-assembly.md",
@@ -30,7 +30,7 @@
       "file": "40-phase-6-verification.md",
       "heading": "### Phase 6: Independent Verification",
       "summary": "Phase 6 independent verification.",
-      "bytes": 10265
+      "bytes": 10387
     },
     {
       "file": "50-phase-7-blind-review.md",
@@ -48,7 +48,7 @@
       "file": "70-browser-evidence-and-completion.md",
       "heading": "## Browser Evidence Gate",
       "summary": "Browser evidence gate and the completion contract.",
-      "bytes": 9604
+      "bytes": 9756
     },
     {
       "file": "80-drupal-architecture.md",
