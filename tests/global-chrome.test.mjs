@@ -2510,12 +2510,12 @@ test('CDP pipe captures screenshots and list-wrapped or role-container ARIA-menu
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><html lang="en"><head><title>Global chrome fixture</title><meta name="viewport" content="width=device-width"><style>
       body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}input,select{min-height:24px}.menu-toggle{display:none}.honeypot{position:absolute;left:-10000px;width:10px;height:10px}.visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-      @media(max-width:600px){.menu-toggle{display:block}#main-nav{display:none}#main-nav.open{display:block}}
+      @media(max-width:600px){.menu-toggle{display:block}#mobile-menu-region{display:none}#mobile-menu-region.open{display:block}}
     </style></head><body>
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
-      <button class="menu-toggle" aria-label="Menu" aria-controls="main-nav" aria-expanded="false"
-        onclick="this.setAttribute('aria-expanded','true');document.getElementById('main-nav').classList.add('open')">Menu</button>
-      <nav id="main-nav"><ul role="menu"><li role="none"><a role="menuitem" href="/">Home</a></li><li role="none"><a role="menuitem" href="/about">About</a><ul role="menu"><li role="none"><a role="menuitem" href="/team">Team</a></li></ul></li></ul><div role="menu"><div role="menuitem"><a href="/services">Services</a><div role="menu"><a role="menuitem" href="/consulting">Consulting</a></div></div></div></nav></header>
+      <button class="menu-toggle" aria-label="Menu" aria-controls="mobile-menu-region" aria-expanded="false"
+        onclick="this.setAttribute('aria-expanded','true');document.getElementById('mobile-menu-region').classList.add('open')">Menu</button>
+      <div id="mobile-menu-region"><a class="account-link" href="/account">Account</a><nav id="main-nav"><ul role="menu"><li role="none"><a role="menuitem" href="/">Home</a></li><li role="none"><a role="menuitem" href="/about">About</a><ul role="menu"><li role="none"><a role="menuitem" href="/team">Team</a></li></ul></li></ul><div role="menu"><div role="menuitem"><a href="/services">Services</a><div role="menu"><a role="menuitem" href="/consulting">Consulting</a></div></div></div></nav></div></header>
       <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p>
         <form id="fixture-form"><input type="hidden" name="form_token" value="csrf-secret">
           <label for="fixture-email">Email&nbsp;&#xFF21;ddress</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">

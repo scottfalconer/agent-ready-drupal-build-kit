@@ -1026,7 +1026,12 @@ function collectorExpression(contract, mobile) {
       'button[id*="menu" i]', '.menu-toggle', '.navbar-toggler', '[data-drupal-selector*="menu"] button'
     ]);
     const controlledId = String(trigger?.getAttribute('aria-controls') || '').trim();
-    const controlledNavigation = controlledId ? document.getElementById(controlledId) : null;
+    const controlledRegion = controlledId ? document.getElementById(controlledId) : null;
+    const controlledNavigation = controlledRegion instanceof Element
+      ? (controlledRegion.matches('nav,[role="navigation"]')
+          ? controlledRegion
+          : controlledRegion.querySelector('nav,[role="navigation"]') || controlledRegion)
+      : null;
     const primaryNavigationRoot = (
       mobileViewport && visible(trigger) && controlledNavigation instanceof Element
         ? controlledNavigation
@@ -1192,7 +1197,7 @@ function collectorExpression(contract, mobile) {
       trigger.click();
       await new Promise((resolve) => setTimeout(resolve, 120));
       mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
-      mobileMenu.controlledMenuVisible = visible(controlledNavigation);
+      mobileMenu.controlledMenuVisible = visible(controlledRegion);
       mobileMenu.activationWorks = mobileMenu.expandedAfter === 'true' || mobileMenu.controlledMenuVisible || (!beforeNavVisible && visible(navigation));
       if (mobileMenu.expandedBefore !== mobileMenu.expandedAfter) trigger.click();
     }
