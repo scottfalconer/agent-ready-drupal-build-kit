@@ -11064,6 +11064,86 @@ test('live verification fetches and reconciles primary query states exactly', as
   );
 });
 
+test('target-required packet evidence binds exact same-path query requests', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'target-required-query-binding-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const targetBaseUrl = 'https://target.example';
+  const routeMatrix = liveRouteMatrix(targetBaseUrl);
+  for (const state of ['one', 'two']) {
+    routeMatrix.targetRequiredRoutes.push({
+      targetPath: `/search?state=${state}`,
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalPath: `/search?state=${state}`,
+      expectedPublicBehavior: 'public_200',
+      drupalOwner: 'view',
+      shouldBePublic: true,
+      accepted: true,
+      notes: 'The exact public query state is required.'
+    });
+  }
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+  addQualifyingReviewEvidence(packetDir, targetBaseUrl);
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.targetRequiredRouteChecks.push({
+      targetPath: '/search?state=one',
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalUrl: `${targetBaseUrl}/search?state=one`,
+      expectedPublicBehavior: 'public_200',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    });
+  });
+
+  const reusedCheck = await validatePacket({ packetDir });
+  const reusedReasons = reusedCheck.completionEvidence.packetCompletionBlockedReasons.filter((reason) =>
+    /must pass target-required route \/search\?query-sha256=/i.test(reason)
+  );
+  assert.equal(reusedReasons.length, 1, reusedReasons.join('\n'));
+  assert.doesNotMatch(reusedReasons.join('\n'), /state=(?:one|two)/);
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.targetRequiredRouteChecks.push({
+      targetPath: '/search?state=two',
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalUrl: `${targetBaseUrl}/search?state=one`,
+      expectedPublicBehavior: 'public_200',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    });
+  });
+  const wrongFinalRequest = await validatePacket({ packetDir });
+  assert.match(
+    wrongFinalRequest.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
+  );
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    const second = independent.targetRequiredRouteChecks.find((check) => check.targetPath === '/search?state=two');
+    second.targetFinalUrl = `${targetBaseUrl}/search?state=two`;
+    second.expectedPublicBehavior = 'noindex';
+  });
+  const wrongBehavior = await validatePacket({ packetDir });
+  assert.match(
+    wrongBehavior.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
+  );
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    const second = independent.targetRequiredRouteChecks.find((check) => check.targetPath === '/search?state=two');
+    second.expectedPublicBehavior = 'public_200';
+  });
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
+  const exactChecks = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    exactChecks.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
+  );
+});
+
 test('imported-body route candidates require exact path-plus-query drift classification', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'imported-body-route-classification-'));
   const packetDir = join(temp, 'review-packet');

@@ -946,8 +946,8 @@ function redirectStatus(value) {
 }
 
 function expectedPublicBehaviorMatches(behavior, status, finalPath, requestedPath) {
-  const normalizedFinalPath = normalizeRouteKey(finalPath);
-  const normalizedRequestedPath = normalizeRouteKey(requestedPath);
+  const normalizedFinalPath = normalizeRouteRequestKey(finalPath);
+  const normalizedRequestedPath = normalizeRouteRequestKey(requestedPath);
   if (behavior === 'public_200') {
     return numericValue(status) === 200 && normalizedFinalPath === normalizedRequestedPath;
   }
@@ -3018,12 +3018,13 @@ async function independentStructuredGateReasons({
   const targetRequiredChecks = substantiveObjects(independentVerification?.targetRequiredRouteChecks);
   for (const route of targetRequiredRoutes) {
     const behavior = String(route.expectedPublicBehavior ?? '').trim();
-    const routePath = normalizeRouteKey(route.targetPath);
-    const routeFinalPath = normalizeRouteKey(route.targetFinalPath || route.targetPath);
+    const routeRequest = normalizeRouteRequestKey(route.targetPath);
+    const routeFinalRequest = normalizeRouteRequestKey(route.targetFinalPath || route.targetPath);
     const check = targetRequiredChecks.find((candidate) =>
-      normalizeRouteKey(candidate.targetPath) === routePath
+      normalizeRouteRequestKey(candidate.targetPath) === routeRequest
     );
     const checkFinalUrl = httpUrl(check?.targetFinalUrl);
+    const checkFinalRequest = normalizeRouteRequestKey(checkFinalUrl?.href);
     const independentTargetUrl = httpUrl(independentVerification?.target?.baseUrl);
     const checkEvidencePresent = check && await nonEmptyPacketEvidence(
       packetDir,
@@ -3039,11 +3040,11 @@ async function independentStructuredGateReasons({
       numericValue(check.targetStatus) !== numericValue(route.targetStatus) ||
       !independentTargetUrl ||
       checkFinalUrl?.origin !== independentTargetUrl.origin ||
-      normalizeRouteKey(checkFinalUrl?.pathname) !== routeFinalPath ||
-      !expectedPublicBehaviorMatches(behavior, route.targetStatus, routeFinalPath, routePath) ||
+      checkFinalRequest !== routeFinalRequest ||
+      !expectedPublicBehaviorMatches(behavior, route.targetStatus, routeFinalRequest, routeRequest) ||
       !checkEvidencePresent
     ) {
-      reasons.push(`independent-verification.json must pass target-required route ${routePath || '(missing)'} with status/final-path behavior matching route-matrix.json and packet-local evidence.`);
+      reasons.push(`independent-verification.json must pass target-required route ${privacySafeRouteRequestLabel(routeRequest)} with exact status/final-request behavior matching route-matrix.json and packet-local evidence.`);
     }
   }
 
@@ -6360,12 +6361,12 @@ async function packetCompletionReadiness(packetDir, gates, records, jsonContext 
   const targetRequiredRoutes = substantiveObjects(routeMatrix?.targetRequiredRoutes);
   if (
     targetRequiredRoutes.length === 0 ||
-    !targetRequiredRoutes.some((record) => normalizeRouteKey(record.targetPath) === '/') ||
+    !targetRequiredRoutes.some((record) => normalizeRouteRequestKey(record.targetPath) === '/') ||
     targetRequiredRoutes.some((record) =>
-      !normalizeRouteKey(record.targetPath) ||
+      !normalizeRouteRequestKey(record.targetPath) ||
       !String(record.reasonRequired ?? '').trim() ||
       !finiteNumberValue(record.targetStatus) ||
-      !normalizeRouteKey(record.targetFinalPath || record.targetPath) ||
+      !normalizeRouteRequestKey(record.targetFinalPath || record.targetPath) ||
       !String(record.drupalOwner ?? '').trim() ||
       record.accepted !== true ||
       record.expectedPublicBehavior === 'blocked' ||
