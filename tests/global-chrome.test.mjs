@@ -2455,6 +2455,7 @@ function finalizedNavigationCapture({ packetDir, origin, entries, screenshotSeed
     signals: {
       ...route.signals,
       finalUrl: `${origin}/`,
+      publicFormControls: publicFormControlEvidence(),
       primaryNavigation: primaryNavigation(entries)
     },
     axe: {
