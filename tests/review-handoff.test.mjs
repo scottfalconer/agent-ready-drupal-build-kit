@@ -408,6 +408,86 @@ test('independent handoff rejects duplicate bindings, widened URLs, and incomple
   assert.match(incompleteErrors.independent.join('\n'), /artifactsReviewed must exactly match every file/i);
 });
 
+test('independent handoff binds required composition routes without widening blind primary-route review', () => {
+  const { packetDir, projectRoot } = fixtureProject();
+  const routeMatrixPath = join(packetDir, 'route-matrix.json');
+  const routeMatrix = JSON.parse(readFileSync(routeMatrixPath, 'utf8'));
+  routeMatrix.routes.push({
+    sourcePath: '/about',
+    targetPath: '/about',
+    routeRole: 'other',
+    expectedRedirect: false,
+    accepted: true
+  });
+  writeJson(routeMatrixPath, routeMatrix);
+  refreshPreliminaryPacketFingerprint(packetDir);
+
+  const complete = writeReviewHandoff({ project: projectRoot });
+  const declaredPacketFiles = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8')).reviewPacketFiles;
+  assert.equal(
+    complete.projections.independent.allowedInputs.urls.includes('https://target.ddev.site/about'),
+    true
+  );
+  assert.deepEqual(
+    complete.projections.blind.allowedInputs.primaryRoutes.map((route) => route.targetPath),
+    ['/']
+  );
+  assert.deepEqual(
+    complete.projections.blind.allowedInputs.targetUrlsOrArtifacts,
+    ['https://target.ddev.site/']
+  );
+
+  const records = reviewerRecords(complete.manifest, complete.projections);
+  records.independent.compositionModelFidelityChecks = [{
+    sourceRoute: '/about',
+    targetRoute: '/about'
+  }];
+  assert.deepEqual(reviewHandoffReviewerErrors({
+    manifest: complete.manifest,
+    projections: complete.projections,
+    independentVerification: records.independent,
+    blindReview: records.blind,
+    packetDir,
+    declaredPacketFiles
+  }), {
+    blind: [],
+    common: [],
+    independent: []
+  });
+
+  const incompleteBundle = structuredClone(complete);
+  incompleteBundle.projections.independent.allowedInputs.urls =
+    incompleteBundle.projections.independent.allowedInputs.urls.filter((url) => url !== 'https://target.ddev.site/about');
+  const incomplete = resealProjectionBundle(incompleteBundle, 'independent');
+  const incompleteRecords = reviewerRecords(incomplete.manifest, incomplete.projections);
+  incompleteRecords.independent.compositionModelFidelityChecks = [{
+    sourceRoute: '/about',
+    targetRoute: '/about'
+  }];
+  const incompleteErrors = reviewHandoffReviewerErrors({
+    manifest: incomplete.manifest,
+    projections: incomplete.projections,
+    independentVerification: incompleteRecords.independent,
+    blindReview: incompleteRecords.blind,
+    packetDir,
+    declaredPacketFiles
+  });
+  assert.match(incompleteErrors.independent.join('\n'), /required composition-fidelity route/i);
+
+  records.independent.compositionModelFidelityChecks[0].targetRoute =
+    '/not-handed-off?preview_token=super-secret-value';
+  const widenedEvidenceErrors = reviewHandoffReviewerErrors({
+    manifest: complete.manifest,
+    projections: complete.projections,
+    independentVerification: records.independent,
+    blindReview: records.blind,
+    packetDir,
+    declaredPacketFiles
+  });
+  assert.match(widenedEvidenceErrors.independent.join('\n'), /target route is not an allowed handoff URL/i);
+  assert.doesNotMatch(widenedEvidenceErrors.independent.join('\n'), /super-secret-value|preview_token/i);
+});
+
 test('reviewer target and primary-route URLs stay bound to the root target origin', () => {
   const { projectRoot } = fixtureProject();
   const complete = writeReviewHandoff({ project: projectRoot });
@@ -600,6 +680,20 @@ test('strict reviewer projections reject unknown keys and malformed shapes witho
   assert.match(
     reviewHandoffProjectionErrors(contaminated.blind, 'blind', manifest).join('\n'),
     /builderSummary is not allowed/
+  );
+
+  const tooManyUrls = structuredClone(projections.independent);
+  tooManyUrls.allowedInputs.urls = [
+    'https://target.ddev.site/',
+    'https://target.ddev.site/admin',
+    ...Array.from(
+      { length: 4095 },
+      (_, index) => `https://target.ddev.site/review-route-${String(index).padStart(4, '0')}`
+    )
+  ].sort();
+  assert.match(
+    reviewHandoffProjectionErrors(tooManyUrls, 'independent', manifest).join('\n'),
+    /4096-URL limit/i
   );
 
   const malformed = structuredClone(projections);

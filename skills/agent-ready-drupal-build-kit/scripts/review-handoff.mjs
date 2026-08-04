@@ -39,6 +39,7 @@ const MAX_HANDOFF_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_HANDOFF_DEPTH = 12;
 const MAX_HANDOFF_JSON_DEPTH = 64;
 const MAX_HANDOFF_JSON_NODES = 10000;
+const PAGE_LIKE_COMPOSITION_ROUTE_ROLES = new Set(['homepage', 'landing', 'form', 'legal', 'other']);
 const SECRET_PATH_PATTERNS = [
   /(?:^|\/)\.env(?:\.|$)/i,
   /(?:^|\/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.netrc|\.npmrc)(?:[._-](?:bak|backup|copy|old|temp|tmp))?$/i,
@@ -371,6 +372,17 @@ function exactOrigin(value, label) {
   return url.origin;
 }
 
+function targetRouteUrl(value, targetOrigin, label) {
+  const targetPath = String(value ?? '').trim();
+  if (!targetPath.startsWith('/')) throw new Error(`${label} must start with /.`);
+  const targetUrl = credentialFreeUrl(new URL(targetPath, targetOrigin).href, label);
+  if (targetUrl.origin !== targetOrigin) {
+    throw new Error(`${label} must stay on the review-handoff target origin.`);
+  }
+  targetUrl.hash = '';
+  return targetUrl.href;
+}
+
 function uniqueStrings(values) {
   return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))].sort(comparePortable);
 }
@@ -389,10 +401,11 @@ function primaryRouteRows(routeMatrix, targetOrigin, buildMode, briefReference) 
     : '';
   return rows.map((route, index) => {
     const targetPath = String(route?.targetPath ?? '').trim();
-    if (!targetPath.startsWith('/')) {
-      throw new Error(`route-matrix.json primaryRoutes[${index}].targetPath must start with /.`);
-    }
-    const targetUrl = new URL(targetPath, targetOrigin).href;
+    const targetUrl = targetRouteUrl(
+      targetPath,
+      targetOrigin,
+      `route-matrix.json primaryRoutes[${index}].targetPath`
+    );
     const sourceTruthReference = buildMode === 'source_site'
       ? new URL(String(route?.sourcePath ?? '/'), sourceOrigin).href
       : briefReference;
@@ -406,6 +419,35 @@ function primaryRouteRows(routeMatrix, targetOrigin, buildMode, briefReference) 
     `${left.targetPath}\u0000${left.sourceTruthReference}`,
     `${right.targetPath}\u0000${right.sourceTruthReference}`
   ));
+}
+
+function requiredCompositionTargetUrls(routeMatrix, targetOrigin) {
+  const urls = new Set();
+  const rows = Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [];
+  for (const [index, route] of rows.entries()) {
+    const sourcePath = String(route?.sourcePath ?? '').trim();
+    const targetPath = String(route?.targetPath ?? '').trim();
+    if (
+      route?.accepted !== true ||
+      route?.expectedRedirect === true ||
+      !sourcePath ||
+      !targetPath ||
+      !PAGE_LIKE_COMPOSITION_ROUTE_ROLES.has(String(route?.routeRole ?? '').trim())
+    ) {
+      continue;
+    }
+    urls.add(targetRouteUrl(
+      targetPath,
+      targetOrigin,
+      `route-matrix.json routes[${index}].targetPath`
+    ));
+    if (urls.size > MAX_HANDOFF_ENTRIES) {
+      throw new Error(
+        `route-matrix.json requires more than ${MAX_HANDOFF_ENTRIES} independent composition-route URL inputs.`
+      );
+    }
+  }
+  return [...urls].sort(comparePortable);
 }
 
 function reviewOutputPath(packetPath) {
@@ -1047,6 +1089,9 @@ function allowedInputErrors(value, kind, path, manifest) {
     if (!Array.isArray(allowed.urls)) {
       errors.push(`${path}.urls must be an array.`);
     } else {
+      if (allowed.urls.length > MAX_HANDOFF_ENTRIES) {
+        errors.push(`${path}.urls exceeds the ${MAX_HANDOFF_ENTRIES}-URL limit.`);
+      }
       const normalized = new Set();
       for (const [index, url] of allowed.urls.entries()) {
         try { normalized.add(normalizedUrl(url, `${path}.urls[${index}]`)); } catch (error) { errors.push(error.message); }
@@ -1272,21 +1317,24 @@ function revalidateIndependentUrls({ manifest, projection, packetDir }) {
     const targetUrls = (Array.isArray(routeMatrix.primaryRoutes) ? routeMatrix.primaryRoutes : [])
       .map((route, index) => {
         const targetPath = String(route?.targetPath ?? '').trim();
-        if (!targetPath.startsWith('/')) {
-          throw new Error(`route-matrix.json primaryRoutes[${index}].targetPath must start with /.`);
-        }
-        return new URL(targetPath, targetOrigin).href;
+        return targetRouteUrl(
+          targetPath,
+          targetOrigin,
+          `route-matrix.json primaryRoutes[${index}].targetPath`
+        );
       });
+    const compositionTargetUrls = requiredCompositionTargetUrls(routeMatrix, targetOrigin);
     const expected = uniqueStrings([
       `${targetOrigin}/`,
       ...targetUrls,
+      ...compositionTargetUrls,
       `${targetOrigin}/admin`,
       ...(manifest.binding.buildMode === 'source_site'
         ? [`${exactOrigin(routeMatrix.sourceBaseUrl, 'route-matrix.json sourceBaseUrl')}/`]
         : [])
     ]);
     if (canonicalJson(projection?.allowedInputs?.urls) !== canonicalJson(expected)) {
-      errors.push('Independent review-handoff projection URLs do not exactly match the current target, admin, primary-route, and source input set.');
+      errors.push('Independent review-handoff projection URLs do not exactly match the current target, admin, primary-route, required composition-fidelity route, and source input set.');
     }
   } catch (error) {
     errors.push(error.message);
@@ -1410,6 +1458,33 @@ export function reviewHandoffReviewerErrors({
         independent.push(error.message);
       }
     }
+    const fidelityChecksValue = independentVerification?.compositionModelFidelityChecks;
+    if (fidelityChecksValue !== undefined && !Array.isArray(fidelityChecksValue)) {
+      independent.push('independent-verification.json compositionModelFidelityChecks must be an array.');
+    }
+    const fidelityChecks = Array.isArray(fidelityChecksValue) ? fidelityChecksValue : [];
+    if (fidelityChecks.length > MAX_HANDOFF_ENTRIES) {
+      independent.push(
+        `independent-verification.json compositionModelFidelityChecks exceeds the ${MAX_HANDOFF_ENTRIES}-entry handoff limit.`
+      );
+    } else {
+      for (const [index, check] of fidelityChecks.entries()) {
+        try {
+          const targetUrl = targetRouteUrl(
+            check?.targetRoute ?? check?.targetPath,
+            manifest.binding.targetOrigin,
+            `independent-verification.json compositionModelFidelityChecks[${index}] target route`
+          );
+          if (!allowedIndependentUrls.has(targetUrl)) {
+            independent.push(
+              `independent-verification.json compositionModelFidelityChecks[${index}] target route is not an allowed handoff URL.`
+            );
+          }
+        } catch (error) {
+          independent.push(error.message);
+        }
+      }
+    }
   }
 
   if (blind.length === 0) blind.push(...referenceErrors(blindReview, manifest, 'blind-adversarial-review.json'));
@@ -1531,13 +1606,18 @@ export function buildReviewHandoff({
   const brief = briefInput(projectRoot, packetDir, buildInput, blindReview?.reviewInputs);
   const routes = primaryRouteRows(routeMatrix, binding.targetOrigin, buildInput.mode, brief.reference);
   const targetUrls = uniqueStrings(routes.map((route) => route.targetUrl));
+  const compositionTargetUrls = requiredCompositionTargetUrls(routeMatrix, binding.targetOrigin);
   const materials = sourceTruthMaterials(projectRoot, packetDir, buildInput, routeMatrix, blindReview?.reviewInputs, brief);
   const independentUrls = uniqueStrings([
     `${binding.targetOrigin}/`,
     ...targetUrls,
+    ...compositionTargetUrls,
     `${binding.targetOrigin}/admin`,
     ...(buildInput.mode === 'source_site' ? [`${exactOrigin(routeMatrix.sourceBaseUrl, 'sourceBaseUrl')}/`] : [])
   ]);
+  if (independentUrls.length > MAX_HANDOFF_ENTRIES) {
+    throw new Error(`Independent review handoff exceeds the ${MAX_HANDOFF_ENTRIES}-URL limit.`);
+  }
 
   const extraPacketPaths = [
     brief.kind === 'packet_file' ? brief.reference : '',

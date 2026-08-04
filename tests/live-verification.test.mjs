@@ -76,6 +76,7 @@ const templatesDir = join(repoRoot, 'templates');
 const testSiteUuid = '11111111-1111-4111-8111-111111111111';
 const testCheckedAt = new Date().toISOString();
 const canvasDigest = (seed) => `sha256:${seed.repeat(64)}`;
+const pageLikeCompositionRouteRoles = new Set(['homepage', 'landing', 'form', 'legal', 'other']);
 
 function canvasCapabilityInventory({
   status = 'available',
@@ -2463,6 +2464,15 @@ function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
     targetPath: route.targetPath,
     targetUrl: new URL(route.targetPath, targetOrigin).href
   }));
+  const compositionTargetUrls = (routeMatrix.routes ?? [])
+    .filter((route) =>
+      route?.accepted === true &&
+      route?.expectedRedirect !== true &&
+      String(route?.sourcePath ?? '').trim() &&
+      String(route?.targetPath ?? '').trim() &&
+      pageLikeCompositionRouteRoles.has(String(route?.routeRole ?? '').trim())
+    )
+    .map((route) => new URL(route.targetPath, targetOrigin).href);
   const excludedBlindInputs = [
     'implementation files',
     'review packet before public or artifact review',
@@ -2549,6 +2559,7 @@ function attachFixtureReviewHandoff(packetDir, targetBaseUrl) {
         urls: [...new Set([
           `${targetOrigin}/`,
           ...primaryRoutes.map((route) => route.targetUrl),
+          ...compositionTargetUrls,
           `${targetOrigin}/admin`,
           ...(buildInput.mode === 'source_site'
             ? [`${new URL(routeMatrix.sourceBaseUrl).origin}/`]

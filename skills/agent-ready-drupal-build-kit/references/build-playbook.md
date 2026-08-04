@@ -107,7 +107,7 @@ The builder's self-review is useful, but it is not enough to close the rebuild. 
 
 Use the strongest separation the runtime supports: a subagent, a new agent context, a review-only task, or a clearly separated skeptic checklist that reads only the operating guide, live target URLs, credentials needed for editor checks, and the packet. The verifier should not rely on the builder's prose summary as evidence. If the runtime cannot create a separate context, record that as degraded independence rather than treating it as the same confidence level.
 
-The verifier must emit `review-packet/independent-verification.json`. At minimum it should check:
+The verifier must emit `review-packet/independent-verification.json`. The generated independent handoff admits every primary target URL plus every accepted non-redirect page-like route that requires composition-fidelity evidence, and each composition-fidelity row must name a target route inside that exact URL set. This does not widen the blind reviewer’s desktop/mobile route floor beyond `primaryRoutes`. At minimum the independent verifier should check:
 
 - source and target item counts for every declared collection ledger row, with equality unless a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested, and private/unreachable items need boundary evidence;
 - Drupal ownership and non-admin editor add-a-row evidence for every declared list, grid, schedule, directory, archive, catalog, feed, gallery, or search-like route;
