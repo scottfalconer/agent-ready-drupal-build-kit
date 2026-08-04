@@ -2913,6 +2913,15 @@ function captureRouteIndex(capture) {
   ]));
 }
 
+function captureRouteLookupPath(route, capture, index, viewportName) {
+  const normalized = normalizeRoute(route);
+  const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
+    capture?.queryPrivacy?.method === 'sha256' &&
+    capture?.queryPrivacy?.authoritative === true;
+  if (!privacyBound || index.has(`${normalized}\0${viewportName}`)) return normalized;
+  return privacyPreservingRoute(normalized);
+}
+
 const GENERIC_FONT_FAMILIES = new Set([
   'cursive',
   'emoji',
@@ -2997,8 +3006,8 @@ export function compareComputedStyleShadow({
     const targetPath = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
     const routeFingerprint = sha256({ sourcePath, targetPath });
     for (const viewport of VIEWPORTS) {
-      const sourceRoute = sourceIndex.get(`${sourcePath}\0${viewport.name}`);
-      const targetRoute = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const sourceRoute = sourceIndex.get(`${captureRouteLookupPath(sourcePath, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const targetRoute = targetIndex.get(`${captureRouteLookupPath(targetPath, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const sourceEvidencePresent = Boolean(
         sourceRoute?.signals && Object.hasOwn(sourceRoute.signals, 'computedStyleEvidence')
       );
@@ -3208,14 +3217,6 @@ export function compareVerifierOwnedVisualFloor({
   const publicFormControlFindings = [];
   const errors = [];
   let protectedFindingCount = 0;
-  const captureLookupPath = (route, capture, index, viewportName) => {
-    const normalized = normalizeRoute(route);
-    const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
-      capture?.queryPrivacy?.method === 'sha256' &&
-      capture?.queryPrivacy?.authoritative === true;
-    if (!privacyBound || index.has(`${normalized}\0${viewportName}`)) return normalized;
-    return privacyPreservingRoute(normalized);
-  };
   const publicFormRoutePairs = new Set((Array.isArray(publicFormControlRoutes)
     ? publicFormControlRoutes
     : []).map((route) => (
@@ -3229,12 +3230,12 @@ export function compareVerifierOwnedVisualFloor({
   for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
     const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
     const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
-    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
-    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    const sourcePath = captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureRouteLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
     const publicFormEvidenceRequired = publicFormRoutePairs.has(`${sourceRequest}\0${targetRequest}`);
     for (const viewport of VIEWPORTS) {
-      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
-      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const source = sourceIndex.get(`${captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureRouteLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const routeErrors = [];
       const deficits = [];
       const decisiveDeficits = [];
@@ -3402,11 +3403,11 @@ export function compareVerifierOwnedVisualFloor({
   for (const route of additionalPublicFormRoutes) {
     const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
     const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
-    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
-    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    const sourcePath = captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureRouteLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
     for (const viewport of VIEWPORTS) {
-      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
-      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const source = sourceIndex.get(`${captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureRouteLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const routeErrors = [];
       const sourceProtection = source?.signals?.protection ?? {};
       const protectedSource = sourceProtection.detected === true;

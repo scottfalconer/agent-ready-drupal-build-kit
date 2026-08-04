@@ -1191,6 +1191,43 @@ test('computed-style shadow keeps a desktop-only oversized H1 scoped to that vie
   assert.ok(!mobile.diagnostics.some((diagnostic) => diagnostic.code === 'extreme-font-size-ratio'));
 });
 
+test('computed-style shadow resolves raw and already-finalized exact-query capture identities', () => {
+  const rawRoute = '/course-search?kind=summer&campus=budapest';
+  const finalizedRoute = `/course-search?query-sha256=${sha256('?kind=summer&campus=budapest').slice('sha256:'.length)}`;
+  const finalizedCapture = (origin, hashSeed) => {
+    const capture = attachComputedStyles(
+      visualFloorCapture({
+        origin,
+        hashSeed,
+        structure: composedStructure,
+        path: finalizedRoute
+      }),
+      () => completeComputedStyleEvidence()
+    );
+    capture.queryPrivacy = {
+      schemaVersion: 'public-kit.query-privacy.1',
+      method: 'sha256',
+      authoritative: true
+    };
+    return capture;
+  };
+  const sourceCapture = finalizedCapture('https://source.example', 'a');
+  const targetCapture = finalizedCapture('https://target.example', 'b');
+
+  for (const route of [rawRoute, finalizedRoute]) {
+    const shadow = compareComputedStyleShadow({
+      sourceCapture,
+      targetCapture,
+      primaryRoutes: [{ sourcePath: route, targetPath: route }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(shadow.status, 'observed');
+    assert.equal(shadow.comparisonCount, 2);
+    assert.equal(shadow.insufficientEvidenceCount, 0);
+    assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.length === 0));
+  }
+});
+
 test('computed-style shadow reports a source web font that is computed but unloaded on target', () => {
   const sourceCapture = attachComputedStyles(
     visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
