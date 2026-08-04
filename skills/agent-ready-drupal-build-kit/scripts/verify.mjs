@@ -2197,17 +2197,24 @@ function acceptedCollectionPaginationContracts(patternMap = {}, routeMatrix = {}
     .filter((ledger) => ledger?.accepted === true && ledger?.pagination?.accepted === true)
     .map((ledger) => {
       const sourceInitialRequest = requestPathAndSearch(ledger?.sourceRoute);
-      const route = routeRows.find((candidate) =>
-        requestPathAndSearch(candidate?.sourcePath) === sourceInitialRequest
-      );
+      const targetInitialRequests = new Set(routeRows
+        .filter((candidate) => requestPathAndSearch(candidate?.sourcePath) === sourceInitialRequest)
+        .map((candidate) => requestPathAndSearch(candidate?.targetPath))
+        .filter(Boolean));
+      const label = String(ledger?.sourceObject ?? '').trim() ||
+        redactedRequest(sourceInitialRequest) || 'accepted collection';
+      const mappingError = targetInitialRequests.size === 1
+        ? ''
+        : `Accepted collection ${label} exact source request must map to exactly one target request in route-matrix.json; found ${targetInitialRequests.size}.`;
       return {
-        label: String(ledger?.sourceObject || ledger?.sourceRoute || 'accepted collection').trim(),
+        label,
+        mappingError,
         sourceInitialRequest,
         sourceMode: String(ledger?.pagination?.sourceMode ?? '').trim(),
         sourceContinuationKind: String(ledger?.pagination?.sourceContinuationKind ?? '').trim(),
         sourceContinuationRequest: requestPathAndSearch(ledger?.pagination?.sourceContinuationRequest),
         sourceContinuationStateId: String(ledger?.pagination?.sourceContinuationStateId ?? '').trim(),
-        targetInitialRequest: requestPathAndSearch(route?.targetPath),
+        targetInitialRequest: targetInitialRequests.size === 1 ? [...targetInitialRequests][0] : '',
         targetMode: String(ledger?.pagination?.targetMode ?? '').trim(),
         targetContinuationKind: String(ledger?.pagination?.targetContinuationKind ?? '').trim(),
         targetContinuationRequest: requestPathAndSearch(ledger?.pagination?.targetContinuationRequest),
@@ -5329,10 +5336,17 @@ export function collectionPaginationTargetRoutePlan(
   routeMatrix = {},
   alreadyScheduledRequests = []
 ) {
-  const contracts = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
+  const candidates = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
     .filter((contract) => contract.targetMode !== 'none' && contract.targetContinuationKind === 'request');
-  if (contracts.length > MAX_COLLECTION_PAGINATION_CHECKS) {
-    return { contractCount: contracts.length, requests: [], withinLimit: false };
+  const errors = candidates.map((contract) => contract.mappingError).filter(Boolean);
+  const contracts = candidates.filter((contract) => !contract.mappingError);
+  if (candidates.length > MAX_COLLECTION_PAGINATION_CHECKS) {
+    return {
+      contractCount: candidates.length,
+      errors,
+      requests: [],
+      withinLimit: false
+    };
   }
   const scheduled = new Set(
     (Array.isArray(alreadyScheduledRequests) ? alreadyScheduledRequests : [])
@@ -5349,7 +5363,7 @@ export function collectionPaginationTargetRoutePlan(
       requests.push(request);
     }
   }
-  return { contractCount: contracts.length, requests, withinLimit: true };
+  return { contractCount: candidates.length, errors, requests, withinLimit: true };
 }
 
 export function collectionPaginationLiveResponseChecks(
@@ -5357,16 +5371,20 @@ export function collectionPaginationLiveResponseChecks(
   routeMatrix = {},
   liveRouteChecks = []
 ) {
-  const contracts = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
+  const candidates = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
     .filter((contract) => contract.targetMode !== 'none');
-  if (contracts.length > MAX_COLLECTION_PAGINATION_CHECKS) {
+  const errors = candidates.map((contract) => contract.mappingError).filter(Boolean);
+  const contracts = candidates.filter((contract) => !contract.mappingError);
+  if (candidates.length > MAX_COLLECTION_PAGINATION_CHECKS) {
     return {
       checks: [],
-      errors: [`Target collection pagination requires ${contracts.length} checks, exceeding the ${MAX_COLLECTION_PAGINATION_CHECKS} collection limit.`]
+      errors: [
+        ...errors,
+        `Target collection pagination requires ${candidates.length} checks, exceeding the ${MAX_COLLECTION_PAGINATION_CHECKS} collection limit.`
+      ]
     };
   }
   const checks = [];
-  const errors = [];
   for (const contract of contracts) {
     if (contract.targetContinuationKind === 'browser_interaction') {
       checks.push({

@@ -407,6 +407,7 @@ test('a valid non-primary collection schedules both exact target states in the s
     collectionPaginationTargetRoutePlan(patternMap, routeMatrix, ['/']),
     {
       contractCount: 1,
+      errors: [],
       requests: ['/events', '/events?page=1'],
       withinLimit: true
     }
@@ -415,6 +416,25 @@ test('a valid non-primary collection schedules both exact target states in the s
     collectionPaginationTargetRoutePlan(patternMap, routeMatrix, ['/', '/events?page=1']).requests,
     ['/events']
   );
+
+  const ambiguousRouteMatrix = structuredClone(routeMatrix);
+  ambiguousRouteMatrix.routes.push({
+    sourcePath: '/events',
+    targetPath: '/alternate-events',
+    targetStatus: 200,
+    accepted: true
+  });
+  const ambiguousPlan = collectionPaginationTargetRoutePlan(patternMap, ambiguousRouteMatrix, ['/']);
+  assert.deepEqual(ambiguousPlan.requests, []);
+  assert.match(ambiguousPlan.errors.join('\n'), /must map to exactly one target request.*found 2/i);
+
+  const ambiguousChecks = collectionPaginationLiveResponseChecks(
+    patternMap,
+    ambiguousRouteMatrix,
+    []
+  );
+  assert.deepEqual(ambiguousChecks.checks, []);
+  assert.match(ambiguousChecks.errors.join('\n'), /must map to exactly one target request.*found 2/i);
 });
 
 test('collection packet records bind to exact same-path query variants', () => {

@@ -12328,6 +12328,83 @@ test('collection pagination route tasks use exact same-path query route rows', a
   );
 });
 
+test('live pagination planning rejects an ambiguous exact source mapping without scheduling a target', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(request.url === '/events?page=1'
+        ? '<!doctype html><html><head><title>Events</title></head><body><h1>Events</h1><article>Next batch</article></body></html>'
+        : fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'pagination-ambiguous-live-mapping-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/source-events',
+          targetPath: '/events',
+          routeRole: 'listing',
+          targetStatus: 200,
+          targetFinalPath: '/events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'First conflicting mapping.'
+        },
+        {
+          sourcePath: '/source-events',
+          targetPath: '/alternate-events',
+          routeRole: 'listing',
+          targetStatus: 200,
+          targetFinalPath: '/alternate-events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Second conflicting mapping.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+        patternMap.structuredContentModel.collectionOwnershipLedger = [{
+          sourceRoute: '/source-events',
+          sourceObject: 'Event',
+          accepted: true,
+          pagination: {
+            sourceMode: 'paged',
+            sourceContinuationKind: 'request',
+            sourceContinuationRequest: '/source-events?page=1',
+            sourceContinuationStateId: '',
+            targetMode: 'paged',
+            targetContinuationKind: 'request',
+            targetContinuationRequest: '/events?page=1',
+            targetContinuationStateId: '',
+            accepted: true
+          }
+        }];
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.liveRouteBudget.routeCount, 2);
+      assert.deepEqual(report.collectionPaginationLiveResponses.checks, []);
+      assert.match(
+        report.collectionPaginationLiveResponses.errors.join('\n'),
+        /must map to exactly one target request.*found 2/i
+      );
+    }
+  );
+});
+
 test('generated missing-route verification rejects soft 404s, unrelated canonicals, and missing noindex', async () => {
   const cases = [
     {
