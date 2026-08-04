@@ -106,6 +106,7 @@ const MAX_LIVE_HTTP_REQUESTS = 2_000;
 const MAX_LIVE_HTTP_TASKS = 20_000;
 const LIVE_ROUTE_DEADLINE_MS = 90_000;
 const MAX_LIVE_TARGET_ROUTES = 8_192;
+const MAX_COLLECTION_PAGINATION_CHECKS = 256;
 const LIVE_TARGET_BUDGET_ERROR_PATTERN =
   /Live route verification (?:exhausted its \d+ (?:HTTP request|task) budget|exceeded its total wall-clock deadline|requires \d+ checks, exceeding the \d+ route limit)/i;
 export const SOURCE_SURFACE_LIMITS = Object.freeze({
@@ -402,6 +403,8 @@ export function verifierFingerprint({ kitRoot = KIT_ROOT, scriptPath = SCRIPT_PA
 
 const REDACTED_QUERY_TOKEN_RE = /^\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000$/;
 const REDACTED_QUERY_TOKEN_GLOBAL_RE = /\?\u0000agent-ready-query-sha256:([a-f0-9]{64})\u0000/g;
+const LIVE_ROUTE_REQUEST = Symbol('live-route-request');
+const LIVE_ROUTE_FINAL_REQUEST = Symbol('live-route-final-request');
 
 function redactedQuery(value) {
   const query = String(value ?? '');
@@ -550,6 +553,11 @@ function redactedPath(value, baseUrl) {
   } catch {
     return '[invalid-path]';
   }
+}
+
+function redactedRequest(value) {
+  const request = requestPathAndSearch(value);
+  return request ? redactedPath(request, 'https://route-key.invalid/') : '';
 }
 
 function redactQueryValuesInMessage(value) {
@@ -2178,11 +2186,187 @@ export function formatSourceSurfaceProgress(event = {}) {
   return parts.join(' ');
 }
 
+function acceptedCollectionPaginationContracts(patternMap = {}, routeMatrix = {}) {
+  const routeRows = [
+    ...(Array.isArray(routeMatrix?.primaryRoutes) ? routeMatrix.primaryRoutes : []),
+    ...(Array.isArray(routeMatrix?.routes) ? routeMatrix.routes : [])
+  ];
+  return (Array.isArray(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+    ? patternMap.structuredContentModel.collectionOwnershipLedger
+    : [])
+    .filter((ledger) => ledger?.accepted === true && ledger?.pagination?.accepted === true)
+    .map((ledger) => {
+      const sourceInitialRequest = requestPathAndSearch(ledger?.sourceRoute);
+      const targetInitialRequests = new Set(routeRows
+        .filter((candidate) => requestPathAndSearch(candidate?.sourcePath) === sourceInitialRequest)
+        .map((candidate) => requestPathAndSearch(candidate?.targetPath))
+        .filter(Boolean));
+      const label = String(ledger?.sourceObject ?? '').trim() ||
+        redactedRequest(sourceInitialRequest) || 'accepted collection';
+      const mappingError = targetInitialRequests.size === 1
+        ? ''
+        : `Accepted collection ${label} exact source request must map to exactly one target request in route-matrix.json; found ${targetInitialRequests.size}.`;
+      return {
+        label,
+        mappingError,
+        sourceInitialRequest,
+        sourceMode: String(ledger?.pagination?.sourceMode ?? '').trim(),
+        sourceContinuationKind: String(ledger?.pagination?.sourceContinuationKind ?? '').trim(),
+        sourceContinuationRequest: requestPathAndSearch(ledger?.pagination?.sourceContinuationRequest),
+        sourceContinuationStateId: String(ledger?.pagination?.sourceContinuationStateId ?? '').trim(),
+        targetInitialRequest: targetInitialRequests.size === 1 ? [...targetInitialRequests][0] : '',
+        targetMode: String(ledger?.pagination?.targetMode ?? '').trim(),
+        targetContinuationKind: String(ledger?.pagination?.targetContinuationKind ?? '').trim(),
+        targetContinuationRequest: requestPathAndSearch(ledger?.pagination?.targetContinuationRequest),
+        targetContinuationStateId: String(ledger?.pagination?.targetContinuationStateId ?? '').trim()
+      };
+    });
+}
+
+function liveResponseSemanticDistinctness(initial, continuation) {
+  const initialSemantics = initial?.intrinsicSemantics ?? {};
+  const continuationSemantics = continuation?.intrinsicSemantics ?? {};
+  const bodyDistinct = Boolean(initial?.bodySha256) && Boolean(continuation?.bodySha256) &&
+    initial.bodySha256 !== continuation.bodySha256;
+  const visibleTextDistinct = Boolean(initialSemantics.visibleTextSha256) &&
+    Boolean(continuationSemantics.visibleTextSha256) &&
+    initialSemantics.visibleTextSha256 !== continuationSemantics.visibleTextSha256;
+  const mediaDistinct = Boolean(initialSemantics.mediaTargetsSha256) &&
+    Boolean(continuationSemantics.mediaTargetsSha256) &&
+    initialSemantics.mediaTargetsSha256 !== continuationSemantics.mediaTargetsSha256;
+  return {
+    bodyDistinct,
+    mediaDistinct,
+    semanticallyDistinct: bodyDistinct && (visibleTextDistinct || mediaDistinct),
+    visibleTextDistinct
+  };
+}
+
+function successfulCollectionLiveResponse(check) {
+  const finalStatus = Number(check?.finalStatus);
+  const semantics = check?.intrinsicSemantics ?? {};
+  const exactSha256 = (value) => /^sha256:[a-f0-9]{64}$/.test(String(value ?? ''));
+  return check?.passed === true &&
+    Number.isInteger(finalStatus) && finalStatus >= 200 && finalStatus < 300 &&
+    exactSha256(check?.bodySha256) &&
+    exactSha256(semantics.visibleTextSha256) &&
+    exactSha256(semantics.mediaTargetsSha256);
+}
+
+async function inspectSourcePaginationContinuations({
+  context,
+  maxBodyBytes,
+  patternMap,
+  routeMatrix,
+  sourceBaseUrl
+}) {
+  const contracts = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
+    .filter((contract) => contract.sourceMode !== 'none');
+  if (contracts.length > MAX_COLLECTION_PAGINATION_CHECKS) {
+    return {
+      checks: [],
+      errors: [`Source collection pagination requires ${contracts.length} checks, exceeding the ${MAX_COLLECTION_PAGINATION_CHECKS} collection limit.`]
+    };
+  }
+  const checks = [];
+  const errors = [];
+  for (const contract of contracts) {
+    if (contract.sourceContinuationKind === 'browser_interaction') {
+      checks.push({
+        authority: 'self_attested_capture_evidence',
+        label: contract.label,
+        liveResponseChecked: false,
+        sourceContinuationKind: contract.sourceContinuationKind,
+        sourceContinuationStateId: contract.sourceContinuationStateId,
+        status: 'packet_authored_js_only'
+      });
+      continue;
+    }
+    const checkErrors = [];
+    let initial = null;
+    let continuation = null;
+    try {
+      [initial, continuation] = await context.runTasks(
+        'source-pagination-response',
+        [contract.sourceInitialRequest, contract.sourceContinuationRequest],
+        async (request) => {
+          const response = await requestFollowingRedirects(new URL(request, sourceBaseUrl), {
+            liveHttpContext: context,
+            maxBodyBytes
+          });
+          return {
+            bodySha256: `sha256:${sha256(response.body)}`,
+            finalRequest: requestPathAndSearch(response.finalUrl),
+            finalStatus: response.status,
+            intrinsicSemantics: intrinsicRouteSemantics(response.body, response.finalUrl),
+            request
+          };
+        }
+      );
+    } catch (error) {
+      checkErrors.push(`Source continuation for ${contract.label} could not be fetched within the verifier-owned source budget: ${error.message}`);
+    }
+    if (initial && continuation) {
+      if (initial.finalStatus < 200 || initial.finalStatus >= 300) {
+        checkErrors.push(`Source collection ${contract.label} initial request returned HTTP ${initial.finalStatus}.`);
+      }
+      if (continuation.finalStatus < 200 || continuation.finalStatus >= 300) {
+        checkErrors.push(`Source collection ${contract.label} continuation request returned HTTP ${continuation.finalStatus}.`);
+      }
+      if (
+        !initial.finalRequest ||
+        !continuation.finalRequest ||
+        initial.finalRequest === continuation.finalRequest
+      ) {
+        checkErrors.push(`Source collection ${contract.label} initial and continuation requests must resolve to distinct final requests.`);
+      }
+      if (continuation.finalRequest !== contract.sourceContinuationRequest) {
+        checkErrors.push(`Source collection ${contract.label} continuation resolved to a different final request than its exact declared continuation binding.`);
+      }
+      const distinctness = liveResponseSemanticDistinctness(initial, continuation);
+      if (!distinctness.semanticallyDistinct) {
+        checkErrors.push(`Source collection ${contract.label} exact continuation request did not produce a verifier-owned response with distinct visible-text or media semantics.`);
+      }
+      checks.push({
+        authority: 'verifier-owned-source-http',
+        initial: {
+          ...initial,
+          finalRequest: redactedRequest(initial.finalRequest),
+          request: redactedRequest(initial.request)
+        },
+        continuation: {
+          ...continuation,
+          finalRequest: redactedRequest(continuation.finalRequest),
+          request: redactedRequest(continuation.request)
+        },
+        ...distinctness,
+        errors: checkErrors,
+        label: contract.label,
+        liveResponseChecked: true,
+        passed: checkErrors.length === 0,
+        sourceContinuationKind: contract.sourceContinuationKind
+      });
+    } else {
+      checks.push({
+        authority: 'verifier-owned-source-http',
+        errors: checkErrors,
+        label: contract.label,
+        liveResponseChecked: true,
+        passed: false,
+        sourceContinuationKind: contract.sourceContinuationKind
+      });
+    }
+    errors.push(...checkErrors);
+  }
+  return { checks, errors };
+}
+
 export async function inspectSourceSurface({
   independentVerification = {},
   limits = {},
   liveHttpContext = null,
   onProgress = null,
+  patternMap = {},
   routeMatrix = {}
 } = {}) {
   const checkedAt = new Date().toISOString();
@@ -2463,6 +2647,21 @@ export async function inspectSourceSurface({
       );
     }
   }
+  let sourcePagination = { checks: [], errors: [] };
+  if (primaryPhaseCompleted) {
+    try {
+      sourcePagination = await inspectSourcePaginationContinuations({
+        context,
+        maxBodyBytes: effectiveLimits.maxBodyBytes,
+        patternMap,
+        routeMatrix,
+        sourceBaseUrl
+      });
+      errors.push(...sourcePagination.errors);
+    } catch (error) {
+      errors.push(`Verifier-owned source continuation inspection could not complete: ${error.message}`);
+    }
+  }
   emitProgress('discovery', primaryPhaseCompleted ? 'started' : 'blocked', { force: true });
 
   let robots = null;
@@ -2637,6 +2836,7 @@ export async function inspectSourceSurface({
   })).sort((left, right) => comparePortable(left.requestedUrl, right.requestedUrl));
   const fingerprintInput = {
     sourceOrigin: sourceBaseUrl.origin,
+    sourcePaginationChecks: sourcePagination.checks,
     routes: routeRecords.map(({ errors: _errors, ...record }) => record),
     sitemaps: sitemapRecords,
     robots
@@ -2648,6 +2848,7 @@ export async function inspectSourceSurface({
     status: errors.length === 0 ? 'passed' : 'blocked',
     authoritative: true,
     sourceOrigin: sourceBaseUrl.origin,
+    collectionPaginationChecks: sourcePagination.checks,
     routes: routeRecords,
     sitemaps: sitemapRecords,
     robots,
@@ -3789,6 +3990,123 @@ foreach ($config_factory->listAll('block.block.') as $block_config_name) {
     $public_menus[substr($plugin, strlen('system_menu_block:'))] = TRUE;
   }
 }
+$layout_display_config_names = $config_factory->listAll('core.entity_view_display.');
+sort($layout_display_config_names, SORT_STRING);
+$layout_display_count = 0;
+$layout_component_count = 0;
+foreach ($layout_display_config_names as $layout_display_config_name) {
+  $display_config = $config_factory->get($layout_display_config_name)->getRawData();
+  $entity_type_id = (string) ($display_config['targetEntityType'] ?? '');
+  $bundle = (string) ($display_config['bundle'] ?? '');
+  if (
+    $entity_type_id === '' ||
+    $bundle === '' ||
+    ($display_config['status'] ?? FALSE) !== TRUE ||
+    !in_array($bundle, $public_editorial_roots[$entity_type_id] ?? [], TRUE)
+  ) {
+    continue;
+  }
+  $layout_builder = is_array($display_config['third_party_settings']['layout_builder'] ?? NULL)
+    ? $display_config['third_party_settings']['layout_builder']
+    : [];
+  if (($layout_builder['enabled'] ?? FALSE) !== TRUE) {
+    continue;
+  }
+  $layout_display_count++;
+  if ($layout_display_count > $surface_limit) {
+    $truncated = TRUE;
+    break;
+  }
+  $layout_sections = is_array($layout_builder['sections'] ?? NULL) ? $layout_builder['sections'] : [];
+  foreach ($layout_sections as $section) {
+    $layout_components = is_array($section['components'] ?? NULL) ? $section['components'] : [];
+    foreach ($layout_components as $component) {
+      $layout_component_count++;
+      if ($layout_component_count > $surface_limit) {
+        $truncated = TRUE;
+        break 3;
+      }
+      $plugin = (string) ($component['configuration']['id'] ?? '');
+      if (str_starts_with($plugin, 'views_block:')) {
+        $public_view_blocks[substr($plugin, strlen('views_block:'))] = TRUE;
+      }
+    }
+  }
+}
+$anonymous_user = new \Drupal\Core\Session\AnonymousUserSession();
+$layout_override_entity_count = 0;
+$account_switcher = \Drupal::service('account_switcher');
+$account_switcher->switchTo($anonymous_user);
+try {
+  foreach ($public_editorial_roots as $entity_type_id => $bundles) {
+    $definition = $definitions[$entity_type_id] ?? NULL;
+    if (!($definition instanceof \Drupal\Core\Entity\ContentEntityTypeInterface)) {
+      continue;
+    }
+    $bundle_key = (string) ($definition->getKey('bundle') ?? '');
+    $id_key = (string) ($definition->getKey('id') ?? '');
+    $status_key = (string) ($definition->getKey('status') ?? '');
+    if ($bundle_key === '' || $id_key === '') {
+      continue;
+    }
+    foreach ($bundles as $bundle) {
+      $field_definitions = \Drupal::service('entity_field.manager')->getFieldDefinitions($entity_type_id, $bundle);
+      if (!isset($field_definitions['layout_builder__layout'])) {
+        continue;
+      }
+      $remaining = $surface_limit - $layout_override_entity_count;
+      if ($remaining <= 0) {
+        $truncated = TRUE;
+        break 2;
+      }
+      try {
+        $query = $manager->getStorage($entity_type_id)->getQuery()
+          ->accessCheck(TRUE)
+          ->condition($bundle_key, $bundle)
+          ->exists('layout_builder__layout')
+          ->sort($id_key)
+          ->range(0, $remaining + 1);
+        if ($status_key !== '') {
+          $query->condition($status_key, TRUE);
+        }
+        $ids = array_values($query->execute());
+        if (count($ids) > $remaining) {
+          $truncated = TRUE;
+          $ids = array_slice($ids, 0, $remaining);
+        }
+        foreach ($manager->getStorage($entity_type_id)->loadMultiple($ids) as $entity) {
+          $layout_override_entity_count++;
+          if (!$entity->access('view', $anonymous_user, TRUE)->isAllowed() || !$entity->hasField('layout_builder__layout')) {
+            continue;
+          }
+          $layout_field = $entity->get('layout_builder__layout');
+          if (!method_exists($layout_field, 'getSections')) {
+            continue;
+          }
+          foreach ($layout_field->getSections() as $section) {
+            foreach ($section->getComponents() as $component) {
+              $layout_component_count++;
+              if ($layout_component_count > $surface_limit) {
+                $truncated = TRUE;
+                break 5;
+              }
+              $plugin = (string) $component->getPluginId();
+              if (str_starts_with($plugin, 'views_block:')) {
+                $public_view_blocks[substr($plugin, strlen('views_block:'))] = TRUE;
+              }
+            }
+          }
+        }
+      }
+      catch (\Throwable) {
+        $errors[] = 'Public Layout Builder override inspection failed for ' . $entity_type_id . '.' . $bundle . '.';
+      }
+    }
+  }
+}
+finally {
+  $account_switcher->switchBack();
+}
 foreach ($config_factory->listAll('canvas.component.block.views_block.') as $component_config_name) {
   $public_view_blocks[substr($component_config_name, strlen('canvas.component.block.views_block.'))] = TRUE;
 }
@@ -3807,6 +4125,19 @@ foreach ($config_factory->listAll('views.view.') as $config_name) {
       continue;
     }
     $options = is_array($display['display_options'] ?? NULL) ? $display['display_options'] : [];
+    $display_defaults = is_array($options['defaults'] ?? NULL) ? $options['defaults'] : [];
+    $pager_inherited = !array_key_exists('pager', $options) || (($display_defaults['pager'] ?? TRUE) !== FALSE);
+    $pager = $pager_inherited
+      ? (is_array($default_options['pager'] ?? NULL) ? $default_options['pager'] : [])
+      : (is_array($options['pager'] ?? NULL) ? $options['pager'] : []);
+    $pager_options = is_array($pager['options'] ?? NULL) ? $pager['options'] : [];
+    $pager_type = (string) ($pager['type'] ?? 'none');
+    $pager_items_per_page = is_numeric($pager_options['items_per_page'] ?? NULL)
+      ? (int) $pager_options['items_per_page']
+      : 0;
+    $pager_offset = is_numeric($pager_options['offset'] ?? NULL)
+      ? (int) $pager_options['offset']
+      : 0;
     $path = $normalize_path($options['path'] ?? '');
     $access = is_array($options['access'] ?? NULL)
       ? $options['access']
@@ -3826,6 +4157,12 @@ foreach ($config_factory->listAll('views.view.') as $config_name) {
       'displayId' => (string) $display_id,
       'displayPlugin' => $display_plugin,
       'path' => $path,
+      'pager' => [
+        'inheritedFromDefault' => $pager_inherited,
+        'itemsPerPage' => $pager_items_per_page,
+        'offset' => $pager_offset,
+        'type' => $pager_type,
+      ],
       'publicSurface' => $public_surface,
       'routeName' => $path !== '' ? 'view.' . $view_id . '.' . $display_id : '',
       'viewId' => $view_id,
@@ -4941,6 +5278,235 @@ export function canvasAvailabilityReconciliationErrors(patternMap = {}, runtimeA
     errors.push(
       `Build type ${buildType} requires a confirmed authorable Canvas runtime; use the constrained fallback only when the verifier confirms Canvas is absent.`
     );
+  }
+  return errors;
+}
+
+export function effectiveViewPager(view = {}, displayId = '') {
+  const displays = view?.display && typeof view.display === 'object' && !Array.isArray(view.display)
+    ? view.display
+    : {};
+  const defaultOptions = displays?.default?.display_options && typeof displays.default.display_options === 'object'
+    ? displays.default.display_options
+    : {};
+  const options = displays?.[displayId]?.display_options && typeof displays[displayId].display_options === 'object'
+    ? displays[displayId].display_options
+    : {};
+  const defaults = options?.defaults && typeof options.defaults === 'object' ? options.defaults : {};
+  const inheritedFromDefault = !Object.hasOwn(options, 'pager') || defaults.pager !== false;
+  const pager = inheritedFromDefault ? defaultOptions.pager : options.pager;
+  const pagerOptions = pager?.options && typeof pager.options === 'object' ? pager.options : {};
+  const itemsPerPage = Number(pagerOptions.items_per_page ?? 0);
+  const offset = Number(pagerOptions.offset ?? 0);
+  return {
+    inheritedFromDefault,
+    itemsPerPage: Number.isSafeInteger(itemsPerPage) ? itemsPerPage : null,
+    offset: Number.isSafeInteger(offset) ? offset : null,
+    type: String(pager?.type ?? 'none')
+  };
+}
+
+function livePagerBehaviorMode(type) {
+  const plugin = String(type ?? '').trim().toLowerCase();
+  if (['full', 'mini'].includes(plugin)) return 'paged';
+  if (plugin === 'none') return 'none';
+  if (plugin === 'some') return 'fixed_limit';
+  if (/(?:^|_)load_?more(?:_|$)|show_?more/.test(plugin)) return 'load_more';
+  if (/infinite/.test(plugin)) return 'infinite_scroll';
+  return 'unknown';
+}
+
+function liveRouteResponseByRequest(checks, request) {
+  const expected = requestPathAndSearch(request);
+  return (Array.isArray(checks) ? checks : []).find((check) =>
+    requestPathAndSearch(
+      check?.[LIVE_ROUTE_REQUEST] || check?.requestTarget || check?.requestedUrl || check?.targetPath
+    ) === expected
+  );
+}
+
+function liveRouteFinalRequest(check) {
+  return requestPathAndSearch(
+    check?.[LIVE_ROUTE_FINAL_REQUEST] || check?.finalRequest || check?.finalUrl
+  );
+}
+
+export function collectionPaginationTargetRoutePlan(
+  patternMap = {},
+  routeMatrix = {},
+  alreadyScheduledRequests = []
+) {
+  const candidates = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
+    .filter((contract) => contract.targetMode !== 'none' && contract.targetContinuationKind === 'request');
+  const errors = candidates.map((contract) => contract.mappingError).filter(Boolean);
+  const contracts = candidates.filter((contract) => !contract.mappingError);
+  if (candidates.length > MAX_COLLECTION_PAGINATION_CHECKS) {
+    return {
+      contractCount: candidates.length,
+      errors,
+      requests: [],
+      withinLimit: false
+    };
+  }
+  const scheduled = new Set(
+    (Array.isArray(alreadyScheduledRequests) ? alreadyScheduledRequests : [])
+      .map(requestPathAndSearch)
+      .filter(Boolean)
+  );
+  const requests = [];
+  for (const contract of contracts) {
+    for (const request of [contract.targetInitialRequest, contract.targetContinuationRequest]) {
+      if (!request || scheduled.has(request)) {
+        continue;
+      }
+      scheduled.add(request);
+      requests.push(request);
+    }
+  }
+  return { contractCount: candidates.length, errors, requests, withinLimit: true };
+}
+
+export function collectionPaginationLiveResponseChecks(
+  patternMap = {},
+  routeMatrix = {},
+  liveRouteChecks = []
+) {
+  const candidates = acceptedCollectionPaginationContracts(patternMap, routeMatrix)
+    .filter((contract) => contract.targetMode !== 'none');
+  const errors = candidates.map((contract) => contract.mappingError).filter(Boolean);
+  const contracts = candidates.filter((contract) => !contract.mappingError);
+  if (candidates.length > MAX_COLLECTION_PAGINATION_CHECKS) {
+    return {
+      checks: [],
+      errors: [
+        ...errors,
+        `Target collection pagination requires ${candidates.length} checks, exceeding the ${MAX_COLLECTION_PAGINATION_CHECKS} collection limit.`
+      ]
+    };
+  }
+  const checks = [];
+  for (const contract of contracts) {
+    if (contract.targetContinuationKind === 'browser_interaction') {
+      checks.push({
+        authority: 'self_attested_capture_evidence',
+        label: contract.label,
+        liveResponseChecked: false,
+        status: 'packet_authored_js_only',
+        targetContinuationKind: contract.targetContinuationKind,
+        targetContinuationStateId: contract.targetContinuationStateId
+      });
+      continue;
+    }
+    const initial = liveRouteResponseByRequest(liveRouteChecks, contract.targetInitialRequest);
+    const continuation = liveRouteResponseByRequest(liveRouteChecks, contract.targetContinuationRequest);
+    const checkErrors = [];
+    if (!successfulCollectionLiveResponse(initial) || !successfulCollectionLiveResponse(continuation)) {
+      checkErrors.push(`Target collection ${contract.label} needs successful verifier-owned live responses for its exact initial and continuation requests.`);
+    }
+    const initialFinalRequest = liveRouteFinalRequest(initial);
+    const continuationFinalRequest = liveRouteFinalRequest(continuation);
+    if (!initialFinalRequest || !continuationFinalRequest || initialFinalRequest === continuationFinalRequest) {
+      checkErrors.push(`Target collection ${contract.label} initial and continuation requests must resolve to distinct final requests.`);
+    }
+    if (continuationFinalRequest !== contract.targetContinuationRequest) {
+      checkErrors.push(`Target collection ${contract.label} continuation resolved to a different final request than its exact declared continuation binding.`);
+    }
+    const distinctness = liveResponseSemanticDistinctness(initial, continuation);
+    if (!distinctness.semanticallyDistinct) {
+      checkErrors.push(`Target collection ${contract.label} exact continuation request did not produce a verifier-owned response with distinct visible-text or media semantics.`);
+    }
+    const check = {
+      authority: 'verifier-owned-target-http',
+      initialRequest: redactedRequest(contract.targetInitialRequest),
+      initialResponseSha256: initial?.bodySha256 ?? '',
+      continuationRequest: redactedRequest(contract.targetContinuationRequest),
+      continuationFinalRequest: redactedRequest(continuationFinalRequest),
+      continuationResponseSha256: continuation?.bodySha256 ?? '',
+      ...distinctness,
+      errors: checkErrors,
+      label: contract.label,
+      initialFinalRequest: redactedRequest(initialFinalRequest),
+      liveResponseChecked: true,
+      passed: checkErrors.length === 0,
+      targetContinuationKind: contract.targetContinuationKind
+    };
+    checks.push(check);
+    errors.push(...checkErrors);
+  }
+  return { checks, errors };
+}
+
+export function collectionPaginationReconciliationErrors(patternMap = {}, liveSurfaceInventory = {}) {
+  const ledgers = Array.isArray(patternMap?.structuredContentModel?.collectionOwnershipLedger)
+    ? patternMap.structuredContentModel.collectionOwnershipLedger.filter((ledger) => ledger?.accepted === true)
+    : [];
+  if (ledgers.length === 0) {
+    return [];
+  }
+  if (liveSurfaceInventory?.confirmed !== true) {
+    return ['Accepted collection pagination could not be reconciled because the live Drupal surface inventory is unavailable.'];
+  }
+  const liveDisplays = new Map(
+    (Array.isArray(liveSurfaceInventory?.items) ? liveSurfaceInventory.items : [])
+      .filter((item) => item?.kind === 'view_display')
+      .map((item) => [String(item?.key ?? ''), item])
+  );
+  const errors = [];
+  for (const ledger of ledgers) {
+    const label = String(ledger?.sourceObject || ledger?.sourceRoute || 'accepted collection').trim();
+    const pagination = ledger?.pagination && typeof ledger.pagination === 'object' ? ledger.pagination : {};
+    if (ledger?.collectionOwner === 'documented_exception') {
+      continue;
+    }
+    const reference = String(pagination.liveViewDisplay ?? '').trim();
+    const match = reference.match(/^views\.view\.([a-z0-9_]+):([a-z0-9_]+)$/);
+    if (!match) {
+      errors.push(`Accepted collection ${label} does not identify one exact live View display for pagination reconciliation.`);
+      continue;
+    }
+    const item = liveDisplays.get(`view_display:${match[1]}:${match[2]}`);
+    if (!item || item.publicSurface !== true) {
+      errors.push(`Accepted collection ${label} pagination display ${reference} is not one public live View display.`);
+      continue;
+    }
+    const pager = item?.pager && typeof item.pager === 'object' ? item.pager : {};
+    const type = String(pager.type ?? '');
+    const liveMode = livePagerBehaviorMode(type);
+    const itemsPerPage = Number(pager.itemsPerPage);
+    const offset = Number(pager.offset);
+    if (
+      typeof pager.inheritedFromDefault !== 'boolean' ||
+      !Number.isSafeInteger(itemsPerPage) || itemsPerPage < 0 ||
+      !Number.isSafeInteger(offset) || offset < 0 ||
+      !type
+    ) {
+      errors.push(`Accepted collection ${label} live View pager readback is incomplete; effective type, items-per-page, offset, and inheritance are required.`);
+      continue;
+    }
+    if (offset !== 0) {
+      errors.push(`Accepted collection ${label} live View display uses fixed offset ${offset}; collection pagination must start at the first item.`);
+    }
+    if (liveMode === 'fixed_limit') {
+      errors.push(`Accepted collection ${label} live View display uses fixed-limit pager type some; it cannot represent pagination mode ${pagination.targetMode || '(missing)'}.`);
+      continue;
+    }
+    if (pagination.targetMode === 'none') {
+      if (type !== 'none') {
+        errors.push(`Accepted single-page collection ${label} declares pagination none but its live View pager type is ${type}.`);
+      }
+      continue;
+    }
+    if (liveMode === 'none' || itemsPerPage <= 0) {
+      errors.push(`Accepted paginated collection ${label} has no continuation-capable live View pager.`);
+      continue;
+    }
+    if (liveMode === 'unknown' || liveMode !== pagination.targetMode) {
+      errors.push(`Accepted collection ${label} declares target pagination mode ${pagination.targetMode || '(missing)'} but live View pager type ${type} resolves to ${liveMode}.`);
+      continue;
+    }
+    if (Number(pagination.targetPageSize) !== itemsPerPage) {
+      errors.push(`Accepted collection ${label} target page size ${pagination.targetPageSize ?? '(missing)'} does not match live View items-per-page ${itemsPerPage}.`);
+    }
   }
   return errors;
 }
@@ -12510,7 +13076,7 @@ function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
   const requestTarget = requestPathAndSearch(check?.targetUrl || check?.targetFinalUrl);
   const expectedFinalRequest = requestPathAndSearch(check?.targetFinalUrl || check?.targetUrl);
   const targetPath = normalizePath(requestTarget);
-  const record = matchingRouteRecord(routeMatrix, targetPath) ?? {};
+  const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
   const declaredStatus = record.targetStatus;
   const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
     ? Number(declaredStatus)
@@ -12533,18 +13099,47 @@ function expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
   };
 }
 
+function expectedCollectionPaginationRoute(routeMatrix, request) {
+  const requestTarget = requestPathAndSearch(request);
+  const targetPath = normalizePath(requestTarget);
+  const record = matchingRouteRecord(routeMatrix, targetPath, requestTarget) ?? {};
+  const declaredStatus = record.targetStatus;
+  const expectedStatus = declaredStatus !== null && declaredStatus !== '' && Number.isFinite(Number(declaredStatus))
+    ? Number(declaredStatus)
+    : 200;
+  return {
+    accepted: record.accepted === true && Boolean(record.targetPath),
+    expectedBehavior: 'public_200',
+    expectedFinalPath: targetPath,
+    expectedFinalRequest: requestTarget,
+    expectedH1: '',
+    expectedStatus,
+    expectedTitle: '',
+    identityRequired: false,
+    matchesBrowserRenderedSource: true,
+    renderedSeo: null,
+    requestTarget,
+    routeKind: 'collection-pagination',
+    statusUsesInitialResponse: false,
+    targetPath
+  };
+}
+
 function expectedTargetRequiredRoute(record) {
-  const targetPath = normalizeRouteKey(record?.targetPath);
+  const requestTarget = requestPathAndSearch(record?.targetPath);
+  const targetPath = normalizePath(requestTarget);
   return {
     accepted: record?.accepted === true,
     expectedBehavior: String(record?.expectedPublicBehavior ?? ''),
-    expectedFinalPath: normalizeRouteKey(record?.targetFinalPath || targetPath),
+    expectedFinalPath: normalizePath(record?.targetFinalPath || targetPath),
+    expectedFinalRequest: requestPathAndSearch(record?.targetFinalPath || requestTarget),
     expectedH1: '',
     expectedStatus: Number(record?.targetStatus),
     expectedTitle: '',
     identityRequired: false,
     matchesBrowserRenderedSource: true,
     renderedSeo: null,
+    requestTarget,
     routeKind: 'target-required',
     statusUsesInitialResponse: record?.expectedPublicBehavior === 'redirect',
     targetPath
@@ -13298,6 +13893,8 @@ async function verifyRoute(baseUrl, expected, liveHttpContext, criticalAssetCont
     }
     return {
       ...expected,
+      [LIVE_ROUTE_REQUEST]: requestPathAndSearch(requestedUrl),
+      [LIVE_ROUTE_FINAL_REQUEST]: requestPathAndSearch(response.finalUrl),
       expectedFinalRequest: expected.expectedFinalRequest
         ? redactedPath(expected.expectedFinalRequest, baseUrl)
         : undefined,
@@ -13342,6 +13939,7 @@ async function verifyRoute(baseUrl, expected, liveHttpContext, criticalAssetCont
     errors.push(`${expected.targetPath} could not be fetched: ${error.message}`);
     return {
       ...expected,
+      [LIVE_ROUTE_REQUEST]: requestPathAndSearch(requestedUrl),
       expectedFinalRequest: expected.expectedFinalRequest
         ? redactedPath(expected.expectedFinalRequest, baseUrl)
         : undefined,
@@ -13716,7 +14314,9 @@ export async function scheduleLiveRouteChecks({
       ? 'primary-route'
       : task.bucket === 'target-required'
         ? 'target-required-route'
-        : 'browser-representative-route';
+        : task.bucket === 'collection-pagination'
+          ? 'collection-pagination-route'
+          : 'browser-representative-route';
     try {
       return {
         bucket: task.bucket,
@@ -13730,6 +14330,9 @@ export async function scheduleLiveRouteChecks({
         bucket: task.bucket,
         check: {
           ...task.expected,
+          [LIVE_ROUTE_REQUEST]: requestPathAndSearch(
+            task.expected?.requestTarget || task.expected?.targetPath
+          ),
           expectedFinalRequest: task.expected?.expectedFinalRequest
             ? redactedPath(task.expected.expectedFinalRequest, baseUrl)
             : undefined,
@@ -14250,6 +14853,7 @@ export async function verifyLive({
         independentVerification,
         limits: sourceSurfaceLimits,
         onProgress: onSourceProgress,
+        patternMap,
         routeMatrix
       })
     : sourceSurfaceNotRun(
@@ -14268,6 +14872,20 @@ export async function verifyLive({
       representativeChecksByPath.set(path, check);
     }
   }
+  const scheduledTargetRequests = new Set([
+    ...primaryRoutePaths,
+    ...targetRequiredRoutes.map((route) => requestPathAndSearch(route?.targetPath)).filter(Boolean),
+    ...representativeChecksByPath.keys()
+  ]);
+  const collectionPaginationRoutePlan = collectionPaginationTargetRoutePlan(
+    patternMap,
+    routeMatrix,
+    [...scheduledTargetRequests]
+  );
+  const collectionPaginationRouteTasks = collectionPaginationRoutePlan.requests.map((request) => ({
+    bucket: 'collection-pagination',
+    expected: expectedCollectionPaginationRoute(routeMatrix, request)
+  }));
   const liveRouteTasks = [
     ...primaryRoutes.map((route) => ({
       bucket: 'primary',
@@ -14280,7 +14898,8 @@ export async function verifyLive({
     ...[...representativeChecksByPath.values()].map((check) => ({
       bucket: 'browser-representative',
       expected: expectedBrowserRepresentativeRoute(routeMatrix, check, browserEvidence)
-    }))
+    })),
+    ...collectionPaginationRouteTasks
   ];
   const fetchChecksEnabled = Boolean(
     target &&
@@ -14329,9 +14948,26 @@ export async function verifyLive({
   const routeChecks = checksForBucket('primary');
   const targetRequiredRouteChecks = checksForBucket('target-required');
   const browserRepresentativeRouteChecks = checksForBucket('browser-representative');
-  for (const route of [...routeChecks, ...targetRequiredRouteChecks, ...browserRepresentativeRouteChecks]) {
+  const collectionPaginationRouteChecks = checksForBucket('collection-pagination');
+  for (const route of [
+    ...routeChecks,
+    ...targetRequiredRouteChecks,
+    ...browserRepresentativeRouteChecks,
+    ...collectionPaginationRouteChecks
+  ]) {
     liveErrors.push(...route.errors);
   }
+  const collectionPaginationLiveResponses = collectionPaginationLiveResponseChecks(
+    patternMap,
+    routeMatrix,
+    [
+      ...routeChecks,
+      ...targetRequiredRouteChecks,
+      ...browserRepresentativeRouteChecks,
+      ...collectionPaginationRouteChecks
+    ]
+  );
+  liveErrors.push(...collectionPaginationLiveResponses.errors);
   const emptyServerRenderedResponseSurface = () => ({
     errors: [],
     htmlRouteCount: 0,
@@ -14552,6 +15188,10 @@ export async function verifyLive({
     )
     : [];
   liveErrors.push(...surfaceReconciliationErrors);
+  const collectionPaginationErrors = !runtimeWasInjected || Object.hasOwn(inspectedDrupalRuntime, 'liveSurfaceInventory')
+    ? collectionPaginationReconciliationErrors(patternMap, inspectedDrupalRuntime.liveSurfaceInventory)
+    : [];
+  liveErrors.push(...collectionPaginationErrors);
   const runtimeCanvasAvailability = canvasAvailabilityFromLiveSurface(
     inspectedDrupalRuntime.liveSurfaceInventory
   );
@@ -15130,6 +15770,16 @@ export async function verifyLive({
       nextAction: 'Bind each Canvas-owned public route to exactly one published live Canvas page, its component topology, and its exact entity editor URL, then refresh evidence.'
     });
   }
+  for (const error of collectionPaginationErrors) {
+    addCompletionBlocker('collection.pagination', error, {
+      nextAction: 'Repair the declared collection View pager, prove a successful distinct continuation state when pagination applies, refresh evidence, and rerun the live verifier.'
+    });
+  }
+  for (const error of collectionPaginationLiveResponses.errors) {
+    addCompletionBlocker('collection.pagination-response', error, {
+      nextAction: 'Repair the exact continuation route so its verifier-owned live response has distinct collection semantics, or declare and prove a genuinely browser-interaction-only state.'
+    });
+  }
   for (const error of observedCompositionErrors) {
     addCompletionBlocker('canvas.observed-composition', error, {
       nextAction: 'Use Canvas for the verifier-observed design-led route or provide a future externally authenticated owner exception; packet-local self-attestation cannot waive this check.'
@@ -15304,6 +15954,7 @@ export async function verifyLive({
       passed: check.passed,
       sourcePath: check.sourcePath
     })),
+    collectionPaginationLiveResponses: collectionPaginationLiveResponses.checks,
     serverRenderedResponseSurface: {
       linkChecks: serverRenderedResponseSurface.linkChecks.map((check) => ({
         finalStatus: check.finalStatus ?? 0,
@@ -15443,6 +16094,7 @@ export async function verifyLive({
     legalPrivacyLinkChecks: sharedValue(legalPrivacyLinkChecks, absolutePacketDir),
     consentReconciliation: sharedConsentReconciliation,
     browserRepresentativeRouteChecks: browserRepresentativeRouteChecks.map((route) => sharedRouteCheck(route, absolutePacketDir)),
+    collectionPaginationLiveResponses: sharedValue(collectionPaginationLiveResponses, absolutePacketDir),
     serverRenderedResponseSurface: sharedValue(serverRenderedResponseSurface, absolutePacketDir),
     redirectMappingConflicts: redirectMaterialization.conflicts,
     redirectMaterializationChecks: sharedValue(redirectMaterializationChecks, absolutePacketDir),

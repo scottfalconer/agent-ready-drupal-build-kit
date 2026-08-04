@@ -198,6 +198,27 @@
       "blockers": []
     }
   ],
+  "collectionPaginationChecks": [
+    {
+      "sourceRoute": "",
+      "targetRoute": "",
+      "sourceObject": "",
+      "sourceInitialRequest": "",
+      "sourceContinuationRequest": "",
+      "sourceContinuationStateId": "",
+      "initialTargetRequest": "",
+      "targetContinuationRequest": "",
+      "targetContinuationStateId": "",
+      "initialStatus": null,
+      "continuationStatus": null,
+      "initialItemIdentitySha256": "",
+      "continuationItemIdentitySha256": "",
+      "continuationStateDistinct": false,
+      "sourceContinuationEquivalent": false,
+      "status": "pass | fail | blocked",
+      "evidence": ""
+    }
+  ],
   "anonymousFormChecks": [
     {
       "formKey": "",

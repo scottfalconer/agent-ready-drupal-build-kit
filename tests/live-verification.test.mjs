@@ -3727,6 +3727,7 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
   browser.site = targetBaseUrl;
   browser.checkedAt = testCheckedAt;
   browser.toolOrMethod = 'browser';
+  browser.collectionPaginationChecks = [];
   browser.publicRouteChecks = ['desktop', 'mobile'].map((viewport) => {
     const desktop = viewport === 'desktop';
     return {
@@ -5794,6 +5795,16 @@ test('declared query route variants are fetched and state-bound distinctly while
       routeMatrix.routes[2].sourcePath = '/search?type=workshop&year=2026';
       routeMatrix.routes[2].targetFinalPath = '/search?type=workshop&year=2026';
       writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
+        for (const check of browser.publicRouteChecks.filter(
+          (candidate) => candidate.targetUrl === `${baseUrl}/search?year=2026&type=speaker`
+        )) {
+          check.sourceUrl = `${routeMatrix.sourceBaseUrl}/search?type=workshop&year=2026`;
+          check.sourceFinalUrl = check.sourceUrl;
+          check.targetUrl = `${baseUrl}/search?type=workshop&year=2026`;
+          check.targetFinalUrl = check.targetUrl;
+        }
+      });
       const changedQuery = await inspect();
       assert.equal(changedQuery.liveTargetValid, true, changedQuery.errors.join('\n'));
       assert.equal(requestedTargets.includes('/search?type=workshop&year=2026'), true);
@@ -8100,7 +8111,8 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
       expected: [
         /passing, evidence-backed per-route item counts/i,
         /passing collection ownership and editor-add-row checks/i,
-        /passing editor-add-row checks/i
+        /passing editor-add-row checks/i,
+        /accepted pagination declaration/i
       ],
       mutate: (packetDir) => {
         mutateJson(join(packetDir, 'pattern-map.json'), (value) => {
@@ -8339,6 +8351,135 @@ test('self-authored count and exclusion dispositions cannot hide collection shor
 
     assert.equal(report.completionEvidence.packetSupportsCompletion, false, name);
     assert.match(report.completionEvidence.packetCompletionBlockedReasons.join('\n'), expected, name);
+  }
+});
+
+test('collection packet evidence cannot cross-bind from swapped or missing query states', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'collection-query-binding-'));
+  const expectedSourceRoute = '/catalog?audience=expected';
+  const expectedTargetRoute = '/offers?audience=expected';
+  const cases = [
+    {
+      name: 'swapped-query',
+      sourceRoute: '/catalog?audience=other',
+      targetRoute: '/offers?audience=other'
+    },
+    {
+      name: 'missing-query',
+      sourceRoute: '/catalog',
+      targetRoute: '/offers'
+    }
+  ];
+
+  for (const fixture of cases) {
+    const packetDir = join(temp, fixture.name);
+    copyTemplatePacket(packetDir);
+    const routeMatrix = liveRouteMatrix('https://target.example');
+    routeMatrix.routes.push({
+      sourcePath: expectedSourceRoute,
+      targetPath: expectedTargetRoute,
+      routeRole: 'listing',
+      targetStatus: 200,
+      targetFinalPath: expectedTargetRoute,
+      targetTitle: 'Offers',
+      targetH1: 'Offers',
+      expectedRedirect: false,
+      accepted: true,
+      notes: 'Exact query-bound collection fixture.'
+    });
+    routeMatrix.perRouteItemReconciliation = [{
+      sourcePath: expectedSourceRoute,
+      targetPath: expectedTargetRoute,
+      sourceObject: 'Query listing',
+      itemType: 'product',
+      sourceCount: 2,
+      targetRenderedCount: 2,
+      targetDrupalEntityCount: 2,
+      mismatchDisposition: 'none',
+      acceptedBy: '',
+      rationale: '',
+      dispositionEvidence: '',
+      accepted: true,
+      notes: 'Counts agree at the exact query state.'
+    }];
+    writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+    addQualifyingReviewEvidence(packetDir, 'https://target.example');
+    mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+      patternMap.structuredContentModel.collectionScope = {
+        reviewed: true,
+        applies: true,
+        reason: 'The source has a query-bound product collection.'
+      };
+      patternMap.structuredContentModel.collectionOwnershipLedger = [{
+        sourceRoute: expectedSourceRoute,
+        collectionPattern: 'catalog',
+        sourceObject: 'Query listing',
+        sourceItemCount: 2,
+        drupalEntityType: 'node',
+        contentTypeOrBundle: 'product',
+        requiredFields: ['title'],
+        collectionOwner: 'view',
+        viewDisplayOrConfig: 'views.view.query_listing',
+        detailRouteOwner: 'view_row',
+        drupalOwnerConfigId: 'views.view.query_listing:page_1',
+        detailRouteMode: 'inline_in_collection',
+        representativeDetailSourcePath: '',
+        representativeDetailTargetPath: '',
+        detailLoadBearingFields: [],
+        detailRouteRationale: 'Products are complete in the query-bound listing.',
+        pagination: {
+          sourceMode: 'none',
+          sourcePageSize: null,
+          sourceContinuationKind: 'none',
+          sourceContinuationRequest: '',
+          sourceContinuationStateId: '',
+          targetMode: 'none',
+          targetPageSize: null,
+          liveViewDisplay: 'views.view.query_listing:page_1',
+          targetContinuationKind: 'none',
+          targetContinuationRequest: '',
+          targetContinuationStateId: '',
+          sourceContinuationEquivalent: false,
+          modeChangeDisposition: {
+            kind: 'none',
+            sourceMode: '',
+            targetMode: '',
+            acceptedBy: '',
+            rationale: '',
+            evidence: '',
+            accepted: false
+          },
+          evidence: 'evidence/independent-verification/claim-evidence.json',
+          accepted: true
+        },
+        editorAddRowEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+        exceptionRationale: '',
+        accepted: true,
+        notes: 'The query state is part of the collection identity.'
+      }];
+    });
+    mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+      independent.perRouteItemCounts = [{
+        sourceRoute: fixture.sourceRoute,
+        targetRoute: fixture.targetRoute,
+        sourceObject: 'Query listing',
+        routeRole: 'listing',
+        expectedSourceItemCount: 2,
+        targetRenderedItemCount: 2,
+        targetDrupalEntityCount: 2,
+        missingItems: [],
+        extraItems: [],
+        status: 'pass',
+        evidence: 'claim-evidence.json'
+      }];
+    });
+
+    const report = await validatePacket({ packetDir });
+    assert.match(
+      report.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+      /needs an independently evidenced perRouteItemCounts row for collection Query listing/i,
+      fixture.name
+    );
   }
 });
 
@@ -10762,13 +10903,14 @@ test('live verification preserves and independently checks representative query 
       if (request.url.startsWith('/search?')) {
         seen.add(request.url);
         const origin = `http://${request.headers.host}`;
-        if (new URL(`${origin}${request.url}`).searchParams.get('state') === 'drop') {
+        const state = new URL(`${origin}${request.url}`).searchParams.get('state');
+        if (state === 'drop') {
           response.writeHead(302, { location: '/search' });
           response.end();
           return;
         }
-        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}${request.url}"><meta name="description" content="State ${new URL(`${origin}${request.url}`).searchParams.get('state')}"></head><body><h1>Search</h1></body></html>`);
+        response.writeHead(state === 'a' ? 201 : 200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Search</title><link rel="canonical" href="${origin}${request.url}"><meta name="description" content="State ${state}"></head><body><h1>Search</h1></body></html>`);
         return;
       }
       if (request.url === '/search') {
@@ -10792,6 +10934,24 @@ test('live verification preserves and independently checks representative query 
           targetPath: '/search', targetStatus: 200, targetFinalPath: '/search', targetTitle: 'Search', targetH1: 'Search',
           expectedRedirect: false, routeRole: 'search', accepted: true, notes: 'Query-state fixture.'
         });
+        for (const state of ['a', 'b', 'drop']) {
+          routeMatrix.routes.push({
+            sourcePath: `/search?state=${state}`,
+            sourceStatus: 200,
+            sourceFinalPath: `/search?state=${state}`,
+            sourceTitle: 'Search',
+            sourceH1: 'Search',
+            targetPath: `/search?state=${state}`,
+            targetStatus: state === 'a' ? 201 : 200,
+            targetFinalPath: `/search?state=${state}`,
+            targetTitle: 'Search',
+            targetH1: 'Search',
+            expectedRedirect: false,
+            routeRole: 'search',
+            accepted: true,
+            notes: 'Exact query-state fixture.'
+          });
+        }
       });
       mutateJson(join(packetDir, 'browser-evidence.json'), (browser) => {
         for (const state of ['a', 'b', 'drop']) {
@@ -10901,6 +11061,86 @@ test('live verification fetches and reconciles primary query states exactly', as
       assert.deepEqual([...seen].filter((url) => url.includes('?')).sort(), ['/search?state=drop', '/search?state=keep']);
       assert.doesNotMatch(JSON.stringify(report), /state=(?:drop|keep)/);
     }
+  );
+});
+
+test('target-required packet evidence binds exact same-path query requests', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'target-required-query-binding-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const targetBaseUrl = 'https://target.example';
+  const routeMatrix = liveRouteMatrix(targetBaseUrl);
+  for (const state of ['one', 'two']) {
+    routeMatrix.targetRequiredRoutes.push({
+      targetPath: `/search?state=${state}`,
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalPath: `/search?state=${state}`,
+      expectedPublicBehavior: 'public_200',
+      drupalOwner: 'view',
+      shouldBePublic: true,
+      accepted: true,
+      notes: 'The exact public query state is required.'
+    });
+  }
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+  addQualifyingReviewEvidence(packetDir, targetBaseUrl);
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.targetRequiredRouteChecks.push({
+      targetPath: '/search?state=one',
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalUrl: `${targetBaseUrl}/search?state=one`,
+      expectedPublicBehavior: 'public_200',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    });
+  });
+
+  const reusedCheck = await validatePacket({ packetDir });
+  const reusedReasons = reusedCheck.completionEvidence.packetCompletionBlockedReasons.filter((reason) =>
+    /must pass target-required route \/search\?query-sha256=/i.test(reason)
+  );
+  assert.equal(reusedReasons.length, 1, reusedReasons.join('\n'));
+  assert.doesNotMatch(reusedReasons.join('\n'), /state=(?:one|two)/);
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.targetRequiredRouteChecks.push({
+      targetPath: '/search?state=two',
+      reasonRequired: 'query_state',
+      targetStatus: 200,
+      targetFinalUrl: `${targetBaseUrl}/search?state=one`,
+      expectedPublicBehavior: 'public_200',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    });
+  });
+  const wrongFinalRequest = await validatePacket({ packetDir });
+  assert.match(
+    wrongFinalRequest.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
+  );
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    const second = independent.targetRequiredRouteChecks.find((check) => check.targetPath === '/search?state=two');
+    second.targetFinalUrl = `${targetBaseUrl}/search?state=two`;
+    second.expectedPublicBehavior = 'noindex';
+  });
+  const wrongBehavior = await validatePacket({ packetDir });
+  assert.match(
+    wrongBehavior.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
+  );
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    const second = independent.targetRequiredRouteChecks.find((check) => check.targetPath === '/search?state=two');
+    second.expectedPublicBehavior = 'public_200';
+  });
+  attachFixtureReviewHandoff(packetDir, targetBaseUrl);
+  const exactChecks = await validatePacket({ packetDir });
+  assert.doesNotMatch(
+    exactChecks.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /must pass target-required route \/search\?query-sha256=/i
   );
 });
 
@@ -11965,6 +12205,284 @@ test('blind completion evidence rejects a text file named like a screenshot', as
   assert.equal(report.completionEvidence.blindAdversarialReviewSupportsCompletion, false);
   assert.match(report.errors.join('\n'), /checks\.actualRequestedOutcome must be pass/);
   assert.match(report.errors.join('\n'), /must be a credible packet-local PNG, JPEG, WebP, or GIF capture/);
+});
+
+test('collection pagination reuses an overlapping target-required continuation response', async () => {
+  let privateContinuation = false;
+  await withHttpServer(
+    (request, response) => {
+      const continuation = request.url === '/events?page=1';
+      if (request.url === '/events' || continuation) {
+        response.writeHead(continuation && privateContinuation ? 403 : 200, {
+          'content-type': 'text/html; charset=utf-8'
+        });
+        response.end(`<!doctype html><html><head><title>Events</title></head><body><h1>Events</h1><article>${continuation ? 'Second event batch' : 'First event batch'}</article></body></html>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'pagination-target-required-overlap-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push({
+        sourcePath: '/events',
+        targetPath: '/events',
+        routeRole: 'listing',
+        targetStatus: 200,
+        targetFinalPath: '/events',
+        targetTitle: 'Events',
+        targetH1: 'Events',
+        expectedRedirect: false,
+        accepted: true,
+        notes: 'Collection pagination fixture.'
+      });
+      routeMatrix.targetRequiredRoutes.push(
+        {
+          targetPath: '/events',
+          reasonRequired: 'collection_initial',
+          targetStatus: 200,
+          targetFinalPath: '/events',
+          expectedPublicBehavior: 'public_200',
+          drupalOwner: 'view',
+          shouldBePublic: true,
+          accepted: true,
+          notes: 'The collection initial state is independently required.'
+        },
+        {
+          targetPath: '/events?page=1',
+          reasonRequired: 'collection_continuation',
+          targetStatus: 200,
+          targetFinalPath: '/events?page=1',
+          expectedPublicBehavior: 'public_200',
+          drupalOwner: 'view',
+          shouldBePublic: true,
+          accepted: true,
+          notes: 'The collection continuation is independently required.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+        patternMap.structuredContentModel.collectionScope = {
+          reviewed: true,
+          applies: true,
+          reason: 'The source has a continuing event collection.'
+        };
+        patternMap.structuredContentModel.collectionOwnershipLedger = [{
+          sourceRoute: '/events',
+          sourceObject: 'Event',
+          accepted: true,
+          pagination: {
+            sourceMode: 'paged',
+            sourceContinuationKind: 'request',
+            sourceContinuationRequest: '/events?page=1',
+            sourceContinuationStateId: '',
+            targetMode: 'paged',
+            targetContinuationKind: 'request',
+            targetContinuationRequest: '/events?page=1',
+            targetContinuationStateId: '',
+            accepted: true
+          }
+        }];
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.targetRequiredRouteChecks.length, 3);
+      assert.equal(report.liveRouteBudget.routeCount, 4);
+      assert.deepEqual(report.collectionPaginationLiveResponses.errors, []);
+      assert.equal(report.collectionPaginationLiveResponses.checks[0].passed, true);
+      assert.equal(report.collectionPaginationLiveResponses.checks[0].authority, 'verifier-owned-target-http');
+
+      privateContinuation = true;
+      mutateJson(join(packetDir, 'route-matrix.json'), (matrix) => {
+        const continuation = matrix.targetRequiredRoutes.find((route) => route.targetPath === '/events?page=1');
+        continuation.targetStatus = 403;
+        continuation.expectedPublicBehavior = 'private_403';
+      });
+      const privateReport = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+      const privateRouteCheck = privateReport.targetRequiredRouteChecks.find(
+        (check) => check.expectedBehavior === 'private_403'
+      );
+      assert.equal(privateRouteCheck.passed, true);
+      assert.equal(privateRouteCheck.finalStatus, 403);
+      assert.equal(privateReport.collectionPaginationLiveResponses.checks[0].passed, false);
+      assert.match(
+        privateReport.collectionPaginationLiveResponses.errors.join('\n'),
+        /successful verifier-owned live responses/i
+      );
+    }
+  );
+});
+
+test('collection pagination route tasks use exact same-path query route rows', async () => {
+  await withHttpServer(
+    (request, response) => {
+      if (request.url === '/events?batch=initial' || request.url === '/events?batch=next') {
+        const continuation = request.url === '/events?batch=next';
+        response.writeHead(continuation ? 201 : 200, { 'content-type': 'text/html; charset=utf-8' });
+        response.end(`<!doctype html><html><head><title>Events</title></head><body><h1>Events</h1><article>${continuation ? 'Next query batch' : 'Initial query batch'}</article></body></html>`);
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'pagination-exact-query-routes-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/events?batch=initial',
+          targetPath: '/events?batch=initial',
+          routeRole: 'listing',
+          targetStatus: 200,
+          targetFinalPath: '/events?batch=initial',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Initial query state.'
+        },
+        {
+          sourcePath: '/events?batch=next',
+          targetPath: '/events?batch=next',
+          routeRole: 'listing',
+          targetStatus: 201,
+          targetFinalPath: '/events?batch=next',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Continuation query state.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+        patternMap.structuredContentModel.collectionOwnershipLedger = [{
+          sourceRoute: '/events?batch=initial',
+          sourceObject: 'Event',
+          accepted: true,
+          pagination: {
+            sourceMode: 'paged',
+            sourceContinuationKind: 'request',
+            sourceContinuationRequest: '/events?batch=next',
+            sourceContinuationStateId: '',
+            targetMode: 'paged',
+            targetContinuationKind: 'request',
+            targetContinuationRequest: '/events?batch=next',
+            targetContinuationStateId: '',
+            accepted: true
+          }
+        }];
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.liveRouteBudget.routeCount, 4);
+      assert.deepEqual(report.collectionPaginationLiveResponses.errors, []);
+      assert.equal(report.collectionPaginationLiveResponses.checks[0].passed, true);
+      assert.doesNotMatch(JSON.stringify(report.collectionPaginationLiveResponses), /batch=(?:initial|next)/);
+    }
+  );
+});
+
+test('live pagination planning rejects an ambiguous exact source mapping without scheduling a target', async () => {
+  await withHttpServer(
+    (request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(request.url === '/events?page=1'
+        ? '<!doctype html><html><head><title>Events</title></head><body><h1>Events</h1><article>Next batch</article></body></html>'
+        : fixtureTargetHtml(request));
+    },
+    async (baseUrl) => {
+      const temp = mkdtempSync(join(tmpdir(), 'pagination-ambiguous-live-mapping-'));
+      const packetDir = join(temp, 'review-packet');
+      copyTemplatePacket(packetDir);
+      const routeMatrix = liveRouteMatrix(baseUrl);
+      routeMatrix.routes.push(
+        {
+          sourcePath: '/source-events',
+          targetPath: '/events',
+          routeRole: 'listing',
+          targetStatus: 200,
+          targetFinalPath: '/events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'First conflicting mapping.'
+        },
+        {
+          sourcePath: '/source-events',
+          targetPath: '/alternate-events',
+          routeRole: 'listing',
+          targetStatus: 200,
+          targetFinalPath: '/alternate-events',
+          targetTitle: 'Events',
+          targetH1: 'Events',
+          expectedRedirect: false,
+          accepted: true,
+          notes: 'Second conflicting mapping.'
+        }
+      );
+      writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+      mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+        patternMap.structuredContentModel.collectionOwnershipLedger = [{
+          sourceRoute: '/source-events',
+          sourceObject: 'Event',
+          accepted: true,
+          pagination: {
+            sourceMode: 'paged',
+            sourceContinuationKind: 'request',
+            sourceContinuationRequest: '/source-events?page=1',
+            sourceContinuationStateId: '',
+            targetMode: 'paged',
+            targetContinuationKind: 'request',
+            targetContinuationRequest: '/events?page=1',
+            targetContinuationStateId: '',
+            accepted: true
+          }
+        }];
+      });
+
+      const report = await verifyLive({
+        packetDir,
+        targetUrl: baseUrl,
+        cwd: repoRoot,
+        environment: {},
+        drupalRuntime: injectedDrupalRuntime(baseUrl)
+      });
+
+      assert.equal(report.liveRouteBudget.routeCount, 2);
+      assert.deepEqual(report.collectionPaginationLiveResponses.checks, []);
+      assert.match(
+        report.collectionPaginationLiveResponses.errors.join('\n'),
+        /must map to exactly one target request.*found 2/i
+      );
+    }
+  );
 });
 
 test('generated missing-route verification rejects soft 404s, unrelated canonicals, and missing noindex', async () => {

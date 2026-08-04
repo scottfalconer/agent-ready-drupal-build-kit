@@ -56,6 +56,7 @@ Before final handoff, answer this completion gate:
 - Public content inventory reconciled: every reachable source item is imported/recreated or item-blocked.
 - Per-route item reconciliation complete: repeated items on each load-bearing route match source counts, or a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested.
 - Collection ownership ledger complete: every declared row includes source/target count reconciliation, Drupal content/entity plus View/collection ownership, and non-admin editor add-a-row evidence.
+- Collection pagination complete: every accepted collection declares source/target mode, continuation mechanism, and positive observed page/batch sizes when continuing; the live View pager matches the target declaration with zero offset; and every continuing collection has either verifier-owned distinct final requests plus semantic distinctness or an exact, explicitly self-attested interaction-bearing JS-only capture-state binding.
 - Public media inventory reconciled: every reachable asset is managed in Drupal Media or item-blocked.
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
 - First-fold and brand-defining assets are present or explicitly dispositioned for primary routes.
