@@ -80,6 +80,31 @@ export const PUBLIC_FORM_CONTROL_LIMITS = Object.freeze({
   maxLabelLength: 180,
   maxOptionsPerControl: 64
 });
+
+function normalizedPublicFormLabel(value, { identity = false } = {}) {
+  const normalized = String(value ?? '')
+    .slice(0, PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength + 1)
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (identity ? normalized.toLowerCase() : normalized)
+    .slice(0, PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength);
+}
+const PUBLIC_FORM_VISIBLE_LABEL_SOURCES = new Set([
+  'none',
+  'associated_label',
+  'visible_aria_labelledby',
+  'button_text',
+  'rendered_input_button_text',
+  'placeholder'
+]);
+const PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES = new Set([
+  'associated_label',
+  'visible_aria_labelledby',
+  'button_text',
+  'rendered_input_button_text'
+]);
 const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
   maximumPageHeightRatio: 1.6,
@@ -1032,28 +1057,71 @@ function collectorExpression(contract, mobile) {
       labels: 0,
       optionControls: 0
     };
+    const normalizedControlLabel = (value) => String(value ?? '')
+      .normalize('NFKC')
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     const boundedControlLabel = (value) => {
-      const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+      const normalized = normalizedControlLabel(value);
       if (normalized.length > publicFormControlLimits.maxLabelLength) formControlOverflow.labels += 1;
       return normalized.slice(0, publicFormControlLimits.maxLabelLength);
     };
-    const publiclyVisibleControl = (element) => {
+    const firstControlLabel = (values) => {
+      const candidate = values.find((value) => normalizedControlLabel(value));
+      return boundedControlLabel(candidate);
+    };
+    const publiclyVisibleElement = (element) => {
       if (!(element instanceof HTMLElement) || !visible(element)) return false;
-      if (element.matches('input[type="hidden" i],[hidden],[aria-hidden="true"],[inert]')) return false;
+      if (element.matches('input[type="hidden" i]')) return false;
+      if (element.closest('[hidden],[inert],[aria-hidden="true" i]')) return false;
+      try {
+        if (
+          typeof element.checkVisibility === 'function' &&
+          !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        ) return false;
+      } catch {}
       const value = element.getBoundingClientRect();
       return value.right > 0 && value.bottom > 0;
     };
-    const publicControlCandidates = [...document.querySelectorAll(
-      'form input,form select,form textarea,form button'
-    )].filter(publiclyVisibleControl);
-    formControlOverflow.controls = Math.max(0, publicControlCandidates.length - publicFormControlLimits.maxControls);
-    const publicForms = [...new Set(publicControlCandidates.map((element) => element.form).filter(Boolean))];
+    const visiblyRenderedText = (root, { excludeNestedControls = false } = {}) => {
+      if (!(root instanceof Element)) return '';
+      const values = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const parent = node.parentElement;
+        if (!(parent instanceof Element) || !normalizedControlLabel(node.nodeValue)) continue;
+        const nestedControl = parent.closest('input,select,textarea,button');
+        if (excludeNestedControls && nestedControl && nestedControl !== root) continue;
+        if (!visible(parent) || parent.closest('[hidden]')) continue;
+        try {
+          if (
+            typeof parent.checkVisibility === 'function' &&
+            !parent.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+          ) continue;
+        } catch {}
+        values.push(node.nodeValue);
+      }
+      return values.join(' ');
+    };
+    const publicControlCandidates = [];
+    let publicControlCount = 0;
+    const candidateForms = new Set();
+    for (const element of document.querySelectorAll('input,select,textarea,button')) {
+      if (!(element.form instanceof HTMLFormElement) || !publiclyVisibleElement(element)) continue;
+      publicControlCount += 1;
+      candidateForms.add(element.form);
+      if (publicControlCandidates.length < publicFormControlLimits.maxControls) {
+        publicControlCandidates.push(element);
+      }
+    }
+    formControlOverflow.controls = Math.max(0, publicControlCount - publicFormControlLimits.maxControls);
+    const publicForms = [...document.forms].filter((form) => candidateForms.has(form));
     const formOrdinals = new Map(publicForms.map((form, index) => [form, index + 1]));
     const nextControlOrdinal = new Map();
     const controlOccurrences = new Map();
-    const publicFormControls = publicControlCandidates
-      .slice(0, publicFormControlLimits.maxControls)
-      .map((element) => {
+    const publicFormControls = publicControlCandidates.map((element) => {
         const tag = element.tagName.toLowerCase();
         const inputType = tag === 'input'
           ? String(element.type || 'text').trim().toLowerCase()
@@ -1065,12 +1133,17 @@ function collectorExpression(contract, mobile) {
             : tag === 'button'
               ? `button_${String(element.type || 'submit').trim().toLowerCase()}`
               : `input_${inputType}`;
-        const labelledBy = String(element.getAttribute('aria-labelledby') || '')
+        const labelledByElements = String(element.getAttribute('aria-labelledby') || '')
           .split(/\s+/)
           .filter(Boolean)
           .map((id) => document.getElementById(id))
-          .filter((candidate) => candidate instanceof Element)
+          .filter((candidate) => candidate instanceof Element);
+        const labelledBy = labelledByElements
           .map((candidate) => candidate.textContent)
+          .join(' ');
+        const visibleLabelledBy = labelledByElements
+          .filter(publiclyVisibleElement)
+          .map((candidate) => visiblyRenderedText(candidate))
           .join(' ');
         const associatedLabels = [...(element.labels || [])];
         const associatedLabelTextFor = (label) => {
@@ -1080,45 +1153,65 @@ function collectorExpression(contract, mobile) {
         };
         const associatedLabelText = associatedLabels.map(associatedLabelTextFor).join(' ');
         const visibleAssociatedLabelText = associatedLabels
-          .filter(visible)
-          .map(associatedLabelTextFor)
+          .filter(publiclyVisibleElement)
+          .map((label) => visiblyRenderedText(label, { excludeNestedControls: true }))
           .join(' ');
-        const buttonText = tag === 'button' ? element.textContent : '';
-        const renderedInputButtonText = tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(inputType)
+        const accessibleButtonText = tag === 'button' ? element.textContent : '';
+        const visibleButtonText = tag === 'button' ? visiblyRenderedText(element) : '';
+        const accessibleInputButtonText = tag === 'input' && ['button', 'image', 'reset', 'submit'].includes(inputType)
           ? (inputType === 'image' ? element.getAttribute('alt') : element.value)
           : '';
-        const accessibleLabel = boundedControlLabel(
-          labelledBy ||
-          element.getAttribute('aria-label') ||
-          associatedLabelText ||
-          buttonText ||
-          renderedInputButtonText ||
-          element.getAttribute('title') ||
-          ''
-        );
-        const visibleLabel = boundedControlLabel(
-          visibleAssociatedLabelText ||
-          buttonText ||
-          renderedInputButtonText ||
-          element.getAttribute('placeholder') ||
-          ''
-        );
-        const accessibleIdentity = accessibleLabel.normalize('NFKC').toLowerCase();
+        const visibleInputButtonText = tag === 'input' && ['button', 'reset', 'submit'].includes(inputType)
+          ? element.value
+          : '';
+        const renderedPlaceholder = ['input', 'textarea'].includes(tag) && element.matches(':placeholder-shown')
+          ? element.getAttribute('placeholder')
+          : '';
+        const accessibleLabel = firstControlLabel([
+          labelledBy,
+          element.getAttribute('aria-label') || '',
+          associatedLabelText,
+          accessibleButtonText,
+          accessibleInputButtonText,
+          element.getAttribute('title') || ''
+        ]);
+        const visibleCandidates = [
+          ['associated_label', visibleAssociatedLabelText],
+          ['visible_aria_labelledby', visibleLabelledBy],
+          ['button_text', visibleButtonText],
+          ['rendered_input_button_text', visibleInputButtonText],
+          ['placeholder', renderedPlaceholder]
+        ];
+        let visibleLabel = '';
+        let visibleLabelSource = 'none';
+        for (const [candidateSource, candidateValue] of visibleCandidates) {
+          if (!normalizedControlLabel(candidateValue)) continue;
+          visibleLabel = boundedControlLabel(candidateValue);
+          visibleLabelSource = candidateSource;
+          break;
+        }
+        const accessibleIdentity = boundedControlLabel(normalizedControlLabel(accessibleLabel).toLowerCase());
         const occurrence = (controlOccurrences.get(accessibleIdentity) || 0) + 1;
         controlOccurrences.set(accessibleIdentity, occurrence);
         const formOrdinal = formOrdinals.get(element.form);
         const controlOrdinal = (nextControlOrdinal.get(formOrdinal) || 0) + 1;
         nextControlOrdinal.set(formOrdinal, controlOrdinal);
-        const rawOptions = tag === 'select' ? [...element.options] : [];
-        if (rawOptions.length > publicFormControlLimits.maxOptionsPerControl) {
+        const rawOptionCount = tag === 'select' ? element.options.length : 0;
+        if (rawOptionCount > publicFormControlLimits.maxOptionsPerControl) {
           formControlOverflow.optionControls += 1;
         }
-        const options = rawOptions.slice(0, publicFormControlLimits.maxOptionsPerControl).map((option) => ({
-          label: boundedControlLabel(option.label || option.textContent || ''),
-          selected: option.selected === true,
-          defaultSelected: option.defaultSelected === true,
-          disabled: option.matches(':disabled')
-        }));
+        const options = Array.from(
+          { length: Math.min(rawOptionCount, publicFormControlLimits.maxOptionsPerControl) },
+          (_value, index) => {
+            const option = element.options[index];
+            return {
+              label: boundedControlLabel(option.label),
+              selected: option.selected === true,
+              defaultSelected: option.defaultSelected === true,
+              disabled: option.matches(':disabled')
+            };
+          }
+        );
         const selectable = tag === 'select';
         const checkable = tag === 'input' && ['checkbox', 'radio'].includes(inputType);
         return {
@@ -1128,12 +1221,13 @@ function collectorExpression(contract, mobile) {
           controlOrdinal,
           kind,
           visibleLabel,
+          visibleLabelSource,
           required: element.matches(':required') || String(element.getAttribute('aria-required') || '').toLowerCase() === 'true',
           disabled: element.matches(':disabled'),
           selected: checkable ? element.checked === true : null,
           defaultSelected: checkable ? element.defaultChecked === true : null,
-          optionEvidence: selectable ? (rawOptions.length > 0 ? 'observed' : 'unobserved_empty') : 'not_applicable',
-          optionCount: rawOptions.length,
+          optionEvidence: selectable ? (rawOptionCount > 0 ? 'observed' : 'unobserved_empty') : 'not_applicable',
+          optionCount: rawOptionCount,
           options
         };
       });
@@ -1141,7 +1235,7 @@ function collectorExpression(contract, mobile) {
       schemaVersion: 'public-kit.public-form-controls.1',
       limits: publicFormControlLimits,
       formCount: publicForms.length,
-      controlCount: publicControlCandidates.length,
+      controlCount: publicControlCount,
       controls: publicFormControls,
       overflow: formControlOverflow
     };
@@ -1765,6 +1859,12 @@ function observedPublicFormControls(signals, side) {
       errors.push(`${side} public-form evidence has an invalid ${field}`);
     }
   }
+  if (Number.isSafeInteger(evidence.formCount) && evidence.formCount > PUBLIC_FORM_CONTROL_LIMITS.maxControls) {
+    errors.push(`${side} public-form evidence exceeds the bounded form count`);
+  }
+  if (Number.isSafeInteger(evidence.controlCount) && evidence.controlCount > PUBLIC_FORM_CONTROL_LIMITS.maxControls) {
+    errors.push(`${side} public-form evidence exceeds the bounded control count`);
+  }
   const overflow = evidence.overflow ?? {};
   for (const field of ['controls', 'labels', 'optionControls']) {
     if (!Number.isSafeInteger(overflow[field]) || overflow[field] < 0) {
@@ -1773,41 +1873,56 @@ function observedPublicFormControls(signals, side) {
       errors.push(`${side} public-form evidence exceeded the verifier's ${field} bound; truncated evidence cannot establish parity`);
     }
   }
-  const controls = Array.isArray(evidence.controls) ? evidence.controls : [];
-  if (!Array.isArray(evidence.controls) || controls.length > PUBLIC_FORM_CONTROL_LIMITS.maxControls) {
+  const rawControls = Array.isArray(evidence.controls) ? evidence.controls : [];
+  const controls = rawControls.slice(0, PUBLIC_FORM_CONTROL_LIMITS.maxControls);
+  if (!Array.isArray(evidence.controls) || rawControls.length > PUBLIC_FORM_CONTROL_LIMITS.maxControls) {
     errors.push(`${side} public-form evidence has an invalid bounded control list`);
   }
   if (
     Number.isSafeInteger(evidence.controlCount) &&
     evidence.controlCount <= PUBLIC_FORM_CONTROL_LIMITS.maxControls &&
-    controls.length !== evidence.controlCount
+    rawControls.length !== evidence.controlCount
   ) {
     errors.push(`${side} public-form evidence control count does not match its observed controls`);
   }
   const index = new Map();
   const normalizedControls = [];
+  const expectedIdentityOccurrences = new Map();
   for (const [controlIndex, control] of controls.entries()) {
-    const identity = String(control?.accessibleIdentity ?? '');
-    const visibleLabel = String(control?.visibleLabel ?? '');
+    const rawIdentity = typeof control?.accessibleIdentity === 'string' ? control.accessibleIdentity : '';
+    const identity = normalizedPublicFormLabel(rawIdentity, { identity: true });
+    const rawVisibleLabel = typeof control?.visibleLabel === 'string' ? control.visibleLabel : '';
+    const visibleLabel = normalizedPublicFormLabel(rawVisibleLabel);
+    const rawVisibleLabelSource = String(control?.visibleLabelSource ?? '');
+    const visibleLabelSource = PUBLIC_FORM_VISIBLE_LABEL_SOURCES.has(rawVisibleLabelSource)
+      ? rawVisibleLabelSource
+      : 'none';
     const occurrence = Number(control?.occurrence);
     const formOrdinal = Number(control?.formOrdinal);
     const controlOrdinal = Number(control?.controlOrdinal);
-    const kind = String(control?.kind ?? '');
-    const options = Array.isArray(control?.options) ? control.options : [];
+    const rawKind = String(control?.kind ?? '');
+    const kind = rawKind.slice(0, 80);
+    const rawOptions = Array.isArray(control?.options) ? control.options : [];
+    const options = rawOptions.slice(0, PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl);
     if (Object.hasOwn(control ?? {}, 'name') || Object.hasOwn(control ?? {}, 'value')) {
       errors.push(`${side} public-form control ${controlIndex + 1} contains a private implementation name or value`);
     }
-    if (identity.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength) {
+    if (typeof control?.accessibleIdentity !== 'string' || rawIdentity.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an unbounded accessible identity`);
     }
     if (!identity && side === 'target') {
       errors.push(`${side} public-form control ${controlIndex + 1} lacks a bounded accessible identity`);
     }
-    if (identity && identity !== identity.normalize('NFKC').toLowerCase()) {
+    if (rawIdentity !== identity) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an unstable accessible identity`);
     }
     if (!Number.isSafeInteger(occurrence) || occurrence <= 0) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid identity occurrence`);
+    }
+    const expectedOccurrence = (expectedIdentityOccurrences.get(identity) || 0) + 1;
+    expectedIdentityOccurrences.set(identity, expectedOccurrence);
+    if (occurrence !== expectedOccurrence) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has an unstable identity occurrence`);
     }
     if (
       !Number.isSafeInteger(formOrdinal) ||
@@ -1818,11 +1933,24 @@ function observedPublicFormControls(signals, side) {
     ) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid bounded structural ordinal`);
     }
-    if (!/^(?:input_[a-z0-9_-]+|select_(?:single|multiple)|textarea|button_[a-z0-9_-]+)$/.test(kind)) {
+    if (
+      rawKind.length > 80 ||
+      !/^(?:input_[a-z0-9_-]+|select_(?:single|multiple)|textarea|button_[a-z0-9_-]+)$/.test(rawKind)
+    ) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid native kind`);
     }
-    if (visibleLabel.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength) {
+    if (
+      typeof control?.visibleLabel !== 'string' ||
+      rawVisibleLabel.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength ||
+      rawVisibleLabel !== visibleLabel
+    ) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an unbounded visible label`);
+    }
+    if (!PUBLIC_FORM_VISIBLE_LABEL_SOURCES.has(rawVisibleLabelSource)) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has an invalid visible-label source`);
+    }
+    if ((visibleLabel === '') !== (visibleLabelSource === 'none')) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has inconsistent visible-label evidence`);
     }
     if (
       typeof control?.required !== 'boolean' ||
@@ -1835,24 +1963,45 @@ function observedPublicFormControls(signals, side) {
     if (!Number.isSafeInteger(control?.optionCount) || control.optionCount < 0) {
       errors.push(`${side} public-form control ${controlIndex + 1} has an invalid option count`);
     }
-    if (options.length > PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl) {
+    if (!Array.isArray(control?.options)) {
+      errors.push(`${side} public-form control ${controlIndex + 1} has an invalid option list`);
+    }
+    if (rawOptions.length > PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl) {
       errors.push(`${side} public-form control ${controlIndex + 1} exceeds the option evidence bound`);
     }
+    const normalizedOptions = [];
     for (const [optionIndex, option] of options.entries()) {
       if (Object.hasOwn(option ?? {}, 'value')) {
         errors.push(`${side} public-form control ${controlIndex + 1} option ${optionIndex + 1} contains a private implementation value`);
       }
+      const rawOptionLabel = typeof option?.label === 'string' ? option.label : '';
+      const optionLabel = normalizedPublicFormLabel(rawOptionLabel);
       if (
         typeof option?.label !== 'string' ||
-        option.label.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength ||
+        rawOptionLabel.length > PUBLIC_FORM_CONTROL_LIMITS.maxLabelLength ||
+        rawOptionLabel !== optionLabel ||
         typeof option?.selected !== 'boolean' ||
         typeof option?.defaultSelected !== 'boolean' ||
         typeof option?.disabled !== 'boolean'
       ) {
         errors.push(`${side} public-form control ${controlIndex + 1} has invalid bounded option evidence`);
       }
+      normalizedOptions.push({
+        label: optionLabel,
+        selected: option?.selected,
+        defaultSelected: option?.defaultSelected,
+        disabled: option?.disabled
+      });
     }
     const selectable = kind === 'select_single' || kind === 'select_multiple';
+    const checkable = kind === 'input_checkbox' || kind === 'input_radio';
+    if (checkable) {
+      if (typeof control?.selected !== 'boolean' || typeof control?.defaultSelected !== 'boolean') {
+        errors.push(`${side} checkable public-form control ${controlIndex + 1} lacks boolean current and default state`);
+      }
+    } else if (control?.selected !== null || control?.defaultSelected !== null) {
+      errors.push(`${side} non-checkable public-form control ${controlIndex + 1} has unexpected current or default selected state`);
+    }
     if (selectable) {
       if (
         control?.optionEvidence !== 'observed' ||
@@ -1879,18 +2028,14 @@ function observedPublicFormControls(signals, side) {
       controlOrdinal,
       kind,
       visibleLabel,
+      visibleLabelSource,
       required: control?.required,
       disabled: control?.disabled,
       selected: control?.selected,
       defaultSelected: control?.defaultSelected,
       optionEvidence: control?.optionEvidence,
       optionCount: control?.optionCount,
-      options: options.map((option) => ({
-        label: String(option?.label ?? ''),
-        selected: option?.selected,
-        defaultSelected: option?.defaultSelected,
-        disabled: option?.disabled
-      }))
+      options: normalizedOptions
     };
     index.set(key, normalized);
     normalizedControls.push(normalized);
@@ -1898,7 +2043,11 @@ function observedPublicFormControls(signals, side) {
   const observedFormOrdinals = [...new Set(normalizedControls.map((control) => control.formOrdinal))]
     .sort((left, right) => left - right);
   const expectedFormOrdinals = Array.from(
-    { length: Number.isSafeInteger(evidence.formCount) ? evidence.formCount : 0 },
+    {
+      length: Number.isSafeInteger(evidence.formCount)
+        ? Math.min(evidence.formCount, PUBLIC_FORM_CONTROL_LIMITS.maxControls)
+        : 0
+    },
     (_value, index) => index + 1
   );
   if (canonicalJson(observedFormOrdinals) !== canonicalJson(expectedFormOrdinals)) {
@@ -1949,18 +2098,70 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
     }
     matched.push(key);
     if (sourceControl.accessibleIdentity) {
-      for (const field of ['accessibleIdentity', 'occurrence', 'visibleLabel']) {
+      for (const field of ['accessibleIdentity', 'occurrence']) {
         if (canonicalJson(sourceControl[field]) !== canonicalJson(targetControl[field])) {
           errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ${field}`);
         }
       }
-    } else if (targetControl.accessibleIdentity) {
-      accessibilityImprovements.push({
-        formOrdinal: sourceControl.formOrdinal,
-        controlOrdinal: sourceControl.controlOrdinal,
-        targetAccessibleIdentity: targetControl.accessibleIdentity,
-        targetVisibleLabel: targetControl.visibleLabel
-      });
+      if (sourceControl.visibleLabel !== targetControl.visibleLabel) {
+        const sameVisibleLabelAdded =
+          sourceControl.visibleLabel === '' &&
+          sourceControl.visibleLabelSource === 'none' &&
+          targetControl.accessibleIdentity === sourceControl.accessibleIdentity &&
+          PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES.has(targetControl.visibleLabelSource) &&
+          normalizedPublicFormLabel(targetControl.visibleLabel, { identity: true }) === sourceControl.accessibleIdentity;
+        if (sameVisibleLabelAdded) {
+          accessibilityImprovements.push({
+            type: 'matching-durable-visible-label-added',
+            formOrdinal: sourceControl.formOrdinal,
+            controlOrdinal: sourceControl.controlOrdinal,
+            preservedAccessibleIdentity: sourceControl.accessibleIdentity,
+            targetVisibleLabel: targetControl.visibleLabel
+          });
+        } else {
+          errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in visibleLabel`);
+        }
+      } else if (
+        sourceControl.visibleLabelSource === 'placeholder' &&
+        PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES.has(targetControl.visibleLabelSource)
+      ) {
+        accessibilityImprovements.push({
+          type: 'durable-visible-label-replaced-placeholder',
+          formOrdinal: sourceControl.formOrdinal,
+          controlOrdinal: sourceControl.controlOrdinal,
+          preservedAccessibleIdentity: sourceControl.accessibleIdentity,
+          preservedVisibleLabel: sourceControl.visibleLabel
+        });
+      }
+    } else {
+      const sourceVisibleIdentity = normalizedPublicFormLabel(sourceControl.visibleLabel, { identity: true });
+      const targetVisibleIdentity = normalizedPublicFormLabel(targetControl.visibleLabel, { identity: true });
+      const existingVisibleLabelBound =
+        sourceVisibleIdentity !== '' &&
+        targetControl.accessibleIdentity === sourceVisibleIdentity &&
+        targetControl.visibleLabel === sourceControl.visibleLabel;
+      const newVisibleLabelBound =
+        sourceVisibleIdentity === '' &&
+        targetVisibleIdentity !== '' &&
+        targetControl.accessibleIdentity === targetVisibleIdentity &&
+        PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES.has(targetControl.visibleLabelSource);
+      const accessibleIdentityAdded = existingVisibleLabelBound || newVisibleLabelBound;
+      if (accessibleIdentityAdded) {
+        accessibilityImprovements.push({
+          type: existingVisibleLabelBound
+            ? 'accessible-identity-added-from-existing-visible-label'
+            : 'matching-visible-label-and-accessible-identity-added',
+          formOrdinal: sourceControl.formOrdinal,
+          controlOrdinal: sourceControl.controlOrdinal,
+          sourceVisibleLabel: sourceControl.visibleLabel || null,
+          targetVisibleLabel: targetControl.visibleLabel,
+          targetAccessibleIdentity: targetControl.accessibleIdentity
+        });
+      } else {
+        errors.push(sourceVisibleIdentity
+          ? `public-form ${location} (${JSON.stringify(label)}) target accessible identity or visible label is not bound to the source's existing visible label`
+          : `public-form ${location} (${JSON.stringify(label)}) target does not add matching durable visible text and an accessible identity`);
+      }
     }
     for (const field of ['kind', 'required', 'disabled', 'selected', 'defaultSelected']) {
       if (canonicalJson(sourceControl[field]) !== canonicalJson(targetControl[field])) {

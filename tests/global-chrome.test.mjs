@@ -911,6 +911,7 @@ function observedControl({
   occurrence = 1,
   kind = 'input_text',
   visibleLabel = accessibleIdentity,
+  visibleLabelSource = visibleLabel ? (accessibleIdentity ? 'associated_label' : 'placeholder') : 'none',
   required = false,
   disabled = false,
   selected = null,
@@ -923,6 +924,7 @@ function observedControl({
     occurrence,
     kind,
     visibleLabel,
+    visibleLabelSource,
     required,
     disabled,
     selected,
@@ -1014,16 +1016,17 @@ test('verifier-owned source and target form controls pass with exact accessible 
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.fingerprint.startsWith('sha256:')));
 });
 
-test('an unlabeled source control may gain a target accessible identity without becoming unverifiable', () => {
+test('an inaccessible source control may gain only the identity of its existing visible label', () => {
   const sourceControls = [observedControl({
     accessibleIdentity: '',
     visibleLabel: 'Email',
+    visibleLabelSource: 'placeholder',
     kind: 'input_email',
     required: true
   })];
   const targetControls = [observedControl({
-    accessibleIdentity: 'email address',
-    visibleLabel: 'Email address',
+    accessibleIdentity: 'email',
+    visibleLabel: 'Email',
     kind: 'input_email',
     required: true
   })];
@@ -1043,7 +1046,8 @@ test('an unlabeled source control may gain a target accessible identity without 
   assert.equal(floor.status, 'passed', floor.errors.join('\n'));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 1));
   assert.ok(floor.findings.every((finding) => (
-    finding.publicFormControlParity.accessibilityImprovements[0]?.targetAccessibleIdentity === 'email address'
+    finding.publicFormControlParity.accessibilityImprovements[0]?.type ===
+      'accessible-identity-added-from-existing-visible-label'
   )));
 
   const stillUnlabeled = compareVerifierOwnedVisualFloor({
@@ -1060,6 +1064,171 @@ test('an unlabeled source control may gain a target accessible identity without 
   });
   assert.equal(stillUnlabeled.status, 'failed');
   assert.match(stillUnlabeled.errors.join('\n'), /target public-form control 1 lacks a bounded accessible identity/i);
+
+  const invented = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([observedControl({
+        accessibleIdentity: 'email address',
+        visibleLabel: 'Email address',
+        kind: 'input_email',
+        required: true
+      })])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(invented.status, 'failed');
+  assert.match(invented.errors.join('\n'), /not bound to the source's existing visible label/i);
+});
+
+test('a truly unlabeled source control may gain only matching durable visible text and identity', () => {
+  const sourceControl = observedControl({
+    accessibleIdentity: '',
+    visibleLabel: '',
+    visibleLabelSource: 'none',
+    kind: 'input_email',
+    required: true
+  });
+  for (const visibleLabelSource of ['associated_label', 'visible_aria_labelledby']) {
+    const floor = compareVerifierOwnedVisualFloor({
+      sourceCapture: visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([sourceControl])
+      }),
+      targetCapture: visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([observedControl({
+          accessibleIdentity: 'email address',
+          visibleLabel: 'Email address',
+          visibleLabelSource,
+          kind: 'input_email',
+          required: true
+        })])
+      }),
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+      stateFingerprint: state('f')
+    });
+
+    assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+    assert.ok(floor.findings.every((finding) => (
+      finding.publicFormControlParity.accessibilityImprovements[0]?.type ===
+        'matching-visible-label-and-accessible-identity-added'
+    )));
+  }
+
+  for (const invalidTarget of [
+    observedControl({
+      accessibleIdentity: 'email address', visibleLabel: '', visibleLabelSource: 'none', kind: 'input_email', required: true
+    }),
+    observedControl({
+      accessibleIdentity: 'email address', visibleLabel: 'Email address', visibleLabelSource: 'placeholder', kind: 'input_email', required: true
+    }),
+    observedControl({
+      accessibleIdentity: 'contact email', visibleLabel: 'Email address', visibleLabelSource: 'associated_label', kind: 'input_email', required: true
+    })
+  ]) {
+    const invalid = compareVerifierOwnedVisualFloor({
+      sourceCapture: visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([sourceControl])
+      }),
+      targetCapture: visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([invalidTarget])
+      }),
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(invalid.status, 'failed');
+    assert.match(invalid.errors.join('\n'), /does not add matching durable visible text/i);
+  }
+});
+
+test('an accessibly named source control may gain the same visible associated label only', () => {
+  const sourceControl = observedControl({
+    accessibleIdentity: 'email address',
+    visibleLabel: '',
+    visibleLabelSource: 'none',
+    kind: 'input_email',
+    required: true
+  });
+  const matchingVisibleLabel = observedControl({
+    accessibleIdentity: 'email address',
+    visibleLabel: 'Email address',
+    visibleLabelSource: 'associated_label',
+    kind: 'input_email',
+    required: true
+  });
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([sourceControl])
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([matchingVisibleLabel])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => (
+    finding.publicFormControlParity.accessibilityImprovements[0]?.type ===
+      'matching-durable-visible-label-added'
+  )));
+
+  for (const invalidTarget of [
+    { ...matchingVisibleLabel, visibleLabel: 'Contact email' },
+    { ...matchingVisibleLabel, visibleLabelSource: 'placeholder' }
+  ]) {
+    const invalid = compareVerifierOwnedVisualFloor({
+      sourceCapture: visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([sourceControl])
+      }),
+      targetCapture: visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+        publicFormControls: publicFormControlEvidence([invalidTarget])
+      }),
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(invalid.status, 'failed');
+    assert.match(invalid.errors.join('\n'), /differs in visibleLabel/i);
+  }
+});
+
+test('equivalent public labels do not require the same target markup mechanism', () => {
+  const sourceControl = observedControl({
+    accessibleIdentity: 'email address',
+    visibleLabel: 'Email address',
+    visibleLabelSource: 'associated_label',
+    kind: 'input_email'
+  });
+  const targetControl = {
+    ...sourceControl,
+    visibleLabelSource: 'visible_aria_labelledby'
+  };
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([sourceControl])
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([targetControl])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
 });
 
 test('structural fallback still blocks a missing unlabeled source control and option drift', () => {
@@ -1078,7 +1247,7 @@ test('structural fallback still blocks a missing unlabeled source control and op
     })
   ];
   const labeledEmail = observedControl({
-    accessibleIdentity: 'email address', visibleLabel: 'Email address', kind: 'input_email', required: true
+    accessibleIdentity: 'email', visibleLabel: 'Email', kind: 'input_email', required: true
   });
   const missing = compareVerifierOwnedVisualFloor({
     sourceCapture: visualFloorCapture({
@@ -1131,7 +1300,7 @@ test('structural fallback rejects reordered formerly unlabeled controls', () => 
       optionEvidence: 'observed',
       options: [{ label: 'Budapest', selected: true, defaultSelected: true, disabled: false }]
     }),
-    observedControl({ accessibleIdentity: 'email address', visibleLabel: 'Email address', kind: 'input_email' })
+    observedControl({ accessibleIdentity: 'email', visibleLabel: 'Email', kind: 'input_email' })
   ];
   const floor = compareVerifierOwnedVisualFloor({
     sourceCapture: visualFloorCapture({
@@ -1178,6 +1347,51 @@ test('verifier-owned form parity blocks kind, label, required, selection, and or
   assert.match(floor.errors.join('\n'), /ordered option labels.*selected, default, and disabled option state/i);
 });
 
+test('verifier-owned form parity rejects target-only controls and forms', () => {
+  const targetControls = [
+    ...structuredClone(publicContactControls),
+    observedControl({ accessibleIdentity: 'phone', visibleLabel: 'Phone', kind: 'input_tel' })
+  ];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(publicContactControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(targetControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /unexpected public-form control at form 1 control 5/i);
+
+  const extraFormControls = structuredClone(publicContactControls);
+  extraFormControls.push({
+    ...observedControl({ accessibleIdentity: 'search', visibleLabel: 'Search', kind: 'input_search' }),
+    formOrdinal: 2,
+    controlOrdinal: 1
+  });
+  const extraForm = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(publicContactControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(extraFormControls, 2)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(extraForm.status, 'failed');
+  assert.match(extraForm.errors.join('\n'), /public-form count differs: target 2, source 1/i);
+  assert.match(extraForm.errors.join('\n'), /unexpected public-form control at form 2 control 1/i);
+});
+
 test('empty or truncated select evidence cannot pass as a dynamic-options wildcard', () => {
   const emptySelect = observedControl({
     accessibleIdentity: 'campus',
@@ -1203,6 +1417,102 @@ test('empty or truncated select evidence cannot pass as a dynamic-options wildca
   assert.equal(floor.status, 'failed');
   assert.match(floor.errors.join('\n'), /dynamic options must be populated.*empty list cannot act as a wildcard/i);
   assert.match(floor.errors.join('\n'), /truncated evidence cannot establish parity/i);
+});
+
+test('malformed form evidence is bounded before it reaches comparison findings', () => {
+  const oversizedOptions = Array.from(
+    { length: PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl + 10 },
+    (_value, index) => ({
+      label: `Option ${index + 1}`,
+      selected: index === 0,
+      defaultSelected: index === 0,
+      disabled: false
+    })
+  );
+  const oversizedControls = Array.from(
+    { length: PUBLIC_FORM_CONTROL_LIMITS.maxControls + 10 },
+    (_value, index) => observedControl({
+      accessibleIdentity: `control ${index + 1}`,
+      visibleLabel: `Control ${index + 1}`,
+      kind: index === 0 ? 'select_single' : 'input_text',
+      optionEvidence: index === 0 ? 'observed' : 'not_applicable',
+      options: index === 0 ? oversizedOptions : []
+    })
+  );
+  const evidence = publicFormControlEvidence(oversizedControls);
+  evidence.overflow.controls = 10;
+  evidence.overflow.optionControls = 1;
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  for (const finding of floor.findings) {
+    assert.equal(finding.publicFormControlParity.source.controls.length, PUBLIC_FORM_CONTROL_LIMITS.maxControls);
+    assert.equal(
+      finding.publicFormControlParity.source.controls[0].options.length,
+      PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl
+    );
+  }
+});
+
+test('noncanonical labels, unstable occurrences, and impossible native state fail closed', () => {
+  const malformedControls = [
+    observedControl({
+      accessibleIdentity: 'ｅmail',
+      occurrence: 2,
+      visibleLabel: 'Ｅmail',
+      kind: 'input_email',
+      selected: true,
+      defaultSelected: true
+    }),
+    observedControl({
+      accessibleIdentity: 'choice',
+      kind: 'input_checkbox',
+      visibleLabel: 'Choice',
+      selected: null,
+      defaultSelected: null
+    }),
+    observedControl({
+      accessibleIdentity: 'campus',
+      kind: 'select_single',
+      visibleLabel: 'Campus',
+      optionEvidence: 'observed',
+      options: [{ label: 'Ｏnline', selected: true, defaultSelected: true, disabled: false }]
+    })
+  ];
+  const evidence = publicFormControlEvidence(malformedControls);
+  delete evidence.controls[1].options;
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: evidence
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /unstable accessible identity/i);
+  assert.match(floor.errors.join('\n'), /unbounded visible label/i);
+  assert.match(floor.errors.join('\n'), /unstable identity occurrence/i);
+  assert.match(floor.errors.join('\n'), /invalid option list/i);
+  assert.match(floor.errors.join('\n'), /non-checkable.*unexpected current or default selected state/i);
+  assert.match(floor.errors.join('\n'), /checkable.*lacks boolean current and default state/i);
+  assert.match(floor.errors.join('\n'), /invalid bounded option evidence/i);
 });
 
 test('long article structure does not become a design-led Canvas candidate from headings alone', () => {
@@ -1662,7 +1972,7 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     const missingBrand = request.url?.startsWith('/missing-brand');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><html lang="en"><head><title>Global chrome fixture</title><meta name="viewport" content="width=device-width"><style>
-      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}.menu-toggle{display:none}.honeypot{position:absolute;left:-10000px;width:10px;height:10px}
+      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}input,select{min-height:24px}.menu-toggle{display:none}.honeypot{position:absolute;left:-10000px;width:10px;height:10px}.visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
       @media(max-width:600px){.menu-toggle{display:block}#main-nav{display:none}#main-nav.open{display:block}}
     </style></head><body>
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
@@ -1670,15 +1980,21 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
         onclick="this.setAttribute('aria-expanded','true');document.getElementById('main-nav').classList.add('open')">Menu</button>
       <nav id="main-nav"><a href="/">Home</a><a href="/about">About</a></nav></header>
       <main><h1>Fixture</h1><p data-dynamic>Dynamic timestamp</p>
-        <form><input type="hidden" name="form_token" value="csrf-secret">
-          <label for="fixture-email">Email address</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">
+        <form id="fixture-form"><input type="hidden" name="form_token" value="csrf-secret">
+          <label for="fixture-email">Email&nbsp;&#xFF21;ddress</label><input id="fixture-email" name="email_internal" type="email" required value="visitor-secret">
           <label for="fixture-topic">Topic</label><select id="fixture-topic" name="topic_internal">
-            <option value="general-internal" selected>General</option><option value="admissions-internal">Admissions</option><option value="archived-internal" disabled>Archived</option>
+            <option value="general-internal" selected>&#xFF27;eneral</option><option value="admissions-internal">Admissions</option><option value="archived-internal" disabled>Archived</option><option value="blank-internal" label="">Private fallback text</option>
           </select>
           <label><input type="checkbox" name="copy_internal" checked>Send me a copy</label>
           <input class="honeypot" aria-hidden="true" tabindex="-1" name="website_honeypot" value="honeypot-secret">
+          <div inert><label>Inert secret<input name="inert_internal" value="inert-secret"></label></div>
+          <div style="opacity:0"><label>Transparent secret<input name="transparent_internal" value="transparent-secret"></label></div>
+          <div hidden><label>Hidden secret<input name="hidden_internal" value="hidden-secret"></label></div>
           <button type="submit" name="operation_internal" value="send-internal">Send</button>
+          <button type="button"><span class="visually-hidden">Screen reader action</span><svg aria-hidden="true" width="16" height="16"><circle cx="8" cy="8" r="6"></circle></svg></button>
         </form>
+        <span id="external-reference-label">Reference</span>
+        <input id="external-reference" form="fixture-form" aria-labelledby="external-reference-label" name="reference_internal" value="external-secret">
       </main>
       <footer><a href="/legal">Legal</a><a href="mailto:team@example.com">Email</a></footer>
     </body></html>`);
@@ -1711,22 +2027,29 @@ test('CDP pipe captures desktop/mobile screenshots and computed signals without 
     assert.ok(raw.routes.every((route) => route.signals.placeholderHrefs.length === 0));
     assert.ok(raw.routes.every((route) => route.signals.meaningfulHrefs.some((link) => link.href === 'mailto:team@example.com')));
     assert.ok(raw.routes.every((route) => route.signals.publicFormControls.formCount === 1));
-    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 4));
+    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 6));
     const publicControls = raw.routes[0].signals.publicFormControls.controls;
     assert.deepEqual(publicControls.map((control) => [control.formOrdinal, control.controlOrdinal]), [
-      [1, 1], [1, 2], [1, 3], [1, 4]
+      [1, 1], [1, 2], [1, 3], [1, 4], [1, 5], [1, 6]
     ]);
     assert.deepEqual(publicControls.map((control) => control.accessibleIdentity), [
-      'email address', 'topic', 'send me a copy', 'send'
+      'email address', 'topic', 'send me a copy', 'send', 'screen reader action', 'reference'
+    ]);
+    assert.deepEqual(publicControls.map((control) => control.visibleLabel), [
+      'Email Address', 'Topic', 'Send me a copy', 'Send', '', 'Reference'
+    ]);
+    assert.deepEqual(publicControls.map((control) => control.visibleLabelSource), [
+      'associated_label', 'associated_label', 'associated_label', 'button_text', 'none', 'visible_aria_labelledby'
     ]);
     assert.deepEqual(publicControls[1].options, [
       { label: 'General', selected: true, defaultSelected: true, disabled: false },
       { label: 'Admissions', selected: false, defaultSelected: false, disabled: false },
-      { label: 'Archived', selected: false, defaultSelected: false, disabled: true }
+      { label: 'Archived', selected: false, defaultSelected: false, disabled: true },
+      { label: '', selected: false, defaultSelected: false, disabled: false }
     ]);
     assert.doesNotMatch(
       JSON.stringify(raw.routes.map((route) => route.signals.publicFormControls)),
-      /form_token|csrf-secret|email_internal|visitor-secret|general-internal|website_honeypot|honeypot-secret|operation_internal|send-internal/
+      /form_token|csrf-secret|email_internal|visitor-secret|general-internal|blank-internal|Private fallback text|website_honeypot|honeypot-secret|inert_internal|inert-secret|transparent_internal|transparent-secret|hidden_internal|hidden-secret|operation_internal|send-internal|reference_internal|external-secret/
     );
     assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
     assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
