@@ -488,6 +488,86 @@ test('independent handoff binds required composition routes without widening bli
   assert.doesNotMatch(widenedEvidenceErrors.independent.join('\n'), /super-secret-value|preview_token/i);
 });
 
+test('independent handoff canonicalizes trailing slashes in composition route identities', () => {
+  const { packetDir, projectRoot } = fixtureProject();
+  const routeMatrixPath = join(packetDir, 'route-matrix.json');
+  const routeMatrix = JSON.parse(readFileSync(routeMatrixPath, 'utf8'));
+  routeMatrix.routes.push({
+    sourcePath: '/about/',
+    targetPath: '/about/',
+    routeRole: 'other',
+    expectedRedirect: false,
+    accepted: true
+  });
+  writeJson(routeMatrixPath, routeMatrix);
+  refreshPreliminaryPacketFingerprint(packetDir);
+
+  const complete = writeReviewHandoff({ project: projectRoot });
+  assert.equal(
+    complete.projections.independent.allowedInputs.urls.includes('https://target.ddev.site/about'),
+    true
+  );
+  assert.equal(
+    complete.projections.independent.allowedInputs.urls.includes('https://target.ddev.site/about/'),
+    false
+  );
+
+  const records = reviewerRecords(complete.manifest, complete.projections);
+  records.independent.compositionModelFidelityChecks = [{
+    sourceRoute: '/about/',
+    targetRoute: '/about/'
+  }];
+  const declaredPacketFiles = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8')).reviewPacketFiles;
+  assert.deepEqual(reviewHandoffReviewerErrors({
+    manifest: complete.manifest,
+    projections: complete.projections,
+    independentVerification: records.independent,
+    blindReview: records.blind,
+    packetDir,
+    declaredPacketFiles
+  }), {
+    blind: [],
+    common: [],
+    independent: []
+  });
+});
+
+test('reviewer validation ignores route-less composition fidelity template placeholders', () => {
+  const { packetDir, projectRoot } = fixtureProject();
+  const complete = writeReviewHandoff({ project: projectRoot });
+  const records = reviewerRecords(complete.manifest, complete.projections);
+  const template = JSON.parse(readFileSync(join(templatesDir, 'independent-verification.template.json'), 'utf8'));
+  records.independent.compositionModelFidelityChecks = template.compositionModelFidelityChecks;
+  const declaredPacketFiles = JSON.parse(readFileSync(join(repoRoot, 'gates.json'), 'utf8')).reviewPacketFiles;
+
+  assert.deepEqual(reviewHandoffReviewerErrors({
+    manifest: complete.manifest,
+    projections: complete.projections,
+    independentVerification: records.independent,
+    blindReview: records.blind,
+    packetDir,
+    declaredPacketFiles
+  }), {
+    blind: [],
+    common: [],
+    independent: []
+  });
+
+  records.independent.compositionModelFidelityChecks = [{
+    sourceRoute: '/about',
+    targetRoute: ''
+  }];
+  const malformedErrors = reviewHandoffReviewerErrors({
+    manifest: complete.manifest,
+    projections: complete.projections,
+    independentVerification: records.independent,
+    blindReview: records.blind,
+    packetDir,
+    declaredPacketFiles
+  });
+  assert.match(malformedErrors.independent.join('\n'), /target route must start with \/\./i);
+});
+
 test('reviewer target and primary-route URLs stay bound to the root target origin', () => {
   const { projectRoot } = fixtureProject();
   const complete = writeReviewHandoff({ project: projectRoot });

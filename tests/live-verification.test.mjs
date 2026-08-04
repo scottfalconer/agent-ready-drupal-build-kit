@@ -34,6 +34,7 @@ import {
   inspectCustomCodeFilesystem,
   inspectSourceSurface,
   inspectCriticalAssets,
+  independentlyCorroboratedNavigationParityDispositions,
   observedComposedRouteReconciliationErrors,
   SOURCE_SURFACE_LIMITS,
   sourceSurfaceCompletionBlocker,
@@ -44,6 +45,7 @@ import {
   yamlTreeMatchesHead,
   reconcileLifecycleContinuation,
   verifyLive,
+  visualParityCompletionSupport,
   buildVerificationSummary,
   summaryPathFor,
   verificationCliReportAnnouncement
@@ -256,6 +258,34 @@ test('Canvas authoring screenshots must be credible, distinct, and same-size bef
     canvasAuthoringScreenshotSetCredible([image('a', { width: 1440 }), image('b'), image('c', { height: 844 })]),
     false
   );
+});
+
+test('brief completion requires a verifier-owned passing target raster floor', () => {
+  const rasterFloor = {
+    schemaVersion: 'public-kit.target-raster-quality-floor.1',
+    status: 'passed',
+    completionSupported: true
+  };
+  const visualFloor = {
+    schemaVersion: 'public-kit.visual-parity-floor.1',
+    status: 'passed',
+    authority: 'verifier-owned-managed-browser-target-raster-quality',
+    verifierOwned: true,
+    completionSupported: true,
+    sourceTargetStructuralParity: { status: 'not_applicable' },
+    targetRasterQualityFloor: rasterFloor
+  };
+
+  assert.equal(visualParityCompletionSupport(visualFloor, { briefMode: true }), true);
+  assert.equal(visualParityCompletionSupport({
+    ...visualFloor,
+    status: 'not_applicable',
+    authority: 'not-applicable-build-from-brief'
+  }, { briefMode: true }), false);
+  assert.equal(visualParityCompletionSupport({
+    ...visualFloor,
+    targetRasterQualityFloor: { ...rasterFloor, status: 'review_required', completionSupported: false }
+  }, { briefMode: true }), false);
 });
 
 test('verifier-observed design-led routes cannot evade Canvas by relabeling the route', () => {
@@ -1586,7 +1616,7 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
       return;
     }
     const links = path === '/'
-      ? '<nav><a href="/projects">Projects</a><a href="/projects?utm_source=home&utm_campaign=spring">Tracked projects</a><a href="/projects?view=featured&utm_medium=nav">Featured projects</a><a href="/developers">Developers</a><a href="/podcasts">Podcasts</a></nav>'
+      ? '<nav><a href="/projects">Projects</a><a href="/projects?utm_source=home&utm_campaign=spring">Tracked projects</a><a href="/projects?utm_source=home&">Trailing tracked projects</a><a href="/projects?view=featured&utm_medium=nav">Featured projects</a><a href="/developers">Developers</a><a href="/podcasts">Podcasts</a></nav>'
       : '';
     response.writeHead(200, { 'content-type': 'text/html' });
     response.end(`<!doctype html><html><head><title>${page[0]}</title><link rel="canonical" href="${origin}${path}"></head><body><h1>${page[1]}</h1>${links}</body></html>`);
@@ -1680,6 +1710,7 @@ test('verifier-owned source census rejects a target-derived one-route inventory 
     assert.ok(complete.routes.some((route) => route.path === '/projects?view=featured'));
     assert.ok(complete.discoveredPublicPaths.includes('/projects?view=featured'));
     assert.ok(complete.routes.every((route) => !route.path.includes('utm_')));
+    assert.ok(complete.routes.every((route) => !route.path.endsWith('?')));
     assert.match(complete.fingerprint, /^sha256:[a-f0-9]{64}$/);
 
     const staleNonPrimary = structuredClone(completeMatrix);
@@ -1730,13 +1761,23 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       </body></html>`);
       return;
     }
-    if (request.url === '/prose' || request.url === '/hero' || request.url === '/hidden-main') {
+    if (
+      request.url === '/prose' ||
+      request.url === '/hero' ||
+      request.url === '/hidden-main' ||
+      request.url === '/hidden-main-ancestor' ||
+      request.url === '/hidden-main-before-visible'
+    ) {
       const sharedChrome = 'Shared navigation and footer copy. '.repeat(24);
       const mainContent = request.url === '/prose'
         ? `<main><h1>Program</h1><p>${'Substantive route prose. '.repeat(32)}</p></main>`
         : request.url === '/hero'
           ? '<div role="main"><h1>Program</h1></div>'
-          : `<main hidden><h1>Program</h1><p>${'Hidden route prose. '.repeat(32)}</p></main>`;
+          : request.url === '/hidden-main'
+            ? `<main hidden><h1>Program</h1><p>${'Hidden route prose. '.repeat(32)}</p></main>`
+            : request.url === '/hidden-main-ancestor'
+              ? `<section aria-hidden="true"><main><h1>Program</h1><p>${'Hidden route prose. '.repeat(32)}</p></main></section>`
+              : `<main hidden><h1>Hidden program</h1></main><main><h1>Program</h1><p>${'Visible route prose. '.repeat(32)}</p></main>`;
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(`<!doctype html><html><head><title>Program</title></head><body>
         <header>${sharedChrome}</header>${mainContent}<footer>${sharedChrome}</footer>
@@ -1744,8 +1785,8 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       return;
     }
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><title>Home</title></head><body>
-      <h1>Home</h1><button type="button">Menu</button>
+    response.end(`<!doctype html><html><head><!-- <title>Old title</title> --><title>Home</title></head><body>
+      <section hidden><h1>Old hidden home</h1></section><h1>Home</h1><button type="button">Menu</button>
       <!-- <h2>Old heading</h2><form><select><option>Old</option></select></form><iframe src="/old"></iframe> -->
       <script>const oldMarkup = '<form><button>Old</button></form><video src="old.mp4"></video>';</script>
       <template><h2>Template heading</h2><form><input name="template"></form><object data="old.pdf"></object></template>
@@ -1765,16 +1806,20 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
       routes: [
         { sourcePath: '/', sourceStatus: 200, sourceFinalPath: '/', sourceTitle: 'Home', sourceH1: 'Home', accepted: true },
         { sourcePath: '/form', sourceStatus: 200, sourceFinalPath: '/form', sourceTitle: 'Form', sourceH1: 'Form', accepted: true },
-        { sourcePath: '/manual.pdf', sourceStatus: 200, sourceFinalPath: '/manual.pdf', sourceTitle: '', sourceH1: '', accepted: true },
+        { sourcePath: '/manual.pdf', sourceStatus: 200, sourceFinalPath: '/manual.pdf', sourceTitle: '', sourceH1: '', routeRole: 'media', accepted: true },
         { sourcePath: '/prose', sourceStatus: 200, sourceFinalPath: '/prose', sourceTitle: 'Program', sourceH1: 'Program', accepted: true },
         { sourcePath: '/hero', sourceStatus: 200, sourceFinalPath: '/hero', sourceTitle: 'Program', sourceH1: 'Program', accepted: true },
-        { sourcePath: '/hidden-main', sourceStatus: 200, sourceFinalPath: '/hidden-main', sourceTitle: 'Program', sourceH1: 'Program', accepted: true }
+        { sourcePath: '/hidden-main', sourceStatus: 200, sourceFinalPath: '/hidden-main', sourceTitle: 'Program', sourceH1: '', accepted: true },
+        { sourcePath: '/hidden-main-ancestor', sourceStatus: 200, sourceFinalPath: '/hidden-main-ancestor', sourceTitle: 'Program', sourceH1: '', accepted: true },
+        { sourcePath: '/hidden-main-before-visible', sourceStatus: 200, sourceFinalPath: '/hidden-main-before-visible', sourceTitle: 'Program', sourceH1: 'Program', accepted: true }
       ],
       sourceRouteDriftClassification: []
     };
     const census = await inspectSourceSurface({ routeMatrix });
     assert.equal(census.status, 'passed', census.errors.join('\n'));
     const home = census.routes.find((route) => route.path === '/');
+    assert.equal(home.title, 'Home');
+    assert.equal(home.h1, 'Home');
     assert.equal(home.intrinsicSemantics.headingCount, 1);
     assert.equal(home.intrinsicSemantics.formCount, 0);
     assert.equal(home.intrinsicSemantics.formControlCount, 0);
@@ -1811,6 +1856,14 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
     assert.equal(matchingMedia.routeChecks[0].htmlSemanticComparisonApplied, false);
     assert.equal(matchingMedia.routeChecks[0].contentTypeComparisonApplied, true);
 
+    const nonHtmlMisclassifiedAsPage = allRouteSemanticReconciliation({
+      routeMatrix: { routes: [{ ...mediaRoute, routeRole: 'other', targetPath: '/manual.pdf', targetTitle: '', targetH1: '' }] },
+      serverRenderedResponseSurface: targetSurface,
+      sourceSurfaceCensus: census
+    });
+    assert.equal(nonHtmlMisclassifiedAsPage.status, 'blocked');
+    assert.match(nonHtmlMisclassifiedAsPage.errors.join('\n'), /must use routeRole media/i);
+
     const changedType = structuredClone(targetSurface);
     changedType.routeChecks[0].contentType = 'application/octet-stream';
     const mismatchingMedia = allRouteSemanticReconciliation({
@@ -1824,11 +1877,20 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
     const sourceProse = census.routes.find((route) => route.path === '/prose');
     const targetHero = census.routes.find((route) => route.path === '/hero');
     const hiddenMain = census.routes.find((route) => route.path === '/hidden-main');
+    const hiddenMainAncestor = census.routes.find((route) => route.path === '/hidden-main-ancestor');
+    const visibleMainAfterHidden = census.routes.find((route) => route.path === '/hidden-main-before-visible');
     assert.ok(sourceProse.intrinsicSemantics.visibleTextLength >= 400);
     assert.ok(targetHero.intrinsicSemantics.visibleTextLength < 120);
     assert.equal(hiddenMain.intrinsicSemantics.visibleTextLength, 0);
     assert.equal(hiddenMain.intrinsicSemantics.headingCount, 0);
     assert.equal(hiddenMain.intrinsicSemantics.formCount, 0);
+    assert.equal(hiddenMain.h1, '');
+    assert.equal(hiddenMainAncestor.intrinsicSemantics.visibleTextLength, 0);
+    assert.equal(hiddenMainAncestor.intrinsicSemantics.headingCount, 0);
+    assert.equal(hiddenMainAncestor.h1, '');
+    assert.ok(visibleMainAfterHidden.intrinsicSemantics.visibleTextLength >= 400);
+    assert.equal(visibleMainAfterHidden.intrinsicSemantics.headingCount, 1);
+    assert.equal(visibleMainAfterHidden.h1, 'Program');
     const omittedMainContent = allRouteSemanticReconciliation({
       routeMatrix: { routes: [{
         sourcePath: '/prose',
@@ -1852,6 +1914,31 @@ test('source semantics exclude inert markup and explicitly observe accepted non-
     });
     assert.equal(omittedMainContent.status, 'blocked');
     assert.match(omittedMainContent.errors.join('\n'), /visible text collapsed/i);
+
+    const htmlMisclassifiedAsMedia = allRouteSemanticReconciliation({
+      routeMatrix: { routes: [{
+        sourcePath: '/hero',
+        sourceStatus: 200,
+        sourceFinalPath: '/hero',
+        sourceTitle: 'Program',
+        sourceH1: 'Program',
+        targetPath: '/hero',
+        targetTitle: 'Program',
+        targetH1: 'Program',
+        routeRole: 'media',
+        accepted: true
+      }] },
+      sourceSurfaceCensus: census,
+      serverRenderedResponseSurface: {
+        passed: true,
+        routeChecks: [{
+          ...targetHero,
+          requestedUrl: 'https://target.example/hero'
+        }]
+      }
+    });
+    assert.equal(htmlMisclassifiedAsMedia.status, 'blocked');
+    assert.match(htmlMisclassifiedAsMedia.errors.join('\n'), /routeRole media is reserved for matching non-HTML response surfaces/i);
   }, { defaultVerificationRoutes: false });
 });
 
@@ -1969,9 +2056,26 @@ test('all-route semantic reconciliation live-binds exact query identities and bl
     applies: true,
     acceptedBy: 'Site owner',
     rationale: 'The owner approved the clearer public identity.',
-    evidence: 'evidence/identity-change.txt'
+    evidence: 'evidence/identity-change.txt',
+    sourceTitle: 'Program',
+    sourceH1: 'Program',
+    targetTitle: 'New program title',
+    targetH1: 'New program title'
+  };
+  const independentVerification = {
+    identityChangeDispositionChecks: [{
+      sourcePath: '/program?audience=parents',
+      targetPath: '/program?audience=parents',
+      sourceTitle: 'Program',
+      sourceH1: 'Program',
+      targetTitle: 'New program title',
+      targetH1: 'New program title',
+      dispositionEvidence: 'evidence/identity-change.txt',
+      status: 'pass'
+    }]
   };
   const dispositionedChange = allRouteSemanticReconciliation({
+    independentVerification,
     packetDir,
     routeMatrix: { routes: [changedRoute] },
     serverRenderedResponseSurface: changedTarget,
@@ -1979,6 +2083,60 @@ test('all-route semantic reconciliation live-binds exact query identities and bl
   });
   assert.equal(dispositionedChange.status, 'passed', dispositionedChange.errors.join('\n'));
   assert.equal(dispositionedChange.routeChecks[0].acceptedIdentityChangeDisposition, true);
+
+  const staleDisposition = structuredClone(changedRoute);
+  staleDisposition.identityChangeDisposition.targetH1 = 'Previous target heading';
+  const staleDispositionResult = allRouteSemanticReconciliation({
+    independentVerification,
+    packetDir,
+    routeMatrix: { routes: [staleDisposition] },
+    serverRenderedResponseSurface: changedTarget,
+    sourceSurfaceCensus
+  });
+  assert.equal(staleDispositionResult.status, 'blocked');
+  assert.match(staleDispositionResult.errors.join('\n'), /not bound to the exact current verifier-owned/i);
+
+  const uncorroboratedDisposition = allRouteSemanticReconciliation({
+    independentVerification: { identityChangeDispositionChecks: [] },
+    packetDir,
+    routeMatrix: { routes: [changedRoute] },
+    serverRenderedResponseSurface: changedTarget,
+    sourceSurfaceCensus
+  });
+  assert.equal(uncorroboratedDisposition.status, 'blocked');
+  assert.match(uncorroboratedDisposition.errors.join('\n'), /exactly one matching passing independent-verification counterpart/i);
+
+  const preemptiveDispositionRoute = structuredClone(route);
+  preemptiveDispositionRoute.identityChangeDisposition = {
+    applies: true,
+    acceptedBy: 'Site owner',
+    rationale: 'Preemptive blanket acceptance must not survive.',
+    evidence: 'evidence/identity-change.txt',
+    sourceTitle: 'Program',
+    sourceH1: 'Program',
+    targetTitle: 'Program',
+    targetH1: 'Program'
+  };
+  const preemptiveDisposition = allRouteSemanticReconciliation({
+    independentVerification: {
+      identityChangeDispositionChecks: [{
+        sourcePath: '/program?audience=parents',
+        targetPath: '/program?audience=parents',
+        sourceTitle: 'Program',
+        sourceH1: 'Program',
+        targetTitle: 'Program',
+        targetH1: 'Program',
+        dispositionEvidence: 'evidence/identity-change.txt',
+        status: 'pass'
+      }]
+    },
+    packetDir,
+    routeMatrix: { routes: [preemptiveDispositionRoute] },
+    serverRenderedResponseSurface,
+    sourceSurfaceCensus
+  });
+  assert.equal(preemptiveDisposition.status, 'blocked');
+  assert.match(preemptiveDisposition.errors.join('\n'), /applies but.*no difference/i);
 
   const omittedTarget = structuredClone(serverRenderedResponseSurface);
   omittedTarget.routeChecks[0].intrinsicSemantics = {
@@ -3232,6 +3390,8 @@ function addQualifyingReviewEvidence(packetDir, targetBaseUrl) {
     }
   ];
   independent.routeDriftDispositionChecks = [];
+  independent.identityChangeDispositionChecks = [];
+  independent.primaryNavigationParityDispositionChecks = [];
   independent.placeholderTextScan = {
     scannedRoutes: ['/'],
     scannedAdminSurfaces: ['/admin/content'],
@@ -4437,6 +4597,21 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
       routeRole: 'search',
       notes: 'Exact query-bearing primary route.'
     });
+    routeMatrix.perRouteItemReconciliation.push({
+      sourcePath: sourceRoute,
+      targetPath: targetRoute,
+      sourceObject: 'Search result',
+      itemType: 'page',
+      sourceCount: 2,
+      targetRenderedCount: 2,
+      targetDrupalEntityCount: 2,
+      mismatchDisposition: 'none',
+      acceptedBy: '',
+      rationale: '',
+      dispositionEvidence: '',
+      accepted: true,
+      notes: 'The exact query-state result count reconciles.'
+    });
     routeMatrix.firstFoldBrandAssetParity.push(...routeMatrix.firstFoldBrandAssetParity
       .filter((record) => record.sourcePath === '/')
       .map((record) => ({
@@ -4468,6 +4643,63 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
       routeRole: 'search',
       ownerRationale: 'A structured Drupal search route owns this query state.'
     });
+    patternMap.structuredContentModel.collectionScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The accepted search route renders a dynamic recurring result collection.'
+    };
+    patternMap.structuredContentModel.collectionOwnershipLedger = [{
+      sourceRoute,
+      collectionPattern: 'search',
+      sourceObject: 'Search result',
+      sourceItemCount: 2,
+      drupalEntityType: 'node',
+      contentTypeOrBundle: 'page',
+      requiredFields: ['title'],
+      collectionOwner: 'search_api_view',
+      collectionSelection: 'query_backed',
+      curationRationale: '',
+      curationEvidence: '',
+      viewDisplayOrConfig: 'views.view.search_results:page_1',
+      detailRouteOwner: 'view_row',
+      drupalOwnerConfigId: 'views.view.search_results:page_1',
+      detailRouteMode: 'inline_in_collection',
+      representativeDetailSourcePath: '',
+      representativeDetailTargetPath: '',
+      detailLoadBearingFields: [],
+      detailRouteRationale: 'This fixture verifies the exact query-state collection route.',
+      pagination: {
+        sourceMode: 'none',
+        sourcePageSize: null,
+        sourceContinuationKind: 'none',
+        sourceContinuationRequest: '',
+        sourceContinuationBinding: 'none',
+        sourceContinuationStateId: '',
+        targetMode: 'none',
+        targetPageSize: null,
+        liveViewDisplay: 'views.view.search_results:page_1',
+        targetContinuationKind: 'none',
+        targetContinuationRequest: '',
+        targetContinuationBinding: 'none',
+        targetContinuationStateId: '',
+        sourceContinuationEquivalent: false,
+        modeChangeDisposition: {
+          kind: 'none',
+          sourceMode: '',
+          targetMode: '',
+          acceptedBy: '',
+          rationale: '',
+          evidence: '',
+          accepted: false
+        },
+        evidence: 'evidence/independent-verification/claim-evidence.json',
+        accepted: true
+      },
+      editorAddRowEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      exceptionRationale: '',
+      accepted: true,
+      notes: 'Search results are query-backed by one exact Drupal View display.'
+    }];
   });
 
   mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
@@ -4485,6 +4717,70 @@ function addQueryPrimaryEvidence(packetDir, targetBaseUrl) {
       targetRoute,
       sectionsChecked: ['Search results']
     });
+    independent.perRouteItemCounts = [{
+      sourceRoute,
+      targetRoute,
+      sourceObject: 'Search result',
+      routeRole: 'search',
+      expectedSourceItemCount: 2,
+      targetRenderedItemCount: 2,
+      targetDrupalEntityCount: 2,
+      missingItems: [],
+      extraItems: [],
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.collectionOwnershipChecks = [{
+      sourceRoute,
+      targetRoute,
+      sourceObject: 'Search result',
+      collectionPattern: 'search',
+      drupalOwner: 'search_api_view',
+      collectionSelection: 'query_backed',
+      viewOrCollectionConfig: 'views.view.search_results:page_1',
+      curationRationale: '',
+      curationEvidence: '',
+      editorAddRowEvidence: 'claim-evidence.json',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.editorAddRowChecks = [{
+      sourceRoute,
+      targetRoute,
+      sourceObject: 'Search result',
+      editorUser: 'search content editor',
+      editorRole: 'content editor',
+      publicOutputChanged: true,
+      listingOrDetailUpdatedWithoutCode: true,
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+  });
+
+  mutateJson(join(packetDir, 'drupal-readback.json'), (readback) => {
+    readback.views = [{
+      viewId: 'search_results',
+      displayId: 'page_1',
+      configName: 'views.view.search_results',
+      path: '/search',
+      pager: { type: 'none', itemsPerPage: 0, offset: 0, inheritedFromDefault: true }
+    }];
+  });
+
+  const recurringSearchModel = {
+    entityType: 'node',
+    bundle: 'page',
+    publicRoutes: [targetRoute],
+    reviewed: true,
+    dimensions: [],
+    noTemporalCycleDimensionRationale: 'The page search collection has no date, year, season, period, or taxonomy cycle dimension.'
+  };
+  mutateJson(join(packetDir, 'next-cycle-verification.json'), (nextCycle) => {
+    nextCycle.discovery.recurringPublicModels = [recurringSearchModel];
+    nextCycle.applicability.reason = 'The recurring search model was reviewed and has no temporal or cycle dimension.';
+  });
+  mutateJson(join(packetDir, 'evidence', 'next-cycle', 'discovery.json'), (discovery) => {
+    discovery.recurringPublicModels = [recurringSearchModel];
   });
 
   mutateJson(join(packetDir, 'parity-report.json'), (parity) => {
@@ -5461,6 +5757,8 @@ test('intrinsic route state ignores target origin and volatile form tokens while
           <a href="${origin}/people?page=2">People</a>
           <a href="${origin}/people?campaign=${campaign}#${fragment}">Campaign</a>
           <a href="${origin}/account?form_token=${token}">Account</a>
+          <a href="${origin}/session?session_id=${token}">Session</a>
+          <a href="${origin}/tracked?utm_source=">Tracked</a>
           <img src="${origin}/hero.jpg?v=${token}" alt="Hero">
           <form action="${origin}/search" method="post">
             <input type="hidden" name="form_build_id" value="${token}">
@@ -5505,10 +5803,18 @@ test('intrinsic route state ignores target origin and volatile form tokens while
 
   const changedLongQuery = await capture('third', 'meaningful-campaign-identifier-987654321');
   assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedLongQuery.intrinsicSemantics.linkTargetsSha256);
+  assert.notDeepEqual(
+    first.intrinsicSemantics.internalLinkRequestSha256s,
+    changedLongQuery.intrinsicSemantics.internalLinkRequestSha256s
+  );
   assert.notEqual(first.routeStateFingerprint, changedLongQuery.routeStateFingerprint);
 
   const changedFragment = await capture('fourth', 'meaningful-campaign-identifier-123456789', 'all-speakers');
   assert.notEqual(first.intrinsicSemantics.linkTargetsSha256, changedFragment.intrinsicSemantics.linkTargetsSha256);
+  assert.deepEqual(
+    first.intrinsicSemantics.internalLinkRequestSha256s,
+    changedFragment.intrinsicSemantics.internalLinkRequestSha256s
+  );
 });
 
 test('critical same-origin rendered asset bytes are bounded, validated, and state-bound', async () => {
@@ -7087,10 +7393,26 @@ process.stdout.write(outputs.get(command) + '\\n');
         applies: true,
         acceptedBy: 'Fixture owner',
         rationale: 'This fixture intentionally uses different source and target identities.',
-        evidence: 'evidence/identity-change.txt'
+        evidence: 'evidence/identity-change.txt',
+        sourceTitle: 'Source site',
+        sourceH1: 'Source home',
+        targetTitle: 'Target site',
+        targetH1: 'Target home'
       };
       writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
       addQualifyingReviewEvidence(packetDir, baseUrl);
+      mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+        independent.identityChangeDispositionChecks = [{
+          sourcePath: '/',
+          targetPath: '/',
+          sourceTitle: 'Source site',
+          sourceH1: 'Source home',
+          targetTitle: 'Target site',
+          targetH1: 'Target home',
+          dispositionEvidence: 'evidence/identity-change.txt',
+          status: 'pass'
+        }];
+      });
       writeFileSync(
         join(packetDir, 'evidence', 'identity-change.txt'),
         'The fixture owner accepted the source-to-target identity change.\n'
@@ -7917,7 +8239,7 @@ test('composition ownership is route-reconciled and Canvas opt-out requires an o
       whyNotStructuredContent: 'The route has no recurring schema or reusable object.',
       whyCanvasOrExperienceBuilderNotUsed: 'Editors only maintain one stable introduction field.',
       editorMaintenancePath: '/node/1/edit',
-      browserEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      browserEvidence: 'evidence/blind-adversarial-review/target-desktop.png',
       accepted: true,
       notes: ''
     }];
@@ -7993,8 +8315,8 @@ test('composition ownership is route-reconciled and Canvas opt-out requires an o
   attachFixtureReviewHandoff(exactTargetDeviation, 'https://target.example');
   const exactTargetDeviationReport = await validatePacket({ packetDir: exactTargetDeviation });
   const exactTargetDeviationReasons = exactTargetDeviationReport.completionEvidence.packetCompletionBlockedReasons.join('\n');
-  assert.doesNotMatch(exactTargetDeviationReasons, /independent composition fidelity for \/ must pass/i);
-  assert.doesNotMatch(exactTargetDeviationReasons, /needs a passing composition-fidelity check for \/\./i);
+  assert.equal(exactTargetDeviationReport.completionEvidence.packetSupportsCompletion, false);
+  assert.match(exactTargetDeviationReasons, /actual composition owner.*must match.*declared owner|independent composition fidelity for \/ must pass/i);
 
   for (const [name, mutateDeviation] of [
     ['wrong-target', (check) => { check.deviationTargetUrl = 'https://target.example/wrong'; }],
@@ -8130,6 +8452,9 @@ test('conditionally applicable hard gates fail closed when their verifier eviden
             contentTypeOrBundle: 'card',
             requiredFields: ['title'],
             collectionOwner: 'view',
+            collectionSelection: 'query_backed',
+            curationRationale: '',
+            curationEvidence: '',
             viewDisplayOrConfig: 'views.view.cards',
             detailRouteOwner: 'entity_view_display',
             editorAddRowEvidence: 'editor-task.json',
@@ -8419,6 +8744,9 @@ test('collection packet evidence cannot cross-bind from swapped or missing query
         contentTypeOrBundle: 'product',
         requiredFields: ['title'],
         collectionOwner: 'view',
+        collectionSelection: 'query_backed',
+        curationRationale: '',
+        curationEvidence: '',
         viewDisplayOrConfig: 'views.view.query_listing',
         detailRouteOwner: 'view_row',
         drupalOwnerConfigId: 'views.view.query_listing:page_1',
@@ -8481,6 +8809,169 @@ test('collection packet evidence cannot cross-bind from swapped or missing query
       fixture.name
     );
   }
+});
+
+test('curated-reference collections clear full packet readiness only with exact independent evidence', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'curated-reference-readiness-'));
+  const packetDir = join(temp, 'review-packet');
+  copyTemplatePacket(packetDir);
+  const routeMatrix = liveRouteMatrix('https://target.example');
+  routeMatrix.perRouteItemReconciliation = [{
+    sourcePath: '/',
+    targetPath: '/',
+    sourceObject: 'Featured card',
+    itemType: 'card',
+    sourceCount: 2,
+    targetRenderedCount: 2,
+    targetDrupalEntityCount: 2,
+    mismatchDisposition: 'none',
+    acceptedBy: '',
+    rationale: '',
+    dispositionEvidence: '',
+    accepted: true,
+    notes: 'The two deliberately selected cards reconcile exactly.'
+  }];
+  writeJson(join(packetDir, 'route-matrix.json'), routeMatrix);
+  addQualifyingReviewEvidence(packetDir, 'https://target.example');
+  mkdirSync(join(packetDir, 'evidence', 'source-audit'), { recursive: true });
+  writeJson(join(packetDir, 'evidence', 'source-audit', 'featured-card-selection.json'), {
+    sourceRoute: '/',
+    selection: 'curated_reference',
+    observation: 'The source and brief identify two hand-picked, order-sensitive featured cards.'
+  });
+  mutateJson(join(packetDir, 'pattern-map.json'), (patternMap) => {
+    patternMap.structuredContentModel.collectionScope = {
+      reviewed: true,
+      applies: true,
+      reason: 'The homepage includes a deliberately curated, order-sensitive featured-card region.'
+    };
+    patternMap.structuredContentModel.collectionOwnershipLedger = [{
+      sourceRoute: '/',
+      collectionPattern: 'grid',
+      sourceObject: 'Featured card',
+      sourceItemCount: 2,
+      drupalEntityType: 'node',
+      contentTypeOrBundle: 'page',
+      requiredFields: ['title'],
+      collectionOwner: 'entity_reference',
+      collectionSelection: 'curated_reference',
+      curationRationale: 'Editors deliberately hand-pick and order exactly two featured cards.',
+      curationEvidence: 'evidence/source-audit/featured-card-selection.json',
+      viewDisplayOrConfig: '',
+      detailRouteOwner: 'documented_exception',
+      drupalOwnerConfigId: '',
+      detailRouteMode: 'no_detail',
+      representativeDetailSourcePath: '',
+      representativeDetailTargetPath: '',
+      detailLoadBearingFields: [],
+      detailRouteRationale: 'The cards link no separate public detail route.',
+      pagination: {
+        sourceMode: 'none',
+        sourcePageSize: null,
+        sourceContinuationKind: 'none',
+        sourceContinuationRequest: '',
+        sourceContinuationBinding: 'none',
+        sourceContinuationStateId: '',
+        targetMode: 'none',
+        targetPageSize: null,
+        liveViewDisplay: '',
+        targetContinuationKind: 'none',
+        targetContinuationRequest: '',
+        targetContinuationBinding: 'none',
+        targetContinuationStateId: '',
+        sourceContinuationEquivalent: false,
+        modeChangeDisposition: {
+          kind: 'none',
+          sourceMode: '',
+          targetMode: '',
+          acceptedBy: '',
+          rationale: '',
+          evidence: '',
+          accepted: false
+        },
+        evidence: 'evidence/independent-verification/claim-evidence.json',
+        accepted: true
+      },
+      editorAddRowEvidence: 'evidence/blind-adversarial-review/editor-task.json',
+      exceptionRationale: '',
+      accepted: true,
+      notes: 'This is a bounded editorial selection, not a dynamic listing.'
+    }];
+  });
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.perRouteItemCounts = [{
+      sourceRoute: '/',
+      targetRoute: '/',
+      sourceObject: 'Featured card',
+      routeRole: 'homepage',
+      expectedSourceItemCount: 2,
+      targetRenderedItemCount: 2,
+      targetDrupalEntityCount: 2,
+      missingItems: [],
+      extraItems: [],
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.collectionOwnershipChecks = [{
+      sourceRoute: '/',
+      targetRoute: '/',
+      sourceObject: 'Featured card',
+      collectionPattern: 'grid',
+      drupalOwner: 'entity_reference_curated',
+      collectionSelection: 'curated_reference',
+      viewOrCollectionConfig: '',
+      curationRationale: 'Editors deliberately hand-pick and order exactly two featured cards.',
+      curationEvidence: 'evidence/source-audit/featured-card-selection.json',
+      editorAddRowEvidence: 'claim-evidence.json',
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+    independent.editorAddRowChecks = [{
+      sourceRoute: '/',
+      targetRoute: '/',
+      sourceObject: 'Featured card',
+      editorUser: 'curation editor',
+      editorRole: 'content editor',
+      publicOutputChanged: true,
+      listingOrDetailUpdatedWithoutCode: true,
+      status: 'pass',
+      evidence: 'claim-evidence.json'
+    }];
+  });
+  const recurringModel = {
+    entityType: 'node',
+    bundle: 'page',
+    publicRoutes: ['/'],
+    reviewed: true,
+    dimensions: [],
+    noTemporalCycleDimensionRationale: 'The curated page selection has no date, year, season, period, or taxonomy cycle dimension.'
+  };
+  mutateJson(join(packetDir, 'next-cycle-verification.json'), (nextCycle) => {
+    nextCycle.discovery.recurringPublicModels = [recurringModel];
+    nextCycle.applicability.reason = 'The recurring page model was reviewed and has no temporal or cycle dimension.';
+  });
+  mutateJson(join(packetDir, 'evidence', 'next-cycle', 'discovery.json'), (discovery) => {
+    discovery.recurringPublicModels = [recurringModel];
+  });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
+
+  const accepted = await validatePacket({ packetDir });
+  assert.equal(
+    accepted.completionEvidence.packetSupportsCompletion,
+    true,
+    accepted.completionEvidence.packetCompletionBlockedReasons.join('\n')
+  );
+
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.collectionOwnershipChecks[0].curationEvidence = 'claim-evidence.json';
+  });
+  attachFixtureReviewHandoff(packetDir, 'https://target.example');
+  const crossBound = await validatePacket({ packetDir });
+  assert.equal(crossBound.completionEvidence.packetSupportsCompletion, false);
+  assert.match(
+    crossBound.completionEvidence.packetCompletionBlockedReasons.join('\n'),
+    /curated references must exactly corroborate.*curation\/editor evidence/i
+  );
 });
 
 test('human-gate records are reported separately while packet contradictions fail closed', async () => {
@@ -10566,6 +11057,9 @@ test('separate public collection details require browser proof of visible load-b
       contentTypeOrBundle: 'event',
       requiredFields: ['title', 'field_start'],
       collectionOwner: 'view',
+      collectionSelection: 'query_backed',
+      curationRationale: '',
+      curationEvidence: '',
       viewDisplayOrConfig: 'views.view.events',
       detailRouteOwner: 'entity_view_display',
       drupalOwnerConfigId: 'core.entity_view_display.node.event.full',
@@ -10592,6 +11086,7 @@ test('separate public collection details require browser proof of visible load-b
       targetFinalPath: '/events/target-event',
       targetTitle: 'Target event',
       targetH1: 'Target event',
+      routeRole: 'detail',
       expectedRedirect: false,
       accepted: true,
       notes: 'Representative Event detail.'
@@ -12166,6 +12661,44 @@ test('packet-only verification rejects authored completion authority', async () 
   assert.match(report.errors.join('\n'), /completion authority belongs only to the live verifier/);
 });
 
+test('live navigation parity only receives exactly corroborated independent dispositions', () => {
+  const packetDir = mkdtempSync(join(tmpdir(), 'live-navigation-disposition-'));
+  mkdirSync(join(packetDir, 'evidence'), { recursive: true });
+  writeFileSync(join(packetDir, 'evidence', 'navigation.txt'), 'Owner decision.\n');
+  const disposition = {
+    accepted: true,
+    viewport: 'desktop',
+    expectedSourceTreeFingerprint: `sha256:${'a'.repeat(64)}`,
+    targetTreeFingerprint: `sha256:${'b'.repeat(64)}`,
+    differenceKinds: ['label'],
+    evidence: 'evidence/navigation.txt'
+  };
+  const matchingCheck = {
+    viewport: 'desktop',
+    expectedSourceTreeFingerprint: disposition.expectedSourceTreeFingerprint,
+    targetTreeFingerprint: disposition.targetTreeFingerprint,
+    differenceKinds: ['label'],
+    dispositionEvidence: 'evidence/navigation.txt',
+    status: 'pass'
+  };
+  const corroborated = independentlyCorroboratedNavigationParityDispositions({
+    dispositions: [disposition],
+    independentVerification: { primaryNavigationParityDispositionChecks: [matchingCheck] },
+    packetDir
+  });
+  assert.deepEqual(corroborated, [disposition]);
+  assert.deepEqual(independentlyCorroboratedNavigationParityDispositions({
+    dispositions: [disposition],
+    independentVerification: { primaryNavigationParityDispositionChecks: [] },
+    packetDir
+  }), []);
+  assert.deepEqual(independentlyCorroboratedNavigationParityDispositions({
+    dispositions: [disposition],
+    independentVerification: { primaryNavigationParityDispositionChecks: [matchingCheck, matchingCheck] },
+    packetDir
+  }), []);
+});
+
 test('navigation parity dispositions require exact fingerprints, sorted difference kinds, and packet evidence', async () => {
   const temp = mkdtempSync(join(tmpdir(), 'navigation-parity-disposition-'));
   const packetDir = join(temp, 'review-packet');
@@ -12192,6 +12725,16 @@ test('navigation parity dispositions require exact fingerprints, sorted differen
 
   mkdirSync(join(packetDir, 'evidence'), { recursive: true });
   writeFileSync(join(packetDir, 'evidence', 'navigation-label-decision.txt'), 'Approved by the source-site owner.\n');
+  mutateJson(join(packetDir, 'independent-verification.json'), (independent) => {
+    independent.primaryNavigationParityDispositionChecks = [{
+      viewport: 'desktop',
+      expectedSourceTreeFingerprint: `sha256:${'a'.repeat(64)}`,
+      targetTreeFingerprint: `sha256:${'b'.repeat(64)}`,
+      differenceKinds: ['label'],
+      dispositionEvidence: 'navigation-label-decision.txt',
+      status: 'pass'
+    }];
+  });
   const evidenced = await validatePacket({ packetDir });
   assert.doesNotMatch(
     evidenced.completionEvidence.packetCompletionBlockedReasons.join('\n'),

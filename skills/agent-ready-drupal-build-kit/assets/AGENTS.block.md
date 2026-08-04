@@ -12,8 +12,10 @@ Default live verification records bounded local observability under `.agent-read
 
 Non-negotiable gates:
 
-- Model repeatable information as Drupal-owned structured content. Every declared collection needs count, ownership, and non-admin add-a-row evidence; accepted exclusions need a named owner and evidence.
-- Declare composition ownership before implementing landing-like routes and prove the target's actual owner matches it or has a target-bound accepted deviation. Canvas/Experience Builder owns editor composition, not canonical repeatable data.
+- Model repeatable information as Drupal-owned structured content. Every declared collection needs count, ownership, and non-admin add-a-row evidence; query-backed recurring collections use Views, while unlimited curated references require source- or preserved-brief evidence plus editor proof, an explicit rationale, and packet-local evidence. A composed landing page may embed the View but must not impersonate one recurring item.
+- Declare composition ownership before implementing landing-like routes and prove the target's actual owner matches it. A documented owner deviation remains human-reviewable and machine-incomplete. Canvas/Experience Builder owns editor composition, not canonical repeatable data.
+- Require verifier-owned, route-bound continuation requests for paged collections. JS-only pagination that cannot be verifier-replayed is `review_required`, not a machine pass.
+- Render visible material content `<img>` media at an image-style resolution that meets its object-fit-aware painted dimensions; materially upscaled card, listing, event, news, hero, or detail images are a quality failure. Review CSS background images separately.
 - Keep configuration in a non-empty tracked sync directory and prove active configuration has no drift from it. Record clean-install/import reproduction separately only when it was actually run.
 - Test actual anonymous routes and realistic non-admin editor tasks against the running Drupal site. Every custom or repeating public bundle needs an editor workflow, and load-bearing/anonymous-output fields need falsification checks.
 - Complete negative-route and consent evidence: generated 404 quality, access-wall canonicals, rendered legal/privacy links, active consent configuration, and fresh before-consent resource behavior.

@@ -11,10 +11,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   BEFORE_CONSENT_NETWORK_SCHEMA,
   BROWSER_CAPTURE_LIMITS,
+  COMPUTED_STYLE_EVIDENCE_SCHEMA,
+  COMPUTED_STYLE_LIMITS,
+  COMPUTED_STYLE_SHADOW_SCHEMA,
+  CONTENT_IMAGE_EVIDENCE_SCHEMA,
+  CONTENT_IMAGE_LIMITS,
   DEFAULT_SELENIUM_GRID_URL,
   PUBLIC_FORM_CONTROL_LIMITS,
   SELENIUM_ADD_ON_RELEASE,
   SELENIUM_CHROMIUM_IMAGE,
+  TARGET_RASTER_QUALITY_FLOOR_SCHEMA,
   VERIFIER_AXE_SCHEMA,
   VERIFIER_AXE_SOURCE_SHA256,
   VERIFIER_AXE_TAGS,
@@ -27,13 +33,17 @@ import {
   captureSummary,
   canonicalizeSeleniumCdpUrl,
   cleanupBrowserProfile,
+  compareComputedStyleShadow,
   compareGlobalChromeCaptures,
   compareVerifierOwnedVisualFloor,
   createBrowserCaptureBudget,
+  evaluateVerifierOwnedTargetRasterQuality,
   finalizeBeforeConsentNetworkCapture,
   finalizeGlobalChromeCapture,
   findBrowserExecutable,
   globalChromeImpact,
+  normalizeComputedStyleEvidence,
+  normalizeContentImageEvidence,
   normalizeGlobalChromeContract,
   openSeleniumCdpBackend,
   validateBeforeConsentNetworkCapture,
@@ -459,6 +469,8 @@ test('DDEV container mode uses the remote Grid, owns its global context, and rep
   });
   assert.equal(raw.status, 'captured', raw.errors.join('\n'));
   assert.equal(raw.runtime.ready, true);
+  assert.equal(raw.routes[0].signals.computedStyleEvidence.schemaVersion, COMPUTED_STYLE_EVIDENCE_SCHEMA);
+  assert.deepEqual(raw.routes[0].signals.computedStyleEvidence.samples, []);
   assert.deepEqual(raw.runtime, {
     backend: 'selenium-grid-cdp',
     executionBoundary: 'ddev-add-on-sidecar',
@@ -910,6 +922,7 @@ function visualFloorCapture({
       layout: { normalizedPageHeight: 2400 },
       structure,
       publicFormControls: structuredClone(publicFormControls),
+      contentImageEvidence: normalizeContentImageEvidence(),
       protection: {
         detected: protectedSource,
         responseStatus: protectedSource ? 403 : 200,
@@ -1043,6 +1056,744 @@ const publicContactControls = [
   }),
   observedControl({ accessibleIdentity: 'send', kind: 'button_submit', visibleLabel: 'Send' })
 ];
+const styleSelectionMethods = {
+  body: 'document-body',
+  heading_1: 'first-visible-h1',
+  heading_2: 'first-visible-h2',
+  primary_navigation_link: 'first-visible-primary-navigation-link',
+  primary_action: 'first-visible-prominent-main-action',
+  form_control: 'first-visible-main-form-control',
+  card_or_listing_surface: 'first-visible-card-class'
+};
+
+function completeComputedStyleEvidence({
+  family = 'Source Brand Sans',
+  loadedFontFamilies = [family],
+  roleStyles = {}
+} = {}) {
+  const sizes = {
+    body: '16px',
+    heading_1: '48px',
+    heading_2: '32px',
+    primary_navigation_link: '16px',
+    primary_action: '16px',
+    form_control: '16px',
+    card_or_listing_surface: '16px'
+  };
+  return normalizeComputedStyleEvidence({
+    loadedFontFamilies,
+    samples: Object.entries(styleSelectionMethods).map(([semanticRole, selectionMethod]) => ({
+      semanticRole,
+      selectionMethod,
+      styles: {
+        fontFamily: `"${family}", sans-serif`,
+        fontSize: sizes[semanticRole],
+        fontWeight: semanticRole.startsWith('heading_') ? '700' : '400',
+        lineHeight: '24px',
+        letterSpacing: 'normal',
+        color: 'rgb(20, 20, 20)',
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        borderColor: 'rgb(20, 20, 20)',
+        borderRadius: '0px',
+        ...(roleStyles[semanticRole] ?? {})
+      }
+    }))
+  });
+}
+
+function attachComputedStyles(capture, evidenceForViewport) {
+  for (const route of capture.routes) {
+    route.signals.computedStyleEvidence = evidenceForViewport(route.viewport.name);
+  }
+  return capture;
+}
+
+function attachContentImageEvidence(capture, evidenceForViewport) {
+  for (const route of capture.routes) {
+    route.signals.contentImageEvidence = evidenceForViewport(route.viewport.name);
+  }
+  return capture;
+}
+
+function rasterImageEvidence({
+  renderedWidth = 400,
+  renderedHeight = 240,
+  naturalWidth = 800,
+  naturalHeight = 480,
+  objectFit = 'fill',
+  intrinsicAvailable = true,
+  truncated = false
+} = {}) {
+  return normalizeContentImageEvidence({
+    truncated,
+    images: [{
+      resourceUrl: 'https://target.example/sites/default/files/styles/card/example.jpg',
+      renderedWidth,
+      renderedHeight,
+      naturalWidth,
+      naturalHeight,
+      objectFit,
+      intrinsicAvailable
+    }]
+  });
+}
+
+test('target-only raster floor covers every declared primary route at desktop and mobile', () => {
+  const targetCapture = combinedVisualFloorCapture([
+    attachContentImageEvidence(
+      visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+      () => rasterImageEvidence()
+    ),
+    attachContentImageEvidence(
+      visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'd', structure: composedStructure, path: '/news'
+      }),
+      () => rasterImageEvidence({ renderedWidth: 300, renderedHeight: 180 })
+    )
+  ], 'e');
+  const floor = evaluateVerifierOwnedTargetRasterQuality({
+    targetCapture,
+    primaryRoutes: [{ targetPath: '/' }, { targetPath: '/news' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.schemaVersion, TARGET_RASTER_QUALITY_FLOOR_SCHEMA);
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.equal(floor.completionSupported, true);
+  assert.equal(floor.routeCount, 2);
+  assert.equal(floor.findingCount, 4);
+  assert.equal(floor.checkedImageCount, 4);
+  assert.equal(floor.upscaledImageCount, 0);
+  assert.deepEqual([...new Set(floor.findings.map((finding) => finding.targetPath))], ['/', '/news']);
+  assert.ok(floor.findings.every((finding) => finding.passed));
+  assert.match(floor.fingerprint, /^sha256:[a-f0-9]{64}$/);
+});
+
+test('target-only raster floor fails material upscaling without exposing image URLs', () => {
+  const targetCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence({ renderedWidth: 400, renderedHeight: 240, naturalWidth: 200, naturalHeight: 120 })
+  );
+  const floor = evaluateVerifierOwnedTargetRasterQuality({
+    targetCapture,
+    primaryRoutes: [{ targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  const serialized = JSON.stringify(floor);
+
+  assert.equal(floor.status, 'failed');
+  assert.equal(floor.completionSupported, false);
+  assert.equal(floor.failedFindingCount, 2);
+  assert.equal(floor.upscaledImageCount, 2);
+  assert.match(floor.errors.join('\n'), /material raster image.*upscaled.*image style/i);
+  assert.doesNotMatch(serialized, /target\.example\/sites\/default\/files|styles\/card/i);
+  assert.match(serialized, /sha256:[a-f0-9]{64}/);
+});
+
+test('target-only raster floor blocks incomplete capture and requires review for indeterminate dimensions', () => {
+  const incompleteCapture = visualFloorCapture({
+    origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+  });
+  delete incompleteCapture.routes[0].signals.contentImageEvidence;
+  const failed = evaluateVerifierOwnedTargetRasterQuality({
+    targetCapture: incompleteCapture,
+    primaryRoutes: [{ targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.failedFindingCount, 1);
+  assert.match(failed.errors.join('\n'), /dimensions were not captured/i);
+
+  const indeterminateCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence({ intrinsicAvailable: false })
+  );
+  const reviewRequired = evaluateVerifierOwnedTargetRasterQuality({
+    targetCapture: indeterminateCapture,
+    primaryRoutes: [{ targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(reviewRequired.status, 'review_required');
+  assert.equal(reviewRequired.completionSupported, false);
+  assert.equal(reviewRequired.reviewRequiredFindingCount, 2);
+  assert.equal(reviewRequired.errors.length, 0);
+  assert.match(reviewRequired.reviewReasons.join('\n'), /lacks intrinsic dimensions/i);
+});
+
+test('visual floor accepts material raster images whose intrinsic dimensions cover their rendered size', () => {
+  const targetCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence()
+  );
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }),
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) =>
+    finding.contentImageRasterQuality.status === 'passed' &&
+    finding.contentImageRasterQuality.checkedImageCount === 1 &&
+    finding.contentImageRasterQuality.upscaledImages.length === 0
+  ));
+});
+
+test('visual floor fails material target raster upscaling without exposing image URLs', () => {
+  const targetCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence({ renderedWidth: 400, renderedHeight: 240, naturalWidth: 200, naturalHeight: 120 })
+  );
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }),
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'news_listing' }],
+    stateFingerprint: state('f')
+  });
+  const serializedRasterFindings = JSON.stringify(
+    floor.findings.map((finding) => finding.contentImageRasterQuality)
+  );
+
+  assert.equal(floor.status, 'failed');
+  assert.match(floor.errors.join('\n'), /material raster image.*upscaled.*image style/i);
+  assert.ok(floor.findings.every((finding) =>
+    finding.contentImageRasterQuality.status === 'failed' &&
+    finding.contentImageRasterQuality.upscaledImages[0].ratio === 2
+  ));
+  assert.doesNotMatch(serializedRasterFindings, /target\.example|sites\/default\/files|styles\/card/i);
+  assert.match(serializedRasterFindings, /sha256:[a-f0-9]{64}/);
+});
+
+test('visual floor treats unavailable or truncated raster dimensions as review-required', () => {
+  for (const evidence of [
+    rasterImageEvidence({ intrinsicAvailable: false }),
+    rasterImageEvidence({ truncated: true })
+  ]) {
+    const targetCapture = attachContentImageEvidence(
+      visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+      () => evidence
+    );
+    const floor = compareVerifierOwnedVisualFloor({
+      sourceCapture: visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+      }),
+      targetCapture,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'event' }],
+      stateFingerprint: state('f')
+    });
+
+    assert.equal(floor.status, 'review_required');
+    assert.equal(floor.completionSupported, false);
+    assert.equal(floor.diagnosticReviewEligible, false);
+    assert.ok(floor.findings.every((finding) =>
+      finding.contentImageRasterQuality.status === 'review_required' && finding.reviewRequired
+    ));
+  }
+});
+
+test('visual floor ignores subpixel raster rounding below the material upscale threshold', () => {
+  const targetCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence({ renderedWidth: 401, renderedHeight: 241, naturalWidth: 400, naturalHeight: 240 })
+  );
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }),
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'event' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) => finding.contentImageRasterQuality.upscaledImages.length === 0));
+});
+
+test('raster quality uses object-fit painted dimensions instead of the element box', () => {
+  for (const objectFit of ['contain', 'none', 'scale-down']) {
+    const targetCapture = attachContentImageEvidence(
+      visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+      () => rasterImageEvidence({
+        renderedWidth: 800,
+        renderedHeight: 400,
+        naturalWidth: 400,
+        naturalHeight: 800,
+        objectFit
+      })
+    );
+    const floor = evaluateVerifierOwnedTargetRasterQuality({
+      targetCapture,
+      primaryRoutes: [{ targetPath: '/' }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(floor.status, 'passed', `${objectFit}: ${floor.errors.join('\n')}`);
+  }
+
+  const coverCapture = attachContentImageEvidence(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => rasterImageEvidence({
+      renderedWidth: 800,
+      renderedHeight: 400,
+      naturalWidth: 400,
+      naturalHeight: 800,
+      objectFit: 'cover'
+    })
+  );
+  const coverFloor = evaluateVerifierOwnedTargetRasterQuality({
+    targetCapture: coverCapture,
+    primaryRoutes: [{ targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  assert.equal(coverFloor.status, 'failed');
+  assert.ok(coverFloor.findings.every((finding) =>
+    finding.contentImageRasterQuality.upscaledImages[0].objectFit === 'cover' &&
+    finding.contentImageRasterQuality.upscaledImages[0].ratio === 2
+  ));
+});
+
+test('computed-style shadow diagnoses font replacement and control-token drift without changing completion', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      family: 'Source Brand Sans',
+      roleStyles: {
+        primary_action: {
+          color: 'rgb(255, 255, 255)',
+          backgroundColor: 'rgb(0, 85, 170)',
+          borderColor: 'rgb(0, 85, 170)',
+          borderRadius: '4px'
+        },
+        form_control: {
+          backgroundColor: 'rgb(255, 255, 255)',
+          borderColor: 'rgb(80, 80, 80)',
+          borderRadius: '4px'
+        }
+      }
+    })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      family: 'Target Brand Sans',
+      roleStyles: {
+        primary_action: {
+          color: 'rgb(0, 0, 0)',
+          backgroundColor: 'rgb(245, 210, 80)',
+          borderColor: 'rgb(0, 0, 0)',
+          borderRadius: '24px'
+        },
+        form_control: {
+          backgroundColor: 'rgb(240, 240, 240)',
+          borderColor: 'rgb(0, 0, 0)',
+          borderRadius: '12px'
+        }
+      }
+    })
+  );
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.equal(floor.completionSupported, true);
+  assert.equal(visualParityCompletionSupport(floor), true);
+  assert.equal(floor.computedStyleShadow.schemaVersion, COMPUTED_STYLE_SHADOW_SCHEMA);
+  assert.equal(floor.computedStyleShadow.authority, 'none');
+  assert.equal(floor.computedStyleShadow.completionEffect, 'none');
+  assert.equal(floor.computedStyleShadow.completionStatusAffected, false);
+  assert.equal(floor.computedStyleShadow.status, 'diagnostics');
+  const diagnostics = floor.computedStyleShadow.comparisons.flatMap((comparison) => comparison.diagnostics);
+  assert.ok(diagnostics.some((diagnostic) =>
+    diagnostic.code === 'font-family-replaced' &&
+    diagnostic.sourceFamily === 'source brand sans' &&
+    diagnostic.targetFamily === 'target brand sans'
+  ));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.code === 'control-token-mismatch'));
+});
+
+test('computed-style shadow keeps a desktop-only oversized H1 scoped to that viewport', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    (viewport) => completeComputedStyleEvidence({
+      roleStyles: viewport === 'desktop' ? { heading_1: { fontSize: '80px' } } : {}
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }],
+    stateFingerprint: state('f')
+  });
+  const desktop = shadow.comparisons.find((comparison) => comparison.viewport.name === 'desktop');
+  const mobile = shadow.comparisons.find((comparison) => comparison.viewport.name === 'mobile');
+
+  assert.ok(desktop.diagnostics.some((diagnostic) =>
+    diagnostic.code === 'extreme-font-size-ratio' && diagnostic.semanticRole === 'heading_1'
+  ));
+  assert.ok(!mobile.diagnostics.some((diagnostic) => diagnostic.code === 'extreme-font-size-ratio'));
+});
+
+test('computed-style shadow resolves raw and already-finalized exact-query capture identities', () => {
+  const rawRoute = '/course-search?kind=summer&campus=budapest';
+  const finalizedRoute = `/course-search?query-sha256=${sha256('?kind=summer&campus=budapest').slice('sha256:'.length)}`;
+  const finalizedCapture = (origin, hashSeed) => {
+    const capture = attachComputedStyles(
+      visualFloorCapture({
+        origin,
+        hashSeed,
+        structure: composedStructure,
+        path: finalizedRoute
+      }),
+      () => completeComputedStyleEvidence()
+    );
+    capture.queryPrivacy = {
+      schemaVersion: 'public-kit.query-privacy.1',
+      method: 'sha256',
+      authoritative: true
+    };
+    return capture;
+  };
+  const sourceCapture = finalizedCapture('https://source.example', 'a');
+  const targetCapture = finalizedCapture('https://target.example', 'b');
+
+  for (const route of [rawRoute, finalizedRoute]) {
+    const shadow = compareComputedStyleShadow({
+      sourceCapture,
+      targetCapture,
+      primaryRoutes: [{ sourcePath: route, targetPath: route }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(shadow.status, 'observed');
+    assert.equal(shadow.comparisonCount, 2);
+    assert.equal(shadow.insufficientEvidenceCount, 0);
+    assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.length === 0));
+  }
+});
+
+test('computed-style shadow reports a source web font that is computed but unloaded on target', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: ['Source Brand Sans'] })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: [] })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'font-family-not-loaded' && diagnostic.fontFamily === 'source brand sans'
+  ));
+});
+
+test('computed-style shadow does not infer an unloaded font from a truncated target family list', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: ['Source Brand Sans'] })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => ({
+      ...completeComputedStyleEvidence({ family: 'Source Brand Sans', loadedFontFamilies: [] }),
+      truncated: true
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(!shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'font-family-not-loaded'
+  ));
+  assert.equal(shadow.status, 'review_required');
+  assert.ok(shadow.indeterminateCount > 0);
+  assert.ok(shadow.comparisons.every((comparison) =>
+    comparison.disposition === 'review_required' &&
+    comparison.indeterminateDiagnostics.some((diagnostic) =>
+      diagnostic.code === 'font-family-load-indeterminate' &&
+      diagnostic.fontFamily === 'source brand sans' &&
+      diagnostic.side === 'target'
+    )
+  ));
+});
+
+test('computed-style shadow only requires the computed primary font family to load', () => {
+  const evidence = (loadedFontFamilies) => {
+    const value = completeComputedStyleEvidence({ family: 'Brand Sans', loadedFontFamilies });
+    return {
+      ...value,
+      samples: value.samples.map((sample) => ({
+        ...sample,
+        styles: { ...sample.styles, fontFamily: '"Brand Sans", "Unused Fallback", sans-serif' }
+      }))
+    };
+  };
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => evidence(['Brand Sans', 'Unused Fallback'])
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => evidence(['Brand Sans'])
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'observed');
+  assert.ok(!shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'font-family-not-loaded'
+  ));
+});
+
+test('computed-style shadow ignores invisible border tokens on controls', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      roleStyles: {
+        form_control: {
+          color: 'rgb(20, 20, 20)',
+          backgroundColor: 'transparent',
+          borderColor: 'rgb(0, 85, 170)',
+          borderStyle: 'none',
+          borderWidth: '0px',
+          borderRadius: '4px'
+        }
+      }
+    })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({
+      roleStyles: {
+        form_control: {
+          color: 'rgb(40, 40, 40)',
+          backgroundColor: 'transparent',
+          borderColor: 'rgb(170, 0, 0)',
+          borderStyle: 'none',
+          borderWidth: '0px',
+          borderRadius: '24px'
+        }
+      }
+    })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.ok(!shadow.comparisons.flatMap((comparison) => comparison.diagnostics).some((diagnostic) =>
+    diagnostic.code === 'control-token-mismatch' && diagnostic.semanticRole === 'form_control'
+  ));
+});
+
+test('computed-style shadow calls missing semantic anchors insufficient evidence and never pass', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => {
+      const evidence = completeComputedStyleEvidence();
+      return { ...evidence, samples: evidence.samples.filter((sample) => sample.semanticRole !== 'form_control') };
+    }
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'insufficient_evidence');
+  assert.ok(shadow.comparisons.every((comparison) => comparison.disposition === 'insufficient_evidence'));
+  assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.some((anchor) =>
+    anchor.side === 'target' && anchor.semanticRole === 'form_control'
+  )));
+  assert.equal(Object.hasOwn(shadow, 'passed'), false);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.disposition !== 'passed'));
+});
+
+test('computed-style shadow treats source-absent semantic anchors as not applicable', () => {
+  const withoutOptionalAnchors = () => {
+    const evidence = completeComputedStyleEvidence();
+    return {
+      ...evidence,
+      samples: evidence.samples.filter((sample) =>
+        !['heading_2', 'form_control', 'card_or_listing_surface'].includes(sample.semanticRole)
+      )
+    };
+  };
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    withoutOptionalAnchors
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    withoutOptionalAnchors
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'observed');
+  assert.equal(shadow.insufficientEvidenceCount, 0);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.length === 0));
+  assert.ok(shadow.comparisons.every((comparison) =>
+    comparison.notApplicableAnchors.map((anchor) => anchor.semanticRole).join(',') ===
+      'heading_2,form_control,card_or_listing_surface'
+  ));
+});
+
+test('computed-style shadow keeps missing evidence and the mandatory body anchor insufficient', () => {
+  const missingEvidenceSource = visualFloorCapture({
+    origin: 'https://source.example',
+    hashSeed: 'a',
+    structure: composedStructure
+  });
+  const missingBodySource = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://source.example', hashSeed: 'a', structure: composedStructure }),
+    () => {
+      const evidence = completeComputedStyleEvidence();
+      return { ...evidence, samples: evidence.samples.filter((sample) => sample.semanticRole !== 'body') };
+    }
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence()
+  );
+
+  for (const sourceCapture of [missingEvidenceSource, missingBodySource]) {
+    const shadow = compareComputedStyleShadow({
+      sourceCapture,
+      targetCapture,
+      primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+    });
+    assert.equal(shadow.status, 'insufficient_evidence');
+    assert.ok(shadow.comparisons.every((comparison) => comparison.missingAnchors.some((anchor) =>
+      anchor.side === 'source' && anchor.semanticRole === 'body'
+    )));
+  }
+});
+
+test('computed-style shadow suppresses style diagnostics for a protected source surface', () => {
+  const sourceCapture = attachComputedStyles(
+    visualFloorCapture({
+      origin: 'https://source.example',
+      hashSeed: 'a',
+      structure: composedStructure,
+      protectedSource: true
+    }),
+    () => completeComputedStyleEvidence({ family: 'Challenge Sans' })
+  );
+  const targetCapture = attachComputedStyles(
+    visualFloorCapture({ origin: 'https://target.example', hashSeed: 'b', structure: composedStructure }),
+    () => completeComputedStyleEvidence({ family: 'Inter' })
+  );
+  const shadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/' }]
+  });
+
+  assert.equal(shadow.status, 'insufficient_evidence');
+  assert.equal(shadow.diagnosticCount, 0);
+  assert.ok(shadow.comparisons.every((comparison) => comparison.sourceProtected === true));
+});
+
+test('computed-style evidence strips page text and URLs while enforcing fixed output bounds', () => {
+  const seed = completeComputedStyleEvidence();
+  const evidence = normalizeComputedStyleEvidence({
+    loadedFontFamilies: [
+      'url(https://private.example/font.woff2)',
+      ...Array.from({ length: 60 }, (_, index) => `Fixture Family ${index}`)
+    ],
+    samples: Array.from({ length: 20 }, (_, index) => {
+      const sample = seed.samples[index % seed.samples.length];
+      return {
+        ...sample,
+        textContent: 'private page copy',
+        href: 'https://private.example/account?token=secret',
+        styles: {
+          ...sample.styles,
+          backgroundColor: index === 0 ? 'url(https://private.example/image.png)' : sample.styles.backgroundColor
+        }
+      };
+    })
+  });
+  const serialized = JSON.stringify(evidence);
+
+  assert.equal(evidence.schemaVersion, COMPUTED_STYLE_EVIDENCE_SCHEMA);
+  assert.ok(evidence.samples.length <= COMPUTED_STYLE_LIMITS.maxSamples);
+  assert.ok(evidence.loadedFontFamilies.length <= COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies);
+  assert.equal(evidence.truncated, true);
+  assert.deepEqual(normalizeComputedStyleEvidence(evidence), evidence);
+  assert.doesNotMatch(serialized, /private page copy|private\.example|token=secret/i);
+  assert.equal(evidence.samples[0].styles.backgroundColor, '');
+  assert.deepEqual(evidence.privacy, { includesElementText: false, includesUrls: false });
+});
+
+test('global chrome validation rejects noncanonical computed-style evidence', () => {
+  const malformed = captureFixture(state('f'), (capture) => {
+    for (const route of capture.routes) {
+      route.signals.computedStyleEvidence = {
+        ...completeComputedStyleEvidence(),
+        loadedFontFamilies: ['url(https://private.example/font.woff2)']
+      };
+    }
+  });
+
+  assert.throws(
+    () => validateGlobalChromeCapture(malformed, { stateFingerprint: state('f'), requireAuthoritative: false }),
+    /computed-style evidence is not privacy-safe and bounded/i
+  );
+});
+
+test('content-image raster evidence remains privacy-safe and bounded', () => {
+  const evidence = normalizeContentImageEvidence({
+    images: Array.from({ length: CONTENT_IMAGE_LIMITS.maxImages + 4 }, (_value, index) => ({
+      resourceUrl: `https://private.example/styles/card/image-${index}.jpg?token=secret-${index}`,
+      renderedWidth: 240.4,
+      renderedHeight: 160.4,
+      naturalWidth: 480,
+      naturalHeight: 320,
+      objectFit: index % 2 === 0 ? 'contain' : 'cover',
+      intrinsicAvailable: true
+    }))
+  });
+  const serialized = JSON.stringify(evidence);
+
+  assert.equal(evidence.schemaVersion, CONTENT_IMAGE_EVIDENCE_SCHEMA);
+  assert.equal(evidence.imageCount, CONTENT_IMAGE_LIMITS.maxImages);
+  assert.equal(evidence.truncated, true);
+  assert.deepEqual(normalizeContentImageEvidence(evidence), evidence);
+  assert.ok(evidence.images.every((image) => /^sha256:[a-f0-9]{64}$/.test(image.resourceIdentity)));
+  assert.ok(evidence.images.every((image) => ['contain', 'cover'].includes(image.objectFit)));
+  assert.doesNotMatch(serialized, /private\.example|token=secret|styles\/card/i);
+});
 
 test('verifier-owned visual floor passes comparable composed routes at identical desktop/mobile viewports', () => {
   const floor = compareVerifierOwnedVisualFloor({
@@ -1076,6 +1827,26 @@ test('verifier-owned visual floor passes comparable composed routes at identical
   assert.ok(floor.findings.every((finding) => finding.designLedComposition));
 });
 
+test('managed-browser route identity canonicalizes trailing slashes with and without queries', () => {
+  for (const [route, expected] of [
+    ['/about/', '/about'],
+    ['/about/?view=full', '/about?view=full']
+  ]) {
+    const floor = compareVerifierOwnedVisualFloor({
+      sourceCapture: visualFloorCapture({
+        origin: 'https://source.example', hashSeed: 'a', structure: composedStructure, path: route
+      }),
+      targetCapture: visualFloorCapture({
+        origin: 'https://target.example', hashSeed: 'b', structure: composedStructure, path: route
+      }),
+      primaryRoutes: [{ sourcePath: route, targetPath: route, routeRole: 'landing' }],
+      stateFingerprint: state('f')
+    });
+    assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+    assert.ok(floor.findings.every((finding) => finding.sourcePath === expected && finding.targetPath === expected));
+  }
+});
+
 test('verifier-owned source and target form controls pass with exact accessible identity and native option state', () => {
   const evidence = publicFormControlEvidence(publicContactControls);
   const floor = compareVerifierOwnedVisualFloor({
@@ -1095,6 +1866,36 @@ test('verifier-owned source and target form controls pass with exact accessible 
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.matchedControlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.controlCount === 4));
   assert.ok(floor.findings.every((finding) => finding.publicFormControlParity.source.fingerprint.startsWith('sha256:')));
+});
+
+test('button and input submit controls compare by submit semantics while retaining raw kinds', () => {
+  const sourceControls = [observedControl({
+    accessibleIdentity: 'send', kind: 'button_submit', visibleLabel: 'Send'
+  })];
+  const targetControls = [observedControl({
+    accessibleIdentity: 'send', kind: 'input_submit', visibleLabel: 'Send',
+    visibleLabelSource: 'rendered_input_button_text'
+  })];
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(sourceControls)
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence(targetControls)
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'passed', floor.errors.join('\n'));
+  assert.ok(floor.findings.every((finding) =>
+    finding.publicFormControlParity.source.controls[0].kind === 'button_submit' &&
+    finding.publicFormControlParity.target.controls[0].kind === 'input_submit' &&
+    finding.publicFormControlParity.source.controls[0].semanticKind === 'submit' &&
+    finding.publicFormControlParity.target.controls[0].semanticKind === 'submit'
+  ));
 });
 
 test('accepted non-primary form and search routes cannot escape verifier-owned control parity', () => {
@@ -1602,7 +2403,41 @@ test('verifier-owned form parity rejects target-only controls and forms', () => 
   assert.match(extraForm.errors.join('\n'), /unexpected public-form control at form 2 control 1/i);
 });
 
-test('empty or truncated select evidence cannot pass as a dynamic-options wildcard', () => {
+test('an empty source select is review-required while a populated target remains machine-incomplete', () => {
+  const sourceSelect = observedControl({
+    accessibleIdentity: 'campus',
+    kind: 'select_single',
+    visibleLabel: 'Campus',
+    optionEvidence: 'unobserved_empty'
+  });
+  const targetSelect = observedControl({
+    accessibleIdentity: 'campus',
+    kind: 'select_single',
+    visibleLabel: 'Campus',
+    optionEvidence: 'observed',
+    options: [{ label: 'Budapest', selected: true, defaultSelected: true, disabled: false }]
+  });
+  const floor = compareVerifierOwnedVisualFloor({
+    sourceCapture: visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([sourceSelect])
+    }),
+    targetCapture: visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure,
+      publicFormControls: publicFormControlEvidence([targetSelect])
+    }),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'form' }],
+    stateFingerprint: state('f')
+  });
+
+  assert.equal(floor.status, 'review_required');
+  assert.equal(floor.completionSupported, false);
+  assert.equal(floor.diagnosticReviewEligible, false);
+  assert.match(floor.errors.join('\n'), /source option parity is indeterminate.*machine completion/i);
+  assert.doesNotMatch(floor.errors.join('\n'), /differs in ordered option labels/i);
+});
+
+test('a target empty select and truncated option evidence remain hard failures', () => {
   const emptySelect = observedControl({
     accessibleIdentity: 'campus',
     kind: 'select_single',
@@ -1745,9 +2580,9 @@ test('verifier-owned primary-navigation parity preserves accepted route mappings
     }), targetEntries),
     primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
     routeMappings: [
-      { sourcePath: '/', targetPath: '/', accepted: true },
-      { sourcePath: '/programs?audience=adult', targetPath: '/courses?audience=adult', accepted: true },
-      { sourcePath: '/programs/advanced', targetPath: '/courses/advanced', accepted: true }
+      { sourcePath: '/', targetPath: '/', accepted: true, associationProven: true },
+      { sourcePath: '/programs?audience=adult', targetPath: '/courses?audience=adult', accepted: true, associationProven: true },
+      { sourcePath: '/programs/advanced', targetPath: '/courses/advanced', accepted: true, associationProven: true }
     ],
     stateFingerprint: state('f')
   });
@@ -1756,6 +2591,37 @@ test('verifier-owned primary-navigation parity preserves accepted route mappings
   assert.equal(floor.primaryNavigationSemanticParity.status, 'passed');
   assert.ok(floor.findings.every((finding) => finding.primaryNavigation.passed));
   assert.ok(floor.findings.every((finding) => finding.primaryNavigation.differenceKinds.length === 0));
+});
+
+test('primary-navigation href rewrites require an accepted live-proven route association', () => {
+  const input = {
+    sourceCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://source.example', hashSeed: 'a', structure: composedStructure
+    }), [{ href: '/programs', label: 'Programs' }]),
+    targetCapture: setPrimaryNavigation(visualFloorCapture({
+      origin: 'https://target.example', hashSeed: 'b', structure: composedStructure
+    }), [{ href: '/contact', label: 'Programs' }]),
+    primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
+    stateFingerprint: state('f')
+  };
+  for (const mapping of [
+    { sourcePath: '/programs', targetPath: '/contact', accepted: true },
+    { sourcePath: '/programs', targetPath: '/contact', accepted: true, associationProven: false },
+    { sourcePath: '/programs', targetPath: '/contact', associationProven: true }
+  ]) {
+    const floor = compareVerifierOwnedVisualFloor({ ...input, routeMappings: [mapping] });
+    assert.equal(floor.status, 'failed');
+    assert.ok(floor.findings.every((finding) => finding.primaryNavigation.differenceKinds.includes('href')));
+    assert.ok(floor.findings.every((finding) => finding.primaryNavigation.disposition.applied === false));
+  }
+
+  const proven = compareVerifierOwnedVisualFloor({
+    ...input,
+    routeMappings: [{
+      sourcePath: '/programs', targetPath: '/contact', accepted: true, associationProven: true
+    }]
+  });
+  assert.equal(proven.status, 'passed', proven.errors.join('\n'));
 });
 
 test('primary navigation prefers a unique canonical final route over an earlier incomplete primary mapping', () => {
@@ -1770,12 +2636,13 @@ test('primary navigation prefers a unique canonical final route over an earlier 
     }), targetEntries),
     primaryRoutes: [{ sourcePath: '/', targetPath: '/', routeRole: 'homepage' }],
     routeMappings: [
-      { sourcePath: '/legacy-programs', targetPath: '/legacy-programs', accepted: true },
+      { sourcePath: '/legacy-programs', targetPath: '/legacy-programs', accepted: true, associationProven: false },
       {
         sourcePath: '/legacy-programs',
         targetPath: '/legacy-programs',
         targetFinalPath: '/programs',
-        accepted: true
+        accepted: true,
+        associationProven: true
       }
     ],
     stateFingerprint: state('f')
@@ -1801,13 +2668,15 @@ test('conflicting canonical navigation mappings fail closed even when the observ
         sourcePath: '/legacy-programs',
         targetPath: '/legacy-programs',
         targetFinalPath: '/programs-a',
-        accepted: true
+        accepted: true,
+        associationProven: true
       },
       {
         sourcePath: '/legacy-programs',
         targetPath: '/legacy-programs',
         targetFinalPath: '/programs-b',
-        accepted: true
+        accepted: true,
+        associationProven: true
       }
     ],
     stateFingerprint: state('f')
@@ -2391,6 +3260,10 @@ function rawCaptureFixture() {
   delete raw.resultStateFingerprint;
   raw.routes = raw.routes.map((route) => ({
     ...route,
+    signals: {
+      ...route.signals,
+      contentImageEvidence: normalizeContentImageEvidence()
+    },
     axe: {
       schemaVersion: VERIFIER_AXE_SCHEMA,
       status: 'executed',
@@ -2551,7 +3424,8 @@ test('navigation route mapping remains exact after labels and query values are p
     routeMappings: [{
       sourcePath: '/programs?audience=adult',
       targetPath: '/courses?audience=adult',
-      accepted: true
+      accepted: true,
+      associationProven: true
     }],
     stateFingerprint: state('f')
   });
@@ -2627,15 +3501,21 @@ test('CDP pipe captures lazy controlled ARIA navigation, standalone menuitems, c
   skip: findBrowserExecutable() ? false : 'Chrome/Chromium is not installed in this runtime.'
 }, async () => {
   const server = createServer((request, response) => {
+    if (request.url?.startsWith('/vector-asset')) {
+      response.writeHead(200, { 'content-type': 'image/svg+xml' });
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="180"><rect width="300" height="180" fill="green"/></svg>');
+      return;
+    }
     const missingBrand = request.url?.startsWith('/missing-brand');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><html lang="en"><head><title>Global chrome fixture</title><meta name="viewport" content="width=device-width"><style>
-      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button,[role="menuitem"]{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}input,select{min-height:24px}.menu-toggle,#mobile-menu-region{display:none}.honeypot{position:absolute;left:-10000px;width:10px;height:10px}.visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+      body{margin:0} header,footer{padding:20px} main{min-height:700px}a,button,[role="menuitem"]{display:inline-flex;min-width:24px;min-height:24px;padding:4px;margin:2px}input,select{min-height:24px}.menu-toggle,#mobile-menu-region{display:none}.honeypot,.offscreen-primary{position:absolute;left:-10000px;width:300px;height:120px}.honeypot{width:10px;height:10px}.visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
       @media(max-width:600px){.menu-toggle{display:block}.desktop-primary{display:none}#mobile-menu-region.open{display:block}}
     </style></head><body>
       <header><div class="hf-branding">${missingBrand ? '' : '<a class="site-branding" href="/">Fixture Brand</a>'}</div>
       <button class="menu-toggle" aria-label="Menu" aria-controls="mobile-menu-region" aria-expanded="false"
         onclick="toggleFixtureMenu(this)">Menu</button>
+      <nav class="offscreen-primary" aria-label="Primary navigation"><a href="/decoy">Offscreen decoy</a></nav>
       <div class="desktop-primary" role="menubar" aria-label="Primary navigation"><ul role="none"><li role="none"><a role="menuitem" href="/">Home</a></li><li role="none"><a role="menuitem" href="/about">About</a><ul role="menu"><li role="none"><a role="menuitem" href="/team">Team</a></li></ul></li><li role="none"><button role="menuitem">Programs</button></li></ul><div role="menuitem" tabindex="0" aria-label="Services">Services<div role="menu"><a role="menuitem" href="/consulting">Consulting</a></div></div><a role="menuitem" href="#">More</a></div>
       <div id="mobile-menu-region"><nav class="utility-navigation" aria-label="Account"><a class="account-link" href="/account">Account</a></nav></div>
       <script>function toggleFixtureMenu(button){const region=document.getElementById('mobile-menu-region');if(!region.querySelector('[role="menubar"]')){const menu=document.querySelector('.desktop-primary').cloneNode(true);menu.className='mobile-primary';region.append(menu)}const opening=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(opening));region.classList.toggle('open',opening)}</script></header>
@@ -2655,6 +3535,11 @@ test('CDP pipe captures lazy controlled ARIA navigation, standalone menuitems, c
         </form>
         <span id="external-reference-label">Reference</span>
         <input id="external-reference" form="fixture-form" aria-labelledby="external-reference-label" name="reference_internal" value="external-secret">
+        <label for="standalone-search">Standalone search</label><input id="standalone-search" type="search">
+        <img width="16" height="16" alt="Tiny icon" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <img style="width:300px;height:180px;object-fit:contain" alt="Raster illustration" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <img width="300" height="180" alt="Vector illustration" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='180'%3E%3Crect width='300' height='180' fill='blue'/%3E%3C/svg%3E">
+        <img width="300" height="180" alt="Extensionless vector illustration" src="/vector-asset">
       </main>
       <footer><a href="/legal">Legal</a><a href="mailto:team@example.com?subject=browser-private">Email</a></footer>
     </body></html>`);
@@ -2686,20 +3571,21 @@ test('CDP pipe captures lazy controlled ARIA navigation, standalone menuitems, c
     assert.ok(raw.routes.every((route) => route.signals.maskedRegionCount === 1));
     assert.ok(raw.routes.every((route) => route.signals.placeholderHrefs.some((link) => link.raw === '#')));
     assert.ok(raw.routes.every((route) => route.signals.meaningfulHrefs.some((link) => link.href === 'mailto:team@example.com?subject=browser-private')));
-    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.formCount === 1));
-    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 6));
+    assert.ok(raw.routes.every((route) => route.signals.meaningfulHrefs.every((link) => link.href !== '/decoy')));
+    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.formCount === 2));
+    assert.ok(raw.routes.every((route) => route.signals.publicFormControls.controlCount === 7));
     const publicControls = raw.routes[0].signals.publicFormControls.controls;
     assert.deepEqual(publicControls.map((control) => [control.formOrdinal, control.controlOrdinal]), [
-      [1, 1], [1, 2], [1, 3], [1, 4], [1, 5], [1, 6]
+      [1, 1], [1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [2, 1]
     ]);
     assert.deepEqual(publicControls.map((control) => control.accessibleIdentity), [
-      'email address', 'topic', 'send me a copy', 'send', 'screen reader action', 'reference'
+      'email address', 'topic', 'send me a copy', 'send', 'screen reader action', 'reference', 'standalone search'
     ]);
     assert.deepEqual(publicControls.map((control) => control.visibleLabel), [
-      'Email Address', 'Topic', 'Send me a copy', 'Send', '', 'Reference'
+      'Email Address', 'Topic', 'Send me a copy', 'Send', '', 'Reference', 'Standalone search'
     ]);
     assert.deepEqual(publicControls.map((control) => control.visibleLabelSource), [
-      'associated_label', 'associated_label', 'associated_label', 'button_text', 'none', 'visible_aria_labelledby'
+      'associated_label', 'associated_label', 'associated_label', 'button_text', 'none', 'visible_aria_labelledby', 'associated_label'
     ]);
     assert.deepEqual(publicControls[1].options, [
       { label: 'General', selected: true, defaultSelected: true, disabled: false },
@@ -2713,6 +3599,7 @@ test('CDP pipe captures lazy controlled ARIA navigation, standalone menuitems, c
     );
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entryCount === 7));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries.map((entry) => entry.label).join('|') === 'Home|About|Team|Programs|Services|Consulting|More'));
+    assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries.every((entry) => entry.href !== '/decoy')));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].depth === 1));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[2].parentPosition === 1));
     assert.ok(raw.routes.every((route) => route.signals.primaryNavigation.entries[3].kind === 'control'));
@@ -2724,6 +3611,9 @@ test('CDP pipe captures lazy controlled ARIA navigation, standalone menuitems, c
     assert.ok(raw.routes.filter((route) => route.viewport.name === 'mobile').every((route) =>
       route.signals.primaryNavigation.entries.every((entry) => entry.href !== '/account')
     ));
+    assert.ok(raw.routes.every((route) => route.signals.contentImageEvidence.schemaVersion === CONTENT_IMAGE_EVIDENCE_SCHEMA));
+    assert.ok(raw.routes.every((route) => route.signals.contentImageEvidence.imageCount === 1));
+    assert.ok(raw.routes.every((route) => route.signals.contentImageEvidence.images[0].objectFit === 'contain'));
     assert.ok(raw.routes.every((route) => route.axe.status === 'executed'));
     assert.ok(raw.routes.every((route) => route.axe.source.sha256 === VERIFIER_AXE_SOURCE_SHA256));
     assert.equal(raw.routes.find((route) => route.path === '/' && route.viewport.name === 'mobile').signals.mobileMenu.activationWorks, true);

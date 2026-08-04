@@ -34,6 +34,10 @@ export const GLOBAL_CHROME_CAPTURE_SCHEMA = 'public-kit.global-chrome-capture.1'
 export const GLOBAL_CHROME_CONTRACT_SCHEMA = 'public-kit.global-chrome-contract.1';
 export const GLOBAL_CHROME_COMPARISON_SCHEMA = 'public-kit.global-chrome-comparison.1';
 export const VISUAL_PARITY_FLOOR_SCHEMA = 'public-kit.visual-parity-floor.1';
+export const TARGET_RASTER_QUALITY_FLOOR_SCHEMA = 'public-kit.target-raster-quality-floor.1';
+export const COMPUTED_STYLE_EVIDENCE_SCHEMA = 'public-kit.computed-style-evidence.1';
+export const COMPUTED_STYLE_SHADOW_SCHEMA = 'public-kit.computed-style-shadow.1';
+export const CONTENT_IMAGE_EVIDENCE_SCHEMA = 'public-kit.content-image-raster-evidence.2';
 export const BEFORE_CONSENT_NETWORK_SCHEMA = 'public-kit.before-consent-network-capture.1';
 export const VERIFIER_AXE_SCHEMA = 'public-kit.verifier-axe.1';
 export const VERIFIER_AXE_VERSION = '4.10.3';
@@ -104,6 +108,57 @@ const PUBLIC_FORM_DURABLE_VISIBLE_LABEL_SOURCES = new Set([
   'visible_aria_labelledby',
   'button_text',
   'rendered_input_button_text'
+]);
+export const COMPUTED_STYLE_LIMITS = Object.freeze({
+  maxSamples: 7,
+  maxLoadedFontFamilies: 48,
+  maxCssValueLength: 160,
+  maxDiagnosticsPerRouteViewport: 24,
+  maxRouteViewportComparisons: 128
+});
+export const CONTENT_IMAGE_LIMITS = Object.freeze({
+  maxImages: 64,
+  minimumRenderedWidth: 120,
+  minimumRenderedHeight: 80,
+  minimumUpscaleRatio: 1.25,
+  minimumUpscalePixels: 8
+});
+const COMPUTED_STYLE_ROLES = Object.freeze([
+  'body',
+  'heading_1',
+  'heading_2',
+  'primary_navigation_link',
+  'primary_action',
+  'form_control',
+  'card_or_listing_surface'
+]);
+const COMPUTED_STYLE_METHODS = Object.freeze({
+  body: new Set(['document-body']),
+  heading_1: new Set(['first-visible-h1']),
+  heading_2: new Set(['first-visible-h2']),
+  primary_navigation_link: new Set(['first-visible-primary-navigation-link']),
+  primary_action: new Set(['first-visible-prominent-main-action']),
+  form_control: new Set(['first-visible-main-form-control']),
+  card_or_listing_surface: new Set([
+    'first-visible-card-class',
+    'first-visible-teaser-class',
+    'first-visible-listing-class',
+    'first-visible-article',
+    'first-visible-list-item'
+  ])
+});
+const COMPUTED_STYLE_KEYS = Object.freeze([
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'lineHeight',
+  'letterSpacing',
+  'color',
+  'backgroundColor',
+  'borderColor',
+  'borderStyle',
+  'borderWidth',
+  'borderRadius'
 ]);
 const FIXED_THRESHOLDS = Object.freeze({
   maximumMainTopShiftPx: 160,
@@ -291,7 +346,8 @@ function normalizeRoute(value) {
   const text = String(value ?? '').trim();
   if (!text.startsWith('/') || text.startsWith('//')) throw new Error(`Global chrome route must be root-relative: ${text}`);
   const url = new URL(text, 'https://global-chrome.invalid');
-  return `${url.pathname || '/'}${url.search}`;
+  const pathname = url.pathname.length > 1 ? url.pathname.replace(/\/+$/, '') : '/';
+  return `${pathname || '/'}${url.search}`;
 }
 
 function privacyPreservingQuery(value) {
@@ -435,10 +491,110 @@ function normalizedSelectors(value) {
   return normalized;
 }
 
+function privacySafeCssValue(value) {
+  const normalized = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, COMPUTED_STYLE_LIMITS.maxCssValueLength);
+  if (/(?:https?:\/\/|\b(?:data|blob|file):|url\s*\()/i.test(normalized)) return '';
+  return normalized;
+}
+
+function normalizedFontFamilyName(value) {
+  return privacySafeCssValue(value).replace(/^(['"])(.*)\1$/, '$2').trim();
+}
+
+export function normalizeComputedStyleEvidence(value = {}) {
+  const rawFamilies = Array.isArray(value?.loadedFontFamilies) ? value.loadedFontFamilies : [];
+  const normalizedFamilies = [...new Set(rawFamilies
+    .map(normalizedFontFamilyName)
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  const loadedFontFamilies = normalizedFamilies.slice(0, COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies);
+  const samples = [];
+  const observedRoles = new Set();
+  for (const rawSample of Array.isArray(value?.samples) ? value.samples : []) {
+    if (samples.length >= COMPUTED_STYLE_LIMITS.maxSamples) break;
+    const semanticRole = String(rawSample?.semanticRole ?? '').trim();
+    const selectionMethod = String(rawSample?.selectionMethod ?? '').trim();
+    if (
+      !COMPUTED_STYLE_ROLES.includes(semanticRole) ||
+      !COMPUTED_STYLE_METHODS[semanticRole]?.has(selectionMethod) ||
+      observedRoles.has(semanticRole)
+    ) continue;
+    const rawStyles = rawSample?.styles && typeof rawSample.styles === 'object' && !Array.isArray(rawSample.styles)
+      ? rawSample.styles
+      : {};
+    const styles = Object.fromEntries(COMPUTED_STYLE_KEYS.map((key) => [key, privacySafeCssValue(rawStyles[key])]));
+    samples.push({ semanticRole, selectionMethod, styles });
+    observedRoles.add(semanticRole);
+  }
+  samples.sort((left, right) => COMPUTED_STYLE_ROLES.indexOf(left.semanticRole) - COMPUTED_STYLE_ROLES.indexOf(right.semanticRole));
+  return {
+    schemaVersion: COMPUTED_STYLE_EVIDENCE_SCHEMA,
+    authority: 'verifier-owned-managed-browser-computed-style-observation',
+    completionAuthority: false,
+    privacy: {
+      includesElementText: false,
+      includesUrls: false
+    },
+    limits: { ...COMPUTED_STYLE_LIMITS },
+    loadedFontFamilies,
+    samples,
+    truncated: value?.truncated === true ||
+      normalizedFamilies.length > COMPUTED_STYLE_LIMITS.maxLoadedFontFamilies ||
+      (Array.isArray(value?.samples) && value.samples.length > COMPUTED_STYLE_LIMITS.maxSamples)
+  };
+}
+
+function boundedImageDimension(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(100_000, Math.round(number))) : 0;
+}
+
+const CONTENT_IMAGE_OBJECT_FITS = new Set(['fill', 'contain', 'cover', 'none', 'scale-down']);
+
+function normalizedContentImageObjectFit(value) {
+  const objectFit = String(value ?? '').trim().toLowerCase();
+  return CONTENT_IMAGE_OBJECT_FITS.has(objectFit) ? objectFit : 'fill';
+}
+
+export function normalizeContentImageEvidence(value = {}) {
+  const rawImages = Array.isArray(value?.images) ? value.images : [];
+  const images = rawImages.slice(0, CONTENT_IMAGE_LIMITS.maxImages).map((image, index) => {
+    const declaredIdentity = String(image?.resourceIdentity ?? '').trim();
+    const resourceIdentity = HASH_RE.test(declaredIdentity)
+      ? declaredIdentity
+      : sha256(String(image?.resourceUrl ?? ''));
+    const naturalWidth = boundedImageDimension(image?.naturalWidth);
+    const naturalHeight = boundedImageDimension(image?.naturalHeight);
+    return {
+      ordinal: index + 1,
+      resourceIdentity,
+      renderedWidth: boundedImageDimension(image?.renderedWidth),
+      renderedHeight: boundedImageDimension(image?.renderedHeight),
+      naturalWidth,
+      naturalHeight,
+      objectFit: normalizedContentImageObjectFit(image?.objectFit),
+      intrinsicAvailable: image?.intrinsicAvailable === true && naturalWidth > 0 && naturalHeight > 0
+    };
+  });
+  return {
+    schemaVersion: CONTENT_IMAGE_EVIDENCE_SCHEMA,
+    authority: 'verifier-owned-managed-browser-raster-observation',
+    limits: { ...CONTENT_IMAGE_LIMITS },
+    imageCount: images.length,
+    intrinsicUnavailableCount: images.filter((image) => image.intrinsicAvailable !== true).length,
+    truncated: value?.truncated === true || rawImages.length > CONTENT_IMAGE_LIMITS.maxImages,
+    images
+  };
+}
+
 export function normalizeGlobalChromeContract(value = {}) {
   const contract = {
     schemaVersion: GLOBAL_CHROME_CONTRACT_SCHEMA,
-    selectorHeuristicsVersion: 2,
+    selectorHeuristicsVersion: 3,
     dynamicRegionSelectors: normalizedSelectors(value?.dynamicRegionSelectors),
     thresholds: FIXED_THRESHOLDS,
     viewports: VIEWPORTS.map(({ name, width, height }) => ({ name, width, height }))
@@ -988,18 +1144,31 @@ async function openCaptureBrowserBackend({
   return openLocalCdpBackend({ budget, executable, hideScrollbars, profileCleanup, profilePrefix });
 }
 
-function collectorExpression(contract, mobile) {
+function collectorExpression(contract, mobile, {
+  vectorImageResourceUrls = [],
+  vectorMimeEvidenceTruncated = false
+} = {}) {
   const source = async ({
+    computedStyleLimits,
+    contentImageLimits,
     dynamicRegionSelectors,
     mobileViewport,
     primaryNavigationLimits,
-    publicFormControlLimits
+    publicFormControlLimits,
+    vectorImageResourceUrls,
+    vectorMimeEvidenceTruncated
   }) => {
+    const vectorImageResourceUrlSet = new Set(vectorImageResourceUrls);
     const visible = (element) => {
       if (!(element instanceof Element)) return false;
       const box = element.getBoundingClientRect();
       const style = getComputedStyle(element);
       return box.width > 1 && box.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+    };
+    const visibleInViewport = (element) => {
+      if (!visible(element)) return false;
+      const value = element.getBoundingClientRect();
+      return value.right > 0 && value.bottom > 0 && value.left < innerWidth && value.top < innerHeight;
     };
     const box = (element) => {
       if (!(element instanceof Element)) return null;
@@ -1015,6 +1184,13 @@ function collectorExpression(contract, mobile) {
       }
       return (preferVisible ? elements.find(visible) : null) || elements[0] || null;
     };
+    const firstInViewport = (selectors) => {
+      const elements = [];
+      for (const selector of selectors) {
+        try { elements.push(...document.querySelectorAll(selector)); } catch {}
+      }
+      return elements.find(visibleInViewport) || null;
+    };
     const chromeSelector = 'header,nav,footer,[role="banner"],[role="navigation"],[role="contentinfo"],.site-branding,[class*="site-brand"],[id*="site-brand"]';
     const header = first(['header', '[role="banner"]', '#header', '.site-header']);
     const navigation = first([
@@ -1023,7 +1199,7 @@ function collectorExpression(contract, mobile) {
       'header [role="menubar"]', '[role="banner"] [role="menubar"]',
       '[role="menubar"][aria-label*="primary" i]', '[role="menu"][aria-label*="primary" i]'
     ], false) || first(['nav', '[role="navigation"]', '[role="menubar"]']);
-    const trigger = first([
+    const trigger = firstInViewport([
       'button[aria-controls*="menu" i]', 'button[aria-label*="menu" i]', 'button[class*="menu" i]',
       'button[id*="menu" i]', '.menu-toggle', '.navbar-toggler', '[data-drupal-selector*="menu"] button'
     ]);
@@ -1061,13 +1237,13 @@ function collectorExpression(contract, mobile) {
         region;
     };
     const primaryNavigationRoot = () => {
-      const mobileRoot = mobileViewport && visible(trigger) ? controlledNavigation() : null;
-      return (mobileRoot instanceof Element ? mobileRoot : null) || first([
+      const mobileRoot = mobileViewport && visibleInViewport(trigger) ? controlledNavigation() : null;
+      return (mobileRoot instanceof Element && visibleInViewport(mobileRoot) ? mobileRoot : null) || firstInViewport([
         ...primaryNavigationSelectors,
         'header nav', '[role="banner"] nav',
         'header [role="menubar"]', '[role="banner"] [role="menubar"]',
         'header [role="menu"]', '[role="banner"] [role="menu"]'
-      ]) || navigation;
+      ]) || (visibleInViewport(navigation) ? navigation : null);
     };
     const footer = first(['footer', '[role="contentinfo"]', '#footer', '.site-footer']);
     const brand = first([
@@ -1117,18 +1293,18 @@ function collectorExpression(contract, mobile) {
       } catch { return ''; }
     };
     let mobileMenu = {
-      triggerPresent: Boolean(trigger), triggerVisible: visible(trigger), activationWorks: false,
+      triggerPresent: Boolean(trigger), triggerVisible: visibleInViewport(trigger), activationWorks: false,
       expandedBefore: String(trigger?.getAttribute('aria-expanded') || ''), expandedAfter: '', controlledMenuVisible: false
     };
     let restoreMobileMenu = false;
-    if (mobileViewport && visible(trigger)) {
+    if (mobileViewport && visibleInViewport(trigger)) {
       const beforeControlledNavigation = controlledNavigation();
-      const beforeControlledVisible = visible(beforeControlledNavigation);
-      const beforeNavVisible = visible(navigation);
+      const beforeControlledVisible = visibleInViewport(beforeControlledNavigation);
+      const beforeNavVisible = visibleInViewport(navigation);
       trigger.click();
       await new Promise((resolve) => setTimeout(resolve, 120));
       const afterControlledNavigation = controlledNavigation();
-      const afterControlledVisible = visible(afterControlledNavigation);
+      const afterControlledVisible = visibleInViewport(afterControlledNavigation);
       const controlledRootChanged = beforeControlledNavigation !== afterControlledNavigation;
       mobileMenu.expandedAfter = String(trigger.getAttribute('aria-expanded') || '');
       mobileMenu.controlledMenuVisible = afterControlledVisible;
@@ -1138,7 +1314,7 @@ function collectorExpression(contract, mobile) {
           controlledRootChanged ||
           mobileMenu.expandedBefore !== mobileMenu.expandedAfter
         )
-      ) || (!beforeNavVisible && visible(navigation));
+      ) || (!beforeNavVisible && visibleInViewport(navigation));
       restoreMobileMenu = mobileMenu.expandedBefore !== mobileMenu.expandedAfter ||
         beforeControlledVisible !== afterControlledVisible || controlledRootChanged;
     }
@@ -1150,7 +1326,8 @@ function collectorExpression(contract, mobile) {
     for (const [scope, root] of [['header', header], ['navigation', primaryNavigationElement || navigation], ['footer', footer]]) {
       if (!(root instanceof Element)) continue;
       for (const link of root.querySelectorAll('a')) {
-        if (!visible(link)) continue;
+        const navigationLink = link.closest('nav,[role="navigation"],[role="menubar"],[role="menu"]');
+        if (!visible(link) || (navigationLink && !visibleInViewport(link))) continue;
         const raw = String(link.getAttribute('href') ?? '').trim();
         const label = String(link.getAttribute('aria-label') || link.textContent || link.querySelector('img')?.alt || '').replace(/\s+/g, ' ').trim();
         const href = normalizeHref(raw);
@@ -1161,6 +1338,7 @@ function collectorExpression(contract, mobile) {
     links.sort((left, right) => `${left.scope}\0${left.href}\0${left.label}`.localeCompare(`${right.scope}\0${right.href}\0${right.label}`));
     const navigationElements = primaryNavigationElement instanceof Element
       ? [...primaryNavigationElement.querySelectorAll('a,button,[role="menuitem"]')].filter((element) => {
+          if (!visibleInViewport(element)) return false;
           if (element.matches('a,button')) return true;
           // A role=menuitem wrapper with its own direct anchor/button is the
           // semantic container for that control, not a second navigation item.
@@ -1243,7 +1421,7 @@ function collectorExpression(contract, mobile) {
     }
     const primaryNavigation = {
       present: primaryNavigationElement instanceof Element,
-      visible: visible(primaryNavigationElement),
+      visible: visibleInViewport(primaryNavigationElement),
       entryCount: navigationElements.length,
       capturedEntryCount: primaryNavigationEntries.length,
       entriesTruncated: navigationElements.length > primaryNavigationLimits.maxEntries,
@@ -1337,10 +1515,14 @@ function collectorExpression(contract, mobile) {
     const publicControlCandidates = [];
     let publicControlCount = 0;
     const candidateForms = new Set();
+    let mainFormlessControlsPresent = false;
     for (const element of document.querySelectorAll('input,select,textarea,button')) {
-      if (!(element.form instanceof HTMLFormElement) || !publiclyVisibleElement(element)) continue;
+      const ownedByForm = element.form instanceof HTMLFormElement;
+      const formLessMainControl = !ownedByForm && main instanceof Element && main.contains(element);
+      if ((!ownedByForm && !formLessMainControl) || !publiclyVisibleElement(element)) continue;
       publicControlCount += 1;
-      candidateForms.add(element.form);
+      if (ownedByForm) candidateForms.add(element.form);
+      else mainFormlessControlsPresent = true;
       if (publicControlCandidates.length < publicFormControlLimits.maxControls) {
         publicControlCandidates.push(element);
       }
@@ -1348,6 +1530,7 @@ function collectorExpression(contract, mobile) {
     formControlOverflow.controls = Math.max(0, publicControlCount - publicFormControlLimits.maxControls);
     const publicForms = [...document.forms].filter((form) => candidateForms.has(form));
     const formOrdinals = new Map(publicForms.map((form, index) => [form, index + 1]));
+    const mainFormlessOrdinal = mainFormlessControlsPresent ? publicForms.length + 1 : null;
     const nextControlOrdinal = new Map();
     const controlOccurrences = new Map();
     const publicFormControls = publicControlCandidates.map((element) => {
@@ -1422,7 +1605,7 @@ function collectorExpression(contract, mobile) {
         const accessibleIdentity = boundedControlLabel(normalizedControlLabel(accessibleLabel).toLowerCase());
         const occurrence = (controlOccurrences.get(accessibleIdentity) || 0) + 1;
         controlOccurrences.set(accessibleIdentity, occurrence);
-        const formOrdinal = formOrdinals.get(element.form);
+        const formOrdinal = formOrdinals.get(element.form) ?? mainFormlessOrdinal;
         const controlOrdinal = (nextControlOrdinal.get(formOrdinal) || 0) + 1;
         nextControlOrdinal.set(formOrdinal, controlOrdinal);
         const rawOptionCount = tag === 'select' ? element.options.length : 0;
@@ -1463,7 +1646,7 @@ function collectorExpression(contract, mobile) {
     const publicFormEvidence = {
       schemaVersion: 'public-kit.public-form-controls.1',
       limits: publicFormControlLimits,
-      formCount: publicForms.length,
+      formCount: publicForms.length + (mainFormlessControlsPresent ? 1 : 0),
       controlCount: publicControlCount,
       controls: publicFormControls,
       overflow: formControlOverflow
@@ -1480,6 +1663,57 @@ function collectorExpression(contract, mobile) {
           return value.width >= 80 && value.height >= 50;
         })
       : [];
+    const contentRasterCandidates = contentRoot instanceof Element
+      ? [...contentRoot.querySelectorAll('img')].filter((element) => {
+          if (!visible(element) || element.closest('[data-agent-ready-dynamic-mask]')) return false;
+          const resourceUrl = String(element.currentSrc || element.src || '').trim();
+          if (
+            !resourceUrl ||
+            vectorImageResourceUrlSet.has(resourceUrl) ||
+            /(?:\.svg(?:[?#]|$)|^data:image\/svg\+xml)/i.test(resourceUrl)
+          ) return false;
+          const value = element.getBoundingClientRect();
+          return value.width >= contentImageLimits.minimumRenderedWidth &&
+            value.height >= contentImageLimits.minimumRenderedHeight;
+        })
+      : [];
+    const browserSha256 = async (value) => {
+      if (!globalThis.crypto?.subtle || typeof TextEncoder !== 'function') return '';
+      try {
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value)));
+        return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+      } catch {
+        return '';
+      }
+    };
+    const contentImageRows = await Promise.all(
+      contentRasterCandidates.slice(0, contentImageLimits.maxImages).map(async (element) => {
+        const resourceUrl = String(element.currentSrc || element.src || '').trim();
+        const resourceIdentity = await browserSha256(resourceUrl);
+        const value = element.getBoundingClientRect();
+        const computed = getComputedStyle(element);
+        const cssPixels = (property) => {
+          const number = Number.parseFloat(computed[property]);
+          return Number.isFinite(number) ? Math.max(0, number) : 0;
+        };
+        const renderedWidth = Math.max(0, value.width -
+          cssPixels('borderLeftWidth') - cssPixels('borderRightWidth') -
+          cssPixels('paddingLeft') - cssPixels('paddingRight'));
+        const renderedHeight = Math.max(0, value.height -
+          cssPixels('borderTopWidth') - cssPixels('borderBottomWidth') -
+          cssPixels('paddingTop') - cssPixels('paddingBottom'));
+        return {
+          resourceIdentity,
+          resourceUrl: resourceIdentity ? '' : resourceUrl.slice(0, 4096),
+          renderedWidth,
+          renderedHeight,
+          naturalWidth: element.naturalWidth,
+          naturalHeight: element.naturalHeight,
+          objectFit: computed.objectFit,
+          intrinsicAvailable: element.complete === true && element.naturalWidth > 0 && element.naturalHeight > 0
+        };
+      })
+    );
     const actions = contentRoot instanceof Element
       ? [...contentRoot.querySelectorAll('a[href],button,[role="button"]')].filter((element) => {
           if (!visible(element)) return false;
@@ -1507,6 +1741,84 @@ function collectorExpression(contract, mobile) {
           value.height >= 28
         );
     });
+    const stableStyleAnchor = (element) => visible(element) &&
+      !element.closest('[data-agent-ready-dynamic-mask]');
+    const firstVisibleWithin = (root, selector) => {
+      if (!(root instanceof Element)) return null;
+      try { return [...root.querySelectorAll(selector)].find(stableStyleAnchor) || null; }
+      catch { return null; }
+    };
+    const representativeSurface = (() => {
+      const candidates = [
+        ['first-visible-card-class', '[class*="card" i]'],
+        ['first-visible-teaser-class', '[class*="teaser" i]'],
+        ['first-visible-listing-class', '[class*="listing" i]'],
+        ['first-visible-article', 'article'],
+        ['first-visible-list-item', '[role="listitem"],li']
+      ];
+      for (const [selectionMethod, selector] of candidates) {
+        const element = firstVisibleWithin(contentRoot, selector);
+        if (element) return { element, selectionMethod };
+      }
+      return null;
+    })();
+    const styleSample = (semanticRole, selectionMethod, element) => {
+      if (!(element instanceof Element) || !stableStyleAnchor(element)) return null;
+      const computed = getComputedStyle(element);
+      const bounded = (value) => String(value || '')
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, computedStyleLimits.maxCssValueLength);
+      return {
+        semanticRole,
+        selectionMethod,
+        styles: {
+          fontFamily: bounded(computed.fontFamily),
+          fontSize: bounded(computed.fontSize),
+          fontWeight: bounded(computed.fontWeight),
+          lineHeight: bounded(computed.lineHeight),
+          letterSpacing: bounded(computed.letterSpacing),
+          color: bounded(computed.color),
+          backgroundColor: bounded(computed.backgroundColor),
+          borderColor: bounded(computed.borderTopColor),
+          borderStyle: bounded(computed.borderTopStyle),
+          borderWidth: bounded(computed.borderTopWidth),
+          borderRadius: bounded(computed.borderRadius)
+        }
+      };
+    };
+    const styleSamples = [
+      styleSample('body', 'document-body', document.body),
+      styleSample('heading_1', 'first-visible-h1', firstVisibleWithin(contentRoot, 'h1')),
+      styleSample('heading_2', 'first-visible-h2', firstVisibleWithin(contentRoot, 'h2')),
+      styleSample(
+        'primary_navigation_link',
+        'first-visible-primary-navigation-link',
+        navigationElements.find((element) => element.matches('a[href]'))
+      ),
+      styleSample('primary_action', 'first-visible-prominent-main-action', prominentActions.find(stableStyleAnchor)),
+      styleSample(
+        'form_control',
+        'first-visible-main-form-control',
+        firstVisibleWithin(contentRoot, 'input:not([type="hidden"]),select,textarea')
+      ),
+      representativeSurface
+        ? styleSample('card_or_listing_surface', representativeSurface.selectionMethod, representativeSurface.element)
+        : null
+    ].filter(Boolean).slice(0, computedStyleLimits.maxSamples);
+    const sampledPrimaryFontFamilies = new Set(styleSamples
+      .map((sample) => String(sample?.styles?.fontFamily || '').split(',')[0])
+      .map((family) => family.replace(/^(['"])(.*)\1$/, '$2').trim().toLowerCase())
+      .filter(Boolean));
+    const fontSet = globalThis.document?.fonts;
+    const allLoadedFontFamilies = fontSet
+      ? [...new Set([...fontSet]
+        .filter((fontFace) => fontFace?.status === 'loaded')
+        .map((fontFace) => String(fontFace?.family || '').replace(/^(['"])(.*)\1$/, '$2').trim())
+        .filter((family) => family && sampledPrimaryFontFamilies.has(family.toLowerCase())))].sort((left, right) => left.localeCompare(right))
+      : [];
+    const loadedFontFamilies = allLoadedFontFamilies.slice(0, computedStyleLimits.maxLoadedFontFamilies);
     let bandCandidates = contentRoot instanceof Element
       ? [...contentRoot.querySelectorAll('section,[role="region"]')].filter((element) => {
           if (!visible(element)) return false;
@@ -1570,6 +1882,15 @@ function collectorExpression(contract, mobile) {
         responseStatus,
         reasonCodes: [...new Set(reasonCodes)].sort()
       },
+      computedStyleEvidence: {
+        loadedFontFamilies,
+        truncated: allLoadedFontFamilies.length > loadedFontFamilies.length,
+        samples: styleSamples
+      },
+      contentImageEvidence: {
+        images: contentImageRows,
+        truncated: vectorMimeEvidenceTruncated || contentRasterCandidates.length > contentImageRows.length
+      },
       structure: {
         headingCount: headingOrder.length,
         headingOrder,
@@ -1591,10 +1912,14 @@ function collectorExpression(contract, mobile) {
     };
   };
   return `(${source})(${JSON.stringify({
+    computedStyleLimits: COMPUTED_STYLE_LIMITS,
+    contentImageLimits: CONTENT_IMAGE_LIMITS,
     dynamicRegionSelectors: contract.dynamicRegionSelectors,
     mobileViewport: mobile,
     primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
-    publicFormControlLimits: PUBLIC_FORM_CONTROL_LIMITS
+    publicFormControlLimits: PUBLIC_FORM_CONTROL_LIMITS,
+    vectorImageResourceUrls,
+    vectorMimeEvidenceTruncated
   })})`;
 }
 
@@ -1713,62 +2038,85 @@ async function captureRoute(cdp, sessionId, baseUrl, path, viewport, contract) {
     viewport.mobile ? { enabled: true, maxTouchPoints: 5 } : { enabled: false },
     sessionId
   );
-  const url = new URL(path.replace(/^\//, ''), new URL('/', baseUrl)).href;
-  const loaded = cdp.waitFor('Page.loadEventFired', sessionId);
-  const navigation = await cdp.send('Page.navigate', { url }, sessionId).catch((error) => {
-    void loaded.catch(() => {});
-    throw error;
-  });
-  if (navigation.errorText) throw new Error(`${path} navigation failed: ${navigation.errorText}`);
-  await loaded;
-  await cdp.send('Runtime.evaluate', {
-    expression: 'document.fonts && document.fonts.ready ? document.fonts.ready.then(() => true) : true',
-    awaitPromise: true,
-    returnByValue: true
-  }, sessionId);
-  const axeEvaluation = await cdp.send('Runtime.evaluate', {
-    expression: verifierAxeExpression(),
-    awaitPromise: true,
-    returnByValue: true
-  }, sessionId);
-  if (axeEvaluation.exceptionDetails || !axeEvaluation.result?.value) {
-    throw new Error(`${path} ${viewport.name} verifier-owned axe-core execution failed.`);
-  }
-  const evaluated = await cdp.send('Runtime.evaluate', {
-    expression: collectorExpression(contract, viewport.mobile),
-    awaitPromise: true,
-    returnByValue: true
-  }, sessionId);
-  if (evaluated.exceptionDetails || !evaluated.result?.value) {
-    throw new Error(`${path} ${viewport.name} signal collection failed.`);
-  }
-  const signals = evaluated.result.value;
-  const axe = rawVerifierAxeRecord(axeEvaluation.result.value, signals.finalUrl);
-  if (axe.status !== 'executed') {
-    throw new Error(`${path} ${viewport.name} verifier-owned axe-core result failed validation: ${axe.errors.join(' ')}`);
-  }
-  const metrics = await cdp.send('Page.getLayoutMetrics', {}, sessionId);
-  const content = metrics.cssContentSize || metrics.contentSize || { width: viewport.width, height: viewport.height };
-  const screenshotWidth = Math.max(viewport.width, Math.min(4000, Math.ceil(content.width || viewport.width)));
-  const screenshotHeight = Math.max(viewport.height, Math.min(12_000, Math.ceil(content.height || viewport.height)));
-  const screenshot = await cdp.send('Page.captureScreenshot', {
-    format: 'png',
-    captureBeyondViewport: true,
-    fromSurface: true,
-    clip: { x: 0, y: 0, width: screenshotWidth, height: screenshotHeight, scale: 1 }
-  }, sessionId);
-  return {
-    path,
-    viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
-    axe,
-    signals,
-    screenshot: {
-      base64: screenshot.data,
-      width: screenshotWidth,
-      height: screenshotHeight,
-      clipped: Math.ceil(content.height || viewport.height) > screenshotHeight
+  const vectorImageResourceUrls = new Set();
+  let vectorMimeEvidenceTruncated = false;
+  const maximumVectorMimeResources = CONTENT_IMAGE_LIMITS.maxImages * 4;
+  const unsubscribeResponse = cdp.subscribe('Network.responseReceived', sessionId, (params) => {
+    if (String(params?.type ?? '') !== 'Image' || !/^image\/svg\+xml(?:\s*;|$)/i.test(String(params?.response?.mimeType ?? ''))) return;
+    const resourceUrl = String(params?.response?.url ?? '').trim();
+    if (!resourceUrl || resourceUrl.length > 4096 || vectorImageResourceUrls.size >= maximumVectorMimeResources) {
+      vectorMimeEvidenceTruncated = true;
+      return;
     }
-  };
+    vectorImageResourceUrls.add(resourceUrl);
+  });
+  try {
+    const url = new URL(path.replace(/^\//, ''), new URL('/', baseUrl)).href;
+    const loaded = cdp.waitFor('Page.loadEventFired', sessionId);
+    const navigation = await cdp.send('Page.navigate', { url }, sessionId).catch((error) => {
+      void loaded.catch(() => {});
+      throw error;
+    });
+    if (navigation.errorText) throw new Error(`${path} navigation failed: ${navigation.errorText}`);
+    await loaded;
+    await cdp.send('Runtime.evaluate', {
+      expression: 'document.fonts && document.fonts.ready ? document.fonts.ready.then(() => true) : true',
+      awaitPromise: true,
+      returnByValue: true
+    }, sessionId);
+    const axeEvaluation = await cdp.send('Runtime.evaluate', {
+      expression: verifierAxeExpression(),
+      awaitPromise: true,
+      returnByValue: true
+    }, sessionId);
+    if (axeEvaluation.exceptionDetails || !axeEvaluation.result?.value) {
+      throw new Error(`${path} ${viewport.name} verifier-owned axe-core execution failed.`);
+    }
+    const evaluated = await cdp.send('Runtime.evaluate', {
+      expression: collectorExpression(contract, viewport.mobile, {
+        vectorImageResourceUrls: [...vectorImageResourceUrls],
+        vectorMimeEvidenceTruncated
+      }),
+      awaitPromise: true,
+      returnByValue: true
+    }, sessionId);
+    if (evaluated.exceptionDetails || !evaluated.result?.value) {
+      throw new Error(`${path} ${viewport.name} signal collection failed.`);
+    }
+    const signals = {
+      ...evaluated.result.value,
+      computedStyleEvidence: normalizeComputedStyleEvidence(evaluated.result.value.computedStyleEvidence),
+      contentImageEvidence: normalizeContentImageEvidence(evaluated.result.value.contentImageEvidence)
+    };
+    const axe = rawVerifierAxeRecord(axeEvaluation.result.value, signals.finalUrl);
+    if (axe.status !== 'executed') {
+      throw new Error(`${path} ${viewport.name} verifier-owned axe-core result failed validation: ${axe.errors.join(' ')}`);
+    }
+    const metrics = await cdp.send('Page.getLayoutMetrics', {}, sessionId);
+    const content = metrics.cssContentSize || metrics.contentSize || { width: viewport.width, height: viewport.height };
+    const screenshotWidth = Math.max(viewport.width, Math.min(4000, Math.ceil(content.width || viewport.width)));
+    const screenshotHeight = Math.max(viewport.height, Math.min(12_000, Math.ceil(content.height || viewport.height)));
+    const screenshot = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: true,
+      fromSurface: true,
+      clip: { x: 0, y: 0, width: screenshotWidth, height: screenshotHeight, scale: 1 }
+    }, sessionId);
+    return {
+      path,
+      viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+      axe,
+      signals,
+      screenshot: {
+        base64: screenshot.data,
+        width: screenshotWidth,
+        height: screenshotHeight,
+        clipped: Math.ceil(content.height || viewport.height) > screenshotHeight
+      }
+    };
+  } finally {
+    unsubscribeResponse();
+  }
 }
 
 export async function captureGlobalChrome({
@@ -2068,9 +2416,107 @@ function visualStructureSummary(signals) {
   };
 }
 
+function publicFormSemanticKind(kind) {
+  return ['button_submit', 'input_submit'].includes(kind) ? 'submit' : kind;
+}
+
+function targetContentImageRasterQuality(signals) {
+  const rawEvidence = signals?.contentImageEvidence;
+  const errors = [];
+  const reviewReasons = [];
+  if (!rawEvidence || rawEvidence.schemaVersion !== CONTENT_IMAGE_EVIDENCE_SCHEMA) {
+    errors.push('target content-image raster dimensions were not captured by the verifier-owned browser');
+    return { status: 'failed', checkedImageCount: 0, upscaledImages: [], reviewReasons, errors };
+  }
+  const evidence = normalizeContentImageEvidence(rawEvidence);
+  if (canonicalJson(evidence) !== canonicalJson(rawEvidence)) {
+    errors.push('target content-image raster evidence is not privacy-safe and bounded');
+  }
+  if (evidence.truncated) {
+    reviewReasons.push(
+      `target content-image raster evidence exceeded the ${CONTENT_IMAGE_LIMITS.maxImages}-image bound; ` +
+      'raster upscaling is indeterminate and machine completion remains blocked'
+    );
+  }
+  if (evidence.intrinsicUnavailableCount > 0) {
+    reviewReasons.push(
+      `target content-image raster evidence lacks intrinsic dimensions for ${evidence.intrinsicUnavailableCount} material image(s); ` +
+      'raster upscaling is indeterminate and machine completion remains blocked'
+    );
+  }
+  const upscaledImages = [];
+  for (const image of evidence.images) {
+    if (image.intrinsicAvailable !== true) continue;
+    const widthRatio = image.renderedWidth / image.naturalWidth;
+    const heightRatio = image.renderedHeight / image.naturalHeight;
+    let ratio;
+    let paintedWidth;
+    let paintedHeight;
+    if (image.objectFit === 'contain') {
+      ratio = Math.min(widthRatio, heightRatio);
+      paintedWidth = image.naturalWidth * ratio;
+      paintedHeight = image.naturalHeight * ratio;
+    } else if (image.objectFit === 'cover') {
+      ratio = Math.max(widthRatio, heightRatio);
+      paintedWidth = image.naturalWidth * ratio;
+      paintedHeight = image.naturalHeight * ratio;
+    } else if (image.objectFit === 'none') {
+      ratio = 1;
+      paintedWidth = image.naturalWidth;
+      paintedHeight = image.naturalHeight;
+    } else if (image.objectFit === 'scale-down') {
+      ratio = Math.min(1, widthRatio, heightRatio);
+      paintedWidth = image.naturalWidth * ratio;
+      paintedHeight = image.naturalHeight * ratio;
+    } else {
+      ratio = Math.max(widthRatio, heightRatio);
+      paintedWidth = image.renderedWidth;
+      paintedHeight = image.renderedHeight;
+    }
+    const materialPixelDelta = Math.max(
+      paintedWidth - image.naturalWidth,
+      paintedHeight - image.naturalHeight
+    );
+    if (
+      Number.isFinite(ratio) &&
+      ratio > CONTENT_IMAGE_LIMITS.minimumUpscaleRatio &&
+      materialPixelDelta >= CONTENT_IMAGE_LIMITS.minimumUpscalePixels
+    ) {
+      upscaledImages.push({
+        ordinal: image.ordinal,
+        resourceIdentity: image.resourceIdentity,
+        renderedWidth: image.renderedWidth,
+        renderedHeight: image.renderedHeight,
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        objectFit: image.objectFit,
+        paintedWidth: Number(paintedWidth.toFixed(3)),
+        paintedHeight: Number(paintedHeight.toFixed(3)),
+        ratio: Number(ratio.toFixed(3))
+      });
+    }
+  }
+  for (const image of upscaledImages) {
+    errors.push(
+      `target material raster image ${image.ordinal} (${image.resourceIdentity}) is upscaled ` +
+      `to approximately ${image.paintedWidth}x${image.paintedHeight} with object-fit ${image.objectFit} ` +
+      `from ${image.naturalWidth}x${image.naturalHeight} (ratio ${image.ratio}); ` +
+      'use an image style whose loaded raster dimensions cover the painted size'
+    );
+  }
+  return {
+    status: errors.length > 0 ? 'failed' : reviewReasons.length > 0 ? 'review_required' : 'passed',
+    checkedImageCount: evidence.imageCount,
+    upscaledImages,
+    reviewReasons,
+    errors
+  };
+}
+
 function observedPublicFormControls(signals, side) {
   const evidence = signals?.publicFormControls;
   const errors = [];
+  const reviewReasons = [];
   const empty = {
     schemaVersion: 'public-kit.public-form-controls.1',
     formCount: 0,
@@ -2080,7 +2526,7 @@ function observedPublicFormControls(signals, side) {
   };
   if (!evidence || evidence.schemaVersion !== 'public-kit.public-form-controls.1') {
     errors.push(`${side} public-form controls were not captured by the verifier-owned browser`);
-    return { errors, summary: empty, index: new Map() };
+    return { errors, reviewReasons, summary: empty, index: new Map() };
   }
   if (canonicalJson(evidence.limits) !== canonicalJson(PUBLIC_FORM_CONTROL_LIMITS)) {
     errors.push(`${side} public-form evidence does not use the verifier's fixed privacy and size bounds`);
@@ -2133,6 +2579,7 @@ function observedPublicFormControls(signals, side) {
     const controlOrdinal = Number(control?.controlOrdinal);
     const rawKind = String(control?.kind ?? '');
     const kind = rawKind.slice(0, 80);
+    const semanticKind = publicFormSemanticKind(kind);
     const rawOptions = Array.isArray(control?.options) ? control.options : [];
     const options = rawOptions.slice(0, PUBLIC_FORM_CONTROL_LIMITS.maxOptionsPerControl);
     if (Object.hasOwn(control ?? {}, 'name') || Object.hasOwn(control ?? {}, 'value')) {
@@ -2239,7 +2686,19 @@ function observedPublicFormControls(signals, side) {
         control?.optionCount <= 0 ||
         options.length !== control?.optionCount
       ) {
-        errors.push(`${side} public-form select ${JSON.stringify(visibleLabel || identity || `control ${controlIndex + 1}`)} has no complete observed option state; dynamic options must be populated in a verifier-owned route state and an empty list cannot act as a wildcard`);
+        const label = JSON.stringify(visibleLabel || identity || `control ${controlIndex + 1}`);
+        const sourceEmptySelect = side === 'source' &&
+          control?.optionEvidence === 'unobserved_empty' &&
+          control?.optionCount === 0 &&
+          options.length === 0;
+        if (sourceEmptySelect) {
+          reviewReasons.push(
+            `source public-form select ${label} exposed no options in the verifier-owned route state; ` +
+            'source option parity is indeterminate and machine completion requires a populated source state'
+          );
+        } else {
+          errors.push(`${side} public-form select ${label} has no complete observed option state; dynamic options must be populated in a verifier-owned route state and an empty list cannot act as a wildcard`);
+        }
       }
     } else if (
       control?.optionEvidence !== 'not_applicable' ||
@@ -2258,6 +2717,7 @@ function observedPublicFormControls(signals, side) {
       formOrdinal,
       controlOrdinal,
       kind,
+      semanticKind,
       visibleLabel,
       visibleLabelSource,
       required: control?.required,
@@ -2305,6 +2765,7 @@ function observedPublicFormControls(signals, side) {
   };
   return {
     errors,
+    reviewReasons,
     summary: { ...summaryValue, fingerprint: sha256(summaryValue) },
     index
   };
@@ -2314,6 +2775,7 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
   const source = observedPublicFormControls(sourceSignals, 'source');
   const target = observedPublicFormControls(targetSignals, 'target');
   const errors = [...source.errors, ...target.errors];
+  const reviewReasons = [...source.reviewReasons, ...target.reviewReasons];
   if (source.summary.formCount !== target.summary.formCount) {
     errors.push(`public-form count differs: target ${target.summary.formCount}, source ${source.summary.formCount}`);
   }
@@ -2394,16 +2856,21 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
           : `public-form ${location} (${JSON.stringify(label)}) target does not add matching durable visible text and an accessible identity`);
       }
     }
-    for (const field of ['kind', 'required', 'disabled', 'selected', 'defaultSelected']) {
+    if (sourceControl.semanticKind !== targetControl.semanticKind) {
+      errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in kind`);
+    }
+    for (const field of ['required', 'disabled', 'selected', 'defaultSelected']) {
       if (canonicalJson(sourceControl[field]) !== canonicalJson(targetControl[field])) {
         errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ${field}`);
       }
     }
-    if (
+    const sourceOptionsIndeterminate = sourceControl.optionEvidence === 'unobserved_empty' &&
+      sourceControl.optionCount === 0;
+    if (!sourceOptionsIndeterminate && (
       sourceControl.optionEvidence !== targetControl.optionEvidence ||
       sourceControl.optionCount !== targetControl.optionCount ||
       canonicalJson(sourceControl.options) !== canonicalJson(targetControl.options)
-    ) {
+    )) {
       errors.push(`public-form ${location} (${JSON.stringify(label)}) differs in ordered option labels or selected, default, and disabled option state`);
     }
   }
@@ -2417,6 +2884,7 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
     target: target.summary,
     matchedControlCount: matched.length,
     accessibilityImprovements,
+    reviewReasons,
     errors
   };
 }
@@ -2424,7 +2892,7 @@ function comparePublicFormControls(sourceSignals, targetSignals) {
 function navigationRouteMapping(routeMappings = []) {
   const candidates = new Map();
   for (const route of Array.isArray(routeMappings) ? routeMappings : []) {
-    if (route?.accepted === false) continue;
+    if (route?.accepted !== true || route?.associationProven !== true) continue;
     try {
       const source = privacyPreservingRoute(route?.sourcePath);
       const explicitFinalTarget = route?.targetFinalPath
@@ -2726,9 +3194,443 @@ function captureRouteIndex(capture) {
   ]));
 }
 
+function captureRouteLookupPath(route, capture, index, viewportName) {
+  const normalized = normalizeRoute(route);
+  const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
+    capture?.queryPrivacy?.method === 'sha256' &&
+    capture?.queryPrivacy?.authoritative === true;
+  if (!privacyBound || index.has(`${normalized}\0${viewportName}`)) return normalized;
+  return privacyPreservingRoute(normalized);
+}
+
+const GENERIC_FONT_FAMILIES = new Set([
+  'cursive',
+  'emoji',
+  'fangsong',
+  'fantasy',
+  'math',
+  'monospace',
+  'sans-serif',
+  'serif',
+  'system-ui',
+  'ui-monospace',
+  'ui-rounded',
+  'ui-sans-serif',
+  'ui-serif'
+]);
+
+function fontFamilyTokens(value) {
+  return privacySafeCssValue(value)
+    .split(',')
+    .map((family) => normalizedFontFamilyName(family).toLowerCase())
+    .filter(Boolean);
+}
+
+function styleSampleIndex(evidence) {
+  const normalized = normalizeComputedStyleEvidence(evidence);
+  return {
+    evidence: normalized,
+    samples: new Map(normalized.samples.map((sample) => [sample.semanticRole, sample]))
+  };
+}
+
+function finiteCssPixels(value) {
+  const match = privacySafeCssValue(value).match(/^(-?\d+(?:\.\d+)?)px$/i);
+  const number = match ? Number(match[1]) : Number.NaN;
+  return Number.isFinite(number) && number > 0 ? number : Number.NaN;
+}
+
+function visibleControlToken(value) {
+  const normalized = privacySafeCssValue(value).toLowerCase();
+  return normalized && !['none', 'normal', 'transparent', 'rgba(0, 0, 0, 0)'].includes(normalized)
+    ? normalized
+    : '';
+}
+
+function controlStyleTokens(styles = {}) {
+  const color = visibleControlToken(styles.color);
+  const backgroundColor = visibleControlToken(styles.backgroundColor);
+  const borderColor = visibleControlToken(styles.borderColor);
+  const borderStyle = privacySafeCssValue(styles.borderStyle).toLowerCase();
+  const borderWidth = finiteCssPixels(styles.borderWidth);
+  const visibleBorder = borderColor && !['none', 'hidden'].includes(borderStyle) && Number.isFinite(borderWidth);
+  return {
+    color,
+    backgroundColor,
+    borderColor: visibleBorder ? borderColor : '',
+    borderRadius: backgroundColor || visibleBorder ? visibleControlToken(styles.borderRadius) : ''
+  };
+}
+
+function computedStyleShadowResult(value) {
+  const record = { schemaVersion: COMPUTED_STYLE_SHADOW_SCHEMA, ...value };
+  return { ...record, fingerprint: sha256(record) };
+}
+
+export function compareComputedStyleShadow({
+  sourceCapture,
+  targetCapture,
+  primaryRoutes = [],
+  stateFingerprint = ''
+} = {}) {
+  const sourceIndex = captureRouteIndex(sourceCapture);
+  const targetIndex = captureRouteIndex(targetCapture);
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  const maximumRoutes = Math.floor(COMPUTED_STYLE_LIMITS.maxRouteViewportComparisons / VIEWPORTS.length);
+  const routes = routeInputs.slice(0, maximumRoutes);
+  const inputTruncated = routeInputs.length > routes.length;
+  const comparisons = [];
+  let diagnosticCount = 0;
+  let indeterminateCount = 0;
+  let insufficientEvidenceCount = inputTruncated || routes.length === 0 ? 1 : 0;
+  for (const route of routes) {
+    const sourcePath = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
+    const targetPath = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
+    const routeFingerprint = sha256({ sourcePath, targetPath });
+    for (const viewport of VIEWPORTS) {
+      const sourceRoute = sourceIndex.get(`${captureRouteLookupPath(sourcePath, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const targetRoute = targetIndex.get(`${captureRouteLookupPath(targetPath, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const sourceEvidencePresent = Boolean(
+        sourceRoute?.signals && Object.hasOwn(sourceRoute.signals, 'computedStyleEvidence')
+      );
+      const targetEvidencePresent = Boolean(
+        targetRoute?.signals && Object.hasOwn(targetRoute.signals, 'computedStyleEvidence')
+      );
+      const sourceProtected = sourceRoute?.signals?.protection?.detected === true;
+      const source = styleSampleIndex(sourceRoute?.signals?.computedStyleEvidence);
+      const target = styleSampleIndex(targetRoute?.signals?.computedStyleEvidence);
+      const missingAnchors = [];
+      const notApplicableAnchors = [];
+      const diagnostics = [];
+      const indeterminateDiagnostics = [];
+      let diagnosticOverflow = false;
+      const addDiagnostic = (diagnostic) => {
+        if (diagnostics.length >= COMPUTED_STYLE_LIMITS.maxDiagnosticsPerRouteViewport) {
+          diagnosticOverflow = true;
+          return;
+        }
+        diagnostics.push(diagnostic);
+      };
+      for (const semanticRole of COMPUTED_STYLE_ROLES) {
+        const sourceSample = source.samples.get(semanticRole);
+        const targetSample = target.samples.get(semanticRole);
+        const sourceUnavailable = !sourceRoute || !sourceEvidencePresent || sourceProtected;
+        const targetUnavailable = !targetRoute || !targetEvidencePresent;
+        if (sourceUnavailable) missingAnchors.push({ side: 'source', semanticRole });
+        if (targetUnavailable) missingAnchors.push({ side: 'target', semanticRole });
+        if (sourceUnavailable || targetUnavailable) continue;
+        if (!sourceSample && semanticRole === 'body') {
+          missingAnchors.push({ side: 'source', semanticRole });
+        } else if (!sourceSample) {
+          notApplicableAnchors.push({
+            semanticRole,
+            targetAnchorPresent: Boolean(targetSample)
+          });
+        } else if (!targetSample) {
+          missingAnchors.push({ side: 'target', semanticRole });
+        }
+        if (!sourceSample || !targetSample) continue;
+        const sourceFamilies = fontFamilyTokens(sourceSample.styles.fontFamily);
+        const targetFamilies = fontFamilyTokens(targetSample.styles.fontFamily);
+        const sourcePrimaryFamily = sourceFamilies[0] ?? '';
+        const targetPrimaryFamily = targetFamilies[0] ?? '';
+        if (sourcePrimaryFamily && targetPrimaryFamily && sourcePrimaryFamily !== targetPrimaryFamily) {
+          addDiagnostic({
+            code: 'font-family-replaced',
+            semanticRole,
+            sourceFamily: sourcePrimaryFamily,
+            targetFamily: targetPrimaryFamily
+          });
+        }
+        const sourceLoaded = new Set(source.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
+        const targetLoaded = new Set(target.evidence.loadedFontFamilies.map((family) => family.toLowerCase()));
+        const primaryFamilyLoadComparisonApplies = sourcePrimaryFamily &&
+          sourcePrimaryFamily === targetPrimaryFamily &&
+          !GENERIC_FONT_FAMILIES.has(sourcePrimaryFamily);
+        if (
+          primaryFamilyLoadComparisonApplies &&
+          sourceLoaded.has(sourcePrimaryFamily) &&
+          !targetLoaded.has(targetPrimaryFamily)
+        ) {
+          if (target.evidence.truncated) {
+            indeterminateDiagnostics.push({
+              code: 'font-family-load-indeterminate',
+              semanticRole,
+              fontFamily: targetPrimaryFamily,
+              side: 'target',
+              reason: 'relevant-font-evidence-truncated'
+            });
+          } else {
+            addDiagnostic({ code: 'font-family-not-loaded', semanticRole, fontFamily: targetPrimaryFamily });
+          }
+        } else if (
+          primaryFamilyLoadComparisonApplies &&
+          source.evidence.truncated &&
+          !sourceLoaded.has(sourcePrimaryFamily)
+        ) {
+          indeterminateDiagnostics.push({
+            code: 'font-family-load-indeterminate',
+            semanticRole,
+            fontFamily: sourcePrimaryFamily,
+            side: 'source',
+            reason: 'relevant-font-evidence-truncated'
+          });
+        }
+        const sourceSize = finiteCssPixels(sourceSample.styles.fontSize);
+        const targetSize = finiteCssPixels(targetSample.styles.fontSize);
+        const sizeRatio = targetSize / sourceSize;
+        if (Number.isFinite(sizeRatio) && (sizeRatio > 1.5 || sizeRatio < (2 / 3))) {
+          addDiagnostic({
+            code: 'extreme-font-size-ratio',
+            semanticRole,
+            sourcePx: sourceSize,
+            targetPx: targetSize,
+            ratio: Number(sizeRatio.toFixed(3))
+          });
+        }
+        if (['primary_action', 'form_control'].includes(semanticRole)) {
+          const controlKeys = ['color', 'backgroundColor', 'borderColor', 'borderRadius'];
+          const sourceControlTokens = controlStyleTokens(sourceSample.styles);
+          const targetControlTokens = controlStyleTokens(targetSample.styles);
+          const differingTokens = controlKeys.filter((key) =>
+            sourceControlTokens[key] !== targetControlTokens[key]
+          );
+          if (
+            differingTokens.length >= 2 &&
+            differingTokens.some((key) => ['backgroundColor', 'borderColor', 'borderRadius'].includes(key))
+          ) {
+            addDiagnostic({ code: 'control-token-mismatch', semanticRole, differingTokens });
+          }
+        }
+      }
+      diagnostics.sort((left, right) =>
+        `${left.semanticRole}\0${left.code}`.localeCompare(`${right.semanticRole}\0${right.code}`)
+      );
+      diagnosticCount += diagnostics.length;
+      indeterminateCount += indeterminateDiagnostics.length;
+      if (missingAnchors.length > 0) insufficientEvidenceCount += 1;
+      comparisons.push({
+        routeFingerprint,
+        viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        sourceProtected,
+        disposition: missingAnchors.length > 0
+          ? 'insufficient_evidence'
+          : indeterminateDiagnostics.length > 0
+            ? 'review_required'
+            : diagnostics.length > 0 ? 'diagnostics' : 'observed',
+        missingAnchors,
+        notApplicableAnchors,
+        diagnostics,
+        indeterminateDiagnostics,
+        diagnosticLimitReached: diagnosticOverflow
+      });
+    }
+  }
+  const status = insufficientEvidenceCount > 0
+    ? 'insufficient_evidence'
+    : indeterminateCount > 0
+      ? 'review_required'
+      : diagnosticCount > 0 ? 'diagnostics' : 'observed';
+  return computedStyleShadowResult({
+    checkedAt: String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString()),
+    authority: 'none',
+    verifierOwnedObservation: true,
+    completionEffect: 'none',
+    completionStatusAffected: false,
+    resultStateFingerprint: String(stateFingerprint || targetCapture?.resultStateFingerprint || ''),
+    sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
+    targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
+    status,
+    limits: { ...COMPUTED_STYLE_LIMITS },
+    inputTruncated,
+    comparisonCount: comparisons.length,
+    diagnosticCount,
+    indeterminateCount,
+    insufficientEvidenceCount,
+    comparisons
+  });
+}
+
 function visualFloorResult(value) {
   const record = { schemaVersion: VISUAL_PARITY_FLOOR_SCHEMA, ...value };
   return { ...record, fingerprint: sha256(record) };
+}
+
+function targetRasterQualityFloorResult(value) {
+  const record = { schemaVersion: TARGET_RASTER_QUALITY_FLOOR_SCHEMA, ...value };
+  return { ...record, fingerprint: sha256(record) };
+}
+
+export function evaluateVerifierOwnedTargetRasterQuality({
+  targetCapture,
+  primaryRoutes = [],
+  stateFingerprint = ''
+} = {}) {
+  const checkedAt = String(targetCapture?.checkedAt || new Date().toISOString());
+  const targetOrigin = String(targetCapture?.targetOrigin ?? '');
+  const targetCaptureFingerprint = String(targetCapture?.captureFingerprint ?? '');
+  const resultStateFingerprint = String(stateFingerprint || targetCapture?.resultStateFingerprint || '');
+  const base = {
+    checkedAt,
+    authority: 'verifier-owned-managed-browser-target-raster-quality',
+    verifierOwned: true,
+    completionSupported: false,
+    scope: 'declared-target-primary-routes',
+    targetOrigin,
+    resultStateFingerprint,
+    targetCaptureFingerprint,
+    limits: { ...CONTENT_IMAGE_LIMITS },
+    viewports: VIEWPORTS.map(({ name, width, height }) => ({ name, width, height })),
+    routeCount: 0,
+    findingCount: 0,
+    checkedImageCount: 0,
+    upscaledImageCount: 0,
+    failedFindingCount: 0,
+    reviewRequiredFindingCount: 0,
+    findings: [],
+    reviewReasons: [],
+    errors: []
+  };
+  const routeInputs = Array.isArray(primaryRoutes) ? primaryRoutes : [];
+  if (routeInputs.length === 0) {
+    return targetRasterQualityFloorResult({
+      ...base,
+      status: 'blocked',
+      errors: ['Target raster-quality verification requires at least one declared target primary route.']
+    });
+  }
+  if (routeInputs.length > BROWSER_CAPTURE_LIMITS.maxRoutes) {
+    return targetRasterQualityFloorResult({
+      ...base,
+      routeCount: routeInputs.length,
+      status: 'blocked',
+      errors: [
+        `Target raster-quality verification requires ${routeInputs.length} target primary routes, exceeding the ` +
+        `${BROWSER_CAPTURE_LIMITS.maxRoutes} route limit; no partial evaluation was run.`
+      ]
+    });
+  }
+  const captureErrors = [];
+  if (targetCapture?.status !== 'captured' || targetCapture?.authoritative !== true) {
+    captureErrors.push(
+      `Target managed-browser capture is unavailable: ${(targetCapture?.errors ?? []).join(' ') || targetCapture?.status || 'missing'}.`
+    );
+  }
+  try {
+    if (!targetOrigin || new URL(targetOrigin).origin !== targetOrigin) {
+      captureErrors.push('Target managed-browser capture lacks a valid target origin.');
+    }
+  } catch {
+    captureErrors.push('Target managed-browser capture lacks a valid target origin.');
+  }
+  if (!HASH_RE.test(targetCaptureFingerprint)) {
+    captureErrors.push('Target raster-quality verification requires a fingerprint-bound target capture.');
+  }
+  if (
+    resultStateFingerprint &&
+    targetCapture?.resultStateFingerprint !== resultStateFingerprint
+  ) {
+    captureErrors.push('Target raster-quality capture does not match the exact result-state fingerprint.');
+  }
+  if (captureErrors.length > 0) {
+    return targetRasterQualityFloorResult({
+      ...base,
+      routeCount: routeInputs.length,
+      status: 'blocked',
+      errors: captureErrors
+    });
+  }
+
+  let routes;
+  let targetIndex;
+  try {
+    routes = routeInputs.map((route) => normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route));
+    targetIndex = captureRouteIndex(targetCapture);
+  } catch (error) {
+    return targetRasterQualityFloorResult({
+      ...base,
+      routeCount: routeInputs.length,
+      status: 'blocked',
+      errors: [`Target raster-quality route identity is invalid: ${error.message}`]
+    });
+  }
+
+  const findings = [];
+  const errors = [];
+  const reviewReasons = [];
+  for (const targetRequest of routes) {
+    for (const viewport of VIEWPORTS) {
+      const targetPath = captureRouteLookupPath(targetRequest, targetCapture, targetIndex, viewport.name);
+      const target = targetIndex.get(`${targetPath}\0${viewport.name}`);
+      const findingErrors = [];
+      const findingReviewReasons = [];
+      let contentImageRasterQuality = {
+        status: 'not_run',
+        checkedImageCount: 0,
+        upscaledImages: [],
+        reviewReasons: [],
+        errors: []
+      };
+      if (!target) {
+        findingErrors.push('missing target managed-browser capture');
+      } else {
+        if (
+          target.viewport?.name !== viewport.name ||
+          target.viewport?.width !== viewport.width ||
+          target.viewport?.height !== viewport.height
+        ) {
+          findingErrors.push('target was not captured at the exact required viewport');
+        }
+        try {
+          if (new URL(target.signals?.finalUrl ?? 'about:blank').origin !== targetOrigin) {
+            findingErrors.push('target capture left the inspected target origin');
+          }
+        } catch {
+          findingErrors.push('target capture lacks a valid final URL identity');
+        }
+        contentImageRasterQuality = targetContentImageRasterQuality(target.signals);
+        findingErrors.push(...contentImageRasterQuality.errors);
+        findingReviewReasons.push(...contentImageRasterQuality.reviewReasons);
+      }
+      const finding = {
+        targetPath,
+        viewport: { name: viewport.name, width: viewport.width, height: viewport.height },
+        contentImageRasterQuality,
+        reviewRequired: findingReviewReasons.length > 0,
+        passed: findingErrors.length === 0 && findingReviewReasons.length === 0,
+        reviewReasons: findingReviewReasons,
+        errors: findingErrors
+      };
+      findings.push(finding);
+      errors.push(...findingErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+      reviewReasons.push(...findingReviewReasons.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+    }
+  }
+  const status = errors.length > 0
+    ? 'failed'
+    : reviewReasons.length > 0
+      ? 'review_required'
+      : 'passed';
+  return targetRasterQualityFloorResult({
+    ...base,
+    status,
+    completionSupported: status === 'passed',
+    routeCount: routes.length,
+    findingCount: findings.length,
+    checkedImageCount: findings.reduce(
+      (total, finding) => total + finding.contentImageRasterQuality.checkedImageCount,
+      0
+    ),
+    upscaledImageCount: findings.reduce(
+      (total, finding) => total + finding.contentImageRasterQuality.upscaledImages.length,
+      0
+    ),
+    failedFindingCount: findings.filter((finding) => finding.errors.length > 0).length,
+    reviewRequiredFindingCount: findings.filter((finding) => finding.reviewRequired).length,
+    findings,
+    reviewReasons,
+    errors
+  });
 }
 
 export function compareVerifierOwnedVisualFloor({
@@ -2741,6 +3643,12 @@ export function compareVerifierOwnedVisualFloor({
   stateFingerprint = ''
 } = {}) {
   const checkedAt = String(targetCapture?.checkedAt || sourceCapture?.checkedAt || new Date().toISOString());
+  const computedStyleShadow = compareComputedStyleShadow({
+    sourceCapture,
+    targetCapture,
+    primaryRoutes,
+    stateFingerprint
+  });
   const base = {
     checkedAt,
     authority: 'verifier-owned-managed-browser-structural-floor',
@@ -2752,6 +3660,7 @@ export function compareVerifierOwnedVisualFloor({
     sourceCaptureFingerprint: String(sourceCapture?.captureFingerprint ?? ''),
     targetCaptureFingerprint: String(targetCapture?.captureFingerprint ?? ''),
     thresholds: VISUAL_FLOOR_THRESHOLDS,
+    computedStyleShadow,
     primaryNavigationLimits: PRIMARY_NAVIGATION_LIMITS,
     findings: [],
     publicFormControlFindings: [],
@@ -2800,15 +3709,10 @@ export function compareVerifierOwnedVisualFloor({
   const findings = [];
   const publicFormControlFindings = [];
   const errors = [];
+  const machineReviewReasons = [];
   let protectedFindingCount = 0;
-  const captureLookupPath = (route, capture, index, viewportName) => {
-    const normalized = normalizeRoute(route);
-    const privacyBound = capture?.queryPrivacy?.schemaVersion === 'public-kit.query-privacy.1' &&
-      capture?.queryPrivacy?.method === 'sha256' &&
-      capture?.queryPrivacy?.authoritative === true;
-    if (!privacyBound || index.has(`${normalized}\0${viewportName}`)) return normalized;
-    return privacyPreservingRoute(normalized);
-  };
+  let publicFormReviewFindingCount = 0;
+  let contentImageReviewFindingCount = 0;
   const publicFormRoutePairs = new Set((Array.isArray(publicFormControlRoutes)
     ? publicFormControlRoutes
     : []).map((route) => (
@@ -2822,13 +3726,14 @@ export function compareVerifierOwnedVisualFloor({
   for (const route of Array.isArray(primaryRoutes) ? primaryRoutes : []) {
     const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
     const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
-    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
-    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    const sourcePath = captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureRouteLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
     const publicFormEvidenceRequired = publicFormRoutePairs.has(`${sourceRequest}\0${targetRequest}`);
     for (const viewport of VIEWPORTS) {
-      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
-      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const source = sourceIndex.get(`${captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureRouteLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const routeErrors = [];
+      const routeReviewReasons = [];
       const deficits = [];
       const decisiveDeficits = [];
       const sourceStructure = visualStructureSummary(source?.signals);
@@ -2841,6 +3746,14 @@ export function compareVerifierOwnedVisualFloor({
         source: null,
         target: null,
         matchedControlCount: 0,
+        reviewReasons: [],
+        errors: []
+      };
+      let contentImageRasterQuality = {
+        status: 'not_run',
+        checkedImageCount: 0,
+        upscaledImages: [],
+        reviewReasons: [],
         errors: []
       };
       let primaryNavigation = {
@@ -2877,9 +3790,13 @@ export function compareVerifierOwnedVisualFloor({
         } else if (sourceHash === targetHash) {
           routeErrors.push('source and target must use distinct source and target screenshot identities');
         }
+        contentImageRasterQuality = targetContentImageRasterQuality(target.signals);
+        routeErrors.push(...contentImageRasterQuality.errors);
+        routeReviewReasons.push(...contentImageRasterQuality.reviewReasons);
         if (!protectedSource) {
           publicFormControlParity = comparePublicFormControls(source.signals, target.signals);
           routeErrors.push(...publicFormControlParity.errors);
+          routeReviewReasons.push(...publicFormControlParity.reviewReasons);
           if (publicFormEvidenceRequired && publicFormControlParity.source?.controlCount === 0) {
             routeErrors.push('audited public form/search route exposed no visible native source controls; empty source and target evidence cannot establish form parity');
           }
@@ -2956,6 +3873,8 @@ export function compareVerifierOwnedVisualFloor({
         }
       }
       if (protectedSource) protectedFindingCount += 1;
+      if (publicFormControlParity.reviewReasons.length > 0) publicFormReviewFindingCount += 1;
+      if (contentImageRasterQuality.reviewReasons.length > 0) contentImageReviewFindingCount += 1;
       const finding = {
         sourcePath,
         targetPath,
@@ -2976,13 +3895,17 @@ export function compareVerifierOwnedVisualFloor({
         targetStructure,
         primaryNavigation,
         publicFormControlParity,
+        contentImageRasterQuality,
         deficits,
         decisiveDeficits,
-        passed: routeErrors.length === 0 && !protectedSource,
+        reviewRequired: routeReviewReasons.length > 0,
+        reviewReasons: routeReviewReasons,
+        passed: routeErrors.length === 0 && routeReviewReasons.length === 0 && !protectedSource,
         errors: routeErrors
       };
       findings.push(finding);
       errors.push(...routeErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+      machineReviewReasons.push(...routeReviewReasons.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
     }
   }
   const additionalPublicFormRoutes = (Array.isArray(publicFormControlRoutes)
@@ -2995,18 +3918,27 @@ export function compareVerifierOwnedVisualFloor({
   for (const route of additionalPublicFormRoutes) {
     const sourceRequest = normalizeRoute(route?.sourcePath ?? route?.targetPath ?? route);
     const targetRequest = normalizeRoute(route?.targetPath ?? route?.sourcePath ?? route);
-    const sourcePath = captureLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
-    const targetPath = captureLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
+    const sourcePath = captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, 'desktop');
+    const targetPath = captureRouteLookupPath(targetRequest, targetCapture, targetIndex, 'desktop');
     for (const viewport of VIEWPORTS) {
-      const source = sourceIndex.get(`${captureLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
-      const target = targetIndex.get(`${captureLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
+      const source = sourceIndex.get(`${captureRouteLookupPath(sourceRequest, sourceCapture, sourceIndex, viewport.name)}\0${viewport.name}`);
+      const target = targetIndex.get(`${captureRouteLookupPath(targetRequest, targetCapture, targetIndex, viewport.name)}\0${viewport.name}`);
       const routeErrors = [];
+      const routeReviewReasons = [];
       const sourceProtection = source?.signals?.protection ?? {};
       const protectedSource = sourceProtection.detected === true;
       let publicFormControlParity = {
         source: null,
         target: null,
         matchedControlCount: 0,
+        reviewReasons: [],
+        errors: []
+      };
+      let contentImageRasterQuality = {
+        status: 'not_run',
+        checkedImageCount: 0,
+        upscaledImages: [],
+        reviewReasons: [],
         errors: []
       };
       if (!source || !target) {
@@ -3027,15 +3959,21 @@ export function compareVerifierOwnedVisualFloor({
         } catch {
           routeErrors.push('source or target capture lacks a valid final URL identity');
         }
+        contentImageRasterQuality = targetContentImageRasterQuality(target.signals);
+        routeErrors.push(...contentImageRasterQuality.errors);
+        routeReviewReasons.push(...contentImageRasterQuality.reviewReasons);
         if (!protectedSource) {
           publicFormControlParity = comparePublicFormControls(source.signals, target.signals);
           routeErrors.push(...publicFormControlParity.errors);
+          routeReviewReasons.push(...publicFormControlParity.reviewReasons);
           if (publicFormControlParity.source?.controlCount === 0) {
             routeErrors.push('audited public form/search route exposed no visible native source controls; empty source and target evidence cannot establish form parity');
           }
         }
       }
       if (protectedSource) protectedFindingCount += 1;
+      if (publicFormControlParity.reviewReasons.length > 0) publicFormReviewFindingCount += 1;
+      if (contentImageRasterQuality.reviewReasons.length > 0) contentImageReviewFindingCount += 1;
       const finding = {
         sourcePath,
         targetPath,
@@ -3044,11 +3982,15 @@ export function compareVerifierOwnedVisualFloor({
         protectedSource,
         protectionReasonCodes: Array.isArray(sourceProtection.reasonCodes) ? sourceProtection.reasonCodes : [],
         publicFormControlParity,
-        passed: routeErrors.length === 0 && !protectedSource,
+        contentImageRasterQuality,
+        reviewRequired: routeReviewReasons.length > 0,
+        reviewReasons: routeReviewReasons,
+        passed: routeErrors.length === 0 && routeReviewReasons.length === 0 && !protectedSource,
         errors: routeErrors
       };
       publicFormControlFindings.push(finding);
       errors.push(...routeErrors.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
+      machineReviewReasons.push(...routeReviewReasons.map((message) => `${targetPath} ${viewport.name}: ${message}.`));
     }
   }
   if (findings.length !== primaryRoutes.length * VIEWPORTS.length) {
@@ -3074,14 +4016,22 @@ export function compareVerifierOwnedVisualFloor({
       );
     }
   }
-  const status = errors.length > 0 ? 'failed' : protectedFindingCount > 0 ? 'review_required' : 'passed';
+  const status = errors.length > 0
+    ? 'failed'
+    : protectedFindingCount > 0 || publicFormReviewFindingCount > 0 || contentImageReviewFindingCount > 0
+      ? 'review_required'
+      : 'passed';
   const navigationFindings = findings.map((finding) => finding.primaryNavigation).filter(Boolean);
   return visualFloorResult({
     ...base,
     status,
     completionSupported: status === 'passed',
     protectedFindingCount,
-    diagnosticReviewEligible: status === 'review_required' && protectedFindingCount > 0,
+    publicFormReviewFindingCount,
+    contentImageReviewFindingCount,
+    reviewReasons: machineReviewReasons,
+    diagnosticReviewEligible: status === 'review_required' &&
+      protectedFindingCount > 0 && publicFormReviewFindingCount === 0 && contentImageReviewFindingCount === 0,
     reviewFallbackEligible: false,
     primaryNavigationSemanticParity: {
       authority: 'verifier-owned-managed-browser-navigation-semantics',
@@ -3103,7 +4053,9 @@ export function compareVerifierOwnedVisualFloor({
     findings,
     publicFormControlFindings,
     errors: status === 'review_required'
-      ? ['Source protection prevented verifier-owned structural or public-form comparison; machine completion remains blocked until verifier-owned source access is restored.']
+      ? (publicFormReviewFindingCount > 0 || contentImageReviewFindingCount > 0
+          ? machineReviewReasons
+          : ['Source protection prevented verifier-owned structural or public-form comparison; machine completion remains blocked until verifier-owned source access is restored.'])
       : errors
   });
 }
@@ -3682,6 +4634,20 @@ export function validateGlobalChromeCapture(capture, { stateFingerprint = '', re
       if (!route.signals || !HASH_RE.test(route.screenshot?.sha256) || !String(route.screenshot?.path ?? '').trim() ||
           !Number.isSafeInteger(route.screenshot?.size) || route.screenshot.size <= 0) {
         throw new Error(`Global chrome ${path} ${route.viewport.name} lacks computed signals or screenshot evidence.`);
+      }
+      if (
+        route.signals.computedStyleEvidence !== undefined &&
+        canonicalJson(normalizeComputedStyleEvidence(route.signals.computedStyleEvidence)) !==
+          canonicalJson(route.signals.computedStyleEvidence)
+      ) {
+        throw new Error(`Global chrome ${path} ${route.viewport.name} computed-style evidence is not privacy-safe and bounded.`);
+      }
+      if (
+        route.signals.contentImageEvidence !== undefined &&
+        canonicalJson(normalizeContentImageEvidence(route.signals.contentImageEvidence)) !==
+          canonicalJson(route.signals.contentImageEvidence)
+      ) {
+        throw new Error(`Global chrome ${path} ${route.viewport.name} content-image evidence is not privacy-safe and bounded.`);
       }
       const axe = route?.axe;
       if (axe !== undefined && (

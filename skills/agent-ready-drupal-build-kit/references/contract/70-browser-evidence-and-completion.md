@@ -26,6 +26,8 @@ The default source/target managed-browser floor also extracts visible native con
 
 The exact audited/modelled source/target pair list is also capped at 64 before CDP starts, independently of the 64 unique-route ceiling on each capture side; neither list is sliced. Structural, navigation, and composition findings remain scoped to authored primaries, while dedicated `publicFormControlFindings` cover additional non-primary form/search routes. An audited form/search route with no visible native source controls is insufficient even when target evidence is also empty.
 
+The verifier-owned managed-browser capture also records a bounded, privacy-safe computed-style sample for semantic body, H1, H2, primary-navigation-link, primary-action, first-form-control, and representative card/listing anchors. Samples contain only the semantic role, fixed selection method, allowlisted computed typography/color/border values, and loaded font-family names; they contain no element text or URLs. Source/target comparisons report font replacement, a source web font that is computed but no longer loaded, extreme font-size ratios, and obvious control-token drift as `computedStyleShadow` diagnostics. A source-absent optional semantic anchor is `not_applicable`; missing capture evidence, a missing body anchor, source protection, or a source-present anchor missing on the target is `insufficient_evidence`, never a pass. Truncated font-family evidence cannot support a load-loss diagnostic. This record has `authority: none` and `completionEffect: none`: it guides review but cannot change the visual-floor status, live-verifier exit, or completion claim.
+
 For each editor workflow check, record editor user/role, Drupal route, task performed, screenshots or captured evidence for the form and result, fields/widgets verified, public output affected, failures, accepted exceptions, and pass/fail status.
 
 If browser evidence is missing or failing, return to the review loop. A target that is only source-inspired is not visually complete.
@@ -47,6 +49,7 @@ The following are not acceptable final states:
 - collection routes without a Drupal owner plus View/collection config and editor add-a-row evidence;
 - homepage-only visual parity with weak listing, detail, taxonomy/category, search, form, legal/footer, or navigation routes;
 - first-fold homepage or primary-route output missing reachable brand-defining hero artwork, logo/lockup, campaign graphics, signature imagery, or primary CTA treatment without an explicit exception;
+- visible material content `<img>` rasters materially upscaled beyond the loaded image-style dimensions, producing blurry cards, listings, events, news, heroes, or detail media; CSS background images are outside this bounded intrinsic-dimension check;
 - public pages that render but do not expose Drupal-owned content, fields, Media, Views, menus, aliases, and blocks behind them;
 - editor add/edit forms that omit load-bearing fields or expose raw machine names, missing labels, or broken widgets;
 - stale review-packet files that still describe placeholders, old route checks, old screenshots, or earlier architecture decisions.
@@ -60,8 +63,9 @@ Before final handoff, answer this completion gate:
 - Public content inventory reconciled: every reachable source item is imported/recreated or item-blocked.
 - Per-route item reconciliation complete: repeated items on each load-bearing route match source counts, or a recorded owner label, reason, and evidence disposition a specific exclusion; local attribution is self-attested.
 - Collection ownership ledger complete: every declared row includes source/target count reconciliation, Drupal content/entity plus View/collection ownership, and non-admin editor add-a-row evidence.
-- Collection pagination complete: every accepted collection declares source/target mode, continuation mechanism, and positive observed page/batch sizes when continuing; the live View pager matches the target declaration with zero offset; and every continuing collection has either verifier-owned distinct final requests plus semantic distinctness or an exact, explicitly self-attested interaction-bearing JS-only capture-state binding.
+- Collection pagination complete: every accepted collection declares source/target mode, continuation mechanism, and positive observed page/batch sizes when continuing; the live View pager matches the target declaration with zero offset; and every continuing collection has verifier-owned route-bound distinct final requests plus semantic distinctness. A JS-only state the verifier cannot replay remains `review_required` and machine-incomplete.
 - Public media inventory reconciled: every reachable asset is managed in Drupal Media or item-blocked.
+- Public image quality verified in both source-site and brief modes: visible material content `<img>` raster resources meet their object-fit-aware painted dimensions on managed-browser target routes without material upscaling; CSS background images remain visual-review evidence.
 - Source-like visual design is implemented across homepage, listing, detail, taxonomy/category, navigation, footer, and responsive states.
 - First-fold and brand-defining assets are present or explicitly dispositioned for primary routes.
 - Source-like public behavior is implemented or blocked for search, filters, pagination, forms, embeds, provider links, redirects, and canonical routes.

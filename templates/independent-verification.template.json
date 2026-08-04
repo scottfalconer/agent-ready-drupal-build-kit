@@ -96,8 +96,11 @@
       "sourceRoute": "",
       "sourceObject": "",
       "collectionPattern": "list | grid | schedule | directory | archive | catalog | feed | search | gallery | other",
-      "drupalOwner": "content_type_plus_view | media_plus_view | taxonomy_view | search_api_view | canvas_bound_to_view | documented_exception | body_markup_or_blob",
+      "drupalOwner": "content_type_plus_view | media_plus_view | taxonomy_view | search_api_view | canvas_bound_to_view | entity_reference_curated | documented_exception | body_markup_or_blob",
+      "collectionSelection": "query_backed | curated_reference",
       "viewOrCollectionConfig": "",
+      "curationRationale": "",
+      "curationEvidence": "",
       "editorAddRowEvidence": "",
       "status": "pass | fail | blocked",
       "evidence": ""
@@ -202,6 +205,28 @@
       "sourcePath": "",
       "classification": "canonical | duplicate_alias | legacy | test_staging | private_boundary | unknown",
       "targetDisposition": "keep | redirect | unpublished_import | intentionally_drop | owner_decision_required | blocked",
+      "dispositionEvidence": "",
+      "status": "pass | fail | blocked"
+    }
+  ],
+  "identityChangeDispositionChecks": [
+    {
+      "sourcePath": "",
+      "targetPath": "",
+      "sourceTitle": "",
+      "sourceH1": "",
+      "targetTitle": "",
+      "targetH1": "",
+      "dispositionEvidence": "",
+      "status": "pass | fail | blocked"
+    }
+  ],
+  "primaryNavigationParityDispositionChecks": [
+    {
+      "viewport": "desktop | mobile",
+      "expectedSourceTreeFingerprint": "",
+      "targetTreeFingerprint": "",
+      "differenceKinds": [],
       "dispositionEvidence": "",
       "status": "pass | fail | blocked"
     }

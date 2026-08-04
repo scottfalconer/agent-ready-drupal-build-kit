@@ -17,7 +17,7 @@ Do not use this file as a reason to stop early. Build, verify, fix, and item-blo
 
 Do not list normal implementation work here. Missing reachable content, broken routes, CSS defects, import retries, field/display mistakes, route alias bugs, editor-form defects, and incomplete packet evidence are work items, not human decisions.
 
-Builder-accepted deviations require a presented ratification decision. If `off-road-inventory.md` contains `OR-` rows, the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, route count reconciliation uses `owner_approved_exclusion`, or composition verification accepts an owner fallback, list each decision here; the verifier rejects an unrelated decision row or a contradictory `Decisions still open: None` declaration. It reports any recorded human choice as self-attested and does not authenticate the approver.
+Builder-recorded deviations require a presented ratification decision. If `off-road-inventory.md` contains `OR-` rows, the parity/blind reviews record accepted exclusions or `accepted_out_of_scope` items, route count reconciliation uses `owner_approved_exclusion`, or composition verification records an owner mismatch, list each decision here; the verifier rejects an unrelated decision row or a contradictory `Decisions still open: None` declaration. Composition-owner mismatch remains machine-incomplete even when presented for human review. The verifier reports any recorded human choice as self-attested and does not authenticate the approver.
 
 Put each stable deviation reference in the decision row's **Current evidence** cell so the verifier can bind the decision to the exact item:
 
@@ -26,7 +26,7 @@ Put each stable deviation reference in the decision row's **Current evidence** c
 - omitted primary route: `omitted-route:/source-path`;
 - parity exclusion: `parity-exclusion:<token-safe-id-or-route>` (add an ID when the description contains spaces);
 - repeated-item count exclusion: `count-exclusion:/source-path->/target-path:item-type-slug` (for example, `gallery image` becomes `gallery-image`).
-- accepted composition-owner fallback: `composition-deviation:/target-path`.
+- diagnostic composition-owner mismatch: `composition-deviation:/target-path`.
 
 References are exact tokens: `OR-0010` does not satisfy `OR-001`.
 
